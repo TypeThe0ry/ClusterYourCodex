@@ -10,6 +10,52 @@ function Assert-True {
     if (-not $Condition) { throw "ASSERTION FAILED: $Message" }
 }
 
+function Get-ValidatedNodeExecutable {
+    param(
+        [string]$ExpectedVersion = 'v24.19.0',
+        [string]$ExpectedArchitecture = 'x64'
+    )
+
+    $commands = @(Get-Command -Name 'node.exe' -CommandType Application -All -ErrorAction Stop)
+    $seen = @{}
+    $observed = New-Object System.Collections.Generic.List[string]
+    foreach ($command in $commands) {
+        $candidate = [string]$command.Path
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            $candidate = [string]$command.Source
+        }
+        if ([string]::IsNullOrWhiteSpace($candidate) -or
+            -not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            continue
+        }
+
+        $resolved = [string](Resolve-Path -LiteralPath $candidate -ErrorAction Stop).ProviderPath
+        if ([System.IO.Path]::GetFileName($resolved) -ine 'node.exe' -or $seen.ContainsKey($resolved)) {
+            continue
+        }
+        $seen[$resolved] = $true
+
+        try {
+            $identityOutput = @(& $resolved --print 'JSON.stringify({version:process.version,architecture:process.arch})' 2>&1)
+            $identityExitCode = $LASTEXITCODE
+            $identity = (($identityOutput | ForEach-Object { [string]$_ }) -join '').Trim() | ConvertFrom-Json
+            $version = [string]$identity.version
+            $architecture = [string]$identity.architecture
+            [void]$observed.Add("$resolved ($version, $architecture, exit $identityExitCode)")
+            if ($identityExitCode -eq 0 -and
+                $version -eq $ExpectedVersion -and
+                $architecture -eq $ExpectedArchitecture) {
+                return $resolved
+            }
+        } catch {
+            [void]$observed.Add("$resolved (identity probe failed: $($_.Exception.Message))")
+        }
+    }
+
+    $details = if ($observed.Count -gt 0) { $observed -join '; ' } else { 'no usable node.exe candidates' }
+    throw "No node.exe Application matched Node.js $ExpectedVersion/$ExpectedArchitecture. Observed: $details"
+}
+
 $bootstrap = Join-Path $PSScriptRoot 'bootstrap.ps1'
 . $bootstrap
 
@@ -315,7 +361,7 @@ try {
     $rootTarget = Join-Path $testRoot 'root-target'
     $desktopTarget = Join-Path $testRoot 'desktop-target'
     $mcpDeploy = Join-Path $testRoot 'mcp-deploy'
-    $nodeRuntime = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+    $nodeRuntime = Get-ValidatedNodeExecutable
     $nodeLicense = Join-Path $testRoot 'LICENSE.node'
     $preview = Join-Path $testRoot 'preview'
     [void](New-Item -ItemType Directory -Path $rootTarget, $desktopTarget, (Join-Path $mcpDeploy 'dist') -Force)

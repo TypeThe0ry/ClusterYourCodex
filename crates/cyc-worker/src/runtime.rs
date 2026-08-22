@@ -1998,6 +1998,12 @@ mod tests {
             assert!(path_entry_exists(&marker).unwrap());
             verify_active_run_guard(&marker, config.node_id, run_id).unwrap();
 
+            // The Linux containment tests enable a process-wide subreaper and
+            // intentionally inspect/terminate newly adopted children. Keep
+            // this deliberately uncontained probe mutually exclusive with
+            // those tests so a concurrent managed tree cannot claim it.
+            let _child_process_guard = crate::process::test_exclusive_child_process_guard().await;
+
             #[cfg(unix)]
             let status = std::process::Command::new("sh")
                 .args(["-c", "test -f \"$1\"", "guard-check"])

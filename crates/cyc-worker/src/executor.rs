@@ -485,7 +485,11 @@ mod tests {
                 program,
                 arguments,
                 cwd: directory.path().to_owned(),
-                timeout: Duration::from_secs(10),
+                // Windows runners can spend well over ten seconds on the
+                // first PowerShell process while Defender/JIT initialization
+                // is cold. This is only a failure ceiling: the normal path
+                // still returns immediately when the process exits.
+                timeout: Duration::from_secs(60),
                 stdout_path: stdout.clone(),
                 stderr_path: logs.join("step.stderr.log"),
                 log_budget: Arc::new(LogBudget::new(16 * 1024)),

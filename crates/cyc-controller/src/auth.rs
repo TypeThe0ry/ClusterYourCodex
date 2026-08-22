@@ -610,7 +610,20 @@ mod tests {
     use super::*;
 
     fn test_directory(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("cyc-auth-{label}-{}", Uuid::new_v4()))
+        // macOS exposes its per-user temporary directory through `/var`,
+        // which is itself a symlink to `/private/var`. Production private
+        // paths deliberately reject every symlink component, so construct
+        // security-test fixtures below the resolved temporary root instead of
+        // weakening that fail-closed contract for the platform default.
+        #[cfg(unix)]
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonicalize the existing system temporary directory");
+        // `std::fs::canonicalize` introduces a verbatim (`\\?\`) prefix on
+        // Windows. The production component walker intentionally handles the
+        // normal Win32 path supplied by callers, so tests keep that form.
+        #[cfg(not(unix))]
+        let root = std::env::temp_dir();
+        root.join(format!("cyc-auth-{label}-{}", Uuid::new_v4()))
     }
 
     #[cfg(unix)]

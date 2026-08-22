@@ -2873,6 +2873,18 @@ mod tests {
 
     use super::*;
 
+    fn test_directory(label: &str) -> PathBuf {
+        // macOS returns a temporary path rooted at `/var`, a symlink to
+        // `/private/var`. Resolve only the test fixture root so production
+        // storage validation can continue rejecting symlink components.
+        #[cfg(unix)]
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonicalize the existing system temporary directory");
+        #[cfg(not(unix))]
+        let root = std::env::temp_dir();
+        root.join(format!("cyc-store-{label}-{}", Uuid::new_v4()))
+    }
+
     fn node() -> Node {
         let mut node = Node::new(
             "test-worker",
@@ -3304,7 +3316,7 @@ mod tests {
 
     #[test]
     fn file_databases_use_wal() {
-        let directory = std::env::temp_dir().join(format!("cyc-store-{}", Uuid::new_v4()));
+        let directory = test_directory("wal");
         std::fs::create_dir_all(&directory).unwrap();
         let database = directory.join("controller.db");
         let store = Store::open(&database).unwrap();
@@ -3316,7 +3328,7 @@ mod tests {
 
     #[test]
     fn file_database_open_rejects_prepositioned_weak_state() {
-        let directory = std::env::temp_dir().join(format!("cyc-store-{}", Uuid::new_v4()));
+        let directory = test_directory("weak-state");
         std::fs::create_dir_all(&directory).unwrap();
         let database = directory.join("controller.db");
         std::fs::write(&database, b"known database bytes").unwrap();
