@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN, WWW_AUTHENTICATE};
+use axum::http::header::{
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, HOST, ORIGIN, WWW_AUTHENTICATE,
+};
 use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -18,7 +20,7 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 use crate::auth::AuthToken;
-use crate::store::{Store, StoreError, StoredJob, StoredPlan};
+use crate::store::{LogChunk, Store, StoreError, StoredArtifact, StoredJob, StoredPlan};
 
 const MAX_JSON_BODY_BYTES: usize = 1024 * 1024;
 
@@ -27,6 +29,13 @@ pub struct AppState {
     pub store: Store,
     pub scheduler: Arc<Scheduler>,
     security: Arc<SecurityPolicy>,
+    worker_endpoint: Option<Arc<WorkerEndpoint>>,
+}
+
+#[derive(Clone)]
+pub struct WorkerEndpoint {
+    pub public_url: String,
+    pub certificate_pem: Arc<str>,
 }
 
 struct SecurityPolicy {
@@ -40,7 +49,20 @@ impl AppState {
             store,
             scheduler: Arc::new(Scheduler::default()),
             security: Arc::new(SecurityPolicy { token, port }),
+            worker_endpoint: None,
         }
+    }
+
+    pub fn with_worker_endpoint(mut self, public_url: String, certificate_pem: String) -> Self {
+        self.worker_endpoint = Some(Arc::new(WorkerEndpoint {
+            public_url,
+            certificate_pem: Arc::from(certificate_pem),
+        }));
+        self
+    }
+
+    pub(crate) fn worker_endpoint(&self) -> Option<&WorkerEndpoint> {
+        self.worker_endpoint.as_deref()
     }
 }
 
@@ -48,11 +70,19 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/fleet", get(fleet))
-        .route("/v1/nodes", post(register_node))
         .route("/v1/plans", post(plan))
         .route("/v1/jobs", get(list_jobs).post(submit_job))
         .route("/v1/jobs/{id}", get(get_job))
         .route("/v1/jobs/{id}/cancel", post(cancel_job))
+        .route("/v1/pairings", post(create_pairing))
+        .route("/v1/pairings/{id}/revoke", post(revoke_pairing))
+        .route("/v1/jobs/{id}/logs", get(list_job_logs))
+        .route("/v1/jobs/{id}/logs/{stream}", get(download_job_log))
+        .route("/v1/jobs/{id}/artifacts", get(list_job_artifacts))
+        .route(
+            "/v1/jobs/{id}/artifacts/{artifact_id}",
+            get(download_job_artifact),
+        )
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn_with_state(
@@ -225,25 +255,6 @@ async fn fleet(State(state): State<AppState>) -> Result<Json<FleetResponse>, Api
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RegisterNodeRequest {
-    node: Node,
-}
-
-async fn register_node(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    bytes: Bytes,
-) -> Result<(StatusCode, Json<Node>), ApiError> {
-    let request: RegisterNodeRequest = parse_json_body(&headers, &bytes)?;
-    let node = request.node;
-    let stored = node.clone();
-    let store = state.store.clone();
-    store_call(move || store.upsert_node(&stored)).await?;
-    Ok((StatusCode::CREATED, Json(node)))
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PlanRequest {
     job: JobSpec,
 }
@@ -375,6 +386,195 @@ async fn cancel_job(
     ))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreatePairingRequest {}
+
+// Deliberately not `Debug`: the serialized bundle contains the one-time code.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PairingBundle {
+    pairing_id: Uuid,
+    controller_id: Uuid,
+    worker_url: String,
+    certificate_pem: String,
+    pairing_code: String,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+async fn create_pairing(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Result<Response, ApiError> {
+    let _: CreatePairingRequest = parse_json_body(&headers, &bytes)?;
+    let endpoint = state
+        .worker_endpoint()
+        .cloned()
+        .ok_or_else(ApiError::worker_listener_unavailable)?;
+    let store = state.store.clone();
+    let (pairing, controller_id) = store_call(move || {
+        let pairing = store.create_pairing()?;
+        let controller_id = store.controller_id()?;
+        Ok((pairing, controller_id))
+    })
+    .await?;
+    let mut response = (
+        StatusCode::CREATED,
+        Json(PairingBundle {
+            pairing_id: pairing.id,
+            controller_id,
+            worker_url: endpoint.public_url.clone(),
+            certificate_pem: endpoint.certificate_pem.to_string(),
+            pairing_code: pairing.code,
+            created_at: pairing.created_at,
+            expires_at: pairing.expires_at,
+        }),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RevokePairingResponse {
+    pairing_id: Uuid,
+    revoked: bool,
+}
+
+async fn revoke_pairing(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<RevokePairingResponse>, ApiError> {
+    let store = state.store.clone();
+    store_call(move || store.revoke_pairing(id)).await?;
+    Ok(Json(RevokePairingResponse {
+        pairing_id: id,
+        revoked: true,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogChunkView {
+    run_id: Uuid,
+    stream: String,
+    offset: u64,
+    length: u64,
+    sha256: String,
+    created_at: DateTime<Utc>,
+}
+
+impl From<LogChunk> for LogChunkView {
+    fn from(value: LogChunk) -> Self {
+        Self {
+            run_id: value.run_id,
+            stream: value.stream,
+            offset: value.offset,
+            length: value.length,
+            sha256: value.sha256,
+            created_at: value.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JobLogsResponse {
+    chunks: Vec<LogChunkView>,
+}
+
+async fn list_job_logs(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<JobLogsResponse>, ApiError> {
+    let store = state.store.clone();
+    let chunks = store_call(move || store.list_log_chunks(id)).await?;
+    Ok(Json(JobLogsResponse {
+        chunks: chunks.into_iter().map(Into::into).collect(),
+    }))
+}
+
+async fn download_job_log(
+    State(state): State<AppState>,
+    Path((id, stream)): Path<(Uuid, String)>,
+) -> Result<Response, ApiError> {
+    let store = state.store.clone();
+    let bytes = store_call(move || store.read_log(id, &stream)).await?;
+    Ok((
+        [(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        )],
+        bytes,
+    )
+        .into_response())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArtifactView {
+    id: Uuid,
+    run_id: Uuid,
+    name: String,
+    size: u64,
+    sha256: String,
+    created_at: DateTime<Utc>,
+}
+
+impl From<StoredArtifact> for ArtifactView {
+    fn from(value: StoredArtifact) -> Self {
+        Self {
+            id: value.id,
+            run_id: value.run_id,
+            name: value.name,
+            size: value.size,
+            sha256: value.sha256,
+            created_at: value.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JobArtifactsResponse {
+    artifacts: Vec<ArtifactView>,
+}
+
+async fn list_job_artifacts(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<JobArtifactsResponse>, ApiError> {
+    let store = state.store.clone();
+    let artifacts = store_call(move || store.list_artifacts(id)).await?;
+    Ok(Json(JobArtifactsResponse {
+        artifacts: artifacts.into_iter().map(Into::into).collect(),
+    }))
+}
+
+async fn download_job_artifact(
+    State(state): State<AppState>,
+    Path((id, artifact_id)): Path<(Uuid, Uuid)>,
+) -> Result<Response, ApiError> {
+    let store = state.store.clone();
+    let (metadata, bytes) = store_call(move || store.read_artifact(id, artifact_id)).await?;
+    let disposition = HeaderValue::from_str(&format!("attachment; filename=\"{}\"", metadata.id))
+        .map_err(|_| ApiError::internal())?;
+    let mut response = bytes.into_response();
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response
+        .headers_mut()
+        .insert(CONTENT_DISPOSITION, disposition);
+    Ok(response)
+}
+
 fn parse_json_body<T: DeserializeOwned>(headers: &HeaderMap, bytes: &[u8]) -> Result<T, ApiError> {
     let content_type = headers
         .get(CONTENT_TYPE)
@@ -466,6 +666,14 @@ impl ApiError {
         )
     }
 
+    fn worker_listener_unavailable() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "worker_listener_unavailable",
+            "the managed worker TLS listener is not configured",
+        )
+    }
+
     fn schedule(error: ScheduleError) -> Self {
         match error {
             ScheduleError::InvalidJob(_) => Self::invalid_job(),
@@ -521,6 +729,23 @@ impl From<StoreError> for ApiError {
                 message: "job version changed; reload before retrying",
                 extra: Some(("details", json!({ "currentVersion": current_version }))),
             },
+            StoreError::WorkerStateConflict {
+                current_version,
+                cancel_requested,
+                current_state,
+            } => Self {
+                status: StatusCode::CONFLICT,
+                code: "state_conflict",
+                message: "worker run state changed",
+                extra: Some((
+                    "details",
+                    json!({
+                        "currentVersion": current_version,
+                        "cancelRequested": cancel_requested,
+                        "currentState": current_state,
+                    }),
+                )),
+            },
             StoreError::PlanExpired => Self::new(
                 StatusCode::CONFLICT,
                 "plan_expired",
@@ -537,11 +762,58 @@ impl From<StoreError> for ApiError {
                 "placement plan does not match this canonical JobSpec",
             ),
             StoreError::Schedule(error) => Self::schedule(error),
-            StoreError::Database(_)
+            StoreError::WorkerUnauthorized | StoreError::RunUnauthorized => Self::new(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "worker authentication failed",
+            ),
+            StoreError::PairingUnavailable => Self::new(
+                StatusCode::GONE,
+                "pairing_unavailable",
+                "pairing code is expired, used, or revoked",
+            ),
+            StoreError::UploadConflict => Self::new(
+                StatusCode::CONFLICT,
+                "upload_conflict",
+                "upload conflicts with an existing object",
+            ),
+            StoreError::UploadOffset => Self::new(
+                StatusCode::CONFLICT,
+                "upload_offset",
+                "log chunk offset is not contiguous",
+            ),
+            StoreError::DigestMismatch => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "digest_mismatch",
+                "uploaded bytes do not match the declared digest",
+            ),
+            StoreError::InvalidUpload => Self::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_upload",
+                "upload metadata is invalid",
+            ),
+            StoreError::LogQuotaExceeded => Self::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "log_quota_exceeded",
+                "run log quota is exhausted",
+            ),
+            StoreError::ArtifactQuotaExceeded => Self::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "artifact_quota_exceeded",
+                "run artifact quota is exhausted",
+            ),
+            StoreError::InvalidManagedNode => Self::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_managed_node",
+                "pairing requires a managed worker node",
+            ),
+            StoreError::StorageSecurity(_)
+            | StoreError::Database(_)
             | StoreError::Document(_)
             | StoreError::Identifier(_)
             | StoreError::Timestamp
-            | StoreError::Poisoned => {
+            | StoreError::Poisoned
+            | StoreError::Io(_) => {
                 tracing::error!(error = %error, "controller storage failure");
                 Self::internal()
             }
@@ -567,8 +839,8 @@ mod tests {
     use super::*;
     use axum::http::{Method, Request};
     use cyc_protocol::{
-        Architecture, JobKind, JobStep, NodeResources, NodeStatus, NodeTransport, OperatingSystem,
-        SourceSpec,
+        Architecture, CredentialRef, JobKind, JobStep, NodeResources, NodeStatus, NodeTransport,
+        OperatingSystem, SourceSpec,
     };
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -594,7 +866,10 @@ mod tests {
     fn online_node() -> Node {
         let mut node = Node::new(
             "windows-worker",
-            NodeTransport::Local,
+            NodeTransport::Managed {
+                endpoint: "https://controller.example:47832".to_owned(),
+                credential_ref: CredentialRef::new("controller-db:managed-worker"),
+            },
             OperatingSystem::Windows,
             Architecture::X86_64,
         );
@@ -616,7 +891,7 @@ mod tests {
             JobKind::Build,
             SourceSpec::Git {
                 repository: "https://example.invalid/repository.git".to_owned(),
-                revision: "0123456789abcdef".to_owned(),
+                revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             },
             vec![JobStep::new("build", "cargo build --locked")],
         )
@@ -714,6 +989,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pairing_bundle_is_available_only_with_a_tls_worker_endpoint() {
+        let response = test_app()
+            .oneshot(
+                request(Method::POST, "/v1/pairings")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let state = AppState::new(Store::in_memory().unwrap(), AuthToken::test_token(), 47_831)
+            .with_worker_endpoint(
+                "https://192.0.2.10:47832".to_owned(),
+                "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n".to_owned(),
+            );
+        let expected_controller_id = state.store.controller_id().unwrap();
+        let response = router(state)
+            .oneshot(
+                request(Method::POST, "/v1/pairings")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        let bundle = body_json(response).await;
+        assert_eq!(
+            bundle["controllerId"],
+            Value::String(expected_controller_id.to_string())
+        );
+        assert_eq!(bundle["workerUrl"], "https://192.0.2.10:47832");
+        assert_eq!(
+            bundle["certificatePem"],
+            "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
+        );
+        assert!(bundle["pairingCode"].as_str().unwrap().len() >= 32);
+    }
+
+    #[tokio::test]
     async fn planning_failure_keeps_structured_placement() {
         let job = build_job();
         let response = test_app()
@@ -741,8 +1059,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registers_node_plans_submits_and_cancels_with_versions() {
-        let app = test_app();
+    async fn only_paired_workers_can_be_planned_submitted_and_cancelled() {
+        let store = Store::in_memory().unwrap();
+        let app = router(AppState::new(
+            store.clone(),
+            AuthToken::test_token(),
+            47_831,
+        ));
         let node = online_node();
         let response = app
             .clone()
@@ -756,7 +1079,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(store.list_nodes().unwrap().is_empty());
+
+        let pairing = store.create_pairing().unwrap();
+        let _credential = store.consume_pairing(&pairing.code, &node).unwrap();
 
         let job = build_job();
         let response = app

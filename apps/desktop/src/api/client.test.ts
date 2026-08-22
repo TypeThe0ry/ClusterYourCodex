@@ -1,8 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
+  type ControllerRequestEnvelope,
   ControllerTransportError,
   DesktopHostControllerTransport,
   DevelopmentProxyControllerTransport,
+  MAX_RENDERER_REQUEST_TIMEOUT_MS,
   mockControllerProvider,
 } from "./auth";
 import { ControllerApiError, ControllerClient } from "./client";
@@ -10,7 +12,9 @@ import { ControllerApiError, ControllerClient } from "./client";
 describe("ControllerClient", () => {
   it("uses the public health route through a transport provider", async () => {
     const transport = mockControllerProvider(async (request) => {
-      expect(request).toEqual({ method: "GET", path: "/v1/health" });
+      expect(request).toMatchObject({ method: "GET", path: "/v1/health" });
+      expect(request.deadlineMs).toBeGreaterThan(Date.now());
+      expect(request.deadlineMs - Date.now()).toBeLessThanOrEqual(MAX_RENDERER_REQUEST_TIMEOUT_MS);
       return {
         status: 200,
         body: { status: "ok", controllerVersion: "0.1.0", apiVersion: "cyc.dev/v1", database: "ok" },
@@ -23,7 +27,8 @@ describe("ControllerClient", () => {
 
   it("encodes job identifiers and supplies an object body for every mutation", async () => {
     const transport = mockControllerProvider(async (request) => {
-      expect(request).toEqual({ method: "POST", path: "/v1/jobs/job%2Fid/cancel", body: {} });
+      expect(request).toMatchObject({ method: "POST", path: "/v1/jobs/job%2Fid/cancel", body: {} });
+      expect(request.deadlineMs).toEqual(expect.any(Number));
       return { status: 200, body: { job: {}, run: {} } };
     });
     const client = new ControllerClient({ transport });
@@ -95,7 +100,11 @@ describe("ControllerClient", () => {
     try {
       const client = new ControllerClient({ transport: new DesktopHostControllerTransport() });
       await client.fleet();
-      expect(controllerRequest).toHaveBeenCalledWith({ method: "GET", path: "/v1/fleet" });
+      expect(controllerRequest).toHaveBeenCalledWith({
+        method: "GET",
+        path: "/v1/fleet",
+        deadlineMs: expect.any(Number),
+      });
       expect(JSON.stringify(controllerRequest.mock.calls)).not.toMatch(/authorization|bearer|token|https?:/i);
     } finally {
       vi.unstubAllGlobals();
@@ -104,7 +113,9 @@ describe("ControllerClient", () => {
 
   it("fails clearly when the production desktop proxy is unavailable", async () => {
     const transport = new DesktopHostControllerTransport();
-    await expect(transport.request({ method: "GET", path: "/v1/fleet" })).rejects.toThrow(
+    await expect(
+      transport.request({ method: "GET", path: "/v1/fleet", deadlineMs: Date.now() + 1_000 }),
+    ).rejects.toThrow(
       "Desktop controller proxy is unavailable",
     );
 
@@ -122,13 +133,19 @@ describe("ControllerClient", () => {
     );
     const transport = new DevelopmentProxyControllerTransport(fetchImpl);
 
-    await transport.request({ method: "POST", path: "/v1/jobs/id/cancel", body: {} });
+    await transport.request({
+      method: "POST",
+      path: "/v1/jobs/id/cancel",
+      deadlineMs: Date.now() + 1_000,
+      body: {},
+    });
 
     const [url, init] = fetchImpl.mock.calls[0] ?? [];
     expect(url).toBe("/__cyc_controller/v1/jobs/id/cancel");
     expect(new Headers(init?.headers).has("authorization")).toBe(false);
     expect(new Headers(init?.headers).get("content-type")).toBe("application/json");
     expect(init?.body).toBe("{}");
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
   });
 
   it("keeps structured placement evidence and drops untrusted error fields", async () => {
@@ -167,8 +184,37 @@ describe("ControllerClient", () => {
 
   it("rejects traversal before it reaches the desktop host", async () => {
     const transport = new DesktopHostControllerTransport();
-    await expect(transport.request({ method: "GET", path: "/v1/../secrets" })).rejects.toBeInstanceOf(
-      ControllerTransportError,
+    await expect(
+      transport.request({ method: "GET", path: "/v1/../secrets", deadlineMs: Date.now() + 1_000 }),
+    ).rejects.toBeInstanceOf(ControllerTransportError);
+  });
+
+  it("rejects an expired deadline before invoking the desktop bridge", async () => {
+    const controllerRequest = vi.fn();
+    vi.stubGlobal("window", { __CLUSTER_YOUR_CODEX__: { controllerRequest } });
+    try {
+      const transport = new DesktopHostControllerTransport();
+      await expect(
+        transport.request({ method: "POST", path: "/v1/jobs", deadlineMs: Date.now() - 1, body: {} }),
+      ).rejects.toThrow("deadline is invalid or expired");
+      expect(controllerRequest).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not permit a renderer timeout above eight seconds", () => {
+    expect(() => new ControllerClient({ timeoutMs: MAX_RENDERER_REQUEST_TIMEOUT_MS + 1 })).toThrow(
+      RangeError,
     );
+    expect(() => new ControllerClient({ timeoutMs: 0 })).toThrow(RangeError);
+  });
+
+  it("keeps the native request envelope deadline typed as an absolute number", () => {
+    expectTypeOf<ControllerRequestEnvelope>().toMatchTypeOf<{
+      method: "GET" | "POST";
+      path: string;
+      deadlineMs: number;
+    }>();
   });
 });

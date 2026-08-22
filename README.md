@@ -36,7 +36,7 @@ The first release is composed of:
 - `cyc-protocol`: versioned cross-platform domain model.
 - `cyc-scheduler`: compatibility filtering and explainable placement.
 - `apps/desktop`: Windows-first desktop interface.
-- `plugins/codex`: Codex Skill and MCP bridge.
+- `plugins/cluster-your-codex`: Codex Skill and MCP bridge.
 
 ## Design rules
 

@@ -7,17 +7,25 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
+
+pub mod worker;
 
 /// Current wire-level API identifier used by [`JobSpec`].
 pub const API_VERSION: &str = "cyc.dev/v1";
 
 /// Numeric protocol generation for capability negotiation outside `JobSpec`.
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Artifact collectors must always apply this exclusion after include rules.
+pub const DEFAULT_GIT_ARTIFACT_EXCLUDE: &str = ".git/**";
 
 /// A stable, extensible capability name such as `docker`, `cuda`, or
 /// `toolchain:msvc`.
@@ -142,7 +150,7 @@ pub enum GpuVendor {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GpuDevice {
     pub vendor: GpuVendor,
     pub model: String,
@@ -159,7 +167,7 @@ const fn default_true() -> bool {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NodeResources {
     pub logical_cpu_cores: u32,
     pub available_cpu_cores: u32,
@@ -172,7 +180,7 @@ pub struct NodeResources {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NodeLoad {
     /// Integer percentage in the inclusive range 0..=100.
     pub cpu_percent: u8,
@@ -364,15 +372,29 @@ impl JobStep {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ArtifactSpec {
     #[serde(default)]
     pub include: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "default_artifact_excludes")]
     pub exclude: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retention_days: Option<u32>,
+}
+
+impl Default for ArtifactSpec {
+    fn default() -> Self {
+        Self {
+            include: Vec::new(),
+            exclude: default_artifact_excludes(),
+            retention_days: None,
+        }
+    }
+}
+
+fn default_artifact_excludes() -> Vec<String> {
+    vec![DEFAULT_GIT_ARTIFACT_EXCLUDE.to_owned()]
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -450,6 +472,10 @@ impl JobSpec {
             if step.script.trim().is_empty() {
                 return Err(ValidationError::EmptyStepScript(index));
             }
+            if let Some(working_directory) = &step.working_directory {
+                validate_portable_relative_path(working_directory)
+                    .map_err(|source| ValidationError::InvalidWorkingDirectory { index, source })?;
+            }
             validate_timeout(step.timeout_seconds, "step timeoutSeconds")?;
         }
         validate_timeout(self.timeout_seconds, "timeoutSeconds")?;
@@ -485,19 +511,48 @@ impl JobSpec {
         if matches!(self.artifacts.retention_days, Some(0 | 3651..)) {
             return Err(ValidationError::InvalidRetentionDays);
         }
+        for (index, pattern) in self.artifacts.include.iter().enumerate() {
+            validate_portable_relative_glob(pattern).map_err(|source| {
+                ValidationError::InvalidArtifactPattern {
+                    field: "include",
+                    index,
+                    source,
+                }
+            })?;
+            if has_literal_git_segment(pattern) {
+                return Err(ValidationError::GitMetadataIncluded(index));
+            }
+        }
+        for (index, pattern) in self.artifacts.exclude.iter().enumerate() {
+            validate_portable_relative_glob(pattern).map_err(|source| {
+                ValidationError::InvalidArtifactPattern {
+                    field: "exclude",
+                    index,
+                    source,
+                }
+            })?;
+        }
+        if !self
+            .artifacts
+            .exclude
+            .iter()
+            .any(|pattern| matches!(pattern.as_str(), ".git" | DEFAULT_GIT_ARTIFACT_EXCLUDE))
+        {
+            return Err(ValidationError::GitMetadataNotExcluded);
+        }
         match &self.source {
             SourceSpec::Git {
                 repository,
                 revision,
             } => {
-                if repository.trim().is_empty() {
+                validate_public_https_repository(repository)?;
+                if !matches!(revision.len(), 40 | 64)
+                    || !revision
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
                     return Err(ValidationError::InvalidSource(
-                        "git repository must not be empty",
-                    ));
-                }
-                if revision.len() < 7 {
-                    return Err(ValidationError::InvalidSource(
-                        "git revision must contain at least 7 characters",
+                        "git revision must be a complete 40- or 64-character lowercase hex object ID",
                     ));
                 }
             }
@@ -519,6 +574,284 @@ impl JobSpec {
     }
 }
 
+/// Apply scheduler-equivalent defaults before binding a job to a plan or run.
+///
+/// Every component that computes or verifies a job digest must call this one
+/// shared normalization path. Adding a new scheduling-equivalent default is a
+/// wire-level change and therefore requires a golden digest test.
+pub fn normalize_job_spec(job: &JobSpec) -> JobSpec {
+    let mut normalized = job.clone();
+    if normalized.requirements.min_cpu_cores.is_none() {
+        normalized.requirements.min_cpu_cores = Some(1);
+    }
+    normalized
+}
+
+/// SHA-256 of the normalized `JobSpec` encoded as recursively key-sorted,
+/// whitespace-free JSON.
+///
+/// This is the only supported digest algorithm for `ClaimAssignment.jobDigest`.
+/// It deliberately does not hash `serde_json::to_vec(job)` because Rust field
+/// order is not a cross-implementation canonicalization contract.
+pub fn canonical_job_digest(job: &JobSpec) -> Result<String, serde_json::Error> {
+    let value = serde_json::to_value(normalize_job_spec(job))?;
+    let mut canonical = Vec::new();
+    write_canonical_json(&value, &mut canonical)?;
+    let digest = Sha256::digest(canonical);
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn write_canonical_json(value: &Value, output: &mut Vec<u8>) -> Result<(), serde_json::Error> {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+            serde_json::to_writer(&mut *output, value)?;
+        }
+        Value::Array(values) => {
+            output.push(b'[');
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push(b',');
+                }
+                write_canonical_json(value, output)?;
+            }
+            output.push(b']');
+        }
+        Value::Object(values) => {
+            output.push(b'{');
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            for (index, key) in keys.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(b',');
+                }
+                serde_json::to_writer(&mut *output, key)?;
+                output.push(b':');
+                write_canonical_json(&values[key], output)?;
+            }
+            output.push(b'}');
+        }
+    }
+    Ok(())
+}
+
+/// Validate a path that must mean the same job-owned location on Windows,
+/// Linux, and macOS. The path is deliberately lexical: workers join it below
+/// an already-proven job root and never canonicalize an attacker-selected
+/// absolute path.
+pub fn validate_portable_relative_path(value: &str) -> Result<(), PortablePathError> {
+    validate_portable_relative(value, false)
+}
+
+/// Validate a glob whose matches are constrained to a job-owned root.
+///
+/// Glob metacharacters are allowed inside a segment, but negated patterns and
+/// traversal/absolute syntax are not. Exclusion rules are applied after all
+/// include rules by the worker.
+pub fn validate_portable_relative_glob(value: &str) -> Result<(), PortablePathError> {
+    validate_portable_relative(value, true)
+}
+
+fn validate_portable_relative(value: &str, glob: bool) -> Result<(), PortablePathError> {
+    if value.is_empty() {
+        return Err(PortablePathError::Empty);
+    }
+    if value.contains('\0') {
+        return Err(PortablePathError::Nul);
+    }
+    if value.contains('\\') {
+        return Err(PortablePathError::Backslash);
+    }
+    if value.starts_with('/') {
+        return Err(PortablePathError::Absolute);
+    }
+    if value
+        .as_bytes()
+        .get(0..2)
+        .is_some_and(|prefix| prefix[0].is_ascii_alphabetic() && prefix[1] == b':')
+    {
+        return Err(PortablePathError::DrivePrefix);
+    }
+    if glob && value.starts_with('!') {
+        return Err(PortablePathError::NegatedGlob);
+    }
+
+    for segment in value.split('/') {
+        match segment {
+            "" => return Err(PortablePathError::EmptySegment),
+            "." => return Err(PortablePathError::DotSegment),
+            ".." => return Err(PortablePathError::ParentSegment),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn has_literal_git_segment(value: &str) -> bool {
+    value.split('/').any(|segment| segment == ".git")
+}
+
+fn validate_public_https_repository(repository: &str) -> Result<(), ValidationError> {
+    if repository.trim() != repository
+        || repository.chars().any(char::is_control)
+        || repository
+            .chars()
+            .any(|character| matches!(character, '?' | '#' | '\\'))
+    {
+        return Err(ValidationError::InvalidSource(
+            "git repository must be a canonical public HTTPS URL without query or fragment",
+        ));
+    }
+
+    let Some(remainder) = repository.strip_prefix("https://") else {
+        return Err(ValidationError::InvalidSource(
+            "git repository must use https://",
+        ));
+    };
+    let Some((authority, path)) = remainder.split_once('/') else {
+        return Err(ValidationError::InvalidSource(
+            "git repository URL must contain a repository path",
+        ));
+    };
+    if authority.is_empty() || authority.contains('@') {
+        return Err(ValidationError::InvalidSource(
+            "git repository URL must not contain userinfo",
+        ));
+    }
+    if path.is_empty()
+        || path.split('/').any(|segment| segment.is_empty())
+        || path.split('/').any(|segment| matches!(segment, "." | ".."))
+    {
+        return Err(ValidationError::InvalidSource(
+            "git repository URL must contain a canonical repository path",
+        ));
+    }
+
+    let host = repository_host(authority)?;
+    if !is_public_repository_host(host) {
+        return Err(ValidationError::InvalidSource(
+            "git repository host must be public",
+        ));
+    }
+    Ok(())
+}
+
+fn repository_host(authority: &str) -> Result<&str, ValidationError> {
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let Some(close) = bracketed.find(']') else {
+            return Err(ValidationError::InvalidSource(
+                "git repository host is invalid",
+            ));
+        };
+        let (host, suffix) = bracketed.split_at(close);
+        let suffix = &suffix[1..];
+        if !suffix.is_empty() && !valid_port_suffix(suffix) {
+            return Err(ValidationError::InvalidSource(
+                "git repository port is invalid",
+            ));
+        }
+        if host.is_empty() {
+            return Err(ValidationError::InvalidSource(
+                "git repository host is invalid",
+            ));
+        }
+        return Ok(host);
+    }
+
+    if authority.matches(':').count() > 1 {
+        return Err(ValidationError::InvalidSource(
+            "IPv6 git repository hosts must use brackets",
+        ));
+    }
+    let (host, suffix) = authority
+        .split_once(':')
+        .map_or((authority, ""), |(host, port)| (host, port));
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+        || host.starts_with('.')
+        || host.ends_with('.')
+    {
+        return Err(ValidationError::InvalidSource(
+            "git repository host is invalid",
+        ));
+    }
+    if !suffix.is_empty() && !valid_port(suffix) {
+        return Err(ValidationError::InvalidSource(
+            "git repository port is invalid",
+        ));
+    }
+    Ok(host)
+}
+
+fn valid_port_suffix(suffix: &str) -> bool {
+    suffix.strip_prefix(':').is_some_and(valid_port)
+}
+
+fn valid_port(port: &str) -> bool {
+    port.parse::<u16>().is_ok_and(|port| port != 0)
+}
+
+fn is_public_repository_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost")
+        || host.to_ascii_lowercase().ends_with(".localhost")
+        || host.to_ascii_lowercase().ends_with(".local")
+    {
+        return false;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(address)) => is_public_ipv4(address),
+        Ok(IpAddr::V6(address)) => is_public_ipv6(address),
+        Err(_) => true,
+    }
+}
+
+fn is_public_ipv4(address: Ipv4Addr) -> bool {
+    let [a, b, _, _] = address.octets();
+    !(a == 0
+        || a == 10
+        || a == 127
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 168)
+        || (a == 198 && (18..=19).contains(&b))
+        || a >= 224)
+}
+
+fn is_public_ipv6(address: Ipv6Addr) -> bool {
+    if address.is_unspecified() || address.is_loopback() || address.is_multicast() {
+        return false;
+    }
+    let first = address.segments()[0];
+    if first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80 {
+        return false;
+    }
+    address.to_ipv4().is_none_or(is_public_ipv4)
+}
+
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum PortablePathError {
+    #[error("path must not be empty")]
+    Empty,
+    #[error("NUL is not allowed")]
+    Nul,
+    #[error("backslashes are not portable")]
+    Backslash,
+    #[error("absolute paths are not allowed")]
+    Absolute,
+    #[error("Windows drive prefixes are not allowed")]
+    DrivePrefix,
+    #[error("empty path segments are not allowed")]
+    EmptySegment,
+    #[error("dot path segments are not allowed")]
+    DotSegment,
+    #[error("parent path segments are not allowed")]
+    ParentSegment,
+    #[error("negated glob patterns are not allowed")]
+    NegatedGlob,
+}
+
 fn validate_timeout(value: Option<u64>, field: &'static str) -> Result<(), ValidationError> {
     if matches!(value, Some(0 | 86401..)) {
         return Err(ValidationError::InvalidTimeout(field));
@@ -538,6 +871,11 @@ pub enum ValidationError {
     EmptyStepName(usize),
     #[error("steps[{0}].script must not be empty")]
     EmptyStepScript(usize),
+    #[error("steps[{index}].workingDirectory is invalid: {source}")]
+    InvalidWorkingDirectory {
+        index: usize,
+        source: PortablePathError,
+    },
     #[error("{0} must be in the inclusive range 1..=86400")]
     InvalidTimeout(&'static str),
     #[error("capability names must not be empty")]
@@ -546,6 +884,16 @@ pub enum ValidationError {
     ZeroRequirement(&'static str),
     #[error("retentionDays must be in the inclusive range 1..=3650")]
     InvalidRetentionDays,
+    #[error("artifacts.{field}[{index}] is invalid: {source}")]
+    InvalidArtifactPattern {
+        field: &'static str,
+        index: usize,
+        source: PortablePathError,
+    },
+    #[error("artifacts.include[{0}] must not explicitly include .git metadata")]
+    GitMetadataIncluded(usize),
+    #[error("artifacts.exclude must contain .git/** (or .git)")]
+    GitMetadataNotExcluded,
     #[error("invalid source: {0}")]
     InvalidSource(&'static str),
 }
@@ -823,7 +1171,7 @@ mod tests {
             JobKind::Build,
             SourceSpec::Git {
                 repository: "https://example.invalid/repo.git".to_owned(),
-                revision: "0123456789abcdef".to_owned(),
+                revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             },
             vec![JobStep::new("build", "cargo build --locked")],
         )
@@ -866,6 +1214,19 @@ mod tests {
     }
 
     #[test]
+    fn omitted_artifact_excludes_default_to_git_metadata_protection() {
+        let mut value = serde_json::to_value(sample_job()).expect("serialize JobSpec");
+        value["artifacts"] = serde_json::json!({});
+
+        let decoded: JobSpec = serde_json::from_value(value).expect("deserialize JobSpec");
+        assert_eq!(
+            decoded.artifacts.exclude,
+            vec![DEFAULT_GIT_ARTIFACT_EXCLUDE.to_owned()]
+        );
+        decoded.validate().expect("default artifact exclusion");
+    }
+
+    #[test]
     fn validation_rejects_unknown_versions_and_empty_work() {
         let mut job = sample_job();
         job.api_version = "cyc.dev/v99".to_owned();
@@ -903,6 +1264,141 @@ mod tests {
         assert_eq!(
             job.validate(),
             Err(ValidationError::OriginFieldTooLong("codexSessionId"))
+        );
+    }
+
+    #[test]
+    fn git_sources_require_public_https_and_complete_object_ids() {
+        let invalid_repositories = [
+            "http://example.invalid/repo.git",
+            "ssh://git@example.invalid/repo.git",
+            "https://user@example.invalid/repo.git",
+            "https://example.invalid/repo.git?token=secret",
+            "https://example.invalid/repo.git#main",
+            "https://localhost/repo.git",
+            "https://192.168.1.10/repo.git",
+            "https://example.invalid",
+        ];
+        for repository in invalid_repositories {
+            let mut job = sample_job();
+            let SourceSpec::Git {
+                repository: current,
+                ..
+            } = &mut job.source
+            else {
+                unreachable!()
+            };
+            *current = repository.to_owned();
+            assert!(matches!(
+                job.validate(),
+                Err(ValidationError::InvalidSource(_))
+            ));
+        }
+
+        for revision in [
+            "0123456789abcdef".to_owned(),
+            "0123456789abcdef0123456789abcdef0123456G".to_owned(),
+            "ABCDEF0123456789ABCDEF0123456789ABCDEF01".to_owned(),
+            "a".repeat(63),
+        ] {
+            let mut job = sample_job();
+            let SourceSpec::Git {
+                revision: current, ..
+            } = &mut job.source
+            else {
+                unreachable!()
+            };
+            *current = revision;
+            assert!(matches!(
+                job.validate(),
+                Err(ValidationError::InvalidSource(_))
+            ));
+        }
+
+        let mut sha256_job = sample_job();
+        let SourceSpec::Git { revision, .. } = &mut sha256_job.source else {
+            unreachable!()
+        };
+        *revision = "a".repeat(64);
+        sha256_job.validate().expect("64-character object ID");
+    }
+
+    #[test]
+    fn working_directories_reject_non_portable_and_traversal_paths() {
+        for path in [
+            "",
+            "/tmp/build",
+            "C:/build",
+            "//server/share",
+            "target\\release",
+            "target//release",
+            "target/./release",
+            "target/../release",
+            "target/\0release",
+        ] {
+            let mut job = sample_job();
+            job.steps[0].working_directory = Some(path.to_owned());
+            assert!(matches!(
+                job.validate(),
+                Err(ValidationError::InvalidWorkingDirectory { .. })
+            ));
+        }
+
+        let mut job = sample_job();
+        job.steps[0].working_directory = Some("crates/cyc-protocol".to_owned());
+        job.validate().expect("portable working directory");
+    }
+
+    #[test]
+    fn artifact_globs_are_relative_and_always_exclude_git_metadata() {
+        let default = ArtifactSpec::default();
+        assert_eq!(
+            default.exclude,
+            vec![DEFAULT_GIT_ARTIFACT_EXCLUDE.to_owned()]
+        );
+
+        let mut job = sample_job();
+        job.artifacts.include = vec!["target/**/*.zip".to_owned()];
+        job.validate().expect("safe relative artifact glob");
+
+        job.artifacts.exclude.clear();
+        assert_eq!(job.validate(), Err(ValidationError::GitMetadataNotExcluded));
+
+        job.artifacts.exclude = vec![DEFAULT_GIT_ARTIFACT_EXCLUDE.to_owned()];
+        job.artifacts.include = vec![".git/config".to_owned()];
+        assert_eq!(job.validate(), Err(ValidationError::GitMetadataIncluded(0)));
+
+        for pattern in ["/etc/*", "C:/*", "../*.zip", "target\\*.zip", "!secret"] {
+            let mut job = sample_job();
+            job.artifacts.include = vec![pattern.to_owned()];
+            assert!(matches!(
+                job.validate(),
+                Err(ValidationError::InvalidArtifactPattern { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn canonical_job_digest_has_one_normalized_golden_contract() {
+        let mut implicit_default = sample_job();
+        implicit_default.id = Uuid::nil();
+        let digest = canonical_job_digest(&implicit_default).expect("canonical digest");
+        assert_eq!(
+            digest,
+            "c42a975899786da2fe30fc286d8ab2dae08519696e659c9ac524d9adcadaad73"
+        );
+
+        let mut explicit_default = implicit_default.clone();
+        explicit_default.requirements.min_cpu_cores = Some(1);
+        assert_eq!(
+            canonical_job_digest(&implicit_default).expect("implicit digest"),
+            canonical_job_digest(&explicit_default).expect("explicit digest")
+        );
+
+        explicit_default.steps[0].script.push_str(" --release");
+        assert_ne!(
+            canonical_job_digest(&implicit_default).expect("original digest"),
+            canonical_job_digest(&explicit_default).expect("changed digest")
         );
     }
 

@@ -1,8 +1,10 @@
 pub mod api;
 pub mod auth;
 pub mod store;
+pub mod worker_api;
 
 use std::net::SocketAddr;
+use std::sync::OnceLock;
 
 use anyhow::{bail, Context, Result};
 use tokio::net::TcpListener;
@@ -18,6 +20,25 @@ pub async fn serve(listener: TcpListener, state: api::AppState) -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("controller HTTP server failed")
+}
+
+pub async fn serve_worker_tls(
+    address: SocketAddr,
+    state: api::AppState,
+    certificate: impl AsRef<std::path::Path>,
+    private_key: impl AsRef<std::path::Path>,
+) -> Result<()> {
+    static TLS_PROVIDER: OnceLock<()> = OnceLock::new();
+    TLS_PROVIDER.get_or_init(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+    let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(certificate, private_key)
+        .await
+        .context("failed to load managed-worker TLS certificate or key")?;
+    axum_server::bind_rustls(address, config)
+        .serve(worker_api::router(state).into_make_service())
+        .await
+        .context("managed-worker TLS server failed")
 }
 
 pub fn ensure_loopback(address: SocketAddr) -> Result<()> {

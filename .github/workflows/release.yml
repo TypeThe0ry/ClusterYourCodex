@@ -1,0 +1,215 @@
+name: Portable release artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CYC_REF_NAME: ${{ github.ref_name }}
+
+jobs:
+  rust-artifacts:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: windows-x64
+            suffix: .exe
+          - name: Linux x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            label: linux-x64
+            suffix: ""
+          - name: macOS x64
+            os: macos-14
+            target: x86_64-apple-darwin
+            label: macos-x64
+            suffix: ""
+          - name: macOS arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            label: macos-arm64
+            suffix: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Build release binaries
+        run: >-
+          cargo build --locked --release --target ${{ matrix.target }}
+          --bin cyc-controller --bin cyc-worker --bin cyc
+      - name: Stage portable archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $safeRef = [string]$env:CYC_REF_NAME -replace '[^0-9A-Za-z._-]', '-'
+          if ([string]::IsNullOrWhiteSpace($safeRef)) { $safeRef = 'build' }
+          $name = "ClusterYourCodex-$safeRef-${{ matrix.label }}"
+          $stage = Join-Path $PWD "release-stage/$name"
+          New-Item -ItemType Directory -Force -Path (Join-Path $stage 'bin') | Out-Null
+          foreach ($binary in @('cyc-controller', 'cyc-worker', 'cyc')) {
+            $source = Join-Path $PWD "target/${{ matrix.target }}/release/$binary${{ matrix.suffix }}"
+            Copy-Item -LiteralPath $source -Destination (Join-Path $stage "bin/$binary${{ matrix.suffix }}")
+          }
+          Copy-Item -LiteralPath README.md, LICENSE -Destination $stage
+          $archiveRoot = Join-Path $PWD 'release-assets'
+          New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
+          if ('${{ runner.os }}' -eq 'Windows') {
+            $archive = Join-Path $archiveRoot "$name.zip"
+            Compress-Archive -LiteralPath $stage -DestinationPath $archive
+          } else {
+            $archive = Join-Path $archiveRoot "$name.tar.gz"
+            tar -C (Split-Path $stage -Parent) -czf $archive (Split-Path $stage -Leaf)
+          }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path $archive -Leaf)" | Set-Content -NoNewline -Encoding ascii "$archive.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClusterYourCodex-${{ matrix.label }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  integration-artifact:
+    name: Desktop renderer and Codex plugin
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.8
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r lint
+      - run: pnpm -r test
+      - run: pnpm -r build
+      - name: Stage integration bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $safeRef = [string]$env:CYC_REF_NAME -replace '[^0-9A-Za-z._-]', '-'
+          if ([string]::IsNullOrWhiteSpace($safeRef)) { $safeRef = 'build' }
+          $name = "ClusterYourCodex-$safeRef-integration"
+          $stage = Join-Path $PWD "release-stage/$name"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item -Recurse -LiteralPath apps/desktop/dist -Destination (Join-Path $stage 'desktop')
+          $marketplace = Join-Path $stage 'marketplace'
+          $plugin = Join-Path $marketplace 'plugins/cluster-your-codex'
+          New-Item -ItemType Directory -Force -Path $plugin | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $marketplace '.agents/plugins') | Out-Null
+          Copy-Item -LiteralPath .agents/plugins/marketplace.json -Destination (Join-Path $marketplace '.agents/plugins/marketplace.json')
+          Copy-Item -Recurse -LiteralPath plugins/cluster-your-codex/.codex-plugin -Destination $plugin
+          Copy-Item -Recurse -LiteralPath plugins/cluster-your-codex/skills -Destination $plugin
+          Copy-Item -LiteralPath plugins/cluster-your-codex/.mcp.json -Destination $plugin
+          pnpm --filter @clusteryourcodex/codex-mcp deploy --prod --legacy (Join-Path $plugin 'mcp')
+          if ($LASTEXITCODE -ne 0) { throw 'failed to deploy MCP production dependencies' }
+          $archiveRoot = Join-Path $PWD 'release-assets'
+          New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
+          $archive = Join-Path $archiveRoot "$name.zip"
+          Compress-Archive -LiteralPath $stage -DestinationPath $archive
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path $archive -Leaf)" | Set-Content -NoNewline -Encoding ascii "$archive.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClusterYourCodex-integration
+          path: release-assets/*
+          if-no-files-found: error
+
+  windows-preview:
+    name: Windows x64 installable preview
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-preview
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.8
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r lint
+      - run: pnpm -r test
+      - run: pnpm -r build
+      - run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - run: cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Validate Windows install lifecycle
+        shell: powershell
+        run: >-
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+          -File .\packaging\windows\Test-WindowsPackaging.ps1
+      - run: cargo build --locked --release --bin cyc-controller --bin cyc-worker --bin cyc
+      - run: pnpm --filter @clusteryourcodex/desktop exec tauri build --no-bundle
+      - name: Stage self-contained Windows preview
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $mcpDeploy = Join-Path $env:RUNNER_TEMP "cyc-mcp-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          pnpm --filter @clusteryourcodex/codex-mcp deploy --prod --legacy $mcpDeploy
+          if ($LASTEXITCODE -ne 0) { throw 'failed to deploy MCP production dependencies' }
+
+          $node = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+          $nodeLicense = Join-Path (Split-Path -Parent $node) 'LICENSE'
+          if (-not (Test-Path -LiteralPath $nodeLicense -PathType Leaf)) {
+            throw "actions/setup-node runtime did not include its LICENSE at $nodeLicense"
+          }
+
+          $safeRef = [string]$env:CYC_REF_NAME -replace '[^0-9A-Za-z._-]', '-'
+          if ([string]::IsNullOrWhiteSpace($safeRef)) { $safeRef = 'build' }
+          $name = "ClusterYourCodex-$safeRef-windows-x64-preview"
+          $preview = Join-Path $env:RUNNER_TEMP $name
+          & .\packaging\windows\New-PreviewPayload.ps1 `
+            -McpDeployRoot $mcpDeploy `
+            -NodeExecutable $node `
+            -NodeLicense $nodeLicense `
+            -OutputRoot $preview
+          if ($LASTEXITCODE -ne 0) { throw 'failed to stage Windows preview payload' }
+
+          $archiveRoot = Join-Path $PWD 'release-assets'
+          New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
+          $archive = Join-Path $archiveRoot "$name.zip"
+          Compress-Archive -LiteralPath $preview -DestinationPath $archive
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path $archive -Leaf)" | Set-Content -NoNewline -Encoding ascii "$archive.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClusterYourCodex-windows-x64-preview
+          path: release-assets/*
+          if-no-files-found: error
+
+  github-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [rust-artifacts, integration-artifact, windows-preview]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: release-assets/*

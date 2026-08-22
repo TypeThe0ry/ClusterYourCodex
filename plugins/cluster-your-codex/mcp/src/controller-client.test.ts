@@ -95,7 +95,11 @@ describe("Codex controller bridge", () => {
 describe("JobSpec validation", () => {
   const baseJob = {
     kind: "build",
-    source: { type: "git", repository: "https://example.test/repo.git", revision: "0123456789abcdef" },
+    source: {
+      type: "git",
+      repository: "https://example.test/repo.git",
+      revision: "0123456789abcdef0123456789abcdef01234567",
+    },
     steps: [{ name: "build", shell: "bash", script: "make" }],
   };
 
@@ -109,5 +113,20 @@ describe("JobSpec validation", () => {
     expect(() => parseJobDraft({ ...baseJob, credentials: { password: "unsafe" } })).toThrow(
       /Credential-bearing field/,
     );
+  });
+
+  it("requires an immutable Git object and a credential-free HTTPS repository", () => {
+    expect(() =>
+      parseJobDraft({
+        ...baseJob,
+        source: { ...baseJob.source, revision: "main" },
+      }),
+    ).toThrow(/complete lowercase Git object ID/);
+    expect(() =>
+      parseJobDraft({
+        ...baseJob,
+        source: { ...baseJob.source, repository: "https://user:secret@example.test/repo.git" },
+      }),
+    ).toThrow(/public HTTPS URL/);
   });
 });

@@ -21,3 +21,4 @@ uuid.workspace = true
 
 [dev-dependencies]
 clap.workspace = true
+tempfile = "3.16"

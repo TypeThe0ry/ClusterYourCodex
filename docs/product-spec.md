@@ -41,6 +41,17 @@ audit. The personal product must not depend on a cloud account.
 7. Show synchronization, placement, execution, verification, and artifact
    collection in both Codex and the desktop application.
 
+## Codex control topology
+
+The controller follows the computer where the Codex execution session runs,
+not necessarily the screen in front of the user. A Mac may act only as the
+remote Codex control surface while the Windows PC hosts Codex,
+ClusterYourCodex, source state, and the local controller. Workers then connect
+to that Windows controller exactly as they do for a locally operated session.
+
+A future native macOS controller uses the same protocol, but it is not required
+for this remote-control topology.
+
 ## Public MVP
 
 - Windows-first controller and desktop application.
@@ -74,4 +85,3 @@ audit. The personal product must not depend on a cloud account.
 - WAN relay or NAT traversal.
 - Multi-tenant billing, SSO, or enterprise policy.
 - Arbitrary third-party code loaded into the controller process.
-

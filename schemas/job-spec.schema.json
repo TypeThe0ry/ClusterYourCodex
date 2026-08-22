@@ -28,8 +28,17 @@
           "required": ["type", "repository", "revision"],
           "properties": {
             "type": { "const": "git" },
-            "repository": { "type": "string", "minLength": 1 },
-            "revision": { "type": "string", "minLength": 7 }
+            "repository": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://(?![^/]*@)[^/?#]+/[^?#]+$",
+              "description": "Public HTTPS clone URL without userinfo, query, fragment, localhost, or private-IP hosts. Runtime validation enforces the host restrictions."
+            },
+            "revision": {
+              "type": "string",
+              "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$",
+              "description": "Complete lowercase hexadecimal Git SHA-1 or SHA-256 object ID."
+            }
           }
         },
         {
@@ -80,7 +89,7 @@
           "name": { "type": "string", "minLength": 1 },
           "shell": { "enum": ["powershell", "bash", "zsh", "cmd"] },
           "script": { "type": "string", "minLength": 1 },
-          "workingDirectory": { "type": "string" },
+          "workingDirectory": { "$ref": "#/$defs/portableRelativePath" },
           "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 }
         }
       }
@@ -89,13 +98,41 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "include": { "type": "array", "items": { "type": "string" } },
-        "exclude": { "type": "array", "items": { "type": "string" } },
+        "include": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              { "$ref": "#/$defs/safeRelativeGlob" },
+              { "not": { "pattern": "(^|/)\\.git(/|$)" } }
+            ]
+          }
+        },
+        "exclude": {
+          "type": "array",
+          "default": [".git/**"],
+          "items": { "$ref": "#/$defs/safeRelativeGlob" },
+          "contains": { "enum": [".git", ".git/**"] },
+          "minContains": 1
+        },
         "retentionDays": { "type": "integer", "minimum": 1, "maximum": 3650 }
       }
     },
     "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
     "placementPolicy": { "enum": ["balanced", "performance", "manual"] },
     "preferredNodeId": { "type": "string", "format": "uuid" }
+  },
+  "$defs": {
+    "portableRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\u0000)(?!.*\\\\)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*//)[^/]+(?:/[^/]+)*$",
+      "description": "Portable forward-slash relative path without drive, UNC, empty, dot, dot-dot, backslash, or NUL segments."
+    },
+    "safeRelativeGlob": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!!)(?!.*\\u0000)(?!.*\\\\)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*//)[^/]+(?:/[^/]+)*$",
+      "description": "Glob constrained to a job-owned relative root. Negation and traversal syntax are forbidden."
+    }
   }
 }

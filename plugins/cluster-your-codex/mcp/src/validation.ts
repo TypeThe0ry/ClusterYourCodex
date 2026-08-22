@@ -32,6 +32,30 @@ export function parseJobDraft(value: unknown): JobSpec {
   if (!isRecord(draft.source) || (draft.source.type !== "git" && draft.source.type !== "snapshot")) {
     throw new Error("job.source must be a git revision or snapshot digest");
   }
+  if (draft.source.type === "git") {
+    let repository: URL;
+    try {
+      repository = new URL(draft.source.repository);
+    } catch {
+      throw new Error("job.source.repository must be a public HTTPS URL");
+    }
+    if (
+      repository.protocol !== "https:" ||
+      repository.username ||
+      repository.password ||
+      repository.search ||
+      repository.hash
+    ) {
+      throw new Error(
+        "job.source.repository must be a public HTTPS URL without embedded credentials, query, or fragment",
+      );
+    }
+    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(draft.source.revision)) {
+      throw new Error("job.source.revision must be a complete lowercase Git object ID");
+    }
+  } else if (!/^sha256:[a-f0-9]{64}$/.test(draft.source.digest)) {
+    throw new Error("job.source.digest must be a lowercase SHA-256 digest");
+  }
   if (!Array.isArray(draft.steps) || draft.steps.length === 0) {
     throw new Error("job.steps must contain at least one executable step");
   }

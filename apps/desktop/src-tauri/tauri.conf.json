@@ -1,0 +1,34 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ClusterYourCodex",
+  "version": "0.1.0",
+  "identifier": "io.github.typethe0ry.clusteryourcodex",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "publisher": "TypeThe0ry",
+    "category": "DeveloperTool",
+    "shortDescription": "Distribute Codex compute jobs across your own computers",
+    "longDescription": "ClusterYourCodex connects Codex to a user-owned heterogeneous worker fleet for builds, tests, containers, GPU jobs, and batch compute.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ]
+  }
+}

@@ -12,7 +12,7 @@ describe("controller URL boundary", () => {
   });
 
   it.each([
-    "http://192.168.1.63:47831",
+    "http://controller.example.test:47831",
     "https://example.com",
     "ftp://127.0.0.1/file",
     "http://user:password@127.0.0.1:47831",

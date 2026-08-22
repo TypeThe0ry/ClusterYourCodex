@@ -7,13 +7,18 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json && vite build",
     "lint": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "native:check": "cargo check --locked --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@types/node": "^24.10.0",

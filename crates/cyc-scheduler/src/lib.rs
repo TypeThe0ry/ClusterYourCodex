@@ -596,7 +596,7 @@ mod tests {
             JobKind::Build,
             SourceSpec::Git {
                 repository: "https://example.invalid/project.git".to_owned(),
-                revision: "0123456789abcdef".to_owned(),
+                revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             },
             vec![JobStep::new("build", "cargo build --locked")],
         )

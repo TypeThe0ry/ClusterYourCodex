@@ -34,8 +34,8 @@ const jobSchema = {
           required: ["type", "repository", "revision"],
           properties: {
             type: { const: "git" },
-            repository: { type: "string", minLength: 1 },
-            revision: { type: "string", minLength: 7 },
+            repository: { type: "string", pattern: "^https://" },
+            revision: { type: "string", pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" },
           },
         },
         {

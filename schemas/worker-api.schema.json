@@ -1,0 +1,458 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clusteryourcodex.dev/schemas/worker-api.v1.json",
+  "title": "ClusterYourCodex managed worker API schema bundle",
+  "$comment": "Select the named contract under $defs for the endpoint being validated. Pair codes and worker credentials are HTTP headers and are intentionally absent.",
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid" },
+    "dateTime": { "type": "string", "format": "date-time" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "os": { "enum": ["windows", "linux", "macos"] },
+    "arch": { "enum": ["x86_64", "aarch64"] },
+    "shell": { "enum": ["powershell", "bash", "zsh", "cmd"] },
+    "terminationReason": {
+      "enum": [
+        "exited",
+        "timed_out",
+        "cancel_requested",
+        "lease_lost",
+        "transport_failure",
+        "source_preparation_failed",
+        "execution_failed",
+        "artifact_verification_failed"
+      ]
+    },
+    "jobState": {
+      "enum": ["queued", "preparing", "running", "verifying", "succeeded", "failed", "cancelled"]
+    },
+    "gpu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vendor", "model", "totalVramMib", "availableVramMib"],
+      "properties": {
+        "vendor": { "enum": ["nvidia", "amd", "intel", "apple"] },
+        "model": { "type": "string", "minLength": 1 },
+        "totalVramMib": { "type": "integer", "minimum": 0 },
+        "availableVramMib": { "type": "integer", "minimum": 0 },
+        "allocatable": { "type": "boolean", "default": true }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logicalCpuCores",
+        "availableCpuCores",
+        "memoryMib",
+        "availableMemoryMib",
+        "diskMib",
+        "availableDiskMib"
+      ],
+      "properties": {
+        "logicalCpuCores": { "type": "integer", "minimum": 1 },
+        "availableCpuCores": { "type": "integer", "minimum": 0 },
+        "memoryMib": { "type": "integer", "minimum": 1 },
+        "availableMemoryMib": { "type": "integer", "minimum": 0 },
+        "diskMib": { "type": "integer", "minimum": 1 },
+        "availableDiskMib": { "type": "integer", "minimum": 0 },
+        "gpus": { "type": "array", "items": { "$ref": "#/$defs/gpu" }, "default": [] }
+      }
+    },
+    "load": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpuPercent", "queueDepth", "runningJobs"],
+      "properties": {
+        "cpuPercent": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "queueDepth": { "type": "integer", "minimum": 0 },
+        "runningJobs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "probeReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocolVersion",
+        "agentVersion",
+        "observedAt",
+        "hostname",
+        "os",
+        "arch",
+        "resources",
+        "load"
+      ],
+      "properties": {
+        "protocolVersion": { "const": 1 },
+        "agentVersion": { "type": "string", "minLength": 1 },
+        "observedAt": { "$ref": "#/$defs/dateTime" },
+        "hostname": { "type": "string", "minLength": 1 },
+        "os": { "$ref": "#/$defs/os" },
+        "arch": { "$ref": "#/$defs/arch" },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        },
+        "resources": { "$ref": "#/$defs/resources" },
+        "load": { "$ref": "#/$defs/load" }
+      }
+    },
+    "pairRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["probe"],
+      "properties": {
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "probe": { "$ref": "#/$defs/probeReport" }
+      }
+    },
+    "pairResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "controllerId",
+        "nodeId",
+        "pairedAt",
+        "heartbeatIntervalSeconds",
+        "leaseSeconds"
+      ],
+      "properties": {
+        "apiVersion": { "const": "cyc.dev/worker/v1" },
+        "controllerId": { "$ref": "#/$defs/uuid" },
+        "nodeId": { "$ref": "#/$defs/uuid" },
+        "pairedAt": { "$ref": "#/$defs/dateTime" },
+        "heartbeatIntervalSeconds": { "type": "integer", "minimum": 1 },
+        "leaseSeconds": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "claimRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["probe"],
+      "properties": {
+        "probe": { "$ref": "#/$defs/probeReport" },
+        "activeRunIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/uuid" },
+          "default": []
+        }
+      }
+    },
+    "workspaceAssignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relativeRoot", "sourceDirectory", "logsDirectory", "artifactsDirectory"],
+      "properties": {
+        "relativeRoot": { "$ref": "job-spec.schema.json#/$defs/portableRelativePath" },
+        "sourceDirectory": { "$ref": "job-spec.schema.json#/$defs/portableRelativePath" },
+        "logsDirectory": { "$ref": "job-spec.schema.json#/$defs/portableRelativePath" },
+        "artifactsDirectory": { "$ref": "job-spec.schema.json#/$defs/portableRelativePath" }
+      }
+    },
+    "executionLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jobTimeoutSeconds", "maxLogBytes", "maxArtifactBytes", "maxArtifactCount"],
+      "properties": {
+        "jobTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
+        "maxLogBytes": { "type": "integer", "minimum": 1 },
+        "maxArtifactBytes": { "type": "integer", "minimum": 1 },
+        "maxArtifactCount": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "claimAssignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jobId",
+        "runId",
+        "jobDigest",
+        "leaseId",
+        "leaseUntil",
+        "stateVersion",
+        "jobSpec",
+        "workspace",
+        "limits"
+      ],
+      "properties": {
+        "jobId": { "$ref": "#/$defs/uuid" },
+        "runId": { "$ref": "#/$defs/uuid" },
+        "jobDigest": { "$ref": "#/$defs/sha256" },
+        "leaseId": { "$ref": "#/$defs/uuid" },
+        "leaseUntil": { "$ref": "#/$defs/dateTime" },
+        "stateVersion": { "type": "integer", "minimum": 0 },
+        "jobSpec": { "$ref": "job-spec.schema.json" },
+        "workspace": { "$ref": "#/$defs/workspaceAssignment" },
+        "limits": { "$ref": "#/$defs/executionLimits" }
+      }
+    },
+    "claimResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["retryAfterSeconds"],
+      "properties": {
+        "assignment": { "$ref": "#/$defs/claimAssignment" },
+        "retryAfterSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 }
+      }
+    },
+    "heartbeatRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runId", "leaseId", "expectedVersion", "state"],
+      "properties": {
+        "runId": { "$ref": "#/$defs/uuid" },
+        "leaseId": { "$ref": "#/$defs/uuid" },
+        "expectedVersion": { "type": "integer", "minimum": 0 },
+        "state": { "$ref": "#/$defs/jobState" },
+        "probe": { "$ref": "#/$defs/probeReport" },
+        "lastLogSequence": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "heartbeatResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cancelRequested", "currentVersion", "leaseUntil"],
+      "properties": {
+        "cancelRequested": { "type": "boolean" },
+        "currentVersion": { "type": "integer", "minimum": 0 },
+        "leaseUntil": { "$ref": "#/$defs/dateTime" }
+      }
+    },
+    "runEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "startedAt": { "$ref": "#/$defs/dateTime" },
+        "finishedAt": { "$ref": "#/$defs/dateTime" },
+        "exitCode": { "type": "integer" },
+        "error": { "type": "string" },
+        "artifactIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/uuid" },
+          "default": []
+        }
+      }
+    },
+    "stateUpdate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runId", "leaseId", "expectedVersion", "nextState"],
+      "properties": {
+        "runId": { "$ref": "#/$defs/uuid" },
+        "leaseId": { "$ref": "#/$defs/uuid" },
+        "expectedVersion": { "type": "integer", "minimum": 0 },
+        "nextState": { "$ref": "#/$defs/jobState" },
+        "evidence": { "$ref": "#/$defs/runEvidence" }
+      }
+    },
+    "stateUpdateResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run", "stateVersion", "cancelRequested"],
+      "properties": {
+        "run": {
+          "type": "object",
+          "description": "Existing cyc-protocol Run wire object."
+        },
+        "stateVersion": { "type": "integer", "minimum": 0 },
+        "cancelRequested": { "type": "boolean" }
+      }
+    },
+    "logRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "recordedAt", "stream", "message"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 0 },
+        "recordedAt": { "$ref": "#/$defs/dateTime" },
+        "stream": { "enum": ["stdout", "stderr", "system"] },
+        "message": { "type": "string" }
+      }
+    },
+    "logBatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runId", "leaseId", "records"],
+      "properties": {
+        "runId": { "$ref": "#/$defs/uuid" },
+        "leaseId": { "$ref": "#/$defs/uuid" },
+        "records": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/logRecord" } }
+      }
+    },
+    "logMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["firstSequence", "lastSequence", "recordCount", "byteCount"],
+      "properties": {
+        "firstSequence": { "type": "integer", "minimum": 0 },
+        "lastSequence": { "type": "integer", "minimum": 0 },
+        "recordCount": { "type": "integer", "minimum": 0 },
+        "byteCount": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean", "default": false }
+      }
+    },
+    "artifactMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "runId", "relativePath", "sizeBytes", "sha256", "createdAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "runId": { "$ref": "#/$defs/uuid" },
+        "relativePath": { "$ref": "job-spec.schema.json#/$defs/portableRelativePath" },
+        "sizeBytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "mediaType": { "type": "string", "minLength": 1 },
+        "createdAt": { "$ref": "#/$defs/dateTime" }
+      }
+    },
+    "executionSourceEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "repository",
+        "requestedRevision",
+        "resolvedRevision",
+        "tree",
+        "gitVersion"
+      ],
+      "properties": {
+        "kind": { "enum": ["git", "snapshot"] },
+        "repository": { "type": "string", "minLength": 1 },
+        "requestedRevision": { "type": "string" },
+        "resolvedRevision": { "type": "string" },
+        "tree": { "type": "string" },
+        "gitVersion": { "type": "string", "minLength": 1, "maxLength": 512 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "git" } } },
+          "then": {
+            "properties": {
+              "requestedRevision": { "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" },
+              "resolvedRevision": { "pattern": "^(?:|[a-f0-9]{40}|[a-f0-9]{64})$" },
+              "tree": { "pattern": "^(?:|[a-f0-9]{40}|[a-f0-9]{64})$" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "snapshot" } } },
+          "then": {
+            "properties": {
+              "repository": { "const": "snapshot" },
+              "requestedRevision": { "pattern": "^sha256:[a-f0-9]{64}$" },
+              "resolvedRevision": { "const": "" },
+              "tree": { "const": "" },
+              "gitVersion": { "const": "not-applicable" }
+            }
+          }
+        }
+      ]
+    },
+    "stepExecutionEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "name",
+        "shell",
+        "startedAt",
+        "finishedAt",
+        "exitCode",
+        "termination"
+      ],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "name": { "type": "string", "minLength": 1 },
+        "shell": { "$ref": "#/$defs/shell" },
+        "startedAt": { "$ref": "#/$defs/dateTime" },
+        "finishedAt": { "$ref": "#/$defs/dateTime" },
+        "exitCode": { "type": ["integer", "null"] },
+        "termination": { "$ref": "#/$defs/terminationReason" }
+      }
+    },
+    "streamEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["byteCount", "sha256", "chunkCount"],
+      "properties": {
+        "byteCount": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "truncated": { "type": "boolean", "default": false },
+        "chunkCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "runStreamsEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stdout", "stderr"],
+      "properties": {
+        "stdout": { "$ref": "#/$defs/streamEvidence" },
+        "stderr": { "$ref": "#/$defs/streamEvidence" }
+      }
+    },
+    "terminationEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
+        "processTreeTerminated",
+        "forcedKill",
+        "rootExitCode",
+        "signal",
+        "observedAt"
+      ],
+      "properties": {
+        "reason": { "$ref": "#/$defs/terminationReason" },
+        "processTreeTerminated": { "const": true },
+        "forcedKill": { "type": "boolean" },
+        "rootExitCode": { "type": ["integer", "null"] },
+        "signal": { "type": ["integer", "null"], "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/dateTime" }
+      }
+    },
+    "executionEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "streams", "termination"],
+      "properties": {
+        "source": { "$ref": "#/$defs/executionSourceEvidence" },
+        "steps": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/stepExecutionEvidence" },
+          "default": []
+        },
+        "streams": { "$ref": "#/$defs/runStreamsEvidence" },
+        "termination": { "$ref": "#/$defs/terminationEvidence" }
+      }
+    },
+    "runCompletion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "leaseId",
+        "expectedVersion",
+        "finalState",
+        "evidence",
+        "execution"
+      ],
+      "properties": {
+        "runId": { "$ref": "#/$defs/uuid" },
+        "leaseId": { "$ref": "#/$defs/uuid" },
+        "expectedVersion": { "type": "integer", "minimum": 0 },
+        "finalState": { "enum": ["succeeded", "failed", "cancelled"] },
+        "evidence": { "$ref": "#/$defs/runEvidence" },
+        "execution": { "$ref": "#/$defs/executionEvidence" },
+        "artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifactMetadata" },
+          "default": []
+        }
+      }
+    }
+  }
+}

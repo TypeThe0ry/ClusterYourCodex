@@ -1,0 +1,20 @@
+{
+  "name": "clusteryourcodex",
+  "interface": {
+    "displayName": "ClusterYourCodex"
+  },
+  "plugins": [
+    {
+      "name": "cluster-your-codex",
+      "source": {
+        "source": "local",
+        "path": "./plugins/cluster-your-codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

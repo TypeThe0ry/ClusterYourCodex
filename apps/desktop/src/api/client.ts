@@ -16,6 +16,7 @@ import type {
 } from "./types";
 import {
   ControllerTransportError,
+  MAX_RENDERER_REQUEST_TIMEOUT_MS,
   defaultControllerTransport,
   type ControllerTransport,
 } from "./auth";
@@ -55,6 +56,15 @@ export class ControllerClient {
 
   constructor(options: ControllerClientOptions = {}) {
     this.timeoutMs = options.timeoutMs ?? 8_000;
+    if (
+      !Number.isSafeInteger(this.timeoutMs) ||
+      this.timeoutMs <= 0 ||
+      this.timeoutMs > MAX_RENDERER_REQUEST_TIMEOUT_MS
+    ) {
+      throw new RangeError(
+        `Controller timeout must be an integer from 1 to ${MAX_RENDERER_REQUEST_TIMEOUT_MS} ms`,
+      );
+    }
     this.transport = options.transport ?? defaultControllerTransport();
   }
 
@@ -88,14 +98,20 @@ export class ControllerClient {
 
   private async request<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
     let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
+    const deadlineMs = Date.now() + this.timeoutMs;
 
     try {
+      const rendererWaitMs = Math.max(0, deadlineMs - Date.now());
       const response = await Promise.race([
-        this.transport.request(method === "POST" ? { method, path, body: body ?? {} } : { method, path }),
+        this.transport.request(
+          method === "POST"
+            ? { method, path, deadlineMs, body: body ?? {} }
+            : { method, path, deadlineMs },
+        ),
         new Promise<never>((_, reject) => {
           timeout = globalThis.setTimeout(
             () => reject(new ControllerApiError(`Controller did not respond within ${this.timeoutMs} ms`)),
-            this.timeoutMs,
+            rendererWaitMs,
           );
         }),
       ]);

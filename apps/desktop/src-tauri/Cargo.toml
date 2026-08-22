@@ -1,0 +1,32 @@
+[package]
+name = "clusteryourcodex-desktop-host"
+version = "0.1.0"
+description = "Security boundary and native host for ClusterYourCodex"
+authors = ["ClusterYourCodex contributors"]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/TypeThe0ry/ClusterYourCodex"
+rust-version = "1.82"
+
+[lib]
+name = "clusteryourcodex_desktop_host"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "ClusterYourCodex"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+thiserror = "2"
+zeroize = "1"
+
+# Keep the native host independently buildable without changing the root Rust
+# workspace membership. The root workspace owns controller and worker crates.
+[workspace]
