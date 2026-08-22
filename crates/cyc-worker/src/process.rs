@@ -256,7 +256,7 @@ impl LogBudget {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     fn remaining(&self) -> u64 {
         self.remaining.load(Ordering::SeqCst)
     }
@@ -1265,6 +1265,45 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[tokio::test]
+    async fn managed_execution_fails_closed_without_a_containment_backend() {
+        let directory = tempdir().unwrap();
+        let sentinel = directory.path().join("sentinel");
+        let error = run_process(
+            ProcessRequest {
+                program: OsString::from("sh"),
+                arguments: vec![
+                    OsString::from("-c"),
+                    OsString::from("printf spawned > sentinel"),
+                ],
+                cwd: directory.path().to_owned(),
+                timeout: Duration::from_secs(5),
+                stdout_path: directory.path().join("stdout.log"),
+                stderr_path: directory.path().join("stderr.log"),
+                log_budget: Arc::new(LogBudget::new(2048)),
+                environment: Vec::new(),
+                fault: None,
+            },
+            Arc::new(AtomicU8::new(CANCEL_NONE)),
+            Arc::new(DiscardLogSink),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.containment(), ProcessContainment::ConfirmedEmpty);
+        let error = format!("{:#}", error.into_inner());
+        assert!(
+            error.contains(
+                "managed execution is unsupported on this Unix platform: no reliable descendant containment backend"
+            )
+        );
+        assert!(
+            !sentinel.exists(),
+            "unsupported platforms must not spawn work"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn procfs_esrch_is_a_completed_exit_race() {
@@ -1275,6 +1314,7 @@ mod tests {
         )));
     }
 
+    #[cfg(any(windows, target_os = "linux"))]
     #[tokio::test]
     async fn timeout_terminates_process() {
         let directory = tempdir().unwrap();
@@ -1314,6 +1354,7 @@ mod tests {
         assert!(!result.succeeded());
     }
 
+    #[cfg(any(windows, target_os = "linux"))]
     #[tokio::test]
     async fn spawn_failure_has_empty_logs_and_a_confirmed_empty_tree() {
         let directory = tempdir().unwrap();
@@ -1342,6 +1383,7 @@ mod tests {
         assert_eq!(fs::metadata(stderr).unwrap().len(), 0);
     }
 
+    #[cfg(any(windows, target_os = "linux"))]
     #[tokio::test]
     async fn injected_monitor_failure_is_unconfirmed_not_terminal_proof() {
         let directory = tempdir().unwrap();
@@ -1494,6 +1536,7 @@ mod tests {
         unrelated.wait().unwrap();
     }
 
+    #[cfg(any(windows, target_os = "linux"))]
     #[tokio::test]
     async fn timeout_kills_descendants_before_they_can_write_a_sentinel() {
         let directory = tempdir().unwrap();
@@ -1546,6 +1589,7 @@ mod tests {
         assert!(!directory.path().join("sentinel").exists());
     }
 
+    #[cfg(any(windows, target_os = "linux"))]
     #[tokio::test]
     async fn normal_root_exit_cleans_up_background_descendants() {
         let directory = tempdir().unwrap();
@@ -1597,6 +1641,7 @@ mod tests {
         assert!(!directory.path().join("sentinel").exists());
     }
 
+    #[cfg(any(windows, target_os = "linux"))]
     #[tokio::test]
     async fn one_log_budget_is_shared_across_processes_and_streams() {
         let directory = tempdir().unwrap();

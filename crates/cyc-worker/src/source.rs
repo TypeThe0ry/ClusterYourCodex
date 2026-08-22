@@ -816,10 +816,13 @@ pub fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(any(windows, target_os = "linux"))]
     use crate::process::{
         DiscardLogSink, ProcessContainment, ProcessRequest, TestProcessFault, CANCEL_NONE,
     };
+    #[cfg(any(windows, target_os = "linux"))]
     use std::process::Command;
+    #[cfg(any(windows, target_os = "linux"))]
     use tempfile::tempdir;
 
     #[test]
@@ -831,6 +834,7 @@ mod tests {
         assert!(validate_repository("https://example.com/repo.git", false).is_ok());
     }
 
+    #[cfg(any(windows, target_os = "linux"))]
     #[tokio::test]
     async fn monitor_failure_stays_unconfirmed_through_source_classification() {
         let directory = tempdir().unwrap();
@@ -870,6 +874,7 @@ mod tests {
         assert_eq!(source_error.containment(), SourceContainment::Unconfirmed);
     }
 
+    #[cfg(any(windows, target_os = "linux"))]
     #[tokio::test]
     async fn checks_out_exact_sha_from_local_fixture() {
         let fixture_guard = crate::process::test_exclusive_child_process_guard().await;
@@ -1031,6 +1036,7 @@ mod tests {
         assert!(windows_path_identity_eq(&canonical, &roundtrip));
     }
 
+    #[cfg(any(windows, target_os = "linux"))]
     fn run_git_fixture(directory: &Path, arguments: &[&str]) {
         let status = Command::new("git")
             .args(arguments)
