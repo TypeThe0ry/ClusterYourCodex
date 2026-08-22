@@ -156,7 +156,7 @@ jobs:
             $destination = Join-Path $bin "$binary${{ matrix.suffix }}"
             Copy-Item -LiteralPath $source -Destination $destination
             if ('${{ runner.os }}' -ne 'Windows') {
-              & chmod '+x' '--' $destination
+              & chmod 'u+x' $destination
               if ($LASTEXITCODE -ne 0) { throw "chmod failed for $destination" }
             }
           }
