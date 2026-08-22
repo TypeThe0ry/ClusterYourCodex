@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "cluster_your_codex": {
+      "command": "node",
+      "args": [
+        "./mcp/dist/server.js"
+      ],
+      "cwd": ".",
+      "startup_timeout_sec": 10,
+      "tool_timeout_sec": 86400
+    }
+  }
+}

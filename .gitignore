@@ -1,9 +1,14 @@
-/target/
-/node_modules/
-/.pnpm-store/
-/dist/
-/.vite/
-/.tauri/
+target/
+node_modules/
+.pnpm-store/
+dist/
+.vite/
+.tauri/
+.edge-smoke-profile/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+ui-smoke.png
 *.db
 *.db-shm
 *.db-wal
@@ -15,4 +20,3 @@
 Thumbs.db
 .idea/
 .vscode/
-

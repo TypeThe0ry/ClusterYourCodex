@@ -1,0 +1,36 @@
+{
+  "name": "cluster-your-codex",
+  "version": "0.1.0",
+  "description": "Let Codex inspect, plan, and run work across computers connected to the local ClusterYourCodex controller.",
+  "author": {
+    "name": "ClusterYourCodex"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "codex",
+    "cluster",
+    "remote-build",
+    "distributed-compute",
+    "developer-tools"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "ClusterYourCodex",
+    "shortDescription": "Let Codex use your computers",
+    "longDescription": "ClusterYourCodex connects Codex to a local pool of Windows, Linux, and GPU computers. Codex can inspect capacity, explain placement, submit meaningful builds and tests, and return verified results without receiving machine credentials.",
+    "developerName": "ClusterYourCodex",
+    "category": "Engineering",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Run this build on the best computer",
+      "Show which computers Codex can use",
+      "Use my GPU computer for this task"
+    ],
+    "brandColor": "#355F4A"
+  }
+}
