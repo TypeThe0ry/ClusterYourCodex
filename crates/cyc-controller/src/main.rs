@@ -256,7 +256,18 @@ mod tests {
 
     #[test]
     fn worker_listener_rejects_a_weak_key_until_it_is_explicitly_provisioned() {
-        let directory = std::env::temp_dir().join(format!("cyc-tls-files-{}", Uuid::new_v4()));
+        // macOS reports its temporary directory through `/var`, a symlink to
+        // `/private/var`. Resolve that existing Unix root before constructing
+        // the fixture so production private-path validation remains strictly
+        // fail-closed for symlink components.
+        #[cfg(unix)]
+        let temp_root = std::fs::canonicalize(std::env::temp_dir())
+            .expect("canonicalize the existing system temporary directory");
+        // Canonicalization introduces a verbatim (`\\?\`) prefix on Windows;
+        // retain the ordinary Win32 path form used by production callers.
+        #[cfg(not(unix))]
+        let temp_root = std::env::temp_dir();
+        let directory = temp_root.join(format!("cyc-tls-files-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
         let certificate = directory.join("controller.crt");
         let private_key = directory.join("controller.key");
