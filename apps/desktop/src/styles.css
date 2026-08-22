@@ -271,6 +271,9 @@ button { color: inherit; }
 .offline-banner > .icon { color: #a77c38; }
 .offline-banner > div { display: flex; gap: 8px; flex: 1; }
 .offline-banner span { color: #8d7b5d; }
+.auth-banner { color: #5a5577; background: #f0edf7; border-bottom-color: #ded8ed; }
+.auth-banner > .icon { color: #766a9b; }
+.auth-banner span { color: #7c7690; }
 
 .page-content { padding: 33px clamp(30px, 4vw, 62px) 55px; }
 

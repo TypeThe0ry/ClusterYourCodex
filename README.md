@@ -49,5 +49,7 @@ The first release is composed of:
 - Existing `AGENTS.md` content is preserved; managed integration is additive.
 
 See [`docs/adr/0001-product-boundary.md`](docs/adr/0001-product-boundary.md)
-for the initial architecture decision.
-
+for the initial architecture decision. The next execution and distribution
+gates are defined in
+[`docs/managed-worker-protocol.md`](docs/managed-worker-protocol.md) and
+[`docs/packaging.md`](docs/packaging.md).

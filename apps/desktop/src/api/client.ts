@@ -8,41 +8,54 @@ import type {
   JobSummary,
   NodePayload,
   NodeSummary,
+  PlacementExplanationPayload,
   PlanRequest,
   PlanResponse,
   SubmitJobRequest,
   SubmitJobResponse,
 } from "./types";
-
-const DEFAULT_CONTROLLER_URL = "http://127.0.0.1:47831";
+import {
+  ControllerTransportError,
+  defaultControllerTransport,
+  type ControllerTransport,
+} from "./auth";
 
 export class ControllerApiError extends Error {
   readonly status?: number;
   readonly requestId?: string;
+  readonly code?: string;
+  readonly placement?: PlacementExplanationPayload;
 
-  constructor(message: string, options: { status?: number; requestId?: string } = {}) {
+  constructor(
+    message: string,
+    options: {
+      status?: number;
+      requestId?: string;
+      code?: string;
+      placement?: PlacementExplanationPayload;
+    } = {},
+  ) {
     super(message);
     this.name = "ControllerApiError";
     this.status = options.status;
     this.requestId = options.requestId;
+    this.code = options.code;
+    this.placement = options.placement;
   }
 }
 
 export interface ControllerClientOptions {
-  baseUrl?: string;
   timeoutMs?: number;
-  fetchImpl?: typeof fetch;
+  transport?: ControllerTransport;
 }
 
 export class ControllerClient {
-  private readonly baseUrl: string;
   private readonly timeoutMs: number;
-  private readonly fetchImpl: typeof fetch;
+  private readonly transport: ControllerTransport;
 
   constructor(options: ControllerClientOptions = {}) {
-    this.baseUrl = (options.baseUrl ?? DEFAULT_CONTROLLER_URL).replace(/\/$/, "");
     this.timeoutMs = options.timeoutMs ?? 8_000;
-    this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+    this.transport = options.transport ?? defaultControllerTransport();
   }
 
   health(): Promise<HealthResponse> {
@@ -74,37 +87,132 @@ export class ControllerClient {
   }
 
   private async request<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
-    const controller = new AbortController();
-    const timeout = globalThis.setTimeout(() => controller.abort(), this.timeoutMs);
+    let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
 
     try {
-      const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-        method,
-        body: body === undefined ? undefined : JSON.stringify(body),
-        headers: body === undefined ? undefined : { "content-type": "application/json" },
-        signal: controller.signal,
-      });
+      const response = await Promise.race([
+        this.transport.request(method === "POST" ? { method, path, body: body ?? {} } : { method, path }),
+        new Promise<never>((_, reject) => {
+          timeout = globalThis.setTimeout(
+            () => reject(new ControllerApiError(`Controller did not respond within ${this.timeoutMs} ms`)),
+            this.timeoutMs,
+          );
+        }),
+      ]);
 
-      const requestId = response.headers.get("x-request-id") ?? undefined;
-      if (!response.ok) {
+      const requestId = safeRequestId(headerValue(response.headers, "x-request-id"));
+      if (response.status < 200 || response.status >= 300) {
+        const publicError = readPublicControllerError(response.body);
         throw new ControllerApiError(
-          `Controller request failed (${response.status} ${response.statusText})`,
-          { status: response.status, requestId },
+          publicErrorMessage(response.status, publicError.code),
+          {
+            status: response.status,
+            ...(requestId ? { requestId } : {}),
+            ...(publicError.code ? { code: publicError.code } : {}),
+            ...(publicError.placement ? { placement: publicError.placement } : {}),
+          },
         );
       }
 
-      return (await response.json()) as T;
+      return response.body as T;
     } catch (error) {
       if (error instanceof ControllerApiError) {
         throw error;
       }
-      if (error instanceof DOMException && error.name === "AbortError") {
-        throw new ControllerApiError(`Controller did not respond within ${this.timeoutMs} ms`);
+      if (error instanceof ControllerTransportError) {
+        throw new ControllerApiError(error.message, { code: "transport_unavailable" });
       }
       throw new ControllerApiError("Could not reach the local ClusterYourCodex controller");
     } finally {
-      globalThis.clearTimeout(timeout);
+      if (timeout !== undefined) globalThis.clearTimeout(timeout);
     }
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function safeText(value: unknown, maximum: number): string | undefined {
+  return typeof value === "string" && value.length > 0 && value.length <= maximum ? value : undefined;
+}
+
+function safeRequestId(value: string | null): string | undefined {
+  return value && /^[A-Za-z0-9._:-]{1,128}$/.test(value) ? value : undefined;
+}
+
+function headerValue(headers: Record<string, string> | undefined, name: string): string | null {
+  if (!headers) return null;
+  const match = Object.entries(headers).find(([key]) => key.toLowerCase() === name);
+  return match?.[1] ?? null;
+}
+
+function sanitizePlacement(value: unknown): PlacementExplanationPayload | undefined {
+  if (!isRecord(value) || !["balanced", "performance", "manual"].includes(String(value.policy))) return undefined;
+  if (!Array.isArray(value.candidates) || value.candidates.length > 256) return undefined;
+  const candidates: PlacementExplanationPayload["candidates"] = [];
+
+  for (const candidateValue of value.candidates) {
+    if (!isRecord(candidateValue)) return undefined;
+    const nodeId = safeText(candidateValue.nodeId, 64);
+    const nodeName = safeText(candidateValue.nodeName, 256);
+    if (!nodeId || !nodeName || typeof candidateValue.eligible !== "boolean") return undefined;
+    const scoreComponents = Array.isArray(candidateValue.scoreComponents)
+      ? candidateValue.scoreComponents.flatMap((component) => {
+          if (!isRecord(component)) return [];
+          const key = safeText(component.key, 128);
+          const detail = safeText(component.detail, 512);
+          return key && detail && typeof component.value === "number" ? [{ key, value: component.value, detail }] : [];
+        })
+      : [];
+    const rejectionReasons = Array.isArray(candidateValue.rejectionReasons)
+      ? candidateValue.rejectionReasons.flatMap((reason) => {
+          if (!isRecord(reason)) return [];
+          const code = safeText(reason.code, 128);
+          const detail = safeText(reason.detail, 512);
+          return code && detail ? [{ code, detail }] : [];
+        })
+      : [];
+    candidates.push({
+      nodeId,
+      nodeName,
+      eligible: candidateValue.eligible,
+      ...(typeof candidateValue.score === "number" ? { score: candidateValue.score } : {}),
+      scoreComponents,
+      rejectionReasons,
+    });
+  }
+
+  const policy = value.policy as PlacementExplanationPayload["policy"];
+  const selectedNodeId = safeText(value.selectedNodeId, 64);
+  return selectedNodeId === undefined ? { policy, candidates } : { policy, selectedNodeId, candidates };
+}
+
+function readPublicControllerError(
+  body: unknown,
+): { code?: string; placement?: PlacementExplanationPayload } {
+  if (!isRecord(body) || !isRecord(body.error)) return {};
+  const code = safeText(body.error.code, 64);
+  const placement = sanitizePlacement(body.error.placement ?? body.error.details);
+  return {
+    ...(code && /^[a-z0-9_]+$/.test(code) ? { code } : {}),
+    ...(placement ? { placement } : {}),
+  };
+}
+
+function publicErrorMessage(status: number, code?: string): string {
+  if (status === 401 || status === 403) return "Controller authentication failed";
+  switch (code) {
+    case "no_eligible_node":
+      return "No connected computer satisfies the job requirements";
+    case "invalid_job":
+      return "Controller rejected the JobSpec";
+    case "plan_mismatch":
+      return "Placement plan does not match this job";
+    case "not_found":
+      return "Requested controller resource was not found";
+    default:
+      return `Controller request failed (${status})`;
   }
 }
 
@@ -198,5 +306,5 @@ function normalizeFleet(payload: FleetPayload): FleetInfo {
 }
 
 export const controllerClient = new ControllerClient({
-  baseUrl: import.meta.env.VITE_CONTROLLER_URL || DEFAULT_CONTROLLER_URL,
+  transport: defaultControllerTransport(),
 });

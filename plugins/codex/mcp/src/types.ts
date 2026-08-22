@@ -90,11 +90,24 @@ export interface PlanResponse {
   decision: {
     nodeId: string;
     score: number;
-    explanation: Record<string, unknown>;
+    explanation: PlacementExplanation;
   };
 }
 
 export type JobStatus = "queued" | "preparing" | "running" | "verifying" | "succeeded" | "failed" | "cancelled";
+
+export interface PlacementExplanation {
+  policy: "balanced" | "performance" | "manual";
+  selectedNodeId?: string;
+  candidates: Array<{
+    nodeId: string;
+    nodeName: string;
+    eligible: boolean;
+    score?: number;
+    scoreComponents: Array<{ key: string; value: number; detail: string }>;
+    rejectionReasons: Array<{ code: string; detail: string }>;
+  }>;
+}
 
 export interface RunPayload {
   id: string;
@@ -106,7 +119,7 @@ export interface RunPayload {
   finishedAt?: string;
   exitCode?: number;
   error?: string;
-  placement?: Record<string, unknown>;
+  placement?: PlacementExplanation;
   artifactIds: string[];
 }
 

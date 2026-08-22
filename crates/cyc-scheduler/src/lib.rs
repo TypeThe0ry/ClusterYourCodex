@@ -5,7 +5,9 @@
 //! the complete explanation on both success and failure.
 
 use std::cmp::Ordering;
+use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use cyc_protocol::{
     GpuRequirement, JobKind, JobSpec, Node, NodeStatus, PlacementCandidateExplain,
     PlacementExplain, PlacementPolicy, PlacementRejection, RejectionCode, ScoreComponent,
@@ -14,6 +16,10 @@ use cyc_protocol::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
+
+/// Three missed 30-second heartbeats is a conservative default for local
+/// worker discovery without leaving vanished workers eligible indefinitely.
+pub const DEFAULT_NODE_FRESHNESS_TTL: Duration = Duration::from_secs(90);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,6 +81,7 @@ impl Default for SchedulerWeights {
 pub struct Scheduler {
     balanced_weights: SchedulerWeights,
     performance_weights: SchedulerWeights,
+    node_freshness_ttl: Duration,
 }
 
 impl Scheduler {
@@ -82,13 +89,34 @@ impl Scheduler {
         Self {
             balanced_weights,
             performance_weights,
+            node_freshness_ttl: DEFAULT_NODE_FRESHNESS_TTL,
         }
+    }
+
+    pub fn with_node_freshness_ttl(mut self, ttl: Duration) -> Self {
+        self.node_freshness_ttl = ttl;
+        self
+    }
+
+    pub fn node_freshness_ttl(&self) -> Duration {
+        self.node_freshness_ttl
     }
 
     pub fn schedule(
         &self,
         job: &JobSpec,
         nodes: &[Node],
+    ) -> Result<PlacementDecision, ScheduleError> {
+        self.schedule_at(job, nodes, Utc::now())
+    }
+
+    /// Deterministic scheduling entry point for tests, replay, and persisted
+    /// decision audits.
+    pub fn schedule_at(
+        &self,
+        job: &JobSpec,
+        nodes: &[Node],
+        observed_at: DateTime<Utc>,
     ) -> Result<PlacementDecision, ScheduleError> {
         job.validate()?;
 
@@ -98,7 +126,7 @@ impl Scheduler {
         };
         let mut candidates = nodes
             .iter()
-            .map(|node| evaluate_node(job, node, weights))
+            .map(|node| evaluate_node(job, node, weights, &observed_at, self.node_freshness_ttl))
             .collect::<Vec<_>>();
 
         let selected = candidates
@@ -183,8 +211,10 @@ fn evaluate_node(
     job: &JobSpec,
     node: &Node,
     weights: &SchedulerWeights,
+    observed_at: &DateTime<Utc>,
+    freshness_ttl: Duration,
 ) -> PlacementCandidateExplain {
-    let rejection_reasons = hard_rejections(job, node);
+    let rejection_reasons = hard_rejections(job, node, observed_at, freshness_ttl);
     if !rejection_reasons.is_empty() {
         return PlacementCandidateExplain {
             node_id: node.id,
@@ -210,7 +240,12 @@ fn evaluate_node(
     }
 }
 
-fn hard_rejections(job: &JobSpec, node: &Node) -> Vec<PlacementRejection> {
+fn hard_rejections(
+    job: &JobSpec,
+    node: &Node,
+    observed_at: &DateTime<Utc>,
+    freshness_ttl: Duration,
+) -> Vec<PlacementRejection> {
     let mut reasons = Vec::new();
     if !node.enabled {
         reject(&mut reasons, RejectionCode::Disabled, "node is disabled");
@@ -223,6 +258,29 @@ fn hard_rejections(job: &JobSpec, node: &Node) -> Vec<PlacementRejection> {
             "node is draining and accepts no new jobs",
         ),
         NodeStatus::Online | NodeStatus::Degraded => {}
+    }
+    match node.last_seen_at.as_ref() {
+        None => reject(
+            &mut reasons,
+            RejectionCode::StaleNode,
+            "node has never reported a heartbeat",
+        ),
+        Some(last_seen_at) => {
+            let age = observed_at.signed_duration_since(*last_seen_at);
+            let maximum_age =
+                chrono::Duration::from_std(freshness_ttl).unwrap_or(chrono::Duration::MAX);
+            if age > maximum_age {
+                reject(
+                    &mut reasons,
+                    RejectionCode::StaleNode,
+                    format!(
+                        "last heartbeat is {} seconds old; freshness TTL is {} seconds",
+                        age.num_seconds(),
+                        freshness_ttl.as_secs()
+                    ),
+                );
+            }
+        }
     }
 
     if job.placement_policy == PlacementPolicy::Manual {
@@ -336,7 +394,28 @@ fn gpu_rejections(
         return;
     }
 
-    let vram_matches = vendor_matches
+    let allocatable_matches = vendor_matches
+        .iter()
+        .copied()
+        .filter(|gpu| gpu.allocatable)
+        .collect::<Vec<_>>();
+    if allocatable_matches.is_empty() {
+        let (code, detail) = if requirement.exclusive {
+            (
+                RejectionCode::ExclusiveGpuUnavailable,
+                "matching GPUs cannot accept an exclusive lease",
+            )
+        } else {
+            (
+                RejectionCode::GpuUnavailable,
+                "matching GPUs are administratively unavailable",
+            )
+        };
+        reject(reasons, code, detail);
+        return;
+    }
+
+    let vram_matches = allocatable_matches
         .iter()
         .copied()
         .filter(|gpu| {
@@ -346,7 +425,7 @@ fn gpu_rejections(
         })
         .collect::<Vec<_>>();
     if vram_matches.is_empty() {
-        let available = vendor_matches
+        let available = allocatable_matches
             .iter()
             .map(|gpu| gpu.available_vram_mib)
             .max()
@@ -359,16 +438,10 @@ fn gpu_rejections(
                 requirement.min_vram_mib.unwrap_or_default()
             ),
         );
-        return;
     }
 
-    if requirement.exclusive && !vram_matches.iter().any(|gpu| gpu.allocatable) {
-        reject(
-            reasons,
-            RejectionCode::ExclusiveGpuUnavailable,
-            "matching GPUs are already exclusively leased",
-        );
-    }
+    // The scheduler only establishes that an exclusive lease can be attempted.
+    // The controller must atomically reserve the selected device before dispatch.
 }
 
 fn reject(reasons: &mut Vec<PlacementRejection>, code: RejectionCode, detail: impl Into<String>) {
@@ -638,6 +711,67 @@ mod tests {
             error.explanation().expect("explanation").candidates[0].rejection_reasons[0].code,
             RejectionCode::ExclusiveGpuUnavailable
         );
+    }
+
+    #[test]
+    fn shared_gpu_jobs_also_reject_unallocatable_devices() {
+        let mut target_job = job();
+        target_job.kind = JobKind::Gpu;
+        target_job.requirements.gpu = Some(GpuRequirement {
+            vendor: Some(GpuVendor::Nvidia),
+            min_vram_mib: Some(4_000),
+            exclusive: false,
+        });
+        let mut worker = node(1, "shared-gpu-worker", 16, 32_768);
+        worker.resources.gpus.push(GpuDevice {
+            vendor: GpuVendor::Nvidia,
+            model: "Unavailable GPU".to_owned(),
+            total_vram_mib: 12_000,
+            available_vram_mib: 12_000,
+            allocatable: false,
+        });
+
+        let error = select_node(&target_job, &[worker]).expect_err("GPU is unavailable");
+        assert_eq!(
+            error.explanation().expect("explanation").candidates[0].rejection_reasons[0].code,
+            RejectionCode::GpuUnavailable
+        );
+    }
+
+    #[test]
+    fn stale_or_never_seen_nodes_are_ineligible() {
+        let target_job = job();
+        let observed_at = Utc::now();
+        let mut stale = node(1, "stale", 8, 16_384);
+        stale.last_seen_at = Some(observed_at - chrono::Duration::seconds(91));
+        let mut never_seen = node(2, "never-seen", 8, 16_384);
+        never_seen.last_seen_at = None;
+
+        let error = Scheduler::default()
+            .schedule_at(&target_job, &[stale, never_seen], observed_at)
+            .expect_err("all nodes are stale");
+        let explanation = error.explanation().expect("explanation");
+        assert!(explanation.candidates.iter().all(|candidate| {
+            candidate
+                .rejection_reasons
+                .iter()
+                .any(|reason| reason.code == RejectionCode::StaleNode)
+        }));
+    }
+
+    #[test]
+    fn freshness_ttl_is_configurable_and_inclusive() {
+        let target_job = job();
+        let observed_at = Utc::now();
+        let mut worker = node(1, "worker", 8, 16_384);
+        worker.last_seen_at = Some(observed_at - chrono::Duration::seconds(10));
+        let scheduler = Scheduler::default().with_node_freshness_ttl(Duration::from_secs(10));
+
+        let decision = scheduler
+            .schedule_at(&target_job, &[worker], observed_at)
+            .expect("heartbeat at the TTL boundary remains fresh");
+        assert_eq!(decision.node_id, Uuid::from_u128(1));
+        assert_eq!(scheduler.node_freshness_ttl(), Duration::from_secs(10));
     }
 
     #[test]

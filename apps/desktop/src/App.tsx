@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { controllerClient } from "./api/client";
+import { ControllerApiError, controllerClient } from "./api/client";
 import type { FleetInfo, JobStatus, NodeStatus, NodeSummary } from "./api/types";
 
 type Page = "home" | "computers" | "tasks" | "rules" | "integration";
@@ -360,17 +360,31 @@ export function App() {
   const [page, setPage] = useState<Page>("home");
   const [fleet, setFleet] = useState<FleetInfo>();
   const [online, setOnline] = useState(false);
+  const [accessError, setAccessError] = useState<string>();
   const [loading, setLoading] = useState(true);
   const [lastCheckedAt, setLastCheckedAt] = useState<Date>();
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [health, fleetInfo] = await Promise.all([controllerClient.health(), controllerClient.fleet()]);
+      const health = await controllerClient.health();
       setOnline(health.status === "ready" || health.status === "degraded");
-      setFleet(fleetInfo);
-    } catch {
+      try {
+        const fleetInfo = await controllerClient.fleet();
+        setFleet(fleetInfo);
+        setAccessError(undefined);
+      } catch (error) {
+        setFleet(undefined);
+        setAccessError(error instanceof Error ? error.message : "Controller authentication failed");
+      }
+    } catch (error) {
       setOnline(false);
+      setFleet(undefined);
+      setAccessError(
+        error instanceof ControllerApiError && error.code === "transport_unavailable"
+          ? error.message
+          : undefined,
+      );
     } finally {
       setLastCheckedAt(new Date());
       setLoading(false);
@@ -386,9 +400,10 @@ export function App() {
   const heading = pageTitles[page];
   const statusCopy = useMemo(() => {
     if (loading && !lastCheckedAt) return "Checking controller…";
+    if (accessError) return "Secure proxy unavailable";
     if (!online) return "Controller offline";
     return `${fleet?.nodes.filter((node) => node.status !== "offline").length ?? 0} computers available`;
-  }, [fleet, lastCheckedAt, loading, online]);
+  }, [accessError, fleet, lastCheckedAt, loading, online]);
 
   return (
     <div className="app-shell">
@@ -409,8 +424,8 @@ export function App() {
         </nav>
         <div className="sidebar-bottom">
           <div className="controller-card">
-            <div><StatusDot status={online ? "connected" : "disconnected"} /><strong>{online ? "Controller online" : "Controller offline"}</strong></div>
-            <span>{online ? `v${fleet?.controller.version ?? "0.1"} · localhost` : "Waiting on port 47831"}</span>
+            <div><StatusDot status={online ? "connected" : "disconnected"} /><strong>{online ? "Controller online" : accessError ? "Integration unavailable" : "Controller offline"}</strong></div>
+            <span>{online ? `v${fleet?.controller.version ?? "0.1"} · localhost` : accessError ? "Secure host proxy required" : "Waiting on port 47831"}</span>
           </div>
           <div className="profile"><span className="avatar">CY</span><div><strong>Local workspace</strong><span>Personal fleet</span></div><Icon name="more" /></div>
         </div>
@@ -426,8 +441,11 @@ export function App() {
           </div>
         </header>
 
-        {!online && !loading ? (
+        {!online && !accessError && !loading ? (
           <div className="offline-banner"><Icon name="terminal" /><div><strong>The local controller is not responding.</strong><span>Start ClusterYourCodex Controller on port 47831, then refresh.</span></div><button className="text-button small" onClick={() => setPage("integration")}>Open setup <Icon name="arrow" size={14} /></button></div>
+        ) : null}
+        {accessError && !loading ? (
+          <div className="offline-banner auth-banner"><Icon name="shield" /><div><strong>The secure controller proxy is unavailable.</strong><span>{accessError}</span></div><button className="text-button small" onClick={() => setPage("integration")}>Repair integration <Icon name="arrow" size={14} /></button></div>
         ) : null}
 
         <div className="page-content">

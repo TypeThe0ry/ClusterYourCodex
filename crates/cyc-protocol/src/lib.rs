@@ -230,7 +230,7 @@ impl Node {
             priority: 0,
             labels: BTreeMap::new(),
             cached_sources: BTreeSet::new(),
-            last_seen_at: None,
+            last_seen_at: Some(Utc::now()),
         }
     }
 
@@ -241,7 +241,7 @@ impl Node {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JobOrigin {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex_session_id: Option<String>,
@@ -264,7 +264,7 @@ pub enum JobKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum SourceSpec {
     Git {
         repository: String,
@@ -291,7 +291,7 @@ impl SourceSpec {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GpuRequirement {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vendor: Option<GpuVendor>,
@@ -312,7 +312,7 @@ impl Default for GpuRequirement {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JobRequirements {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os: Option<OperatingSystem>,
@@ -340,7 +340,7 @@ pub enum Shell {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JobStep {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -365,7 +365,7 @@ impl JobStep {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ArtifactSpec {
     #[serde(default)]
     pub include: Vec<String>,
@@ -385,7 +385,7 @@ pub enum PlacementPolicy {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JobSpec {
     pub api_version: String,
     pub id: Uuid,
@@ -431,6 +431,17 @@ impl JobSpec {
         }
         if self.steps.is_empty() {
             return Err(ValidationError::NoSteps);
+        }
+        if let Some(origin) = &self.origin {
+            for (field, value) in [
+                ("codexSessionId", origin.codex_session_id.as_deref()),
+                ("projectId", origin.project_id.as_deref()),
+                ("workspaceId", origin.workspace_id.as_deref()),
+            ] {
+                if value.is_some_and(|value| value.chars().count() > 256) {
+                    return Err(ValidationError::OriginFieldTooLong(field));
+                }
+            }
         }
         for (index, step) in self.steps.iter().enumerate() {
             if step.name.trim().is_empty() {
@@ -521,6 +532,8 @@ pub enum ValidationError {
     UnsupportedApiVersion(String),
     #[error("steps must contain at least one item")]
     NoSteps,
+    #[error("origin.{0} must contain at most 256 characters")]
+    OriginFieldTooLong(&'static str),
     #[error("steps[{0}].name must not be empty")]
     EmptyStepName(usize),
     #[error("steps[{0}].script must not be empty")]
@@ -630,6 +643,85 @@ impl Run {
         self.state = next;
         Ok(())
     }
+
+    /// Validate persisted run evidence independently of state-transition code.
+    ///
+    /// Workers may crash, controllers may restart, and older database rows may
+    /// be decoded without having passed through [`Run::transition`]. Consumers
+    /// should call this method before publishing a terminal result as verified.
+    pub fn validate(&self) -> Result<(), RunValidationError> {
+        if self
+            .started_at
+            .as_ref()
+            .is_some_and(|started| started < &self.created_at)
+        {
+            return Err(RunValidationError::StartedBeforeCreated);
+        }
+        if self
+            .finished_at
+            .as_ref()
+            .is_some_and(|finished| finished < &self.created_at)
+        {
+            return Err(RunValidationError::FinishedBeforeCreated);
+        }
+        if self
+            .started_at
+            .as_ref()
+            .zip(self.finished_at.as_ref())
+            .is_some_and(|(started, finished)| finished < started)
+        {
+            return Err(RunValidationError::FinishedBeforeStarted);
+        }
+
+        match self.state {
+            JobState::Queued | JobState::Preparing => {
+                if self.finished_at.is_some() {
+                    return Err(RunValidationError::UnexpectedFinishedAt(self.state));
+                }
+            }
+            JobState::Running | JobState::Verifying => {
+                if self.started_at.is_none() {
+                    return Err(RunValidationError::MissingStartedAt(self.state));
+                }
+                if self.finished_at.is_some() {
+                    return Err(RunValidationError::UnexpectedFinishedAt(self.state));
+                }
+            }
+            JobState::Succeeded => {
+                if self.started_at.is_none() {
+                    return Err(RunValidationError::MissingStartedAt(self.state));
+                }
+                if self.finished_at.is_none() {
+                    return Err(RunValidationError::MissingFinishedAt(self.state));
+                }
+                if self.exit_code != Some(0) {
+                    return Err(RunValidationError::InvalidSuccessExitCode(self.exit_code));
+                }
+                if self.error.as_ref().is_some_and(|error| !error.is_empty()) {
+                    return Err(RunValidationError::SuccessContainsError);
+                }
+            }
+            JobState::Failed => {
+                if self.finished_at.is_none() {
+                    return Err(RunValidationError::MissingFinishedAt(self.state));
+                }
+                let has_nonzero_exit = self.exit_code.is_some_and(|exit_code| exit_code != 0);
+                let has_error = self
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| !error.trim().is_empty());
+                if !has_nonzero_exit && !has_error {
+                    return Err(RunValidationError::FailedWithoutEvidence);
+                }
+            }
+            JobState::Cancelled => {
+                if self.finished_at.is_none() {
+                    return Err(RunValidationError::MissingFinishedAt(self.state));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -637,6 +729,28 @@ impl Run {
 pub struct StateTransitionError {
     pub from: JobState,
     pub to: JobState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum RunValidationError {
+    #[error("startedAt is earlier than createdAt")]
+    StartedBeforeCreated,
+    #[error("finishedAt is earlier than createdAt")]
+    FinishedBeforeCreated,
+    #[error("finishedAt is earlier than startedAt")]
+    FinishedBeforeStarted,
+    #[error("state {0:?} requires startedAt")]
+    MissingStartedAt(JobState),
+    #[error("state {0:?} requires finishedAt")]
+    MissingFinishedAt(JobState),
+    #[error("state {0:?} must not contain finishedAt")]
+    UnexpectedFinishedAt(JobState),
+    #[error("a succeeded run requires exitCode 0, got {0:?}")]
+    InvalidSuccessExitCode(Option<i32>),
+    #[error("a succeeded run must not contain an error")]
+    SuccessContainsError,
+    #[error("a failed run requires a non-zero exitCode or a non-empty error")]
+    FailedWithoutEvidence,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -677,6 +791,7 @@ pub enum RejectionCode {
     Disabled,
     Offline,
     Draining,
+    StaleNode,
     ManualNodeRequired,
     ManualNodeMismatch,
     WrongOs,
@@ -686,6 +801,7 @@ pub enum RejectionCode {
     InsufficientMemory,
     InsufficientDisk,
     GpuRequired,
+    GpuUnavailable,
     GpuVendorMismatch,
     InsufficientVram,
     ExclusiveGpuUnavailable,
@@ -764,6 +880,33 @@ mod tests {
     }
 
     #[test]
+    fn job_spec_rejects_unknown_top_level_and_nested_fields() {
+        let mut top_level = serde_json::to_value(sample_job()).expect("serialize JobSpec");
+        top_level
+            .as_object_mut()
+            .expect("job object")
+            .insert("placementPolciy".to_owned(), serde_json::json!("manual"));
+        assert!(serde_json::from_value::<JobSpec>(top_level).is_err());
+
+        let mut nested = serde_json::to_value(sample_job()).expect("serialize JobSpec");
+        nested["steps"][0]["environment"] = serde_json::json!({ "TOKEN": "opaque" });
+        assert!(serde_json::from_value::<JobSpec>(nested).is_err());
+    }
+
+    #[test]
+    fn validation_enforces_origin_schema_lengths() {
+        let mut job = sample_job();
+        job.origin = Some(JobOrigin {
+            codex_session_id: Some("x".repeat(257)),
+            ..JobOrigin::default()
+        });
+        assert_eq!(
+            job.validate(),
+            Err(ValidationError::OriginFieldTooLong("codexSessionId"))
+        );
+    }
+
+    #[test]
     fn run_state_machine_rejects_terminal_transitions() {
         let mut run = Run::queued(Uuid::new_v4());
         run.transition(JobState::Preparing).expect("prepare");
@@ -780,6 +923,40 @@ mod tests {
                 to: JobState::Running,
             })
         );
+    }
+
+    #[test]
+    fn succeeded_runs_require_verified_terminal_evidence() {
+        let mut run = Run::queued(Uuid::new_v4());
+        run.transition(JobState::Preparing).expect("prepare");
+        run.transition(JobState::Running).expect("run");
+        run.transition(JobState::Succeeded).expect("succeed");
+
+        assert_eq!(
+            run.validate(),
+            Err(RunValidationError::InvalidSuccessExitCode(None))
+        );
+        run.exit_code = Some(0);
+        assert!(run.validate().is_ok());
+
+        run.error = Some("verification failed".to_owned());
+        assert_eq!(
+            run.validate(),
+            Err(RunValidationError::SuccessContainsError)
+        );
+    }
+
+    #[test]
+    fn failed_runs_require_an_exit_code_or_error() {
+        let mut run = Run::queued(Uuid::new_v4());
+        run.transition(JobState::Failed).expect("fail");
+        assert_eq!(
+            run.validate(),
+            Err(RunValidationError::FailedWithoutEvidence)
+        );
+
+        run.error = Some("worker disconnected".to_owned());
+        assert!(run.validate().is_ok());
     }
 
     #[test]
@@ -800,5 +977,6 @@ mod tests {
         assert!(encoded.contains("credentialRef"));
         assert!(!encoded.contains("password"));
         assert!(!encoded.contains("privateKey"));
+        assert!(node.last_seen_at.is_some());
     }
 }

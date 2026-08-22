@@ -20,6 +20,10 @@ struct Cli {
     #[arg(long, env = "CYC_CONTROLLER_URL", default_value = DEFAULT_CONTROLLER)]
     controller: String,
 
+    /// File containing the controller bearer token; never pass the token itself on argv.
+    #[arg(long, env = "CYC_CONTROLLER_TOKEN_FILE")]
+    token_file: Option<PathBuf>,
+
     /// Pretty-print JSON responses.
     #[arg(long, global = true)]
     pretty: bool,
@@ -50,9 +54,17 @@ enum Commands {
         /// JobSpec JSON file, or '-' for stdin.
         #[arg(short, long, default_value = "-")]
         file: PathBuf,
+        /// Reuse a previously issued, still-valid placement plan.
+        #[arg(long)]
+        plan_id: Option<Uuid>,
     },
     /// Request cancellation of a queued or active job.
-    Cancel { id: Uuid },
+    Cancel {
+        id: Uuid,
+        /// Optional optimistic-concurrency version from a prior job response.
+        #[arg(long)]
+        expected_version: Option<u64>,
+    },
 }
 
 #[tokio::main]
@@ -63,15 +75,52 @@ async fn main() -> Result<()> {
         .build()
         .context("failed to build HTTP client")?;
     let base = normalize_base_url(&cli.controller)?;
+    let token = if matches!(&cli.command, Commands::Health) {
+        None
+    } else {
+        let token_file = cli.token_file.unwrap_or_else(default_token_path);
+        Some(read_controller_token(&token_file)?)
+    };
 
     let response = match &cli.command {
-        Commands::Health => request_json(&client, Method::GET, &base, "/v1/health", None).await?,
-        Commands::Nodes => request_json(&client, Method::GET, &base, "/v1/fleet", None).await?,
+        Commands::Health => {
+            request_json(&client, Method::GET, &base, "/v1/health", None, None, None).await?
+        }
+        Commands::Nodes => {
+            request_json(
+                &client,
+                Method::GET,
+                &base,
+                "/v1/fleet",
+                None,
+                None,
+                token.as_deref(),
+            )
+            .await?
+        }
         Commands::Jobs { id: Some(id) } => {
-            request_json(&client, Method::GET, &base, &format!("/v1/jobs/{id}"), None).await?
+            request_json(
+                &client,
+                Method::GET,
+                &base,
+                &format!("/v1/jobs/{id}"),
+                None,
+                None,
+                token.as_deref(),
+            )
+            .await?
         }
         Commands::Jobs { id: None } => {
-            request_json(&client, Method::GET, &base, "/v1/jobs", None).await?
+            request_json(
+                &client,
+                Method::GET,
+                &base,
+                "/v1/jobs",
+                None,
+                None,
+                token.as_deref(),
+            )
+            .await?
         }
         Commands::Plan { file } => {
             let spec = read_job_spec(file)?;
@@ -81,27 +130,40 @@ async fn main() -> Result<()> {
                 &base,
                 "/v1/plans",
                 Some(serde_json::json!({ "job": spec })),
+                None,
+                token.as_deref(),
             )
             .await?
         }
-        Commands::Submit { file } => {
+        Commands::Submit { file, plan_id } => {
             let spec = read_job_spec(file)?;
+            let mut body = serde_json::json!({ "job": spec });
+            if let Some(plan_id) = plan_id {
+                body["planId"] = serde_json::to_value(plan_id)?;
+            }
             request_json(
                 &client,
                 Method::POST,
                 &base,
                 "/v1/jobs",
-                Some(serde_json::json!({ "job": spec })),
+                Some(body),
+                None,
+                token.as_deref(),
             )
             .await?
         }
-        Commands::Cancel { id } => {
+        Commands::Cancel {
+            id,
+            expected_version,
+        } => {
             request_json(
                 &client,
                 Method::POST,
                 &base,
                 &format!("/v1/jobs/{id}/cancel"),
                 None,
+                *expected_version,
+                token.as_deref(),
             )
             .await?
         }
@@ -117,8 +179,68 @@ async fn main() -> Result<()> {
 
 fn normalize_base_url(raw: &str) -> Result<String> {
     let value = raw.trim_end_matches('/');
-    if !(value.starts_with("http://") || value.starts_with("https://")) {
+    let parsed = reqwest::Url::parse(value).context("controller URL is invalid")?;
+    if !matches!(parsed.scheme(), "http" | "https") {
         bail!("controller URL must use http:// or https://");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        bail!("controller URL must not contain credentials");
+    }
+    let Some(host) = parsed.host_str() else {
+        bail!("controller URL must include a host");
+    };
+    let is_loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    if !is_loopback {
+        bail!("controller URL must use a loopback host");
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        bail!("controller URL must not include query or fragment components");
+    }
+    Ok(value.to_owned())
+}
+
+fn default_token_path() -> PathBuf {
+    if let Some(data) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(data)
+            .join("ClusterYourCodex")
+            .join("controller.token");
+    }
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(data)
+            .join("clusteryourcodex")
+            .join("controller.token");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        if cfg!(target_os = "macos") {
+            return home
+                .join("Library")
+                .join("Application Support")
+                .join("ClusterYourCodex")
+                .join("controller.token");
+        }
+        return home
+            .join(".local")
+            .join("share")
+            .join("clusteryourcodex")
+            .join("controller.token");
+    }
+    PathBuf::from("controller.token")
+}
+
+fn read_controller_token(path: &PathBuf) -> Result<String> {
+    let value = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read controller token file {}", path.display()))?;
+    let value = value.trim();
+    if !(32..=256).contains(&value.len())
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !byte.is_ascii_whitespace())
+    {
+        bail!("controller token file is invalid");
     }
     Ok(value.to_owned())
 }
@@ -153,8 +275,16 @@ async fn request_json(
     base: &str,
     path: &str,
     body: Option<Value>,
+    expected_version: Option<u64>,
+    token: Option<&str>,
 ) -> Result<Value> {
     let mut request = client.request(method, format!("{base}{path}"));
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    if let Some(version) = expected_version {
+        request = request.header("if-match", format!("\"{version}\""));
+    }
     if let Some(body) = body {
         request = request.json(&body);
     }
@@ -200,12 +330,14 @@ mod tests {
         let mut options = Vec::new();
         all_long_options(&Cli::command(), &mut options);
         let joined = options.join(" ").to_ascii_lowercase();
+        assert!(options.iter().any(|option| option == "token-file"));
         for forbidden in ["password", "private-key", "token", "secret", "credential"] {
             assert!(
-                !joined.contains(forbidden),
+                forbidden == "token" || !joined.contains(forbidden),
                 "forbidden CLI option: {forbidden}"
             );
         }
+        assert!(Cli::try_parse_from(["cyc", "--token", "raw-secret", "health"]).is_err());
     }
 
     #[test]
@@ -215,6 +347,8 @@ mod tests {
             DEFAULT_CONTROLLER
         );
         assert!(normalize_base_url("127.0.0.1:47831").is_err());
+        assert!(normalize_base_url("https://attacker.example:47831").is_err());
+        assert!(normalize_base_url("http://user:password@127.0.0.1:47831").is_err());
     }
 
     #[test]

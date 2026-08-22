@@ -11,6 +11,20 @@ job directories, and artifacts. Never request or include a password, private
 key, token, raw credential object, or credential-bearing command in an MCP tool
 call.
 
+The MCP bridge reads the controller bearer token from the local token file. A
+custom installation may pass only the token-file path through
+`CYC_CONTROLLER_TOKEN_FILE`; never ask for the token value or put it in a tool
+argument, environment value, command, log, or response.
+
+The MCP bridge connects only to an HTTP(S) loopback controller. Never route a
+ClusterYourCodex tool call to a LAN or public URL, and never add a controller
+URL, authorization header, or token field to tool arguments. The desktop UI
+uses a host-side authenticated proxy; its renderer does not read the long-lived
+token file. During Vite development, the loopback-only Vite middleware is that
+proxy and reads the token file server-side; browser code sends only
+method/path/JSON body and must report the integration unavailable when the
+proxy is absent.
+
 ## When to use it
 
 Use this skill for meaningful work that benefits from another machine:
@@ -60,7 +74,9 @@ transfer/setup cost exceeds its runtime on the current computer.
 ## Failure handling
 
 - Controller unavailable: tell the user to open ClusterYourCodex and show the
-  exact local health failure; do not ask for worker passwords.
+  redacted local health failure; do not ask for worker passwords.
+- Controller authentication failure: tell the user to repair the Codex
+  integration from the desktop app. Do not ask them to paste the bearer token.
 - No eligible computer: report the unmet hard capability returned by the plan.
 - Deterministic build/test failure: preserve the exit code and diagnostic
   evidence, fix the cause, then create a new job.

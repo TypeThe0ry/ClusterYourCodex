@@ -188,13 +188,21 @@ function success(value: unknown): CallToolResult {
 }
 
 function failure(error: unknown): CallToolResult {
-  const message =
-    error instanceof ControllerRequestError || error instanceof Error
-      ? error.message
-      : "ClusterYourCodex tool failed";
+  const publicError =
+    error instanceof ControllerRequestError
+      ? {
+          code: error.code ?? "controller_request_failed",
+          message: error.message,
+          ...(error.requestId ? { requestId: error.requestId } : {}),
+          ...(error.placement ? { placement: error.placement } : {}),
+        }
+      : {
+          code: "invalid_tool_input",
+          message: error instanceof Error ? error.message : "ClusterYourCodex tool failed",
+        };
   return {
     isError: true,
-    content: [{ type: "text", text: message }],
+    content: [{ type: "text", text: JSON.stringify({ error: publicError }, null, 2) }],
   };
 }
 
