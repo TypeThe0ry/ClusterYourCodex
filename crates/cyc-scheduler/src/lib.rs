@@ -11,10 +11,12 @@ use cyc_protocol::{
     PlacementExplain, PlacementPolicy, PlacementRejection, RejectionCode, ScoreComponent,
     ValidationError,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SchedulerWeights {
     pub priority: i64,
     pub available_cpu_core: i64,
@@ -76,10 +78,7 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn new(
-        balanced_weights: SchedulerWeights,
-        performance_weights: SchedulerWeights,
-    ) -> Self {
+    pub fn new(balanced_weights: SchedulerWeights, performance_weights: SchedulerWeights) -> Self {
         Self {
             balanced_weights,
             performance_weights,
@@ -144,7 +143,8 @@ pub fn select_node(job: &JobSpec, nodes: &[Node]) -> Result<PlacementDecision, S
     Scheduler::default().schedule(job, nodes)
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlacementDecision {
     pub node_id: Uuid,
     pub score: i64,
@@ -197,9 +197,9 @@ fn evaluate_node(
     }
 
     let score_components = score_components(job, node, weights);
-    let score = score_components
-        .iter()
-        .fold(0_i64, |total, component| total.saturating_add(component.value));
+    let score = score_components.iter().fold(0_i64, |total, component| {
+        total.saturating_add(component.value)
+    });
     PlacementCandidateExplain {
         node_id: node.id,
         node_name: node.name.clone(),
@@ -213,18 +213,10 @@ fn evaluate_node(
 fn hard_rejections(job: &JobSpec, node: &Node) -> Vec<PlacementRejection> {
     let mut reasons = Vec::new();
     if !node.enabled {
-        reject(
-            &mut reasons,
-            RejectionCode::Disabled,
-            "node is disabled",
-        );
+        reject(&mut reasons, RejectionCode::Disabled, "node is disabled");
     }
     match node.status {
-        NodeStatus::Offline => reject(
-            &mut reasons,
-            RejectionCode::Offline,
-            "node is offline",
-        ),
+        NodeStatus::Offline => reject(&mut reasons, RejectionCode::Offline, "node is offline"),
         NodeStatus::Draining => reject(
             &mut reasons,
             RejectionCode::Draining,
@@ -268,10 +260,7 @@ fn hard_rejections(job: &JobSpec, node: &Node) -> Vec<PlacementRejection> {
             );
         }
     }
-    for capability in requirements
-        .capabilities
-        .difference(&node.capabilities)
-    {
+    for capability in requirements.capabilities.difference(&node.capabilities) {
         reject(
             &mut reasons,
             RejectionCode::MissingCapability,
@@ -382,22 +371,14 @@ fn gpu_rejections(
     }
 }
 
-fn reject(
-    reasons: &mut Vec<PlacementRejection>,
-    code: RejectionCode,
-    detail: impl Into<String>,
-) {
+fn reject(reasons: &mut Vec<PlacementRejection>, code: RejectionCode, detail: impl Into<String>) {
     reasons.push(PlacementRejection {
         code,
         detail: detail.into(),
     });
 }
 
-fn score_components(
-    job: &JobSpec,
-    node: &Node,
-    weights: &SchedulerWeights,
-) -> Vec<ScoreComponent> {
+fn score_components(job: &JobSpec, node: &Node, weights: &SchedulerWeights) -> Vec<ScoreComponent> {
     let mut components = vec![
         component(
             "priority",
@@ -417,7 +398,10 @@ fn score_components(
             "memory_capacity",
             capped_units(node.resources.available_memory_mib, 1_024, 1_024)
                 .saturating_mul(weights.available_memory_gib),
-            format!("{} MiB available memory", node.resources.available_memory_mib),
+            format!(
+                "{} MiB available memory",
+                node.resources.available_memory_mib
+            ),
         ),
         component(
             "disk_capacity",
@@ -460,8 +444,7 @@ fn score_components(
             .unwrap_or_default();
         components.push(component(
             "gpu_capacity",
-            capped_units(available_vram, 1_024, 1_024)
-                .saturating_mul(weights.gpu_vram_gib),
+            capped_units(available_vram, 1_024, 1_024).saturating_mul(weights.gpu_vram_gib),
             format!("{available_vram} MiB available VRAM"),
         ));
     }
@@ -508,8 +491,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use cyc_protocol::{
-        Architecture, Capability, GpuDevice, GpuVendor, JobRequirements, JobStep,
-        NodeResources, NodeTransport, OperatingSystem, SourceSpec,
+        Architecture, Capability, GpuDevice, GpuVendor, JobRequirements, JobStep, NodeResources,
+        NodeTransport, OperatingSystem, SourceSpec,
     };
 
     use super::*;
@@ -652,9 +635,7 @@ mod tests {
 
         let error = select_node(&target_job, &[worker]).expect_err("GPU is leased");
         assert_eq!(
-            error.explanation().expect("explanation").candidates[0]
-                .rejection_reasons[0]
-                .code,
+            error.explanation().expect("explanation").candidates[0].rejection_reasons[0].code,
             RejectionCode::ExclusiveGpuUnavailable
         );
     }
@@ -665,8 +646,8 @@ mod tests {
         let first = node(1, "one", 8, 16_384);
         let second = node(2, "two", 8, 16_384);
 
-        let forward = select_node(&target_job, &[first.clone(), second.clone()])
-            .expect("place forward");
+        let forward =
+            select_node(&target_job, &[first.clone(), second.clone()]).expect("place forward");
         let reverse = select_node(&target_job, &[second, first]).expect("place reverse");
 
         assert_eq!(forward.node_id, Uuid::from_u128(1));
@@ -682,9 +663,7 @@ mod tests {
             .expect_err("preferred node is required");
 
         assert_eq!(
-            error.explanation().expect("explanation").candidates[0]
-                .rejection_reasons[0]
-                .code,
+            error.explanation().expect("explanation").candidates[0].rejection_reasons[0].code,
             RejectionCode::ManualNodeRequired
         );
     }

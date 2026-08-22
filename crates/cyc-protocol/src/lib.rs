@@ -84,7 +84,7 @@ impl From<String> for CredentialRef {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OperatingSystem {
     Windows,
@@ -671,7 +671,7 @@ pub struct ScoreComponent {
     pub detail: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RejectionCode {
     Disabled,

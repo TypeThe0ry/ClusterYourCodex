@@ -8,6 +8,6 @@ rust-version.workspace = true
 
 [dependencies]
 cyc-protocol = { path = "../cyc-protocol" }
+serde.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
-
