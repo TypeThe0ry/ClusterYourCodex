@@ -1,4 +1,4 @@
-name: Portable release artifacts
+name: Developer-preview release artifacts
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ env:
 
 jobs:
   rust-artifacts:
-    name: ${{ matrix.name }}
+    name: ${{ matrix.name }} portable preview
     strategy:
       fail-fast: false
       matrix:
@@ -23,22 +23,34 @@ jobs:
             os: windows-latest
             target: x86_64-pc-windows-msvc
             label: windows-x64
+            platform: windows
+            native_arch: x86_64
             suffix: .exe
+            include_worker: "true"
           - name: Linux x64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             label: linux-x64
+            platform: linux
+            native_arch: x86_64
             suffix: ""
+            include_worker: "true"
           - name: macOS x64
-            os: macos-14
+            os: macos-15-intel
             target: x86_64-apple-darwin
             label: macos-x64
+            platform: macos
+            native_arch: x86_64
             suffix: ""
+            include_worker: "false"
           - name: macOS arm64
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
             label: macos-arm64
+            platform: macos
+            native_arch: arm64
             suffix: ""
+            include_worker: "false"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -47,25 +59,179 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
-      - name: Build release binaries
+          key: release-preview-${{ matrix.target }}
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint full Rust workspace
+        run: cargo clippy --workspace --all-targets --locked --target ${{ matrix.target }} -- -D warnings
+      - name: Test full Rust workspace
+        run: cargo test --workspace --locked --target ${{ matrix.target }}
+      - name: Build native release binaries
         run: >-
           cargo build --locked --release --target ${{ matrix.target }}
           --bin cyc-controller --bin cyc-worker --bin cyc
-      - name: Stage portable archive
+      - name: Verify Windows x64 binaries and native smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne
+              [Runtime.InteropServices.Architecture]::X64) {
+            throw "Expected a native Windows x64 runner."
+          }
+          foreach ($name in @('cyc-controller.exe', 'cyc-worker.exe', 'cyc.exe')) {
+            $path = Join-Path $PWD "target/${{ matrix.target }}/release/$name"
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing release binary: $path"
+            }
+            $bytes = [IO.File]::ReadAllBytes($path)
+            if ($bytes.Length -lt 512 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
+              throw "$name is not a PE executable."
+            }
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+            if ($peOffset -lt 0 -or $peOffset + 6 -gt $bytes.Length -or
+                [Text.Encoding]::ASCII.GetString($bytes, $peOffset, 4) -ne "PE`0`0") {
+              throw "$name has an invalid PE header."
+            }
+            $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            if ($machine -ne 0x8664) {
+              throw "$name is not an AMD64 PE executable (machine=0x$($machine.ToString('x4')))."
+            }
+            & $path --version
+            if ($LASTEXITCODE -ne 0) { throw "$name --version failed." }
+            & $path --help | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "$name --help failed." }
+          }
+      - name: Verify Linux x64 binaries, executable bits, and native smoke
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == "x86_64" ]]
+          for name in cyc-controller cyc-worker cyc; do
+            path="target/${{ matrix.target }}/release/$name"
+            test -f "$path"
+            test -x "$path"
+            file "$path" | grep -Eq 'ELF 64-bit.*x86-64'
+            readelf -h "$path" | grep -Eq 'Machine:[[:space:]]+Advanced Micro Devices X86-64'
+            "$path" --version
+            "$path" --help >/dev/null
+          done
+      - name: Verify macOS binaries, executable bits, and native smoke
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == "${{ matrix.native_arch }}" ]]
+          for name in cyc-controller cyc; do
+            path="target/${{ matrix.target }}/release/$name"
+            test -f "$path"
+            test -x "$path"
+            file "$path" | grep -q 'Mach-O 64-bit executable'
+            archs="$(lipo -archs "$path")"
+            case " $archs " in
+              *" ${{ matrix.native_arch }} "*) ;;
+              *) echo "Unexpected Mach-O architectures for $name: $archs" >&2; exit 1 ;;
+            esac
+            "$path" --version
+            "$path" --help >/dev/null
+          done
+      - name: Stage portable developer-preview archive
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $safeRef = [string]$env:CYC_REF_NAME -replace '[^0-9A-Za-z._-]', '-'
           if ([string]::IsNullOrWhiteSpace($safeRef)) { $safeRef = 'build' }
-          $name = "ClusterYourCodex-$safeRef-${{ matrix.label }}"
+          $name = "ClusterYourCodex-$safeRef-${{ matrix.label }}-preview"
           $stage = Join-Path $PWD "release-stage/$name"
-          New-Item -ItemType Directory -Force -Path (Join-Path $stage 'bin') | Out-Null
-          foreach ($binary in @('cyc-controller', 'cyc-worker', 'cyc')) {
+          $bin = Join-Path $stage 'bin'
+          New-Item -ItemType Directory -Force -Path $bin | Out-Null
+
+          $binaryNames = @('cyc-controller', 'cyc')
+          if ('${{ matrix.include_worker }}' -eq 'true') {
+            $binaryNames = @('cyc-controller', 'cyc-worker', 'cyc')
+          }
+          foreach ($binary in $binaryNames) {
             $source = Join-Path $PWD "target/${{ matrix.target }}/release/$binary${{ matrix.suffix }}"
-            Copy-Item -LiteralPath $source -Destination (Join-Path $stage "bin/$binary${{ matrix.suffix }}")
+            $destination = Join-Path $bin "$binary${{ matrix.suffix }}"
+            Copy-Item -LiteralPath $source -Destination $destination
+            if ('${{ runner.os }}' -ne 'Windows') {
+              & chmod '+x' '--' $destination
+              if ($LASTEXITCODE -ne 0) { throw "chmod failed for $destination" }
+            }
           }
           Copy-Item -LiteralPath README.md, LICENSE -Destination $stage
+
+          $managedState = if ('${{ matrix.include_worker }}' -eq 'true') {
+            'developer-preview-enabled-for-trusted-single-user-jobs'
+          } else {
+            'disabled-worker-omitted'
+          }
+          $managedReason = if ('${{ matrix.include_worker }}' -eq 'true') {
+            'The archive contains cyc-worker. It executes native scripts as the worker account and is not a hostile-workload or multi-tenant sandbox.'
+          } else {
+            'The macOS archive is controller/CLI-only. Managed execution fail-closes until macOS has a containment backend that can prove the complete process tree is gone.'
+          }
+          $notice = @"
+          # ClusterYourCodex developer preview
+
+          This is an unsigned, unattested portable developer-preview archive, not a stable installer.
+
+          Platform: ${{ matrix.platform }}
+          Architecture: ${{ matrix.native_arch }}
+          Contents: $($binaryNames -join ', ')
+
+          $managedReason
+
+          Verify the adjacent `.sha256` sidecar or the workflow-level `SHA256SUMS`
+          before extracting. No code-signing, notarization, SBOM, provenance, service
+          installation, automatic update, or rollback behavior is claimed by this archive.
+          "@
+          $notice | Set-Content -LiteralPath (Join-Path $stage 'PREVIEW-NOTICE.md') -Encoding UTF8
+
+          $platformStatus = [ordered]@{
+            schemaVersion = 'cyc.dev/platform-status/v1'
+            releaseKind = 'developer-preview'
+            platform = '${{ matrix.platform }}'
+            architecture = '${{ matrix.native_arch }}'
+            rustTarget = '${{ matrix.target }}'
+            portableArchive = $true
+            nativeRunner = '${{ matrix.os }}'
+            binaries = $binaryNames
+            managedExecution = [ordered]@{
+              workerIncluded = ('${{ matrix.include_worker }}' -eq 'true')
+              state = $managedState
+              reason = $managedReason
+            }
+            securityClaims = [ordered]@{
+              codeSigned = $false
+              notarized = $false
+              attested = $false
+              sbomIncluded = $false
+            }
+          }
+          $platformStatus | ConvertTo-Json -Depth 8 |
+            Set-Content -LiteralPath (Join-Path $stage 'platform-status.json') -Encoding UTF8
+
+          $payloadFiles = @(Get-ChildItem -LiteralPath $stage -File -Recurse -Force |
+            Sort-Object FullName | ForEach-Object {
+              [ordered]@{
+                path = $_.FullName.Substring($stage.Length + 1).Replace('\', '/')
+                length = [long]$_.Length
+                sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+              }
+            })
+          $manifest = [ordered]@{
+            schemaVersion = 'cyc.dev/release-manifest/v1'
+            releaseKind = 'developer-preview'
+            sourceCommit = [string]$env:GITHUB_SHA
+            sourceRef = [string]$env:GITHUB_REF
+            target = '${{ matrix.target }}'
+            files = $payloadFiles
+          }
+          $manifest | ConvertTo-Json -Depth 8 |
+            Set-Content -LiteralPath (Join-Path $stage 'release-manifest.json') -Encoding UTF8
+
           $archiveRoot = Join-Path $PWD 'release-assets'
           New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
           if ('${{ runner.os }}' -eq 'Windows') {
@@ -73,21 +239,27 @@ jobs:
             Compress-Archive -LiteralPath $stage -DestinationPath $archive
           } else {
             $archive = Join-Path $archiveRoot "$name.tar.gz"
-            tar -C (Split-Path $stage -Parent) -czf $archive (Split-Path $stage -Leaf)
+            & tar -C (Split-Path $stage -Parent) -czf $archive (Split-Path $stage -Leaf)
+            if ($LASTEXITCODE -ne 0) { throw 'tar failed to create the portable preview.' }
           }
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
-          "$hash  $(Split-Path $archive -Leaf)" | Set-Content -NoNewline -Encoding ascii "$archive.sha256"
+          "$hash  $(Split-Path $archive -Leaf)" |
+            Set-Content -NoNewline -Encoding ascii "$archive.sha256"
       - uses: actions/upload-artifact@v4
         with:
-          name: ClusterYourCodex-${{ matrix.label }}
+          name: ClusterYourCodex-${{ matrix.label }}-preview
           path: release-assets/*
           if-no-files-found: error
 
   integration-artifact:
-    name: Desktop renderer and Codex plugin
+    name: Desktop renderer and Codex plugin preview
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-integration-preview
       - uses: pnpm/action-setup@v4
         with:
           version: 11.0.8
@@ -96,18 +268,25 @@ jobs:
           node-version: 24.19.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint full Rust workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test full Rust workspace
+        run: cargo test --workspace --locked
       - run: pnpm -r lint
       - run: pnpm -r test
       - run: pnpm -r build
-      - name: Stage integration bundle
+      - name: Stage integration preview bundle
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $safeRef = [string]$env:CYC_REF_NAME -replace '[^0-9A-Za-z._-]', '-'
           if ([string]::IsNullOrWhiteSpace($safeRef)) { $safeRef = 'build' }
-          $name = "ClusterYourCodex-$safeRef-integration"
+          $name = "ClusterYourCodex-$safeRef-integration-preview"
           $stage = Join-Path $PWD "release-stage/$name"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item -LiteralPath README.md, LICENSE -Destination $stage
           Copy-Item -Recurse -LiteralPath apps/desktop/dist -Destination (Join-Path $stage 'desktop')
           $marketplace = Join-Path $stage 'marketplace'
           $plugin = Join-Path $marketplace 'plugins/cluster-your-codex'
@@ -119,27 +298,75 @@ jobs:
           Copy-Item -LiteralPath plugins/cluster-your-codex/.mcp.json -Destination $plugin
           pnpm --filter @clusteryourcodex/codex-mcp deploy --prod --legacy (Join-Path $plugin 'mcp')
           if ($LASTEXITCODE -ne 0) { throw 'failed to deploy MCP production dependencies' }
+
+          @'
+          # ClusterYourCodex integration developer preview
+
+          This archive contains the compiled renderer and Codex marketplace/plugin assets.
+          It is not a native desktop application, controller, worker, CLI, or installer.
+          The MCP bridge in this archive requires Node.js 20 or newer on PATH.
+          It is unsigned and unattested, and does not claim an SBOM or provenance.
+          '@ | Set-Content -LiteralPath (Join-Path $stage 'PREVIEW-NOTICE.md') -Encoding UTF8
+          [ordered]@{
+            schemaVersion = 'cyc.dev/platform-status/v1'
+            releaseKind = 'developer-preview'
+            platform = 'integration-assets'
+            architecture = 'platform-neutral-renderer-and-plugin'
+            portableArchive = $true
+            nativeApplicationIncluded = $false
+            managedExecution = [ordered]@{
+              workerIncluded = $false
+              state = 'not-applicable'
+            }
+            securityClaims = [ordered]@{
+              codeSigned = $false
+              notarized = $false
+              attested = $false
+              sbomIncluded = $false
+            }
+          } | ConvertTo-Json -Depth 8 |
+            Set-Content -LiteralPath (Join-Path $stage 'platform-status.json') -Encoding UTF8
+
+          $payloadFiles = @(Get-ChildItem -LiteralPath $stage -File -Recurse -Force |
+            Sort-Object FullName | ForEach-Object {
+              [ordered]@{
+                path = $_.FullName.Substring($stage.Length + 1).Replace('\', '/')
+                length = [long]$_.Length
+                sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+              }
+            })
+          [ordered]@{
+            schemaVersion = 'cyc.dev/release-manifest/v1'
+            releaseKind = 'developer-preview'
+            sourceCommit = [string]$env:GITHUB_SHA
+            sourceRef = [string]$env:GITHUB_REF
+            target = 'integration-assets'
+            files = $payloadFiles
+          } | ConvertTo-Json -Depth 8 |
+            Set-Content -LiteralPath (Join-Path $stage 'release-manifest.json') -Encoding UTF8
+
           $archiveRoot = Join-Path $PWD 'release-assets'
           New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
           $archive = Join-Path $archiveRoot "$name.zip"
           Compress-Archive -LiteralPath $stage -DestinationPath $archive
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
-          "$hash  $(Split-Path $archive -Leaf)" | Set-Content -NoNewline -Encoding ascii "$archive.sha256"
+          "$hash  $(Split-Path $archive -Leaf)" |
+            Set-Content -NoNewline -Encoding ascii "$archive.sha256"
       - uses: actions/upload-artifact@v4
         with:
-          name: ClusterYourCodex-integration
+          name: ClusterYourCodex-integration-preview
           path: release-assets/*
           if-no-files-found: error
 
   windows-preview:
-    name: Windows x64 installable preview
+    name: Windows x64 self-contained preview
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.0
       - uses: Swatinem/rust-cache@v2
         with:
-          key: windows-preview
+          key: windows-self-contained-preview
       - uses: pnpm/action-setup@v4
         with:
           version: 11.0.8
@@ -148,9 +375,14 @@ jobs:
           node-version: 24.19.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint full Rust workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test full Rust workspace
+        run: cargo test --workspace --locked
       - run: pnpm -r lint
       - run: pnpm -r test
-      - run: pnpm -r build
       - run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
       - run: cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
       - name: Validate Windows install lifecycle
@@ -158,9 +390,48 @@ jobs:
         run: >-
           powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
           -File .\packaging\windows\Test-WindowsPackaging.ps1
+      - run: pnpm -r build
       - run: cargo build --locked --release --bin cyc-controller --bin cyc-worker --bin cyc
       - run: pnpm --filter @clusteryourcodex/desktop exec tauri build --no-bundle
-      - name: Stage self-contained Windows preview
+      - name: Verify self-contained preview native binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne
+              [Runtime.InteropServices.Architecture]::X64) {
+            throw 'Expected a native Windows x64 runner.'
+          }
+          $binaries = @(
+            (Join-Path $PWD 'target/release/cyc-controller.exe'),
+            (Join-Path $PWD 'target/release/cyc-worker.exe'),
+            (Join-Path $PWD 'target/release/cyc.exe'),
+            (Join-Path $PWD 'apps/desktop/src-tauri/target/release/ClusterYourCodex.exe')
+          )
+          foreach ($path in $binaries) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing release binary: $path"
+            }
+            $bytes = [IO.File]::ReadAllBytes($path)
+            if ($bytes.Length -lt 512 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
+              throw "$path is not a PE executable."
+            }
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+            if ($peOffset -lt 0 -or $peOffset + 6 -gt $bytes.Length -or
+                [Text.Encoding]::ASCII.GetString($bytes, $peOffset, 4) -ne "PE`0`0") {
+              throw "$path has an invalid PE header."
+            }
+            $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            if ($machine -ne 0x8664) {
+              throw "$path is not an AMD64 PE executable (machine=0x$($machine.ToString('x4')))."
+            }
+          }
+          foreach ($path in $binaries[0..2]) {
+            & $path --version
+            if ($LASTEXITCODE -ne 0) { throw "$path --version failed." }
+            & $path --help | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "$path --help failed." }
+          }
+      - name: Stage self-contained Windows developer preview
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -222,7 +493,7 @@ jobs:
 
           $safeRef = [string]$env:CYC_REF_NAME -replace '[^0-9A-Za-z._-]', '-'
           if ([string]::IsNullOrWhiteSpace($safeRef)) { $safeRef = 'build' }
-          $name = "ClusterYourCodex-$safeRef-windows-x64-preview"
+          $name = "ClusterYourCodex-$safeRef-windows-x64-self-contained-preview"
           $preview = Join-Path $env:RUNNER_TEMP $name
           & .\packaging\windows\New-PreviewPayload.ps1 `
             -McpDeployRoot $mcpDeploy `
@@ -231,31 +502,194 @@ jobs:
             -OutputRoot $preview
           if ($LASTEXITCODE -ne 0) { throw 'failed to stage Windows preview payload' }
 
+          @'
+          # ClusterYourCodex Windows developer preview
+
+          This self-contained ZIP contains the Windows GUI, controller, managed worker,
+          CLI, per-user bootstrap lifecycle, Codex marketplace/plugin, and private Node
+          runtime. It is a developer preview for trusted single-user jobs. Submitted
+          steps execute as the worker account; this is not a hostile-workload sandbox.
+
+          The ZIP and bootstrap are unsigned and unattested. This is not a signed or
+          one-click NSIS distribution, and no SBOM, provenance, automatic update, or
+          stable-release support is claimed. Keep the extracted directory so the same
+          bootstrap can perform repair or uninstall.
+          '@ | Set-Content -LiteralPath (Join-Path $preview 'PREVIEW-NOTICE.md') -Encoding UTF8
+          [ordered]@{
+            schemaVersion = 'cyc.dev/platform-status/v1'
+            releaseKind = 'developer-preview'
+            platform = 'windows'
+            architecture = 'x86_64'
+            rustTarget = 'x86_64-pc-windows-msvc'
+            package = 'self-contained-bootstrap-zip'
+            nativeRunner = 'windows-latest'
+            binaries = @('ClusterYourCodex.exe', 'cyc-controller.exe', 'cyc-worker.exe', 'cyc.exe')
+            managedExecution = [ordered]@{
+              workerIncluded = $true
+              state = 'developer-preview-enabled-for-trusted-single-user-jobs'
+              containment = 'Windows Job Object with kill-on-close'
+            }
+            securityClaims = [ordered]@{
+              codeSigned = $false
+              notarized = $false
+              attested = $false
+              sbomIncluded = $false
+            }
+          } | ConvertTo-Json -Depth 8 |
+            Set-Content -LiteralPath (Join-Path $preview 'platform-status.json') -Encoding UTF8
+
+          $oldChecksums = Join-Path $preview 'SHA256SUMS'
+          if (Test-Path -LiteralPath $oldChecksums -PathType Leaf) {
+            Remove-Item -LiteralPath $oldChecksums -Force
+          }
+          $payloadFiles = @(Get-ChildItem -LiteralPath $preview -File -Recurse -Force |
+            Where-Object Name -ne 'release-manifest.json' |
+            Sort-Object FullName | ForEach-Object {
+              [ordered]@{
+                path = $_.FullName.Substring($preview.Length + 1).Replace('\', '/')
+                length = [long]$_.Length
+                sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+              }
+            })
+          [ordered]@{
+            schemaVersion = 'cyc.dev/release-manifest/v1'
+            releaseKind = 'developer-preview'
+            sourceCommit = [string]$env:GITHUB_SHA
+            sourceRef = [string]$env:GITHUB_REF
+            target = 'x86_64-pc-windows-msvc-self-contained'
+            files = $payloadFiles
+          } | ConvertTo-Json -Depth 8 |
+            Set-Content -LiteralPath (Join-Path $preview 'release-manifest.json') -Encoding UTF8
+          $checksumRecords = @(Get-ChildItem -LiteralPath $preview -File -Recurse -Force |
+            Where-Object Name -ne 'SHA256SUMS' |
+            Sort-Object FullName | ForEach-Object {
+              $relative = $_.FullName.Substring($preview.Length + 1).Replace('\', '/')
+              $digest = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$digest  $relative"
+            })
+          $checksumRecords | Set-Content -LiteralPath $oldChecksums -Encoding ASCII
+
           $archiveRoot = Join-Path $PWD 'release-assets'
           New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
           $archive = Join-Path $archiveRoot "$name.zip"
           Compress-Archive -LiteralPath $preview -DestinationPath $archive
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
-          "$hash  $(Split-Path $archive -Leaf)" | Set-Content -NoNewline -Encoding ascii "$archive.sha256"
+          "$hash  $(Split-Path $archive -Leaf)" |
+            Set-Content -NoNewline -Encoding ascii "$archive.sha256"
       - uses: actions/upload-artifact@v4
         with:
-          name: ClusterYourCodex-windows-x64-preview
+          name: ClusterYourCodex-windows-x64-self-contained-preview
+          path: release-assets/*
+          if-no-files-found: error
+
+  release-index:
+    name: Verify preview sidecars and build release index
+    needs: [rust-artifacts, integration-artifact, windows-preview]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloaded-artifacts
+      - name: Verify sidecars and assemble indexed release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $inputRoot = Join-Path $PWD 'downloaded-artifacts'
+          $outputRoot = Join-Path $PWD 'release-assets'
+          New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
+          $sidecars = @(Get-ChildItem -LiteralPath $inputRoot -File -Recurse -Filter '*.sha256' |
+            Sort-Object FullName)
+          if ($sidecars.Count -ne 6) {
+            throw "Expected six preview archive sidecars, found $($sidecars.Count)."
+          }
+
+          $records = New-Object System.Collections.Generic.List[object]
+          $names = @{}
+          foreach ($sidecar in $sidecars) {
+            $line = (Get-Content -LiteralPath $sidecar.FullName -Raw).Trim()
+            if ($line -notmatch '^(?<hash>[0-9a-fA-F]{64})  (?<name>[^/\\\r\n]+)$') {
+              throw "Malformed checksum sidecar: $($sidecar.FullName)"
+            }
+            $expectedHash = $Matches.hash.ToLowerInvariant()
+            $archiveName = $Matches.name
+            $sidecarArchiveName = $sidecar.Name.Substring(0, $sidecar.Name.Length - '.sha256'.Length)
+            if ($archiveName -cne $sidecarArchiveName) {
+              throw "Sidecar filename mismatch: $($sidecar.Name) declares $archiveName"
+            }
+            if ($names.ContainsKey($archiveName.ToLowerInvariant())) {
+              throw "Duplicate release asset name: $archiveName"
+            }
+            $names[$archiveName.ToLowerInvariant()] = $true
+            $archive = Join-Path $sidecar.DirectoryName $archiveName
+            if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+              throw "Sidecar target is missing: $archive"
+            }
+            $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+            if ($actualHash -cne $expectedHash) {
+              throw "SHA-256 mismatch for $archiveName"
+            }
+            Copy-Item -LiteralPath $archive, $sidecar.FullName -Destination $outputRoot
+            [void]$records.Add([ordered]@{
+              name = $archiveName
+              bytes = [long](Get-Item -LiteralPath $archive).Length
+              sha256 = $actualHash
+              sidecar = "$archiveName.sha256"
+            })
+          }
+
+          $requiredSuffixes = @(
+            '-windows-x64-preview.zip',
+            '-linux-x64-preview.tar.gz',
+            '-macos-x64-preview.tar.gz',
+            '-macos-arm64-preview.tar.gz',
+            '-integration-preview.zip',
+            '-windows-x64-self-contained-preview.zip'
+          )
+          foreach ($suffix in $requiredSuffixes) {
+            $matches = @($records | Where-Object { $_.name.EndsWith($suffix, [StringComparison]::Ordinal) })
+            if ($matches.Count -ne 1) {
+              throw "Expected exactly one release asset ending in $suffix; found $($matches.Count)."
+            }
+          }
+
+          $sortedRecords = @($records | Sort-Object name)
+          $indexPath = Join-Path $outputRoot 'release-index.json'
+          [ordered]@{
+            schemaVersion = 'cyc.dev/release-index/v1'
+            releaseKind = 'developer-preview'
+            sourceCommit = [string]$env:GITHUB_SHA
+            sourceRef = [string]$env:GITHUB_REF
+            unsigned = $true
+            unattested = $true
+            artifacts = $sortedRecords
+          } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $indexPath -Encoding UTF8
+          $indexHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $indexPath).Hash.ToLowerInvariant()
+          "$indexHash  release-index.json" |
+            Set-Content -NoNewline -Encoding ASCII (Join-Path $outputRoot 'release-index.json.sha256')
+          $combined = @($sortedRecords | ForEach-Object { "$($_.sha256)  $($_.name)" })
+          $combined += "$indexHash  release-index.json"
+          $combined | Set-Content -LiteralPath (Join-Path $outputRoot 'SHA256SUMS') -Encoding ASCII
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClusterYourCodex-release-index-preview
           path: release-assets/*
           if-no-files-found: error
 
   github-release:
+    name: Create tagged draft developer preview
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [rust-artifacts, integration-artifact, windows-preview]
+    needs: [release-index]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
+          name: ClusterYourCodex-release-index-preview
           path: release-assets
-          merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
           draft: true
+          prerelease: true
           generate_release_notes: true
           files: release-assets/*

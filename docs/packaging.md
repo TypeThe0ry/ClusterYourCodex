@@ -1,7 +1,7 @@
-# Packaging direction
+# Packaging and developer-preview artifacts
 
 ClusterYourCodex is Windows-first but keeps one cross-platform product model.
-The intended private-preview package is:
+The self-contained Windows developer-preview payload is:
 
 ```text
 ClusterYourCodex.exe   Tauri 2 GUI
@@ -13,8 +13,9 @@ integrations/          installer-owned Codex marketplace and plugin
                        bundled private runtime for the Codex MCP bridge
 ```
 
-The React application is the shared renderer. Tauri is the native host on
-Windows, Linux, and macOS; it proxies controller requests so the renderer never
+The React application is the shared renderer. Tauri is the intended native
+host on Windows, Linux, and macOS; the current self-contained native GUI archive
+is Windows-only. The host proxies controller requests so the renderer never
 receives the long-lived bearer token. The renderer can send only a typed
 `method/path/body` envelope. The native host owns the fixed
 `http://127.0.0.1:47831` origin, reads the token from the fixed platform data
@@ -23,8 +24,8 @@ explicit route allowlist.
 
 ## Windows lifecycle
 
-The current private preview installs per-user from a portable bootstrap ZIP
-under:
+The current developer preview installs per-user from a self-contained bootstrap
+ZIP under:
 
 ```text
 %LOCALAPPDATA%\Programs\ClusterYourCodex
@@ -59,12 +60,21 @@ post-hardened before startup completes. ACL failure aborts installation.
 Tokens never appear in arguments, environment variables, installer state,
 diagnostics, or logs.
 
-## Planned Linux and macOS lifecycle
+## Linux and macOS preview posture
 
-- Linux packages will use a systemd user service and XDG data/state directories.
-- macOS packages will use a LaunchAgent and Application Support/Logs directories.
-- The same controller/worker protocol, data ownership, rollback, and evidence
-  rules are intended to apply on every platform.
+- The Linux x64 preview is a portable native archive containing
+  `cyc-controller`, `cyc-worker`, and `cyc`. It does not install a systemd unit
+  or create XDG state automatically.
+- The macOS x64 and arm64 previews are portable controller/CLI archives. They
+  contain `cyc-controller` and `cyc`, but deliberately omit `cyc-worker`.
+  Managed execution on macOS remains fail-closed until a containment backend
+  can prove that the complete process tree has terminated.
+- Future Linux lifecycle packaging is expected to use a systemd user service
+  and XDG data/state directories. Future macOS lifecycle packaging is expected
+  to use a LaunchAgent and Application Support/Logs directories.
+- The same controller protocol, data ownership, rollback, and evidence rules
+  remain the cross-platform contract; an archive does not claim that a future
+  service lifecycle is already implemented.
 
 ## Codex integration
 
@@ -83,30 +93,57 @@ When the Codex CLI is available, bootstrap runs
 effort so an unavailable or older Codex CLI does not fail the core install; the
 manifest records whether it was attempted and uninstall reverses the owned
 registrations. The installer does not overwrite global `AGENTS.md`, personal
-marketplaces, or other plugins. The current MCP package contains a compiled
-TypeScript entry, production dependencies, and a bundled private Node runtime
-whose copied bytes are hash-recorded in the preview manifest and `SHA256SUMS`;
-a native MCP binary can replace it later without changing tool contracts.
+marketplaces, or other plugins. The MCP package contains a compiled TypeScript
+entry and production dependencies. The Windows self-contained preview also
+bundles a private Node runtime whose copied bytes are hash-recorded in the
+preview manifest and `SHA256SUMS`; the standalone integration preview instead
+requires Node.js 20 or newer on `PATH`. A native MCP binary can replace it later
+without changing tool contracts.
 
 Install, upgrade, repair, and uninstall record only non-secret owned resources
 and hashes. Uninstall removes those exact resources and preserves user data by
 default. `-PurgeData` is the explicit destructive option.
 
-Tauri 2 is configured for a current-user NSIS target. The bootstrap and
-portable payload are the private-preview lifecycle; wiring that payload into a
-signed, single-file NSIS release and validating clean Windows 11
-install/upgrade/uninstall remain release gates rather than assumed results.
+Tauri 2 has a current-user NSIS target in source configuration, but the release
+workflow does not build or publish it. The bootstrap ZIP is the implemented
+developer-preview lifecycle. It must not be described as a signed, single-file,
+one-click Windows installer.
 
-## Preview artifact gate
+## Published developer-preview set
 
-The current workflow produces unsigned, unattested developer-preview archives
-and checksum files. It does not yet satisfy the stable-release gate below.
+The release workflow publishes the following preview archives:
 
-Tagged builds must produce native Windows, Linux, macOS x64, and macOS arm64
-artifacts where supported, plus `SHA256SUMS`, a release manifest, SBOM, and
-provenance. Windows signing and a clean Windows 11 install/upgrade/uninstall
-smoke are required before calling an installer stable.
+| Artifact suffix | Contents | Current use |
+| --- | --- | --- |
+| `windows-x64-preview.zip` | `cyc-controller.exe`, `cyc-worker.exe`, `cyc.exe` | Portable native controller/worker/CLI preview |
+| `linux-x64-preview.tar.gz` | `cyc-controller`, `cyc-worker`, `cyc` | Portable native controller/worker/CLI preview |
+| `macos-x64-preview.tar.gz` | `cyc-controller`, `cyc` | Native Intel controller/CLI preview; worker omitted |
+| `macos-arm64-preview.tar.gz` | `cyc-controller`, `cyc` | Native Apple Silicon controller/CLI preview; worker omitted |
+| `integration-preview.zip` | Compiled renderer and Codex marketplace/plugin | Integration assets only; no native application or installer |
+| `windows-x64-self-contained-preview.zip` | GUI, controller, worker, CLI, bootstrap, Codex integration, private Node runtime | Windows-first extracted bootstrap preview |
 
-Until the managed execution acceptance gate in
-[`managed-worker-protocol.md`](managed-worker-protocol.md) passes, packaged
-workers are labelled probe/developer artifacts rather than executable workers.
+Every platform/integration archive contains `PREVIEW-NOTICE.md`,
+`platform-status.json`, and `release-manifest.json`. Each archive also has an
+adjacent SHA-256 sidecar. The release-index job downloads all six producer
+artifacts, verifies every sidecar against the downloaded bytes, rejects missing
+or duplicate expected assets, and emits a combined `SHA256SUMS` plus
+`release-index.json`. A tagged draft prerelease depends on that index job and
+publishes only its verified assembled output.
+
+All native Rust release jobs run full-workspace `cargo fmt`, `cargo clippy`, and
+`cargo test` before their release build. Windows, Linux, macOS Intel, and macOS
+Apple Silicon binaries are built on native runners. Staging checks the native
+binary format and architecture, verifies Unix executable bits, and runs native
+`--version` and `--help` smoke checks for every binary that will be shipped.
+The self-contained Windows job also checks the GUI PE architecture and reruns
+the Windows bootstrap lifecycle tests before creating its archive.
+
+These are unsigned and unattested developer previews. The workflow does not
+produce or claim code signing, Apple notarization, a one-click NSIS installer,
+an SBOM, provenance/attestations, automatic update support, or a stable-release
+support policy. Checksums and JSON inventories establish byte identity within
+the workflow output; they are not a substitute for those missing release
+controls. Windows/Linux managed workers execute trusted jobs as the worker OS
+account and are not hostile-workload or multi-tenant sandboxes. See
+[`managed-worker-protocol.md`](managed-worker-protocol.md) for the execution and
+containment contract.

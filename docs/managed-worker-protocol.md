@@ -1,8 +1,9 @@
 # Managed worker execution contract
 
-Status: design contract for the Windows private preview. The capability probe
-and scheduling model exist today; this document defines the execution gate that
-must pass before the project calls a node an executable worker.
+Status: execution contract for the Windows-first developer preview. Windows and
+Linux preview archives contain the managed worker for trusted, single-user
+jobs. The published macOS archives are controller/CLI-only and intentionally
+omit the worker while macOS process containment remains fail-closed.
 
 ## Trust boundary
 
@@ -280,9 +281,11 @@ Cancellation semantics are explicit:
 Windows execution uses a Job Object with kill-on-close. Linux requires
 `PR_SET_CHILD_SUBREAPER` before claiming work, combines a dedicated process
 group with PID/start-time descendant tracking, and fails closed when it cannot
-confirm that every descendant (including a `setsid` escape) is gone. The first
-macOS preview can pair and probe, but refuses to claim executable work until a
-platform containment backend can provide the same proof.
+confirm that every descendant (including a `setsid` escape) is gone. A worker
+built from source on macOS can pair and probe, but refuses to claim executable
+work until a platform containment backend can provide the same proof. The
+published macOS developer-preview archives omit `cyc-worker` entirely so their
+contents match that controller/CLI-only status.
 
 ## Evidence gate
 
@@ -304,9 +307,12 @@ SHA-256 on the controller, writes a temporary file, and atomically renames it.
 Streaming directly to disk is a later hardening step. Repeating the same chunk
 or completion is idempotent only when its digest is identical.
 
-## Acceptance gate
+## Managed-execution acceptance gate
 
-The private-preview label requires all of the following:
+The Windows/Linux managed-worker preview is evaluated against all of the
+following. The release workflow's unit, native-binary, archive, and checksum
+checks are necessary but do not themselves constitute or attest a live
+cross-node acceptance run:
 
 1. concurrent claim tests prove one winner per run and one slot per node;
 2. cross-node credential isolation and stale-CAS tests pass;
@@ -317,4 +323,5 @@ The private-preview label requires all of the following:
    worker, then retrieves logs and a SHA-verified artifact;
 6. failure and cancellation are exercised end to end;
 7. macOS compiles and passes platform unit tests, without claiming a live macOS
-   run until one is actually performed.
+   run until one is actually performed; published macOS archives remain
+   controller/CLI-only in the meantime.
