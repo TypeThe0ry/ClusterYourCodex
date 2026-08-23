@@ -172,3 +172,21 @@ object of at most 4096 UTF-8 bytes:
 leaves stdout empty, and emits one bounded stderr line. Plugin-list, source,
 version, or installed-payload verification failures happen before any AGENTS.md
 transaction is started.
+
+## Fresh-environment deployment test
+
+After extracting a Windows self-contained preview, run the real Windows
+PowerShell 5.1 bootstrap lifecycle in an isolated per-user directory:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File .\packaging\windows\Test-FreshDeployment.ps1 `
+  -PackageRoot C:\path\to\ClusterYourCodex-preview
+```
+
+The test validates the manifest-bound plan, performs an actual Install, starts
+the controller, probes the worker and CLI, runs Repair, then Purge-Uninstalls
+and verifies the scheduled-task state is restored. The smoke intentionally
+disables the managed listener/firewall and Codex external integration so it
+does not change shared network or Codex state. Use `-KeepWorkRoot` to retain
+bounded logs for troubleshooting.
