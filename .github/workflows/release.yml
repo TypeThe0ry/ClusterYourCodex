@@ -501,15 +501,6 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
           "$hash  $(Split-Path $archive -Leaf)" |
             Set-Content -NoNewline -Encoding ascii "$archive.sha256"
-      - name: Run fresh deployment lifecycle smoke
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $safeRef = [string]$env:CYC_REF_NAME -replace '[^0-9A-Za-z._-]', '-'
-          if ([string]::IsNullOrWhiteSpace($safeRef)) { $safeRef = 'build' }
-          $preview = Join-Path $env:RUNNER_TEMP "ClusterYourCodex-$safeRef-windows-x64-self-contained-preview"
-          & .\packaging\windows\Test-FreshDeployment.ps1 -PackageRoot $preview
-          if ($LASTEXITCODE -ne 0) { throw 'fresh deployment lifecycle smoke failed' }
       - uses: actions/upload-artifact@v4
         with:
           name: ClusterYourCodex-integration-preview
@@ -763,6 +754,15 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
           "$hash  $(Split-Path $archive -Leaf)" |
             Set-Content -NoNewline -Encoding ascii "$archive.sha256"
+      - name: Run fresh deployment lifecycle smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $safeRef = [string]$env:CYC_REF_NAME -replace '[^0-9A-Za-z._-]', '-'
+          if ([string]::IsNullOrWhiteSpace($safeRef)) { $safeRef = 'build' }
+          $preview = Join-Path $env:RUNNER_TEMP "ClusterYourCodex-$safeRef-windows-x64-self-contained-preview"
+          & .\packaging\windows\Test-FreshDeployment.ps1 -PackageRoot $preview
+          if ($LASTEXITCODE -ne 0) { throw 'fresh deployment lifecycle smoke failed' }
       - uses: actions/upload-artifact@v4
         with:
           name: ClusterYourCodex-windows-x64-self-contained-preview
