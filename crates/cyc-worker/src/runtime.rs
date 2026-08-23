@@ -2778,7 +2778,9 @@ fn absolute_clean_path(path: &Path, label: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use cyc_protocol::worker::{ExecutionLimits, WorkspaceAssignment};
-    use cyc_protocol::{JobKind, JobSpec, JobStep, Shell, SourceSpec};
+    #[cfg(any(windows, target_os = "linux"))]
+    use cyc_protocol::Shell;
+    use cyc_protocol::{JobKind, JobSpec, JobStep, SourceSpec};
     use tempfile::tempdir;
     use uuid::Uuid;
 

@@ -295,18 +295,16 @@ fn register_pack_case_path(
     Ok(())
 }
 
+#[cfg(windows)]
 fn metadata_is_reparse(metadata: &fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = metadata;
-        false
-    }
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 fn path_entry_exists(path: &Path) -> bool {
