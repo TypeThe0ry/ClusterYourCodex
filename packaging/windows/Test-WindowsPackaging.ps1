@@ -1637,6 +1637,7 @@ exit 4
     Assert-True ($setupBuilder -match 'Get-AuthenticodeSignature') 'Setup builder reports the signing state honestly'
     Assert-True ($setupBuilder -match 'RequireRuntimeSignature') 'GA setup can enforce Authenticode at runtime after signing'
     Assert-True ($setupBuilder -match "Get-FileHash.+SHA256") 'Setup builder emits a SHA-256 sidecar'
+    Assert-True ($setupBuilder -match 'candidateRoots[\s\S]+IsNullOrWhiteSpace') 'Setup builder tolerates a missing ProgramFiles(x86) environment variable'
 
     [System.IO.File]::AppendAllText((Join-Path $workerKits 'artifact-linux-x86_64\cyc-worker'), 'tampered')
     $tamperedPreview = Join-Path $testRoot 'tampered-preview'

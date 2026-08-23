@@ -33,10 +33,12 @@ function Resolve-MakeNsis {
     }
     $command = Get-Command makensis.exe -CommandType Application -ErrorAction SilentlyContinue
     if ($command) { return [string]$command.Source }
-    foreach ($candidate in @(
-        (Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'),
-        (Join-Path $env:ProgramFiles 'NSIS\makensis.exe')
-    )) {
+    $candidateRoots = @(
+        [string]${env:ProgramFiles(x86)},
+        [string]$env:ProgramFiles
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    foreach ($root in $candidateRoots) {
+        $candidate = Join-Path $root 'NSIS\makensis.exe'
         if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { return $candidate }
     }
     throw 'makensis.exe is required to build ClusterYourCodex-Setup.exe.'
