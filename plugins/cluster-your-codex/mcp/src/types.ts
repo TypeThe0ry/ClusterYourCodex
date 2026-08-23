@@ -1,4 +1,18 @@
 export type JobKind = "shell" | "build" | "test" | "lint" | "container" | "gpu" | "batch";
+export type GpuVendor = "nvidia" | "amd" | "intel" | "apple";
+
+export interface ResourceRequest {
+  slots?: number;
+  cpuCores?: number;
+  memoryMiB?: number;
+  diskMiB?: number;
+  gpu?: {
+    deviceId?: string;
+    vendor?: GpuVendor;
+    vramMiB?: number;
+    exclusive?: boolean;
+  };
+}
 
 export interface JobSpec {
   apiVersion: "cyc.dev/v1";
@@ -11,7 +25,7 @@ export interface JobSpec {
   kind: JobKind;
   source:
     | { type: "git"; repository: string; revision: string }
-    | { type: "snapshot"; digest: `sha256:${string}`; sizeBytes?: number };
+    | { type: "snapshot"; digest: `sha256:${string}`; sizeBytes: number };
   requirements?: {
     os?: "windows" | "linux" | "macos";
     arch?: "x86_64" | "aarch64";
@@ -20,11 +34,17 @@ export interface JobSpec {
     minMemoryMiB?: number;
     minDiskMiB?: number;
     gpu?: {
-      vendor?: "nvidia" | "amd" | "intel" | "apple";
+      vendor?: GpuVendor;
       minVramMiB?: number;
       exclusive?: boolean;
     };
   };
+  /**
+   * Consumable capacity reserved atomically for this run. Omit this field to
+   * retain preview-client compatibility; the controller then derives one slot
+   * and the CPU/memory/disk/GPU minima from `requirements`.
+   */
+  resourceRequest?: ResourceRequest;
   steps: Array<{
     name: string;
     shell?: "powershell" | "bash" | "zsh" | "cmd";
@@ -54,7 +74,118 @@ export interface HealthResponse {
   database: "ok";
 }
 
+export type NodeAvailability = "available" | "degraded" | "draining" | "disabled" | "offline" | "stale";
+
+export interface FleetDocument<T> {
+  document: T;
+  revision?: number;
+  digest?: string;
+  observedAt: string;
+  receivedAt: string;
+}
+
+export interface FleetNodeView {
+  nodeId: string;
+  config: FleetDocument<{
+    name: string;
+    enabled: boolean;
+    priority: number;
+    labels: Record<string, string>;
+    desiredState: "active" | "draining";
+    capacity: {
+      maxConcurrentJobs: number;
+      allocatableCpuCores?: number;
+      allocatableCpuPercent?: number;
+      memoryLimitMiB?: number;
+      allowedJobKinds: JobKind[];
+      allowOnBattery: boolean;
+      maxCpuPercent?: number;
+      maxCpuEwmaPercent?: number;
+      maxMemoryPercent?: number;
+      maxTemperatureC?: number;
+    };
+  }>;
+  inventory: FleetDocument<{
+    transport: Record<string, unknown> & { type: "local" | "managed" | "ssh" };
+    os: "windows" | "linux" | "macos";
+    arch: "x86_64" | "aarch64";
+    capabilities: string[];
+    logicalCpuCores: number;
+    memoryMiB: number;
+    diskMiB: number;
+    gpus: Array<{
+      vendor: GpuVendor;
+      model: string;
+      totalVramMiB: number;
+      stableId?: string;
+      driverVersion?: string;
+    }>;
+    cpuModel: string;
+    toolVersions: Record<string, string>;
+    workerVersion: string;
+    protocolVersion: number;
+    containment: { backend: string; version: string; maxSafeSlots: number };
+  }>;
+  telemetry: FleetDocument<{
+    status: "online" | "degraded" | "draining" | "offline";
+    availableCpuCores: number;
+    availableMemoryMiB: number;
+    availableDiskMiB: number;
+    gpus: Array<{
+      availableVramMiB: number;
+      allocatable: boolean;
+      stableId?: string;
+      utilizationPercent?: number;
+      temperatureC?: number;
+    }>;
+    load: { cpuPercent: number; queueDepth: number; runningJobs: number };
+    cachedSources: string[];
+    observedAt: string;
+    bootGeneration: number;
+    bootId: string;
+    sequence: number;
+    cpuEwmaPercent: number;
+    activeRunIds: string[];
+    powerSource: "ac" | "battery" | "unknown";
+    battery?: { chargePercent?: number; charging?: boolean };
+    temperatureC?: number;
+  }>;
+  availability: NodeAvailability;
+  availabilityReasons: string[];
+  effectiveSlots: {
+    configured: number;
+    containmentMaxSafe: number;
+    effective: number;
+    reserved: number;
+    available: number;
+  };
+  effectiveResources: Record<string, unknown> & {
+    logicalCpuCores: number;
+    availableCpuCores: number;
+    memoryMiB: number;
+    availableMemoryMiB: number;
+    diskMiB: number;
+    availableDiskMiB: number;
+  };
+  reservations: Array<{
+    leaseId: string;
+    runId: string;
+    jobId: string;
+    phase: string;
+    slots: number;
+    cpuCores: number;
+    memoryMiB: number;
+    diskMiB: number;
+    gpuDeviceId?: string;
+    gpuVramMiB: number;
+    gpuExclusive: boolean;
+    expiresAt: string;
+  }>;
+}
+
 export interface FleetInfo {
+  fleetRevision: number;
+  observedAt: string;
   controller: {
     version: string;
     apiVersion: "cyc.dev/v1";
@@ -80,18 +211,36 @@ export interface FleetInfo {
     cachedSources: string[];
     lastSeenAt?: string;
   }>;
+  /** Additive split-state view used for fresh occupancy and capacity decisions. */
+  nodeViews?: FleetNodeView[];
   recentJobs: JobResponse[];
 }
 
-export interface PlanResponse {
+export interface PlacementPlanBindingV1 {
+  apiVersion: "cyc.dev/placement-plan-binding/v1";
   planId: string;
   jobId: string;
+  jobDigest: string;
   createdAt: string;
+  expiresAt: string;
+  fleetRevision: number;
+  nodeRevision: number;
+  policyRevision: number;
   decision: {
     nodeId: string;
     score: number;
     explanation: PlacementExplanation;
   };
+}
+
+export type PlanResponse = PlacementPlanBindingV1;
+
+export interface SnapshotMetadata {
+  apiVersion: "cyc.dev/snapshot/v1";
+  format: "tar+zstd";
+  digest: `sha256:${string}`;
+  sizeBytes: number;
+  createdAt: string;
 }
 
 export type JobStatus = "queued" | "preparing" | "running" | "verifying" | "succeeded" | "failed" | "cancelled";
@@ -126,4 +275,8 @@ export interface RunPayload {
 export interface JobResponse {
   job: JobSpec;
   run: RunPayload;
+  /** Null is reserved for non-backfillable pre-binding controller rows. */
+  planBinding: PlacementPlanBindingV1 | null;
+  version: number;
+  cancelRequested: boolean;
 }

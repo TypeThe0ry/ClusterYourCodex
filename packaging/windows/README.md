@@ -1,7 +1,9 @@
 # Windows packaging
 
-`bootstrap.ps1` is the current-user lifecycle engine used by the future NSIS
-custom action and by portable/private-preview bundles. It never accepts a raw
+`Invoke-ClusterYourCodexLifecycle.ps1` is the unelevated current-user
+coordinator used by NSIS and portable previews. `bootstrap.ps1` is its
+per-user core; `Invoke-ClusterYourCodexFirewall.ps1` is the only elevated
+surface. None accepts a raw
 controller token and never places a token in argv, environment variables,
 task definitions, manifests, or logs.
 
@@ -13,11 +15,22 @@ payload/
   cyc-controller.exe
   cyc-worker.exe                 optional unless -EnableWorker is used
   cyc.exe
+  installer/
+    bootstrap.ps1
+    Invoke-ClusterYourCodexLifecycle.ps1
+    Invoke-ClusterYourCodexFirewall.ps1
+    Uninstall-ClusterYourCodex.ps1
+  worker-kits/
+    windows-x86_64/              SSH bootstrap kit for Windows workers
+    linux-x86_64/                SSH bootstrap kit for Linux x64 workers
+    linux-aarch64/               SSH bootstrap kit for Linux arm64 workers
   integrations/codex-marketplace/
     .agents/plugins/marketplace.json
     plugins/cluster-your-codex/  complete plugin directory
       mcp/runtime/node.exe       bundled private MCP runtime
       mcp/runtime/LICENSE.node.txt
+  integrations/codex/
+    cluster-agents-block.md      public global AGENTS.md managed block
 ```
 
 ## Commands
@@ -26,18 +39,24 @@ payload/
 # Show a deterministic plan without changing the machine.
 .\bootstrap.ps1 -Action Install -PlanOnly
 
-# Install or idempotently upgrade/repair the current-user installation.
-.\bootstrap.ps1 -Action Install
-.\bootstrap.ps1 -Action Repair
+# Install or idempotently repair through the split-elevation coordinator.
+.\Invoke-ClusterYourCodexLifecycle.ps1 -Action Install `
+  -BundleRoot .\payload -PackageRoot . `
+  -PackageManifest .\preview-manifest.json
+.\Invoke-ClusterYourCodexLifecycle.ps1 -Action Repair `
+  -BundleRoot .\payload -PackageRoot . `
+  -PackageManifest .\preview-manifest.json
 
-# Enable the worker only after pairing created its protected config file.
-.\bootstrap.ps1 -Action Repair -EnableWorker
+# Non-elevated GUI bridge after plugin install/self-test. This touches only the
+# Codex plugin receipt, global AGENTS.md managed block, and install manifest.
+.\bootstrap.ps1 -Action IntegrateCodex `
+  -InstallRoot "$env:LOCALAPPDATA\Programs\ClusterYourCodex" `
+  -DataRoot "$env:LOCALAPPDATA\ClusterYourCodex" `
+  -CodexHome "$env:USERPROFILE\.codex"
 
-# Remove installer-owned files and tasks; keep controller/worker data.
-.\bootstrap.ps1 -Action Uninstall
-
-# Explicit destructive cleanup of the manifest-recorded default data root.
-.\bootstrap.ps1 -Action Uninstall -PurgeData
+# Remove installer-owned files and tasks while keeping the initiating HKCU and
+# profile context. Only firewall removal prompts for UAC.
+& "$env:LOCALAPPDATA\Programs\ClusterYourCodex\installer\Uninstall-ClusterYourCodex.ps1"
 
 # Pure PowerShell 5.1 static and install-plan tests.
 .\Test-WindowsPackaging.ps1
@@ -60,28 +79,96 @@ if (-not (Test-Path -LiteralPath $nodeLicense)) {
   -McpDeployRoot "$env:RUNNER_TEMP\cyc-mcp" `
   -NodeExecutable $node `
   -NodeLicense $nodeLicense `
+  -WorkerKitsRoot "$env:RUNNER_TEMP\cyc-managed-worker-kits" `
   -OutputRoot ".\artifacts\ClusterYourCodex-Windows-x64"
+
+# Requires makensis.exe (NSIS). Embeds the exact manifest-validated preview.
+.\packaging\windows\New-SetupExecutable.ps1 `
+  -PackageRoot ".\artifacts\ClusterYourCodex-Windows-x64" `
+  -OutputPath ".\artifacts\ClusterYourCodex-Setup.exe"
 ```
 
-The output root contains `bootstrap.ps1`, `SHA256SUMS`, a non-secret preview
-manifest, a double-click `Install-ClusterYourCodex.cmd`, and the complete
-`payload/` expected by bootstrap. The wrapper resolves its directory with
-`%~dp0`, installs for the current user, returns PowerShell's exit code, and
-pauses on failure. On success it launches the installed GUI. The staged plugin
+The output root contains the coordinator, firewall-only helper,
+`bootstrap.ps1`, `SHA256SUMS`, a non-secret preview manifest, a double-click
+`Install-ClusterYourCodex.cmd`, and the complete `payload/`. The wrapper resolves
+its directory with `%~dp0`, remains unelevated, verifies
+`preview-manifest.json`, binds the initiating SID/profile/LOCALAPPDATA, and
+requests exactly one UAC prompt for the fixed firewall transaction. Per-user
+files, HKCU registration, Codex integration, and Scheduled Tasks never switch
+to an over-the-shoulder administrator profile. On success it launches
+the installed GUI. The staged plugin
 uses its bundled, license-accompanied private Node runtime rather than PATH
 `node`; only the staged `.mcp.json` is rewritten. The runtime and license
 hashes are recorded in `preview-manifest.json` and `SHA256SUMS`; release
-staging does not fetch an unverified replacement license. The current Tauri
-NSIS contains the GUI only; it does **not** invoke bootstrap yet.
+staging does not fetch an unverified replacement license. When
+`-WorkerKitsRoot` is supplied, staging requires all three supported worker-kit
+targets, revalidates their exact file sets, manifests, lengths, and SHA-256
+allowlists, requires each canonical manifest's detached Ed25519 publisher
+signature envelope and pinned key id, then records their identities in
+`preview-manifest.json`. Cryptographic Ed25519 verification occurs in the
+controller before SSH staging; preview staging preserves the already signed
+five-file kit byte-for-byte.
 
-Treat this ZIP as a self-contained Windows developer preview. It installs the
-loopback controller, GUI, CLI, worker binary, and best-effort Codex integration.
-Managed-worker TLS onboarding and the GUI setup actions are not connected yet.
-Keep the extracted preview directory to run
-`.\bootstrap.ps1 -Action Uninstall`; this preview does not yet register an
-installed uninstaller.
+The ZIP and `ClusterYourCodex-Setup.exe` contain the same self-contained Windows
+developer preview. Installation creates or verifies a non-rotating controller
+TLS identity, starts the loopback API plus the managed-worker TLS listener,
+adds one product-owned inbound TCP rule restricted to the Private profile and
+`LocalSubnet`, installs the GUI/CLI/Worker Kits/Codex integration, and registers
+a per-user uninstaller in Windows Apps & Features. Repair preserves the TLS
+identity; an incomplete or mismatched identity fails closed rather than
+silently rotating it. Uninstall preserves controller/worker data unless
+`-PurgeData` is explicitly supplied.
+
+The coordinator durably records `prepared -> firewallApplied -> coreApplied ->
+complete`. The helper snapshots only the exact product rule, applies and
+verifies it, then remains elevated until the unelevated core signals finalize
+or rollback. Core failure, cancellation, or timeout restores the verified prior
+rule. Its final receipt binds the transaction, request digest, initiating
+SID/profile, program hash, port, and rule identity. The core manifest stays
+`pending` until that receipt is committed. Matching response-loss replay is
+idempotent; changed SID/profile, request/helper hash, rule collision, or receipt
+fails closed.
+
+`New-SetupExecutable.ps1` revalidates every staged length and SHA-256 before
+embedding the package, emits a checksum sidecar, and reports the Authenticode
+state. Developer preview executables remain explicitly code-unsigned; GA Authenticode signing
+and post-sign verification remain a release gate rather than a claimed result.
+That code-signing status is separate from the Worker Kit publisher signatures.
+The unsigned developer preview constrains elevation through strict validation
+and a package-manifest-bound helper hash, but this does not authenticate a
+user-writable script to the administrator. GA must Authenticode-sign both Setup
+and the narrow helper. `-RequirePackageSignature` makes the helper verify both
+before mutation; that signed-helper gate is mandatory for a GA
+over-the-shoulder guarantee.
 
 The controller and worker run as least-privilege, current-user Scheduled Tasks
 with `Interactive` logon, `IgnoreNew`, bounded restart, and no embedded secret.
 Codex marketplace/plugin registration is best effort: a missing or older Codex
-CLI does not fail the core install. The script never edits global `AGENTS.md`.
+CLI does not fail the core install. The AGENTS.md integration is stricter: Setup
+and Repair require `codex plugin list --json` to confirm the exact plugin is
+installed and enabled, with its exact manifest version and owned local source,
+before they manage one marked block in global
+`%CODEX_HOME%\AGENTS.md` (or `%USERPROFILE%\.codex\AGENTS.md`). A missing or
+failed registration leaves that block absent until a later successful Repair.
+Before mutation, the installer durably journals the before/after images and
+their file/template/block/prefix digests. Product lifecycle calls share one
+named mutex; writes and deletes use compare-and-swap preconditions. Restart and
+rollback reverse only the proven owned range, preserve concurrent edits outside
+it, and fail closed while retaining an ambiguous transaction.
+Uninstall removes only the verified owned block and preserves all other user
+content; an originally absent block-only file is removed. The install manifest
+records previous-file, template, block, and resulting-file SHA-256 values.
+
+`-Action IntegrateCodex` is the machine-facing GUI completion/repair boundary.
+It never invokes controller, worker, TLS, firewall, service, or Scheduled Task
+lifecycle code. On success it exits zero and stdout is exactly one compact JSON
+object of at most 4096 UTF-8 bytes:
+
+```json
+{"schemaVersion":"cyc.dev/codex-integration-receipt/v1","status":"unchanged","pluginId":"cluster-your-codex@clusteryourcodex","pluginVersion":"0.1.0","agentsBlockSha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+```
+
+`status` is `installed`, `repaired`, or `unchanged`. Failure exits nonzero,
+leaves stdout empty, and emits one bounded stderr line. Plugin-list, source,
+version, or installed-payload verification failures happen before any AGENTS.md
+transaction is started.

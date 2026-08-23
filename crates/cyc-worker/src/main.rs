@@ -31,6 +31,12 @@ enum Commands {
         enrollment_file: PathBuf,
         #[arg(long)]
         config: PathBuf,
+        /// Absolute job workspace selected by the installer or operator.
+        #[arg(long)]
+        workspace_root: Option<PathBuf>,
+        /// Rotate credentials for the same controller and intended node.
+        #[arg(long)]
+        repair: bool,
     },
     /// Poll, execute, and report jobs. One worker process runs one job at a time.
     Run {
@@ -58,8 +64,18 @@ async fn main() -> Result<()> {
         Commands::Pair {
             enrollment_file,
             config,
+            workspace_root,
+            repair,
         } => {
-            let paired = cyc_worker::runtime::pair(&enrollment_file, &config).await?;
+            let paired = cyc_worker::runtime::pair(
+                &enrollment_file,
+                &config,
+                cyc_worker::runtime::PairOptions {
+                    workspace_root,
+                    repair,
+                },
+            )
+            .await?;
             println!(
                 "paired node {} to controller {}; config={}",
                 paired.node_id,

@@ -1,6 +1,8 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU8;
 use std::sync::Arc;
@@ -8,9 +10,14 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use cyc_protocol::worker::WorkspaceAssignment;
-use cyc_protocol::{JobSpec, SourceSpec};
+use cyc_protocol::{
+    validate_portable_relative_path, JobSpec, SourceSpec, MAX_SNAPSHOT_ARCHIVE_BYTES,
+    MAX_SNAPSHOT_ENTRIES, MAX_SNAPSHOT_EXPANDED_BYTES, MAX_SNAPSHOT_FILE_BYTES,
+    MAX_SNAPSHOT_PATH_BYTES,
+};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::process::{
@@ -156,6 +163,7 @@ pub async fn prepare_job(
     run_id: Uuid,
     spec: &JobSpec,
     workspace: &WorkspaceAssignment,
+    snapshot_archive: Option<Vec<u8>>,
     cancellation: Arc<AtomicU8>,
     sink: Arc<dyn LogSink>,
     log_budget: Arc<LogBudget>,
@@ -196,7 +204,11 @@ pub async fn prepare_job(
         )
         .into());
     }
-    for directory in [&repository, &scripts, &logs, &artifacts] {
+    let mut directories = vec![&scripts, &logs, &artifacts];
+    if matches!(&spec.source, SourceSpec::Git { .. }) {
+        directories.push(&repository);
+    }
+    for directory in directories {
         fs::create_dir_all(directory)
             .with_context(|| format!("create job directory {}", directory.display()))?;
         let canonical = fs::canonicalize(directory)
@@ -225,11 +237,30 @@ pub async fn prepare_job(
             )
             .await
         }
-        SourceSpec::Snapshot { digest, .. } => Err(PrepareJobError::confirmed_empty(
-            anyhow::anyhow!(
-                "snapshot source `{digest}` is not supported by this worker version; no command was executed"
-            ),
-        )),
+        SourceSpec::Snapshot { digest, size_bytes } => {
+            let digest = digest.clone();
+            let size_bytes = size_bytes.ok_or_else(|| {
+                PrepareJobError::confirmed_empty(anyhow::anyhow!(
+                    "snapshot source omitted required sizeBytes"
+                ))
+            })?;
+            let archive = snapshot_archive.ok_or_else(|| {
+                PrepareJobError::confirmed_empty(anyhow::anyhow!(
+                    "snapshot archive `{digest}` was not supplied after authenticated download"
+                ))
+            })?;
+            let destination = repository.clone();
+            tokio::task::spawn_blocking(move || {
+                extract_snapshot_archive(&digest, size_bytes, archive, &destination)
+            })
+            .await
+            .map_err(|error| {
+                PrepareJobError::confirmed_empty(anyhow::anyhow!(
+                    "snapshot extraction task failed: {error}"
+                ))
+            })?
+            .map_err(PrepareJobError::confirmed_empty)
+        }
     };
     let source = match source_result {
         Ok(source) => source,
@@ -268,6 +299,379 @@ fn join_portable(root: &Path, relative: &str) -> PathBuf {
         .split('/')
         .filter(|segment| !segment.is_empty())
         .fold(root.to_owned(), |path, segment| path.join(segment))
+}
+
+const SNAPSHOT_TAR_OVERHEAD_BYTES: u64 = MAX_SNAPSHOT_ENTRIES * 2_048 + 2 * 1024 * 1024;
+
+fn extract_snapshot_archive(
+    digest: &str,
+    size_bytes: u64,
+    archive_bytes: Vec<u8>,
+    destination: &Path,
+) -> Result<SourceEvidence> {
+    cyc_protocol::validate_snapshot_digest(digest).context("validate snapshot digest")?;
+    cyc_protocol::validate_snapshot_size(size_bytes).context("validate snapshot sizeBytes")?;
+    let actual_size = u64::try_from(archive_bytes.len()).unwrap_or(u64::MAX);
+    if actual_size != size_bytes || actual_size > MAX_SNAPSHOT_ARCHIVE_BYTES {
+        bail!("snapshot archive size does not match sizeBytes");
+    }
+    let actual_digest = format!("sha256:{}", hex::encode(Sha256::digest(&archive_bytes)));
+    if actual_digest != digest {
+        bail!("snapshot archive bytes do not match the assigned digest");
+    }
+    if path_entry_exists(destination)? {
+        bail!("snapshot destination already exists and is never reused");
+    }
+    let parent = destination
+        .parent()
+        .context("snapshot destination must have a job-owned parent")?;
+    require_direct_directory(parent)?;
+    let staging = parent.join(format!(".snapshot-extract-{}", Uuid::new_v4()));
+    fs::create_dir(&staging).context("create fresh snapshot staging directory")?;
+    require_direct_directory(&staging)?;
+
+    let extraction = (|| -> Result<()> {
+        let decoder = zstd::stream::read::Decoder::new(Cursor::new(archive_bytes))
+            .context("open zstd snapshot frame")?;
+        let max_tar_bytes = MAX_SNAPSHOT_EXPANDED_BYTES.saturating_add(SNAPSHOT_TAR_OVERHEAD_BYTES);
+        let reader = BoundedSnapshotReader::new(decoder, max_tar_bytes);
+        let mut archive = tar::Archive::new(reader);
+        let mut explicit_paths = BTreeSet::new();
+        let mut case_paths = BTreeMap::<String, String>::new();
+        let mut entry_count = 0_u64;
+        let mut expanded_bytes = 0_u64;
+
+        for entry in archive.entries().context("read snapshot tar entries")? {
+            let mut entry = entry.context("read snapshot tar entry")?;
+            entry_count = entry_count.saturating_add(1);
+            if entry_count > MAX_SNAPSHOT_ENTRIES {
+                bail!("snapshot archive exceeds the entry-count limit");
+            }
+            let portable = entry
+                .path()
+                .context("decode snapshot entry path")?
+                .to_str()
+                .context("snapshot paths must be valid UTF-8")?
+                .to_owned();
+            validate_snapshot_path(&portable, &mut explicit_paths, &mut case_paths)?;
+            let kind = entry.header().entry_type();
+            let declared_size = entry.header().size().context("read snapshot entry size")?;
+            if kind.is_dir() {
+                if declared_size != 0 {
+                    bail!("snapshot directory entries must have zero size");
+                }
+                create_snapshot_directory(&staging, &portable)?;
+            } else if kind.is_file() {
+                if declared_size > MAX_SNAPSHOT_FILE_BYTES {
+                    bail!("snapshot regular file exceeds the per-file limit");
+                }
+                expanded_bytes = expanded_bytes
+                    .checked_add(declared_size)
+                    .context("snapshot expanded-size overflow")?;
+                if expanded_bytes > MAX_SNAPSHOT_EXPANDED_BYTES {
+                    bail!("snapshot archive exceeds the expanded-size limit");
+                }
+                install_snapshot_file(&staging, &portable, &mut entry, declared_size)?;
+            } else {
+                bail!(
+                    "snapshot archive entry `{portable}` has a forbidden link, device, FIFO, or extension type"
+                );
+            }
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = extraction {
+        remove_owned_snapshot_staging(parent, &staging);
+        return Err(error);
+    }
+    if path_entry_exists(destination)? {
+        remove_owned_snapshot_staging(parent, &staging);
+        bail!("snapshot destination appeared concurrently and will not be replaced");
+    }
+    fs::rename(&staging, destination).context("atomically install extracted snapshot tree")?;
+    require_direct_directory(destination)?;
+    Ok(SourceEvidence {
+        kind: "snapshot".to_owned(),
+        repository: "snapshot".to_owned(),
+        requested_revision: digest.to_owned(),
+        resolved_revision: digest.to_owned(),
+        tree: digest.to_owned(),
+        git_version: "not-applicable".to_owned(),
+    })
+}
+
+struct BoundedSnapshotReader<R> {
+    inner: R,
+    observed: u64,
+    maximum: u64,
+}
+
+impl<R> BoundedSnapshotReader<R> {
+    fn new(inner: R, maximum: u64) -> Self {
+        Self {
+            inner,
+            observed: 0,
+            maximum,
+        }
+    }
+}
+
+impl<R: Read> Read for BoundedSnapshotReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let remaining = self.maximum.saturating_sub(self.observed);
+        if remaining == 0 {
+            let mut probe = [0_u8; 1];
+            return match self.inner.read(&mut probe)? {
+                0 => Ok(0),
+                _ => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "snapshot decompressed tar stream exceeds its bound",
+                )),
+            };
+        }
+        let allowed = usize::try_from(remaining)
+            .unwrap_or(usize::MAX)
+            .min(buffer.len());
+        let length = self.inner.read(&mut buffer[..allowed])?;
+        self.observed = self
+            .observed
+            .saturating_add(u64::try_from(length).unwrap_or(u64::MAX));
+        Ok(length)
+    }
+}
+
+fn validate_snapshot_path(
+    path: &str,
+    explicit_paths: &mut BTreeSet<String>,
+    case_paths: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    validate_portable_relative_path(path).context("validate portable snapshot path")?;
+    if path.len() > MAX_SNAPSHOT_PATH_BYTES || path.chars().any(char::is_control) {
+        bail!("snapshot path is empty, oversized, or contains a control character");
+    }
+    if !explicit_paths.insert(path.to_owned()) {
+        bail!("snapshot archive contains a duplicate path");
+    }
+
+    let mut prefix = String::new();
+    for segment in path.split('/') {
+        validate_snapshot_segment(segment)?;
+        if segment.eq_ignore_ascii_case(".git") {
+            bail!("snapshot archive may not contain .git metadata");
+        }
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(segment);
+        let folded = prefix.to_lowercase();
+        if let Some(existing) = case_paths.get(&folded) {
+            if existing != &prefix {
+                bail!("snapshot archive contains a case-colliding path");
+            }
+        } else {
+            case_paths.insert(folded, prefix.clone());
+        }
+    }
+    Ok(())
+}
+
+fn validate_snapshot_segment(segment: &str) -> Result<()> {
+    if segment.len() > 255
+        || segment.ends_with(['.', ' '])
+        || segment
+            .chars()
+            .any(|character| matches!(character, ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+    {
+        bail!("snapshot path contains a non-portable filesystem component");
+    }
+    let stem = segment
+        .split('.')
+        .next()
+        .unwrap_or(segment)
+        .to_ascii_uppercase();
+    let reserved = matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || matches_snapshot_numbered_device(&stem, "COM")
+        || matches_snapshot_numbered_device(&stem, "LPT");
+    if reserved {
+        bail!("snapshot path contains a reserved filesystem device name");
+    }
+    Ok(())
+}
+
+fn matches_snapshot_numbered_device(value: &str, prefix: &str) -> bool {
+    value
+        .strip_prefix(prefix)
+        .is_some_and(|suffix| matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
+}
+
+fn path_entry_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("inspect path entry {}", path.display())),
+    }
+}
+
+fn snapshot_metadata_is_reparse(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = metadata;
+        false
+    }
+}
+
+fn require_direct_directory(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect snapshot directory {}", path.display()))?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || snapshot_metadata_is_reparse(&metadata)
+    {
+        bail!("snapshot extraction path is not a direct directory");
+    }
+    Ok(())
+}
+
+fn ensure_snapshot_parents(root: &Path, portable: &str) -> Result<PathBuf> {
+    require_direct_directory(root)?;
+    let mut destination = root.to_owned();
+    let mut segments = portable.split('/').peekable();
+    while let Some(segment) = segments.next() {
+        destination.push(segment);
+        if segments.peek().is_none() {
+            break;
+        }
+        match fs::symlink_metadata(&destination) {
+            Ok(metadata)
+                if metadata.is_dir()
+                    && !metadata.file_type().is_symlink()
+                    && !snapshot_metadata_is_reparse(&metadata) => {}
+            Ok(_) => bail!("snapshot parent conflicts with a non-directory entry"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&destination)
+                    .with_context(|| format!("create snapshot parent {}", destination.display()))?;
+                set_snapshot_directory_permissions(&destination)?;
+            }
+            Err(error) => return Err(error).context("inspect snapshot parent"),
+        }
+    }
+    Ok(destination)
+}
+
+fn create_snapshot_directory(root: &Path, portable: &str) -> Result<()> {
+    let destination = ensure_snapshot_parents(root, portable)?;
+    match fs::symlink_metadata(&destination) {
+        Ok(metadata)
+            if metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && !snapshot_metadata_is_reparse(&metadata) => {}
+        Ok(_) => bail!("snapshot directory conflicts with an existing non-directory entry"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&destination).context("create snapshot directory entry")?;
+        }
+        Err(error) => return Err(error).context("inspect snapshot directory entry"),
+    }
+    set_snapshot_directory_permissions(&destination)
+}
+
+fn install_snapshot_file<R: Read>(
+    root: &Path,
+    portable: &str,
+    reader: &mut R,
+    declared_size: u64,
+) -> Result<()> {
+    let destination = ensure_snapshot_parents(root, portable)?;
+    if path_entry_exists(&destination)? {
+        bail!("snapshot file conflicts with an existing path");
+    }
+    let parent = destination
+        .parent()
+        .context("snapshot file must have a parent")?;
+    require_direct_directory(parent)?;
+    let temporary = parent.join(format!(".snapshot-file-{}.tmp", Uuid::new_v4()));
+    let write_result = (|| -> Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
+            .context("create snapshot temporary file")?;
+        let copied = std::io::copy(reader, &mut file).context("extract snapshot regular file")?;
+        if copied != declared_size {
+            bail!("snapshot regular-file payload length differs from its tar header");
+        }
+        file.sync_all().context("flush extracted snapshot file")?;
+        drop(file);
+        set_snapshot_file_permissions(&temporary)?;
+        if path_entry_exists(&destination)? {
+            bail!("snapshot destination appeared concurrently");
+        }
+        #[cfg(unix)]
+        fs::hard_link(&temporary, &destination)
+            .context("atomically install extracted snapshot file")?;
+        #[cfg(windows)]
+        fs::rename(&temporary, &destination)
+            .context("atomically install extracted snapshot file")?;
+        #[cfg(not(any(unix, windows)))]
+        compile_error!("snapshot extraction requires Unix or Windows");
+        #[cfg(unix)]
+        fs::remove_file(&temporary).context("remove installed snapshot temporary file")?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write_result
+}
+
+#[cfg(unix)]
+fn set_snapshot_directory_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+        .context("normalize snapshot directory mode")
+}
+
+#[cfg(not(unix))]
+fn set_snapshot_directory_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_snapshot_file_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o644))
+        .context("normalize snapshot file mode")
+}
+
+#[cfg(not(unix))]
+fn set_snapshot_file_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn remove_owned_snapshot_staging(parent: &Path, staging: &Path) {
+    let owned_name = staging
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(".snapshot-extract-"));
+    if owned_name && staging.parent() == Some(parent) {
+        let _ = fs::remove_dir_all(staging);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -832,6 +1236,128 @@ mod tests {
         assert!(validate_repository("file:///tmp/repo", false).is_err());
         assert!(validate_repository("https://user:secret@example.com/repo", false).is_err());
         assert!(validate_repository("https://example.com/repo.git", false).is_ok());
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn snapshot_extraction_is_content_bound_and_rejects_unsafe_entries() {
+        let valid = build_snapshot_archive(&[
+            ("src", tar::EntryType::Directory, b""),
+            ("src/check.txt", tar::EntryType::Regular, b"snapshot ok\n"),
+        ]);
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(&valid)));
+        let destination_root = tempdir().unwrap();
+        let destination = destination_root.path().join("repo");
+        let evidence =
+            extract_snapshot_archive(&digest, valid.len() as u64, valid.clone(), &destination)
+                .unwrap();
+        assert_eq!(
+            fs::read_to_string(destination.join("src/check.txt")).unwrap(),
+            "snapshot ok\n"
+        );
+        assert_eq!(evidence.kind, "snapshot");
+        assert_eq!(evidence.requested_revision, digest);
+        assert_eq!(evidence.resolved_revision, digest);
+        assert_eq!(evidence.tree, digest);
+
+        let mismatched = destination_root.path().join("mismatch");
+        assert!(extract_snapshot_archive(
+            &format!("sha256:{}", "f".repeat(64)),
+            valid.len() as u64,
+            valid,
+            &mismatched,
+        )
+        .is_err());
+        assert!(!mismatched.exists());
+
+        for (label, archive) in [
+            (
+                "case-collision",
+                build_snapshot_archive(&[
+                    ("Source.txt", tar::EntryType::Regular, b"a"),
+                    ("source.txt", tar::EntryType::Regular, b"b"),
+                ]),
+            ),
+            (
+                "traversal",
+                build_raw_snapshot_archive("../escape.txt", tar::EntryType::Regular, 0),
+            ),
+            (
+                "symlink",
+                build_snapshot_archive(&[("link", tar::EntryType::Symlink, b"")]),
+            ),
+            (
+                "oversized-file",
+                build_raw_snapshot_archive(
+                    "large.bin",
+                    tar::EntryType::Regular,
+                    MAX_SNAPSHOT_FILE_BYTES + 1,
+                ),
+            ),
+            (
+                "git-metadata",
+                build_snapshot_archive(&[(".GiT/config", tar::EntryType::Regular, b"forbidden")]),
+            ),
+        ] {
+            let digest = format!("sha256:{}", hex::encode(Sha256::digest(&archive)));
+            let destination = destination_root.path().join(label);
+            let error =
+                extract_snapshot_archive(&digest, archive.len() as u64, archive, &destination)
+                    .unwrap_err();
+            assert!(
+                !destination.exists(),
+                "unsafe destination survived: {label}"
+            );
+            assert!(
+                !format!("{error:#}").is_empty(),
+                "unsafe archive returned an empty error: {label}"
+            );
+        }
+        assert!(!destination_root.path().join("escape.txt").exists());
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    fn build_snapshot_archive(entries: &[(&str, tar::EntryType, &[u8])]) -> Vec<u8> {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            for (path, kind, data) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_entry_type(*kind);
+                header.set_uid(0);
+                header.set_gid(0);
+                header.set_mtime(0);
+                header.set_mode(if kind.is_dir() { 0o755 } else { 0o644 });
+                header.set_size(if kind.is_file() { data.len() as u64 } else { 0 });
+                if kind.is_symlink() {
+                    header.set_link_name("target").unwrap();
+                }
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, path, Cursor::new(*data))
+                    .unwrap();
+            }
+            builder.finish().unwrap();
+        }
+        zstd::stream::encode_all(Cursor::new(tar_bytes), 3).unwrap()
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    fn build_raw_snapshot_archive(path: &str, kind: tar::EntryType, size: u64) -> Vec<u8> {
+        assert!(path.len() < 100);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(kind);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_mode(0o644);
+        header.set_size(size);
+        header.as_mut_bytes()[..100].fill(0);
+        header.as_mut_bytes()[..path.len()].copy_from_slice(path.as_bytes());
+        header.set_cksum();
+        let mut tar_bytes = header.as_bytes().to_vec();
+        tar_bytes.extend_from_slice(&[0_u8; 1024]);
+        zstd::stream::encode_all(Cursor::new(tar_bytes), 3).unwrap()
     }
 
     #[cfg(any(windows, target_os = "linux"))]

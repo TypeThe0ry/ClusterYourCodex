@@ -44,7 +44,28 @@ export interface NodeSummary {
   resources?: NodeResourceSummary;
   lastSeenAt?: string;
   activeJobs: number;
+  availability?: NodeAvailability;
+  availabilityReasons?: string[];
+  slots?: FleetSlotPayload;
+  telemetry?: {
+    observedAt: string;
+    receivedAt: string;
+    bootGeneration: number;
+    bootId: string;
+    sequence: number;
+    cpuEwmaPercent: number;
+    powerSource: "ac" | "battery" | "unknown";
+    temperatureC?: number;
+  };
 }
+
+export type NodeAvailability =
+  | "available"
+  | "degraded"
+  | "draining"
+  | "disabled"
+  | "offline"
+  | "stale";
 
 export interface JobSummary {
   id: string;
@@ -58,9 +79,12 @@ export interface JobSummary {
   finishedAt?: string;
   exitCode?: number;
   elapsedMs?: number;
+  placement?: PlacementExplanationPayload;
 }
 
 export interface FleetInfo {
+  fleetRevision: number;
+  observedAt: string;
   controller: {
     status: ControllerStatus;
     version: string;
@@ -112,6 +136,19 @@ export interface JobRequirements {
   };
 }
 
+export interface ResourceRequest {
+  slots?: number;
+  cpuCores?: number;
+  memoryMiB?: number;
+  diskMiB?: number;
+  gpu?: {
+    deviceId?: string;
+    vendor?: "nvidia" | "amd" | "intel" | "apple";
+    vramMiB?: number;
+    exclusive?: boolean;
+  };
+}
+
 export interface JobStep {
   name: string;
   shell?: "powershell" | "bash" | "zsh" | "cmd";
@@ -131,6 +168,7 @@ export interface JobSpec {
   kind: JobKind;
   source: GitSource | SnapshotSource;
   requirements?: JobRequirements;
+  resourceRequest?: ResourceRequest;
   steps: JobStep[];
   artifacts?: {
     include?: string[];
@@ -146,10 +184,16 @@ export interface PlanRequest {
   job: JobSpec;
 }
 
-export interface PlanResponse {
+export interface PlacementPlanBindingV1 {
+  apiVersion: "cyc.dev/placement-plan-binding/v1";
   planId: string;
   jobId: string;
+  jobDigest: string;
   createdAt: string;
+  expiresAt: string;
+  fleetRevision: number;
+  nodeRevision: number;
+  policyRevision: number;
   decision: {
     nodeId: string;
     score: number;
@@ -157,21 +201,23 @@ export interface PlanResponse {
   };
 }
 
+export type PlanResponse = PlacementPlanBindingV1;
+
 export interface SubmitJobRequest {
   job: JobSpec;
   planId?: string;
 }
 
-export interface SubmitJobResponse {
-  job: JobSpec;
-  run: RunPayload;
-}
-
 export interface JobResponse {
   job: JobSpec;
   run: RunPayload;
+  /** Null is reserved for non-backfillable pre-binding controller rows. */
+  planBinding: PlacementPlanBindingV1 | null;
+  version: number;
+  cancelRequested: boolean;
 }
 
+export type SubmitJobResponse = JobResponse;
 export type CancelJobResponse = JobResponse;
 
 export interface PlacementExplanationPayload {
@@ -235,14 +281,131 @@ export interface NodePayload {
   lastSeenAt?: string;
 }
 
+export interface FleetDocumentPayload<T> {
+  document: T;
+  revision?: number;
+  digest?: string;
+  observedAt: string;
+  receivedAt: string;
+}
+
+export interface NodeConfigPayload {
+  name: string;
+  enabled: boolean;
+  priority: number;
+  labels: Record<string, string>;
+  desiredState: "active" | "draining";
+  capacity: {
+    maxConcurrentJobs: number;
+    allocatableCpuCores?: number;
+    allocatableCpuPercent?: number;
+    memoryLimitMiB?: number;
+    allowedJobKinds: JobKind[];
+    allowOnBattery: boolean;
+    maxCpuPercent?: number;
+    maxCpuEwmaPercent?: number;
+    maxMemoryPercent?: number;
+    maxTemperatureC?: number;
+  };
+}
+
+export interface NodeInventoryPayload {
+  transport: NodePayload["transport"];
+  os: NodePayload["os"];
+  arch: NodePayload["arch"];
+  capabilities: string[];
+  logicalCpuCores: number;
+  memoryMiB: number;
+  diskMiB: number;
+  gpus: Array<{
+    vendor: "nvidia" | "amd" | "intel" | "apple";
+    model: string;
+    totalVramMiB: number;
+    stableId?: string;
+    driverVersion?: string;
+  }>;
+  cpuModel: string;
+  toolVersions: Record<string, string>;
+  workerVersion: string;
+  protocolVersion: number;
+  containment: {
+    backend: "legacy" | "linux_subreaper_process_group" | "windows_job_object" | "unsupported";
+    version: string;
+    maxSafeSlots: number;
+  };
+}
+
+export interface NodeTelemetryPayload {
+  status: "online" | "degraded" | "draining" | "offline";
+  availableCpuCores: number;
+  availableMemoryMiB: number;
+  availableDiskMiB: number;
+  gpus: Array<{
+    availableVramMiB: number;
+    allocatable: boolean;
+    stableId?: string;
+    utilizationPercent?: number;
+    temperatureC?: number;
+  }>;
+  load: { cpuPercent: number; queueDepth: number; runningJobs: number };
+  cachedSources: string[];
+  observedAt: string;
+  bootGeneration: number;
+  bootId: string;
+  sequence: number;
+  cpuEwmaPercent: number;
+  activeRunIds: string[];
+  powerSource: "ac" | "battery" | "unknown";
+  battery?: { chargePercent?: number; charging?: boolean };
+  temperatureC?: number;
+}
+
+export interface FleetSlotPayload {
+  configured: number;
+  containmentMaxSafe: number;
+  effective: number;
+  reserved: number;
+  available: number;
+}
+
+export interface FleetReservationPayload {
+  leaseId: string;
+  runId: string;
+  jobId: string;
+  phase: string;
+  slots: number;
+  cpuCores: number;
+  memoryMiB: number;
+  diskMiB: number;
+  gpuDeviceId?: string;
+  gpuVramMiB: number;
+  gpuExclusive: boolean;
+  expiresAt: string;
+}
+
+export interface FleetNodeViewPayload {
+  nodeId: string;
+  config: FleetDocumentPayload<NodeConfigPayload>;
+  inventory: FleetDocumentPayload<NodeInventoryPayload>;
+  telemetry: FleetDocumentPayload<NodeTelemetryPayload>;
+  availability: NodeAvailability;
+  availabilityReasons: string[];
+  effectiveSlots: FleetSlotPayload;
+  effectiveResources: NodePayload["resources"];
+  reservations: FleetReservationPayload[];
+}
+
 export interface JobViewPayload {
   job: JobSpec;
   run: RunPayload;
 }
 
 export interface FleetPayload {
+  fleetRevision: number;
+  observedAt: string;
   controller: { version: string; apiVersion: "cyc.dev/v1"; access: "loopback" };
   codex: { integration: "mcp"; status: string };
   nodes: NodePayload[];
+  nodeViews?: FleetNodeViewPayload[];
   recentJobs: JobViewPayload[];
 }

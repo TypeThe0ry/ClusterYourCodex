@@ -1,9 +1,11 @@
 //! Managed-pull worker wire contract.
 //!
 //! Authentication is deliberately out-of-band. Pairing codes and long-lived
-//! worker credentials are carried in authenticated HTTP headers and must never
-//! be placed in these serializable or `Debug`-printable DTOs. The controller
-//! resolves the authenticated credential to a node before accepting a payload.
+//! worker credentials are carried only in authenticated request headers and
+//! must never be returned by the controller or placed in these serializable or
+//! `Debug`-printable DTOs. The pairing request carries only the worker-generated
+//! credential's SHA-256 digest; the controller resolves the plaintext
+//! credential to a node before accepting any authenticated payload.
 
 use std::collections::BTreeSet;
 
@@ -14,35 +16,44 @@ use uuid::Uuid;
 
 use crate::{
     canonical_job_digest, validate_portable_relative_path, Architecture, Capability, JobSpec,
-    JobState, NodeLoad, NodeResources, OperatingSystem, PortablePathError, Run, Shell,
-    PROTOCOL_VERSION,
+    JobState, NodeInventory, NodeLoad, NodeResources, NodeTelemetry, OperatingSystem,
+    PortablePathError, Run, Shell, PROTOCOL_VERSION,
 };
 
 /// Version identifier for the managed worker HTTP contract.
 pub const WORKER_API_VERSION: &str = "cyc.dev/worker/v1";
+/// Largest integer that round-trips exactly through every supported public JSON
+/// consumer, including JavaScript `number`.
+pub const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// HTTP authentication and metadata names shared by controller and worker.
 /// Values carried by these headers remain out-of-band and are never embedded
 /// in serializable DTOs.
 pub const PAIR_AUTH_SCHEME: &str = "Pairing";
 pub const WORKER_AUTH_SCHEME: &str = "Bearer";
-pub const WORKER_CREDENTIAL_HEADER: &str = "x-cyc-worker-credential";
 pub const RUN_CREDENTIAL_HEADER: &str = "x-cyc-run-credential";
 pub const LEASE_ID_HEADER: &str = "x-cyc-lease-id";
 pub const LOG_STREAM_HEADER: &str = "x-cyc-stream";
 pub const LOG_OFFSET_HEADER: &str = "x-cyc-offset";
 pub const SHA256_HEADER: &str = "x-cyc-sha256";
 pub const ARTIFACT_NAME_HEADER: &str = "x-cyc-artifact-name";
+pub const NODE_REPORT_ACCEPTED_HEADER: &str = "x-cyc-report-accepted";
+pub const NODE_REPORT_INVENTORY_REVISION_HEADER: &str = "x-cyc-inventory-revision";
+pub const NODE_REPORT_BOOT_GENERATION_HEADER: &str = "x-cyc-telemetry-boot-generation";
+pub const NODE_REPORT_SEQUENCE_HEADER: &str = "x-cyc-telemetry-sequence";
 
 // Descriptive aliases retained for consumers that name custom headers by the
 // wire token rather than the field purpose.
-pub const X_CYC_WORKER_CREDENTIAL: &str = WORKER_CREDENTIAL_HEADER;
 pub const X_CYC_RUN_CREDENTIAL: &str = RUN_CREDENTIAL_HEADER;
 pub const X_CYC_LEASE_ID: &str = LEASE_ID_HEADER;
 pub const X_CYC_STREAM: &str = LOG_STREAM_HEADER;
 pub const X_CYC_OFFSET: &str = LOG_OFFSET_HEADER;
 pub const X_CYC_SHA256: &str = SHA256_HEADER;
 pub const X_CYC_ARTIFACT_NAME: &str = ARTIFACT_NAME_HEADER;
+pub const X_CYC_REPORT_ACCEPTED: &str = NODE_REPORT_ACCEPTED_HEADER;
+pub const X_CYC_INVENTORY_REVISION: &str = NODE_REPORT_INVENTORY_REVISION_HEADER;
+pub const X_CYC_TELEMETRY_BOOT_GENERATION: &str = NODE_REPORT_BOOT_GENERATION_HEADER;
+pub const X_CYC_TELEMETRY_SEQUENCE: &str = NODE_REPORT_SEQUENCE_HEADER;
 
 /// A fresh, typed capability report produced by the worker itself.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -127,6 +138,11 @@ impl ProbeReport {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PairRequest {
+    pub pairing_id: Uuid,
+    pub intended_node_id: Uuid,
+    /// SHA-256 of the worker-generated long-lived credential. The plaintext is
+    /// staged locally before this request and is never sent in the body.
+    pub credential_sha256: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     pub probe: ProbeReport,
@@ -134,6 +150,15 @@ pub struct PairRequest {
 
 impl PairRequest {
     pub fn validate(&self) -> Result<(), WorkerValidationError> {
+        if self.pairing_id.is_nil() {
+            return Err(WorkerValidationError::NilIdentifier("pairingId"));
+        }
+        if self.intended_node_id.is_nil() {
+            return Err(WorkerValidationError::NilIdentifier("intendedNodeId"));
+        }
+        if !valid_sha256(&self.credential_sha256) {
+            return Err(WorkerValidationError::InvalidCredentialDigest);
+        }
         if self.display_name.as_ref().is_some_and(|name| {
             name.trim().is_empty()
                 || name.chars().count() > 128
@@ -145,14 +170,16 @@ impl PairRequest {
     }
 }
 
-/// Non-secret pairing result. The newly issued worker credential is returned
-/// only in a protected response header and is not part of this DTO.
+/// Non-secret pairing result. The controller never returns credential material;
+/// the echoed digest binds a retry to the worker's durable staged credential.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PairResponse {
     pub api_version: String,
+    pub pairing_id: Uuid,
     pub controller_id: Uuid,
     pub node_id: Uuid,
+    pub credential_sha256: String,
     pub paired_at: DateTime<Utc>,
     pub heartbeat_interval_seconds: u32,
     pub lease_seconds: u32,
@@ -165,6 +192,18 @@ impl PairResponse {
                 self.api_version.clone(),
             ));
         }
+        for (field, id) in [
+            ("pairingId", self.pairing_id),
+            ("controllerId", self.controller_id),
+            ("nodeId", self.node_id),
+        ] {
+            if id.is_nil() {
+                return Err(WorkerValidationError::NilIdentifier(field));
+            }
+        }
+        if !valid_sha256(&self.credential_sha256) {
+            return Err(WorkerValidationError::InvalidCredentialDigest);
+        }
         if self.heartbeat_interval_seconds == 0 || self.lease_seconds == 0 {
             return Err(WorkerValidationError::InvalidLimits(
                 "heartbeat and lease intervals must be greater than zero",
@@ -176,6 +215,61 @@ impl PairResponse {
             ));
         }
         Ok(())
+    }
+}
+
+/// Authenticated commit of a staged pairing. The worker sends this only after
+/// both its protected credential file and config have been atomically installed.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PairAckRequest {
+    pub api_version: String,
+    pub pairing_id: Uuid,
+    pub node_id: Uuid,
+    pub credential_sha256: String,
+}
+
+impl PairAckRequest {
+    pub fn validate(&self) -> Result<(), WorkerValidationError> {
+        if self.api_version != WORKER_API_VERSION {
+            return Err(WorkerValidationError::UnsupportedWorkerApiVersion(
+                self.api_version.clone(),
+            ));
+        }
+        if self.pairing_id.is_nil() {
+            return Err(WorkerValidationError::NilIdentifier("pairingId"));
+        }
+        if self.node_id.is_nil() {
+            return Err(WorkerValidationError::NilIdentifier("nodeId"));
+        }
+        if !valid_sha256(&self.credential_sha256) {
+            return Err(WorkerValidationError::InvalidCredentialDigest);
+        }
+        Ok(())
+    }
+}
+
+/// Stable, non-secret acknowledgement. Replaying the same authenticated ACK
+/// returns the original acknowledgement timestamp.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PairAckResponse {
+    pub api_version: String,
+    pub pairing_id: Uuid,
+    pub node_id: Uuid,
+    pub credential_sha256: String,
+    pub acknowledged_at: DateTime<Utc>,
+}
+
+impl PairAckResponse {
+    pub fn validate(&self) -> Result<(), WorkerValidationError> {
+        PairAckRequest {
+            api_version: self.api_version.clone(),
+            pairing_id: self.pairing_id,
+            node_id: self.node_id,
+            credential_sha256: self.credential_sha256.clone(),
+        }
+        .validate()
     }
 }
 
@@ -201,6 +295,65 @@ impl ClaimRequest {
             .any(|run_id| !unique.insert(run_id))
         {
             return Err(WorkerValidationError::DuplicateActiveRun);
+        }
+        Ok(())
+    }
+}
+
+/// Authenticated worker-owned state report. Node identity is deliberately not
+/// present: the controller resolves it exclusively from the worker credential.
+/// Inventory may be omitted after the controller has persisted a prior copy.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NodeReportRequest {
+    pub api_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<NodeInventory>,
+    pub telemetry: NodeTelemetry,
+}
+
+impl NodeReportRequest {
+    pub fn validate(&self) -> Result<(), WorkerValidationError> {
+        if self.api_version != WORKER_API_VERSION {
+            return Err(WorkerValidationError::UnsupportedWorkerApiVersion(
+                self.api_version.clone(),
+            ));
+        }
+        if self.telemetry.boot_id.is_nil() {
+            return Err(WorkerValidationError::InvalidNodeReport(
+                "bootId must be non-nil",
+            ));
+        }
+        if self.telemetry.sequence == 0 {
+            return Err(WorkerValidationError::InvalidNodeReport(
+                "sequence must be greater than zero",
+            ));
+        }
+        if self.telemetry.boot_generation > MAX_SAFE_JSON_INTEGER
+            || self.telemetry.sequence > MAX_SAFE_JSON_INTEGER
+        {
+            return Err(WorkerValidationError::InvalidNodeReport(
+                "bootGeneration and sequence must not exceed the exact JSON integer limit 9007199254740991",
+            ));
+        }
+        self.telemetry
+            .validate_shape()
+            .map_err(|_| WorkerValidationError::InvalidNodeReport("invalid telemetry"))?;
+        if let Some(inventory) = &self.inventory {
+            inventory
+                .validate()
+                .map_err(|_| WorkerValidationError::InvalidNodeReport("invalid inventory"))?;
+            if inventory.logical_cpu_cores == 0
+                || inventory.memory_mib == 0
+                || inventory.disk_mib == 0
+            {
+                return Err(WorkerValidationError::InvalidNodeReport(
+                    "inventory totals must be greater than zero",
+                ));
+            }
+            self.telemetry
+                .validate(inventory)
+                .map_err(|_| WorkerValidationError::InvalidNodeReport("inventory mismatch"))?;
         }
         Ok(())
     }
@@ -639,10 +792,12 @@ impl ExecutionSourceEvidence {
                 }
             }
             "snapshot" => {
+                let unresolved = self.resolved_revision.is_empty() && self.tree.is_empty();
+                let resolved = self.resolved_revision == self.requested_revision
+                    && self.tree == self.requested_revision;
                 if self.repository != "snapshot"
                     || self.git_version != "not-applicable"
-                    || !self.resolved_revision.is_empty()
-                    || !self.tree.is_empty()
+                    || !(unresolved || resolved)
                     || self
                         .requested_revision
                         .strip_prefix("sha256:")
@@ -943,18 +1098,31 @@ fn valid_object_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum WorkerValidationError {
     #[error("unsupported protocolVersion {0}")]
     UnsupportedProtocolVersion(u32),
     #[error("unsupported worker apiVersion `{0}`")]
     UnsupportedWorkerApiVersion(String),
+    #[error("{0} must not be the nil UUID")]
+    NilIdentifier(&'static str),
+    #[error("credentialSha256 must contain 64 lowercase hex characters")]
+    InvalidCredentialDigest,
     #[error("{0} must not be empty")]
     EmptyField(&'static str),
     #[error("displayName must contain 1..=128 non-control characters")]
     InvalidDisplayName,
     #[error("invalid resource report: {0}")]
     InvalidResource(&'static str),
+    #[error("invalid node report: {0}")]
+    InvalidNodeReport(&'static str),
     #[error("activeRunIds must not contain duplicates")]
     DuplicateActiveRun,
     #[error("retryAfterSeconds must be in the inclusive range 1..=3600")]
@@ -1011,7 +1179,10 @@ pub enum WorkerValidationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ArtifactSpec, JobKind, JobStep, SourceSpec, DEFAULT_GIT_ARTIFACT_EXCLUDE};
+    use crate::{
+        ArtifactSpec, CredentialRef, JobKind, JobStep, Node, NodeStatus, NodeTransport, SourceSpec,
+        DEFAULT_GIT_ARTIFACT_EXCLUDE,
+    };
 
     fn probe() -> ProbeReport {
         ProbeReport {
@@ -1077,20 +1248,89 @@ mod tests {
         }
     }
 
+    fn node_report() -> NodeReportRequest {
+        let mut node = Node::new(
+            "worker-01",
+            NodeTransport::Managed {
+                endpoint: "https://controller.example.invalid/worker/v1".to_owned(),
+                credential_ref: CredentialRef::new("controller-db:worker-01"),
+            },
+            OperatingSystem::Linux,
+            Architecture::X86_64,
+        );
+        node.status = NodeStatus::Online;
+        node.resources = probe().resources;
+        let inventory = NodeInventory::from_node(&node);
+        let mut telemetry = NodeTelemetry::from_node(&node, Utc::now());
+        telemetry.boot_id = Uuid::new_v4();
+        telemetry.sequence = 1;
+        NodeReportRequest {
+            api_version: WORKER_API_VERSION.to_owned(),
+            inventory: Some(inventory),
+            telemetry,
+        }
+    }
+
     #[test]
     fn pair_request_has_no_serializable_secret_surface() {
         let request = PairRequest {
+            pairing_id: Uuid::new_v4(),
+            intended_node_id: Uuid::new_v4(),
+            credential_sha256: "a".repeat(64),
             display_name: Some("Linux builder".to_owned()),
             probe: probe(),
         };
         let json = serde_json::to_string(&request).expect("serialize pair request");
-        for forbidden in ["pairCode", "credential", "password", "privateKey", "token"] {
+        assert!(json.contains("credentialSha256"));
+        for forbidden in [
+            "pairCode",
+            "credential\"",
+            "password",
+            "privateKey",
+            "token",
+        ] {
             assert!(!json.contains(forbidden), "secret-shaped field {forbidden}");
         }
         let mut value = serde_json::to_value(&request).expect("pair value");
         value["pairCode"] = serde_json::json!("do-not-accept");
         assert!(serde_json::from_value::<PairRequest>(value).is_err());
         request.validate().expect("valid request");
+    }
+
+    #[test]
+    fn pairing_digest_and_ack_contracts_are_strict_and_non_secret() {
+        let pairing_id = Uuid::new_v4();
+        let node_id = Uuid::new_v4();
+        let digest = "b".repeat(64);
+        let request = PairAckRequest {
+            api_version: WORKER_API_VERSION.to_owned(),
+            pairing_id,
+            node_id,
+            credential_sha256: digest.clone(),
+        };
+        request.validate().unwrap();
+        let encoded = serde_json::to_string(&request).unwrap();
+        assert!(encoded.contains("credentialSha256"));
+        assert!(!encoded.contains("credential\""));
+
+        let response = PairAckResponse {
+            api_version: WORKER_API_VERSION.to_owned(),
+            pairing_id,
+            node_id,
+            credential_sha256: digest,
+            acknowledged_at: Utc::now(),
+        };
+        response.validate().unwrap();
+
+        let mut invalid = request.clone();
+        invalid.credential_sha256 = "A".repeat(64);
+        assert_eq!(
+            invalid.validate(),
+            Err(WorkerValidationError::InvalidCredentialDigest)
+        );
+        let mut unknown = serde_json::to_value(request).unwrap();
+        unknown["credential"] = serde_json::json!("must-not-be-accepted");
+        assert!(serde_json::from_value::<PairAckRequest>(unknown).is_err());
     }
 
     #[test]
@@ -1105,6 +1345,52 @@ mod tests {
         let mut value = serde_json::to_value(probe()).expect("probe value");
         value["resources"]["unexpected"] = serde_json::json!(1);
         assert!(serde_json::from_value::<ProbeReport>(value).is_err());
+    }
+
+    #[test]
+    fn node_report_is_strict_versioned_and_contains_no_node_identity() {
+        let request = node_report();
+        request.validate().unwrap();
+        let encoded = serde_json::to_string(&request).unwrap();
+        assert!(!encoded.contains("nodeId"));
+
+        let mut unknown = serde_json::to_value(&request).unwrap();
+        unknown["nodeId"] = serde_json::json!(Uuid::new_v4());
+        assert!(serde_json::from_value::<NodeReportRequest>(unknown).is_err());
+
+        let mut exact = request.clone();
+        exact.telemetry.boot_generation = MAX_SAFE_JSON_INTEGER;
+        exact.telemetry.sequence = MAX_SAFE_JSON_INTEGER;
+        exact.validate().unwrap();
+
+        let mut overflow = request.clone();
+        overflow.telemetry.boot_generation = MAX_SAFE_JSON_INTEGER + 1;
+        assert!(matches!(
+            overflow.validate(),
+            Err(WorkerValidationError::InvalidNodeReport(_))
+        ));
+        overflow.telemetry.boot_generation = 1;
+        overflow.telemetry.sequence = MAX_SAFE_JSON_INTEGER + 1;
+        assert!(matches!(
+            overflow.validate(),
+            Err(WorkerValidationError::InvalidNodeReport(_))
+        ));
+
+        let mut wrong_version = request.clone();
+        wrong_version.api_version = "cyc.dev/worker/v99".to_owned();
+        assert!(matches!(
+            wrong_version.validate(),
+            Err(WorkerValidationError::UnsupportedWorkerApiVersion(_))
+        ));
+
+        let mut invalid_sequence = request;
+        invalid_sequence.telemetry.sequence = 0;
+        assert_eq!(
+            invalid_sequence.validate(),
+            Err(WorkerValidationError::InvalidNodeReport(
+                "sequence must be greater than zero"
+            ))
+        );
     }
 
     #[test]
@@ -1366,6 +1652,28 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_evidence_allows_unresolved_failure_or_digest_bound_success_only() {
+        let digest = format!("sha256:{}", "c".repeat(64));
+        let mut evidence = ExecutionSourceEvidence {
+            kind: "snapshot".to_owned(),
+            repository: "snapshot".to_owned(),
+            requested_revision: digest.clone(),
+            resolved_revision: String::new(),
+            tree: String::new(),
+            git_version: "not-applicable".to_owned(),
+        };
+        evidence.validate().unwrap();
+        evidence.resolved_revision = digest.clone();
+        evidence.tree = digest.clone();
+        evidence.validate().unwrap();
+        evidence.tree = format!("sha256:{}", "d".repeat(64));
+        assert!(matches!(
+            evidence.validate(),
+            Err(WorkerValidationError::InvalidExecutionEvidence(_))
+        ));
+    }
+
+    #[test]
     fn artifact_metadata_rejects_git_paths_and_noncanonical_hashes() {
         let mut artifact = ArtifactMetadata {
             id: Uuid::new_v4(),
@@ -1450,5 +1758,11 @@ mod tests {
     fn public_constants_remain_versioned() {
         assert_eq!(crate::API_VERSION, "cyc.dev/v1");
         assert_eq!(WORKER_API_VERSION, "cyc.dev/worker/v1");
+        assert_eq!(NODE_REPORT_ACCEPTED_HEADER, "x-cyc-report-accepted");
+        assert_eq!(
+            NODE_REPORT_BOOT_GENERATION_HEADER,
+            "x-cyc-telemetry-boot-generation"
+        );
+        assert_eq!(NODE_REPORT_SEQUENCE_HEADER, "x-cyc-telemetry-sequence");
     }
 }

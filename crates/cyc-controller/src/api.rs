@@ -4,23 +4,32 @@ use std::sync::Arc;
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::header::{
-    AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, HOST, ORIGIN, WWW_AUTHENTICATE,
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HOST,
+    ORIGIN, WWW_AUTHENTICATE,
 };
 use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
-use cyc_protocol::{JobSpec, Node, Run};
-use cyc_scheduler::{PlacementDecision, ScheduleError, Scheduler};
+use cyc_protocol::onboarding::{
+    CreatePairingRequestV1, EnrollmentBundleV1, PairingStatusV1, ENROLLMENT_API_VERSION,
+};
+use cyc_protocol::{
+    CleanupReservationReleaseReasonV1, CleanupStatusPhaseV1, CleanupStatusV1,
+    JobRootCleanupOutcomeV1, JobSpec, Node, NodeConfig, PlacementPlanBindingV1, Run,
+    SnapshotMetadataV1, TerminalCompletionAckV1, CLEANUP_API_VERSION, MAX_SNAPSHOT_ARCHIVE_BYTES,
+    SNAPSHOT_MEDIA_TYPE,
+};
+use cyc_scheduler::{ScheduleError, Scheduler};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 use crate::auth::AuthToken;
-use crate::store::{LogChunk, Store, StoreError, StoredArtifact, StoredJob, StoredPlan};
+use crate::store::{FleetNodeView, LogChunk, Store, StoreError, StoredArtifact, StoredJob};
 
 const MAX_JSON_BODY_BYTES: usize = 1024 * 1024;
 
@@ -70,12 +79,24 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/fleet", get(fleet))
+        .route(
+            "/v1/nodes/{id}/config",
+            get(get_node_config).put(update_node_config),
+        )
         .route("/v1/plans", post(plan))
         .route("/v1/jobs", get(list_jobs).post(submit_job))
         .route("/v1/jobs/{id}", get(get_job))
         .route("/v1/jobs/{id}/cancel", post(cancel_job))
+        .route("/v1/jobs/{id}/cleanup", get(get_job_cleanup))
         .route("/v1/pairings", post(create_pairing))
+        .route("/v1/pairings/{id}", get(get_pairing_status))
         .route("/v1/pairings/{id}/revoke", post(revoke_pairing))
+        .route(
+            "/v1/snapshots/{sha256}",
+            put(upload_snapshot)
+                .head(head_snapshot)
+                .layer(DefaultBodyLimit::max(MAX_SNAPSHOT_ARCHIVE_BYTES as usize)),
+        )
         .route("/v1/jobs/{id}/logs", get(list_job_logs))
         .route("/v1/jobs/{id}/logs/{stream}", get(download_job_log))
         .route("/v1/jobs/{id}/artifacts", get(list_job_artifacts))
@@ -90,6 +111,93 @@ pub fn router(state: AppState) -> Router {
             security_middleware,
         ))
         .with_state(state)
+}
+
+async fn upload_snapshot(
+    State(state): State<AppState>,
+    Path(sha256): Path<String>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Result<Response, ApiError> {
+    require_snapshot_content_type(&headers)?;
+    let declared_size = parse_required_content_length(&headers)?;
+    if declared_size > MAX_SNAPSHOT_ARCHIVE_BYTES {
+        return Err(ApiError::snapshot_too_large());
+    }
+    if declared_size != u64::try_from(bytes.len()).unwrap_or(u64::MAX) {
+        return Err(ApiError::invalid_snapshot());
+    }
+    let digest = format!("sha256:{sha256}");
+    cyc_protocol::validate_snapshot_digest(&digest).map_err(|_| ApiError::invalid_snapshot())?;
+    let store = state.store.clone();
+    let metadata = store_call(move || store.put_snapshot(&digest, declared_size, &bytes)).await?;
+    let mut response = (StatusCode::CREATED, Json(metadata.clone())).into_response();
+    apply_snapshot_headers(response.headers_mut(), &metadata, false)?;
+    Ok(response)
+}
+
+async fn head_snapshot(
+    State(state): State<AppState>,
+    Path(sha256): Path<String>,
+) -> Result<Response, ApiError> {
+    let digest = format!("sha256:{sha256}");
+    cyc_protocol::validate_snapshot_digest(&digest).map_err(|_| ApiError::invalid_snapshot())?;
+    let store = state.store.clone();
+    let metadata = store_call(move || store.get_snapshot_metadata(&digest)).await?;
+    let mut response = StatusCode::OK.into_response();
+    apply_snapshot_headers(response.headers_mut(), &metadata, true)?;
+    Ok(response)
+}
+
+fn require_snapshot_content_type(headers: &HeaderMap) -> Result<(), ApiError> {
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim);
+    if content_type.is_some_and(|value| value.eq_ignore_ascii_case(SNAPSHOT_MEDIA_TYPE)) {
+        Ok(())
+    } else {
+        Err(ApiError::snapshot_content_type())
+    }
+}
+
+fn parse_required_content_length(headers: &HeaderMap) -> Result<u64, ApiError> {
+    headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(ApiError::invalid_snapshot)
+}
+
+fn apply_snapshot_headers(
+    headers: &mut HeaderMap,
+    metadata: &SnapshotMetadataV1,
+    archive_representation: bool,
+) -> Result<(), ApiError> {
+    let etag = HeaderValue::from_str(&format!("\"{}\"", metadata.digest))
+        .map_err(|_| ApiError::internal())?;
+    let size = HeaderValue::from_str(&metadata.size_bytes.to_string())
+        .map_err(|_| ApiError::internal())?;
+    headers.insert(ETAG, etag);
+    headers.insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("private, immutable, max-age=31536000"),
+    );
+    headers.insert("x-cyc-snapshot-size", size.clone());
+    headers.insert(
+        "x-cyc-snapshot-version",
+        HeaderValue::from_static(cyc_protocol::SNAPSHOT_API_VERSION),
+    );
+    headers.insert(
+        "x-cyc-snapshot-format",
+        HeaderValue::from_static(cyc_protocol::SNAPSHOT_ARCHIVE_FORMAT),
+    );
+    if archive_representation {
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static(SNAPSHOT_MEDIA_TYPE));
+        headers.insert(CONTENT_LENGTH, size);
+    }
+    Ok(())
 }
 
 async fn security_middleware(
@@ -209,9 +317,12 @@ async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>, A
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FleetResponse {
+    fleet_revision: u64,
+    observed_at: DateTime<Utc>,
     controller: ControllerSummary,
     codex: CodexSummary,
     nodes: Vec<Node>,
+    node_views: Vec<FleetNodeView>,
     recent_jobs: Vec<JobView>,
 }
 
@@ -232,13 +343,10 @@ struct CodexSummary {
 
 async fn fleet(State(state): State<AppState>) -> Result<Json<FleetResponse>, ApiError> {
     let store = state.store.clone();
-    let (nodes, jobs) = store_call(move || {
-        let nodes = store.list_nodes()?;
-        let jobs = store.list_jobs(20)?;
-        Ok((nodes, jobs))
-    })
-    .await?;
+    let snapshot = store_call(move || store.fleet_snapshot(20)).await?;
     Ok(Json(FleetResponse {
+        fleet_revision: snapshot.fleet_revision,
+        observed_at: snapshot.observed_at,
         controller: ControllerSummary {
             version: env!("CARGO_PKG_VERSION"),
             api_version: "cyc.dev/v1",
@@ -248,8 +356,65 @@ async fn fleet(State(state): State<AppState>) -> Result<Json<FleetResponse>, Api
             integration: "mcp",
             status: "available",
         },
-        nodes,
-        recent_jobs: jobs.into_iter().map(JobView::from).collect(),
+        nodes: snapshot.nodes,
+        node_views: snapshot.node_views,
+        recent_jobs: snapshot
+            .recent_jobs
+            .into_iter()
+            .map(JobView::from)
+            .collect(),
+    }))
+}
+
+const NODE_CONFIG_API_VERSION: &str = "cyc.dev/node-config/v1";
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeConfigDocument {
+    api_version: &'static str,
+    node_id: Uuid,
+    revision: i64,
+    config: NodeConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NodeConfigUpdate {
+    expected_revision: i64,
+    config: NodeConfig,
+}
+
+async fn get_node_config(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<NodeConfigDocument>, ApiError> {
+    let store = state.store.clone();
+    let stored = store_call(move || store.get_node_config(id)).await?;
+    Ok(Json(NodeConfigDocument {
+        api_version: NODE_CONFIG_API_VERSION,
+        node_id: stored.node_id,
+        revision: stored.revision,
+        config: stored.config,
+    }))
+}
+
+async fn update_node_config(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Result<Json<NodeConfigDocument>, ApiError> {
+    let request: NodeConfigUpdate = parse_json_body(&headers, &bytes)?;
+    let store = state.store.clone();
+    let stored = store_call(move || {
+        store.update_node_config(id, request.expected_revision, &request.config)
+    })
+    .await?;
+    Ok(Json(NodeConfigDocument {
+        api_version: NODE_CONFIG_API_VERSION,
+        node_id: stored.node_id,
+        revision: stored.revision,
+        config: stored.config,
     }))
 }
 
@@ -259,41 +424,11 @@ struct PlanRequest {
     job: JobSpec,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PlanResponse {
-    plan_id: Uuid,
-    job_id: Uuid,
-    job_digest: String,
-    created_at: DateTime<Utc>,
-    expires_at: DateTime<Utc>,
-    fleet_revision: i64,
-    node_revision: i64,
-    policy_revision: i64,
-    decision: PlacementDecision,
-}
-
-impl From<StoredPlan> for PlanResponse {
-    fn from(plan: StoredPlan) -> Self {
-        Self {
-            plan_id: plan.id,
-            job_id: plan.job_id,
-            job_digest: plan.job_digest,
-            created_at: plan.created_at,
-            expires_at: plan.expires_at,
-            fleet_revision: plan.fleet_revision,
-            node_revision: plan.node_revision,
-            policy_revision: plan.policy_revision,
-            decision: plan.decision,
-        }
-    }
-}
-
 async fn plan(
     State(state): State<AppState>,
     headers: HeaderMap,
     bytes: Bytes,
-) -> Result<Json<PlanResponse>, ApiError> {
+) -> Result<Json<PlacementPlanBindingV1>, ApiError> {
     let request: PlanRequest = parse_json_body(&headers, &bytes)?;
     request
         .job
@@ -303,7 +438,7 @@ async fn plan(
     let scheduler = state.scheduler.clone();
     let job = request.job;
     let plan = store_call(move || store.create_plan(&job, &scheduler)).await?;
-    Ok(Json(plan.into()))
+    Ok(Json(plan.binding))
 }
 
 #[derive(Debug, Deserialize)]
@@ -318,6 +453,9 @@ struct SubmitJobRequest {
 struct JobView {
     job: JobSpec,
     run: Run,
+    /// `null` is an explicit legacy marker for rows that lacked exactly one
+    /// validated used plan during migration. New jobs always carry a binding.
+    plan_binding: Option<PlacementPlanBindingV1>,
     version: u64,
     cancel_requested: bool,
 }
@@ -327,6 +465,7 @@ impl From<StoredJob> for JobView {
         Self {
             job: value.job,
             run: value.run,
+            plan_binding: value.plan_binding,
             version: value.version,
             cancel_requested: value.cancel_requested,
         }
@@ -386,21 +525,92 @@ async fn cancel_job(
     ))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreatePairingRequest {}
+async fn get_job_cleanup(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<CleanupStatusV1>, ApiError> {
+    let store = state.store.clone();
+    let snapshot = store_call(move || store.get_cleanup_snapshot(id)).await?;
+    let stored = snapshot.stored;
+    let cleanup = snapshot.cleanup;
+    let completion = snapshot.completion;
+    let obligation = snapshot.obligation;
+    let terminal_ack = completion.map(|completion| TerminalCompletionAckV1 {
+        run_id: stored.run.id,
+        lease_id: completion.completion.lease_id,
+        completion_sha256: completion.sha256,
+        state_version: stored.version,
+        final_state: stored.run.state,
+        acknowledged_at: completion.created_at,
+    });
+    let release_reason = obligation
+        .as_ref()
+        .and_then(|obligation| obligation.release_reason);
+    let (status, job_root_deleted, relative_root, observed_at, received_at, terminal_ack) =
+        if let Some(cleanup) = cleanup {
+            let status = cleanup_status_phase(Some(cleanup.receipt.outcome), release_reason);
+            (
+                status,
+                status == CleanupStatusPhaseV1::Removed && cleanup.receipt.job_root_deleted,
+                Some(cleanup.receipt.relative_root),
+                Some(cleanup.receipt.observed_at),
+                Some(cleanup.received_at),
+                Some(cleanup.receipt.terminal_ack),
+            )
+        } else {
+            (
+                cleanup_status_phase(None, release_reason),
+                false,
+                Some(format!("jobs/{}", stored.run.id)),
+                None,
+                None,
+                terminal_ack,
+            )
+        };
+    Ok(Json(CleanupStatusV1 {
+        api_version: CLEANUP_API_VERSION.to_owned(),
+        job_id: stored.job.id,
+        run_id: stored.run.id,
+        status,
+        job_root_deleted,
+        relative_root,
+        observed_at,
+        received_at,
+        terminal_ack,
+        cleanup_deadline_at: obligation
+            .as_ref()
+            .map(|obligation| obligation.cleanup_deadline_at),
+        reservation_released_at: obligation
+            .as_ref()
+            .and_then(|obligation| obligation.reservation_released_at),
+        release_reason,
+        cleanup_failure: obligation.and_then(|obligation| obligation.cleanup_failure),
+    }))
+}
 
-// Deliberately not `Debug`: the serialized bundle contains the one-time code.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PairingBundle {
-    pairing_id: Uuid,
-    controller_id: Uuid,
-    worker_url: String,
-    certificate_pem: String,
-    pairing_code: String,
-    created_at: DateTime<Utc>,
-    expires_at: DateTime<Utc>,
+/// Capacity recovery is not cleanup evidence. A deadline or legacy migration
+/// therefore remains `pending` until a real `removed` receipt is durable. A
+/// late exact `removed` receipt may still upgrade the evidence phase without
+/// rewriting the historical reason the reservation was released.
+fn cleanup_status_phase(
+    outcome: Option<JobRootCleanupOutcomeV1>,
+    release_reason: Option<CleanupReservationReleaseReasonV1>,
+) -> CleanupStatusPhaseV1 {
+    match outcome {
+        Some(JobRootCleanupOutcomeV1::Removed) => CleanupStatusPhaseV1::Removed,
+        _ if matches!(
+            release_reason,
+            Some(
+                CleanupReservationReleaseReasonV1::DeadlineRecovery
+                    | CleanupReservationReleaseReasonV1::LegacyMigration
+            )
+        ) =>
+        {
+            CleanupStatusPhaseV1::Pending
+        }
+        Some(JobRootCleanupOutcomeV1::NotCreated) => CleanupStatusPhaseV1::NotCreated,
+        None => CleanupStatusPhaseV1::Pending,
+    }
 }
 
 async fn create_pairing(
@@ -408,35 +618,107 @@ async fn create_pairing(
     headers: HeaderMap,
     bytes: Bytes,
 ) -> Result<Response, ApiError> {
-    let _: CreatePairingRequest = parse_json_body(&headers, &bytes)?;
+    let request: CreatePairingRequestV1 = parse_json_body(&headers, &bytes)?;
+    request
+        .validate()
+        .map_err(|_| ApiError::invalid_request())?;
     let endpoint = state
         .worker_endpoint()
         .cloned()
         .ok_or_else(ApiError::worker_listener_unavailable)?;
+    let operation_key = headers
+        .get("idempotency-key")
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::to_owned)
+                .map_err(|_| ApiError::invalid_request())
+        })
+        .transpose()?;
     let store = state.store.clone();
-    let (pairing, controller_id) = store_call(move || {
-        let pairing = store.create_pairing()?;
+    let worker_url = endpoint.public_url.clone();
+    let certificate_pem = endpoint.certificate_pem.to_string();
+    let (pairing, controller_id, worker_url, certificate_pem, replayed) = store_call(move || {
+        let (pairing, worker_url, certificate_pem, replayed) =
+            if let Some(operation_key) = operation_key {
+                let issued = store.create_pairing_idempotent(
+                    &operation_key,
+                    request.intended_node_id,
+                    &worker_url,
+                    &certificate_pem,
+                )?;
+                (
+                    issued.pairing,
+                    issued.worker_url,
+                    issued.certificate_pem,
+                    issued.replayed,
+                )
+            } else {
+                (
+                    store.create_pairing_for(request.intended_node_id)?,
+                    worker_url,
+                    certificate_pem,
+                    false,
+                )
+            };
         let controller_id = store.controller_id()?;
-        Ok((pairing, controller_id))
+        Ok((
+            pairing,
+            controller_id,
+            worker_url,
+            certificate_pem,
+            replayed,
+        ))
     })
     .await?;
-    let mut response = (
-        StatusCode::CREATED,
-        Json(PairingBundle {
-            pairing_id: pairing.id,
-            controller_id,
-            worker_url: endpoint.public_url.clone(),
-            certificate_pem: endpoint.certificate_pem.to_string(),
-            pairing_code: pairing.code,
-            created_at: pairing.created_at,
-            expires_at: pairing.expires_at,
-        }),
-    )
-        .into_response();
+    let bundle = EnrollmentBundleV1 {
+        api_version: ENROLLMENT_API_VERSION.to_owned(),
+        pairing_id: pairing.id,
+        controller_id,
+        intended_node_id: pairing.intended_node_id,
+        worker_url,
+        certificate_pem,
+        pairing_code: pairing.code.clone(),
+        created_at: pairing.created_at,
+        expires_at: pairing.expires_at,
+    };
+    bundle.validate().map_err(|_| ApiError::internal())?;
+    let status = if replayed {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    let mut response = (status, Json(bundle)).into_response();
     response
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(response)
+}
+
+async fn get_pairing_status(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<PairingStatusV1>, ApiError> {
+    let store = state.store.clone();
+    let stored = store_call(move || store.get_pairing_status(id)).await?;
+    let status = PairingStatusV1 {
+        api_version: ENROLLMENT_API_VERSION.to_owned(),
+        pairing_id: stored.pairing_id,
+        intended_node_id: stored.intended_node_id,
+        node_id: stored.node_id,
+        phase: stored.phase,
+        created_at: stored.created_at,
+        expires_at: stored.expires_at,
+        consumed_at: stored.consumed_at,
+        revoked_at: stored.revoked_at,
+        ready: matches!(
+            stored.phase,
+            cyc_protocol::onboarding::PairingPhaseV1::Ready
+        ),
+        error: None,
+    };
+    status.validate().map_err(|_| ApiError::internal())?;
+    Ok(Json(status))
 }
 
 #[derive(Debug, Serialize)]
@@ -650,6 +932,30 @@ impl ApiError {
         )
     }
 
+    fn snapshot_content_type() -> Self {
+        Self::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "snapshot_content_type_required",
+            "Content-Type must identify a cyc tar.zst snapshot archive",
+        )
+    }
+
+    fn invalid_snapshot() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_snapshot",
+            "snapshot path, size, or archive metadata is invalid",
+        )
+    }
+
+    fn snapshot_too_large() -> Self {
+        Self::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "snapshot_too_large",
+            "snapshot archive exceeds the controller limit",
+        )
+    }
+
     fn invalid_version() -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,
@@ -723,11 +1029,22 @@ impl From<StoreError> for ApiError {
                 "invalid_run_evidence",
                 "terminal run evidence is missing or inconsistent",
             ),
+            StoreError::InvalidNodeReport => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_node_report",
+                "node inventory or telemetry is invalid",
+            ),
             StoreError::VersionConflict { current_version } => Self {
                 status: StatusCode::CONFLICT,
                 code: "version_conflict",
                 message: "job version changed; reload before retrying",
                 extra: Some(("details", json!({ "currentVersion": current_version }))),
+            },
+            StoreError::NodeConfigVersionConflict { current_revision } => Self {
+                status: StatusCode::CONFLICT,
+                code: "node_config_conflict",
+                message: "node config revision changed; reload before retrying",
+                extra: Some(("details", json!({ "currentRevision": current_revision }))),
             },
             StoreError::WorkerStateConflict {
                 current_version,
@@ -772,6 +1089,37 @@ impl From<StoreError> for ApiError {
                 "pairing_unavailable",
                 "pairing code is expired, used, or revoked",
             ),
+            StoreError::PairingBindingMismatch => Self::new(
+                StatusCode::CONFLICT,
+                "pairing_binding_mismatch",
+                "pairing request does not match its consumed binding",
+            ),
+            StoreError::InvalidCredentialDigest => Self::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_credential_digest",
+                "credential digest is invalid",
+            ),
+            StoreError::PairingAcknowledgementUnavailable => Self::new(
+                StatusCode::UNAUTHORIZED,
+                "pairing_ack_unauthorized",
+                "pairing acknowledgement authentication failed",
+            ),
+            StoreError::InvalidPairingOperationKey => Self::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_idempotency_key",
+                "Idempotency-Key must be 1-128 portable ASCII characters",
+            ),
+            StoreError::PairingIdempotencyMismatch => Self::new(
+                StatusCode::CONFLICT,
+                "idempotency_request_mismatch",
+                "Idempotency-Key was already used with a different pairing request",
+            ),
+            StoreError::PairingIdempotencyFinalized { phase } => Self {
+                status: StatusCode::CONFLICT,
+                code: "idempotency_operation_finalized",
+                message: "the original pairing operation is no longer pending",
+                extra: Some(("details", json!({ "phase": phase }))),
+            },
             StoreError::UploadConflict => Self::new(
                 StatusCode::CONFLICT,
                 "upload_conflict",
@@ -802,14 +1150,34 @@ impl From<StoreError> for ApiError {
                 "artifact_quota_exceeded",
                 "run artifact quota is exhausted",
             ),
+            StoreError::SnapshotQuotaExceeded => Self::snapshot_too_large(),
+            StoreError::InvalidCleanupReceipt => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_cleanup_receipt",
+                "cleanup receipt does not match the terminal acknowledgement",
+            ),
+            StoreError::CleanupConflict => Self::new(
+                StatusCode::CONFLICT,
+                "cleanup_conflict",
+                "cleanup receipt conflicts with immutable stored evidence",
+            ),
             StoreError::InvalidManagedNode => Self::new(
                 StatusCode::BAD_REQUEST,
                 "invalid_managed_node",
                 "pairing requires a managed worker node",
             ),
+            StoreError::InvalidNodeConfig => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_node_config",
+                "node config or reserved policy labels are invalid",
+            ),
             StoreError::StorageSecurity(_)
             | StoreError::Database(_)
             | StoreError::Document(_)
+            | StoreError::NodeState(_)
+            | StoreError::NodeIdentityMismatch
+            | StoreError::InvalidPlanBinding
+            | StoreError::InvalidFleetRevision
             | StoreError::Identifier(_)
             | StoreError::Timestamp
             | StoreError::Poisoned
@@ -886,6 +1254,40 @@ mod tests {
         node
     }
 
+    fn worker_credential() -> String {
+        format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+    }
+
+    fn credential_digest(credential: &str) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(credential.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    fn pair_store_worker(
+        store: &Store,
+        pairing: &crate::store::PairingSecret,
+        node: &Node,
+    ) -> String {
+        let credential = worker_credential();
+        let digest = credential_digest(&credential);
+        store
+            .consume_pairing(
+                &pairing.code,
+                pairing.id,
+                pairing.intended_node_id,
+                &digest,
+                node,
+            )
+            .unwrap();
+        store
+            .acknowledge_pairing(&credential, pairing.id, pairing.intended_node_id, &digest)
+            .unwrap();
+        credential
+    }
+
     fn build_job() -> JobSpec {
         JobSpec::new(
             JobKind::Build,
@@ -958,6 +1360,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fleet_exposes_one_javascript_safe_revisioned_snapshot() {
+        let store = Store::in_memory().unwrap();
+        let node = online_node();
+        store.upsert_node(&node).unwrap();
+        let app = router(AppState::new(store, AuthToken::test_token(), 47_831));
+        let response = app
+            .oneshot(
+                request(Method::GET, "/v1/fleet")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let fleet = body_json(response).await;
+        let revision = fleet["fleetRevision"].as_u64().unwrap();
+        assert!(revision <= cyc_protocol::worker::MAX_SAFE_JSON_INTEGER);
+        assert!(DateTime::parse_from_rfc3339(fleet["observedAt"].as_str().unwrap()).is_ok());
+        assert_eq!(fleet["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(fleet["nodeViews"].as_array().unwrap().len(), 1);
+        assert_eq!(fleet["nodes"][0]["id"], fleet["nodeViews"][0]["nodeId"]);
+    }
+
+    #[test]
+    fn capacity_recovery_never_masquerades_as_workspace_cleanup() {
+        assert_eq!(
+            cleanup_status_phase(
+                Some(JobRootCleanupOutcomeV1::NotCreated),
+                Some(CleanupReservationReleaseReasonV1::DeadlineRecovery),
+            ),
+            CleanupStatusPhaseV1::Pending
+        );
+        assert_eq!(
+            cleanup_status_phase(
+                None,
+                Some(CleanupReservationReleaseReasonV1::LegacyMigration),
+            ),
+            CleanupStatusPhaseV1::Pending
+        );
+        assert_eq!(
+            cleanup_status_phase(Some(JobRootCleanupOutcomeV1::NotCreated), None),
+            CleanupStatusPhaseV1::NotCreated
+        );
+        assert_eq!(
+            cleanup_status_phase(
+                Some(JobRootCleanupOutcomeV1::Removed),
+                Some(CleanupReservationReleaseReasonV1::DeadlineRecovery),
+            ),
+            CleanupStatusPhaseV1::Removed
+        );
+    }
+
+    #[tokio::test]
     async fn json_posts_require_exact_media_type() {
         let response = test_app()
             .oneshot(
@@ -989,6 +1444,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn snapshot_upload_is_content_addressed_idempotent_and_bounded() {
+        use sha2::{Digest, Sha256};
+
+        let store = Store::in_memory().unwrap();
+        let app = router(AppState::new(store, AuthToken::test_token(), 47_831));
+        let archive = b"bounded raw tar.zst bytes";
+        let sha256 = Sha256::digest(archive)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let uri = format!("/v1/snapshots/{sha256}");
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(
+                    request(Method::PUT, &uri)
+                        .header(CONTENT_TYPE, SNAPSHOT_MEDIA_TYPE)
+                        .header(CONTENT_LENGTH, archive.len())
+                        .body(Body::from(archive.as_slice()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let metadata: SnapshotMetadataV1 =
+                serde_json::from_value(body_json(response).await).unwrap();
+            metadata.validate().unwrap();
+            assert_eq!(metadata.digest, format!("sha256:{sha256}"));
+            assert_eq!(metadata.size_bytes, archive.len() as u64);
+        }
+
+        let response = app
+            .clone()
+            .oneshot(request(Method::HEAD, &uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[CONTENT_LENGTH],
+            archive.len().to_string()
+        );
+        assert_eq!(response.headers()[ETAG], format!("\"sha256:{sha256}\""));
+        assert_eq!(response.headers()[CONTENT_TYPE], SNAPSHOT_MEDIA_TYPE);
+        assert!(response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty());
+
+        let response = app
+            .clone()
+            .oneshot(
+                request(Method::PUT, &format!("/v1/snapshots/{}", "f".repeat(64)))
+                    .header(CONTENT_TYPE, SNAPSHOT_MEDIA_TYPE)
+                    .header(CONTENT_LENGTH, archive.len())
+                    .body(Body::from(archive.as_slice()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let response = app
+            .oneshot(
+                request(Method::PUT, &format!("/v1/snapshots/{}", "e".repeat(64)))
+                    .header(CONTENT_TYPE, SNAPSHOT_MEDIA_TYPE)
+                    .header(CONTENT_LENGTH, MAX_SNAPSHOT_ARCHIVE_BYTES + 1)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
     async fn pairing_bundle_is_available_only_with_a_tls_worker_endpoint() {
         let response = test_app()
             .oneshot(
@@ -1001,17 +1534,26 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-        let state = AppState::new(Store::in_memory().unwrap(), AuthToken::test_token(), 47_831)
+        let store = Store::in_memory().unwrap();
+        let state = AppState::new(store.clone(), AuthToken::test_token(), 47_831)
             .with_worker_endpoint(
                 "https://192.0.2.10:47832".to_owned(),
                 "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n".to_owned(),
             );
         let expected_controller_id = state.store.controller_id().unwrap();
-        let response = router(state)
+        let app = router(state);
+        let intended_node_id = Uuid::new_v4();
+        let response = app
+            .clone()
             .oneshot(
                 request(Method::POST, "/v1/pairings")
                     .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from("{}"))
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "intendedNodeId": intended_node_id,
+                        }))
+                        .unwrap(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -1019,16 +1561,193 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CREATED);
         assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
         let bundle = body_json(response).await;
+        assert_eq!(bundle["apiVersion"], ENROLLMENT_API_VERSION);
         assert_eq!(
             bundle["controllerId"],
             Value::String(expected_controller_id.to_string())
         );
+        assert_eq!(bundle["intendedNodeId"], intended_node_id.to_string());
         assert_eq!(bundle["workerUrl"], "https://192.0.2.10:47832");
         assert_eq!(
             bundle["certificatePem"],
             "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
         );
         assert!(bundle["pairingCode"].as_str().unwrap().len() >= 32);
+
+        let pairing_id = Uuid::parse_str(bundle["pairingId"].as_str().unwrap()).unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                request(Method::GET, &format!("/v1/pairings/{pairing_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let pending = body_json(response).await;
+        assert_eq!(pending["phase"], "pending");
+        assert_eq!(pending["ready"], false);
+        assert!(pending.get("pairingCode").is_none());
+
+        let mut node = online_node();
+        node.id = intended_node_id;
+        let credential = worker_credential();
+        let digest = credential_digest(&credential);
+        let paired = store
+            .consume_pairing(
+                bundle["pairingCode"].as_str().unwrap(),
+                pairing_id,
+                intended_node_id,
+                &digest,
+                &node,
+            )
+            .unwrap();
+        assert_eq!(paired.node_id, intended_node_id);
+        let response = app
+            .clone()
+            .oneshot(
+                request(Method::GET, &format!("/v1/pairings/{pairing_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let consumed = body_json(response).await;
+        assert_eq!(consumed["phase"], "consumed");
+        assert_eq!(consumed["ready"], false);
+        store
+            .acknowledge_pairing(&credential, pairing_id, intended_node_id, &digest)
+            .unwrap();
+        let response = app
+            .oneshot(
+                request(Method::GET, &format!("/v1/pairings/{pairing_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let ready = body_json(response).await;
+        assert_eq!(ready["phase"], "ready");
+        assert_eq!(ready["ready"], true);
+        assert_eq!(ready["nodeId"], intended_node_id.to_string());
+        assert!(ready.get("pairingCode").is_none());
+    }
+
+    #[tokio::test]
+    async fn pairing_create_idempotency_replays_exact_pending_bundle() {
+        let store = Store::in_memory().unwrap();
+        let app = router(
+            AppState::new(store.clone(), AuthToken::test_token(), 47_831).with_worker_endpoint(
+                "https://192.0.2.10:47832".to_owned(),
+                "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n".to_owned(),
+            ),
+        );
+        let intended = Uuid::new_v4();
+        let operation = "desktop-operation:00000000-0000-4000-8000-000000000001";
+        let body = serde_json::to_vec(&json!({ "intendedNodeId": intended })).unwrap();
+        let issue = || {
+            request(Method::POST, "/v1/pairings")
+                .header(CONTENT_TYPE, "application/json")
+                .header("idempotency-key", operation)
+                .body(Body::from(body.clone()))
+                .unwrap()
+        };
+
+        let first = app.clone().oneshot(issue()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        assert_eq!(first.headers()[CACHE_CONTROL], "no-store");
+        let first = body_json(first).await;
+        let retry = app.clone().oneshot(issue()).await.unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        assert_eq!(retry.headers()[CACHE_CONTROL], "no-store");
+        let retry = body_json(retry).await;
+        assert_eq!(retry, first);
+
+        let mismatch = app
+            .clone()
+            .oneshot(
+                request(Method::POST, "/v1/pairings")
+                    .header(CONTENT_TYPE, "application/json")
+                    .header("idempotency-key", operation)
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mismatch.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body_json(mismatch).await["error"]["code"],
+            "idempotency_request_mismatch"
+        );
+
+        let pairing_id = Uuid::parse_str(first["pairingId"].as_str().unwrap()).unwrap();
+        store.revoke_pairing(pairing_id).unwrap();
+        let finalized = app.oneshot(issue()).await.unwrap();
+        assert_eq!(finalized.status(), StatusCode::CONFLICT);
+        let finalized = body_json(finalized).await;
+        assert_eq!(
+            finalized["error"]["code"],
+            "idempotency_operation_finalized"
+        );
+        assert_eq!(finalized["error"]["details"]["phase"], "revoked");
+    }
+
+    #[tokio::test]
+    async fn node_config_get_put_uses_strict_cas_and_policy_labels() {
+        let store = Store::in_memory().unwrap();
+        let node = online_node();
+        let pairing = store.create_pairing_for(Some(node.id)).unwrap();
+        pair_store_worker(&store, &pairing, &node);
+        let app = router(AppState::new(store, AuthToken::test_token(), 47_831));
+        let path = format!("/v1/nodes/{}/config", node.id);
+        let response = app
+            .clone()
+            .oneshot(request(Method::GET, &path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let initial = body_json(response).await;
+        assert_eq!(initial["apiVersion"], NODE_CONFIG_API_VERSION);
+        assert_eq!(initial["revision"], 0);
+
+        let mut config = initial["config"].clone();
+        config["priority"] = json!(900);
+        config["labels"] = json!({
+            "cyc.policy.allowedJobKinds": "build,test",
+            "cyc.policy.resource": "{\"cpuLimitPercent\":80,\"maximumParallelJobs\":2,\"memoryLimitBytes\":null}",
+            "cyc.policy.battery": "{\"allowOnBattery\":false}"
+        });
+        let update = json!({ "expectedRevision": 0, "config": config });
+        let response = app
+            .clone()
+            .oneshot(
+                request(Method::PUT, &path)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let updated = body_json(response).await;
+        assert_eq!(updated["revision"], 1);
+        assert_eq!(updated["config"]["priority"], 900);
+
+        let response = app
+            .oneshot(
+                request(Method::PUT, &path)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let conflict = body_json(response).await;
+        assert_eq!(conflict["error"]["code"], "node_config_conflict");
+        assert_eq!(conflict["error"]["details"]["currentRevision"], 1);
     }
 
     #[tokio::test]
@@ -1082,8 +1801,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert!(store.list_nodes().unwrap().is_empty());
 
-        let pairing = store.create_pairing().unwrap();
-        let _credential = store.consume_pairing(&pairing.code, &node).unwrap();
+        let pairing = store.create_pairing_for(Some(node.id)).unwrap();
+        let credential = pair_store_worker(&store, &pairing, &node);
+        // Enrollment proves pairing only. An authenticated daemon poll is the
+        // first liveness signal that makes the node eligible for placement.
+        assert!(store.claim_job(&credential, &node).unwrap().is_none());
 
         let job = build_job();
         let response = app
@@ -1100,6 +1822,10 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let plan = body_json(response).await;
+        assert_eq!(
+            plan["apiVersion"],
+            cyc_protocol::PLACEMENT_PLAN_BINDING_API_VERSION
+        );
         assert_eq!(plan["jobDigest"].as_str().unwrap().len(), 64);
 
         let response = app
@@ -1123,6 +1849,31 @@ mod tests {
         assert_eq!(submitted["run"]["nodeId"], node.id.to_string());
         assert_eq!(submitted["version"], 0);
         assert_eq!(submitted["cancelRequested"], false);
+        assert_eq!(submitted["planBinding"], plan);
+
+        let response = app
+            .clone()
+            .oneshot(
+                request(Method::GET, &format!("/v1/jobs/{}", job.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_json(response).await["planBinding"], plan);
+
+        let response = app
+            .clone()
+            .oneshot(
+                request(Method::GET, "/v1/jobs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_json(response).await["jobs"][0]["planBinding"], plan);
 
         let run_id = submitted["run"]["id"].as_str().unwrap();
         let response = app
@@ -1138,5 +1889,6 @@ mod tests {
         let cancelled = body_json(response).await;
         assert_eq!(cancelled["run"]["state"], "cancelled");
         assert_eq!(cancelled["version"], 1);
+        assert_eq!(cancelled["planBinding"], plan);
     }
 }

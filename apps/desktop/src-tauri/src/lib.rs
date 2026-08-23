@@ -10,6 +10,49 @@ use tauri::{State, WebviewUrl, WebviewWindowBuilder};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+mod full_run;
+mod integration;
+mod provisioning;
+
+use full_run::{FullRunCheckManager, FullRunCheckResult, PublicFullRunCheckError};
+
+use integration::{
+    IntegrationActionResult, IntegrationManager, IntegrationSelfTestResult, IntegrationStatus,
+    PublicIntegrationError,
+};
+use provisioning::{
+    ApproveHostKeyRequest, ComputerIdRequest, ProvisioningComputerView,
+    ProvisioningInitializationError, ProvisioningManager, ProvisioningOperationResult,
+    PublicProvisioningError, RevisionRequest, SecretActionRequest, StartComputerRequest,
+};
+
+#[derive(Clone)]
+struct ManagedProvisioning {
+    manager: Option<ProvisioningManager>,
+    unavailable_code: &'static str,
+}
+
+impl ManagedProvisioning {
+    fn from_result(result: Result<ProvisioningManager, ProvisioningInitializationError>) -> Self {
+        match result {
+            Ok(manager) => Self {
+                manager: Some(manager),
+                unavailable_code: "provisioning_unavailable",
+            },
+            Err(error) => Self {
+                manager: None,
+                unavailable_code: error.public_code(),
+            },
+        }
+    }
+
+    fn manager(&self) -> Result<ProvisioningManager, PublicProvisioningError> {
+        self.manager.clone().ok_or_else(|| {
+            PublicProvisioningError::initialization_unavailable(self.unavailable_code)
+        })
+    }
+}
+
 const CONTROLLER_ORIGIN: &str = "http://127.0.0.1:47831";
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -38,6 +81,118 @@ const BRIDGE_INITIALIZATION_SCRIPT: &str = r#"
         return Promise.reject(new Error("native bridge unavailable"));
       }
       return invoke("controller_request", { request });
+    },
+    integrationStatus() {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("integration_status");
+    },
+    installOrRepairIntegration() {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("install_or_repair_integration");
+    },
+    integrationSelfTest() {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("integration_self_test");
+    },
+    fullRunCheck() {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("full_run_check");
+    },
+    fullRunCheckStatus() {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("full_run_check_status");
+    },
+    provisioningStart(request) {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("provisioning_start", { request });
+    },
+    provisioningList() {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("provisioning_list");
+    },
+    provisioningGet(request) {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("provisioning_get", { request });
+    },
+    provisioningApproveHostKey(request) {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("provisioning_approve_host_key", { request });
+    },
+    provisioningContinue(request) {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("provisioning_continue", { request });
+    },
+    provisioningResume(request) {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("provisioning_resume", { request });
+    },
+    provisioningRetry(request) {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("provisioning_retry", { request });
+    },
+    provisioningRepair(request) {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("provisioning_repair", { request });
+    },
+    provisioningRollback(request) {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("provisioning_rollback", { request });
+    },
+    provisioningRemove(request) {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("provisioning_remove", { request });
+    },
+    provisioningForgetSshPassword(request) {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("provisioning_forget_ssh_password", { request });
     }
   });
   Object.defineProperty(window, "__CLUSTER_YOUR_CODEX__", {
@@ -251,6 +406,176 @@ async fn controller_request(
     proxy.execute(request).await.map_err(Into::into)
 }
 
+#[tauri::command]
+async fn integration_status(
+    manager: State<'_, IntegrationManager>,
+) -> Result<IntegrationStatus, PublicIntegrationError> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.status())
+        .await
+        .map_err(|_| {
+            PublicIntegrationError::from(integration::IntegrationError::OperationUnavailable)
+        })?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn install_or_repair_integration(
+    manager: State<'_, IntegrationManager>,
+) -> Result<IntegrationActionResult, PublicIntegrationError> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.install_or_repair())
+        .await
+        .map_err(|_| {
+            PublicIntegrationError::from(integration::IntegrationError::OperationUnavailable)
+        })?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn integration_self_test(
+    manager: State<'_, IntegrationManager>,
+) -> Result<IntegrationSelfTestResult, PublicIntegrationError> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.self_test())
+        .await
+        .map_err(|_| {
+            PublicIntegrationError::from(integration::IntegrationError::OperationUnavailable)
+        })?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn full_run_check(
+    manager: State<'_, FullRunCheckManager>,
+    integration: State<'_, IntegrationManager>,
+) -> Result<FullRunCheckResult, PublicFullRunCheckError> {
+    let manager = manager.inner().clone();
+    let integration = integration.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.run(&integration))
+        .await
+        .map_err(|_| PublicFullRunCheckError::operation_unavailable())?
+}
+
+#[tauri::command]
+fn full_run_check_status(manager: State<'_, FullRunCheckManager>) -> Option<FullRunCheckResult> {
+    manager.progress()
+}
+
+async fn run_provisioning<T, F>(operation: F) -> Result<T, PublicProvisioningError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, PublicProvisioningError> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(operation)
+        .await
+        .map_err(|_| PublicProvisioningError::operation_unavailable())?
+}
+
+#[tauri::command]
+async fn provisioning_start(
+    request: StartComputerRequest,
+    manager: State<'_, ManagedProvisioning>,
+) -> Result<ProvisioningOperationResult, PublicProvisioningError> {
+    let manager = manager.inner().manager()?;
+    run_provisioning(move || manager.start(request)).await
+}
+
+#[tauri::command]
+async fn provisioning_list(
+    manager: State<'_, ManagedProvisioning>,
+) -> Result<Vec<ProvisioningComputerView>, PublicProvisioningError> {
+    let manager = manager.inner().manager()?;
+    run_provisioning(move || manager.list()).await
+}
+
+#[tauri::command]
+async fn provisioning_get(
+    request: ComputerIdRequest,
+    manager: State<'_, ManagedProvisioning>,
+) -> Result<ProvisioningComputerView, PublicProvisioningError> {
+    let manager = manager.inner().manager()?;
+    run_provisioning(move || manager.get(request)).await
+}
+
+#[tauri::command]
+async fn provisioning_approve_host_key(
+    request: ApproveHostKeyRequest,
+    manager: State<'_, ManagedProvisioning>,
+) -> Result<ProvisioningOperationResult, PublicProvisioningError> {
+    let manager = manager.inner().manager()?;
+    run_provisioning(move || manager.approve_host_key(request)).await
+}
+
+#[tauri::command]
+async fn provisioning_continue(
+    request: SecretActionRequest,
+    manager: State<'_, ManagedProvisioning>,
+) -> Result<ProvisioningOperationResult, PublicProvisioningError> {
+    let manager = manager.inner().manager()?;
+    run_provisioning(move || manager.continue_provisioning(request)).await
+}
+
+#[tauri::command]
+async fn provisioning_resume(
+    request: SecretActionRequest,
+    manager: State<'_, ManagedProvisioning>,
+) -> Result<ProvisioningOperationResult, PublicProvisioningError> {
+    let manager = manager.inner().manager()?;
+    run_provisioning(move || {
+        manager.request_intent(cyc_provision::ProvisioningIntent::Resume, request)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn provisioning_retry(
+    request: SecretActionRequest,
+    manager: State<'_, ManagedProvisioning>,
+) -> Result<ProvisioningOperationResult, PublicProvisioningError> {
+    let manager = manager.inner().manager()?;
+    run_provisioning(move || {
+        manager.request_intent(cyc_provision::ProvisioningIntent::Retry, request)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn provisioning_repair(
+    request: SecretActionRequest,
+    manager: State<'_, ManagedProvisioning>,
+) -> Result<ProvisioningOperationResult, PublicProvisioningError> {
+    let manager = manager.inner().manager()?;
+    run_provisioning(move || manager.repair(request)).await
+}
+
+#[tauri::command]
+async fn provisioning_rollback(
+    request: SecretActionRequest,
+    manager: State<'_, ManagedProvisioning>,
+) -> Result<ProvisioningOperationResult, PublicProvisioningError> {
+    let manager = manager.inner().manager()?;
+    run_provisioning(move || manager.rollback(request)).await
+}
+
+#[tauri::command]
+async fn provisioning_remove(
+    request: SecretActionRequest,
+    manager: State<'_, ManagedProvisioning>,
+) -> Result<ProvisioningOperationResult, PublicProvisioningError> {
+    let manager = manager.inner().manager()?;
+    run_provisioning(move || manager.remove(request)).await
+}
+
+#[tauri::command]
+async fn provisioning_forget_ssh_password(
+    request: RevisionRequest,
+    manager: State<'_, ManagedProvisioning>,
+) -> Result<ProvisioningOperationResult, PublicProvisioningError> {
+    let manager = manager.inner().manager()?;
+    run_provisioning(move || manager.forget_ssh_password(request)).await
+}
+
 fn is_allowed_controller_route(method: ControllerMethod, path: &str) -> bool {
     match (method, path) {
         (ControllerMethod::Get, "/v1/health" | "/v1/fleet") => true,
@@ -406,10 +731,45 @@ fn trusted_navigation(url: &tauri::Url) -> bool {
 
 pub fn run() {
     let token_file = default_token_file().expect("platform data directory must be available");
-    let proxy = ControllerProxy::new(token_file).expect("native controller proxy must initialize");
+    let data_root = token_file
+        .parent()
+        .expect("controller token must have a data directory")
+        .to_path_buf();
+    let proxy =
+        ControllerProxy::new(token_file.clone()).expect("native controller proxy must initialize");
+    let integration = IntegrationManager::new(token_file.clone())
+        .expect("native Codex integration manager must initialize");
+    let full_run = FullRunCheckManager::new(token_file.clone())
+        .expect("native Full Run Check manager must initialize");
+    // Missing or damaged worker kits disable only Add Computer. The controller,
+    // plugin repair, diagnostics, and Full Run pages must still start so the
+    // installation can be repaired in place.
+    let provisioning =
+        ManagedProvisioning::from_result(ProvisioningManager::new(&data_root, token_file));
     tauri::Builder::default()
         .manage(proxy)
-        .invoke_handler(tauri::generate_handler![controller_request])
+        .manage(integration)
+        .manage(full_run)
+        .manage(provisioning)
+        .invoke_handler(tauri::generate_handler![
+            controller_request,
+            integration_status,
+            install_or_repair_integration,
+            integration_self_test,
+            full_run_check,
+            full_run_check_status,
+            provisioning_start,
+            provisioning_list,
+            provisioning_get,
+            provisioning_approve_host_key,
+            provisioning_continue,
+            provisioning_resume,
+            provisioning_retry,
+            provisioning_repair,
+            provisioning_rollback,
+            provisioning_remove,
+            provisioning_forget_ssh_password
+        ])
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("ClusterYourCodex")
@@ -560,12 +920,68 @@ mod tests {
     }
 
     #[test]
-    fn bridge_script_exposes_only_the_narrow_command() {
+    fn bridge_script_exposes_only_narrow_fixed_commands() {
         assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("controllerRequest"));
         assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("controller_request"));
+        assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("integrationStatus"));
+        assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("integration_status"));
+        assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("installOrRepairIntegration"));
+        assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("install_or_repair_integration"));
+        assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("integrationSelfTest"));
+        assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("integration_self_test"));
+        assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("fullRunCheck"));
+        assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("full_run_check"));
+        assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("fullRunCheckStatus"));
+        assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("full_run_check_status"));
+        for (method, command) in [
+            ("provisioningStart", "provisioning_start"),
+            ("provisioningList", "provisioning_list"),
+            ("provisioningGet", "provisioning_get"),
+            (
+                "provisioningApproveHostKey",
+                "provisioning_approve_host_key",
+            ),
+            ("provisioningContinue", "provisioning_continue"),
+            ("provisioningResume", "provisioning_resume"),
+            ("provisioningRetry", "provisioning_retry"),
+            ("provisioningRepair", "provisioning_repair"),
+            ("provisioningRollback", "provisioning_rollback"),
+            ("provisioningRemove", "provisioning_remove"),
+            (
+                "provisioningForgetSshPassword",
+                "provisioning_forget_ssh_password",
+            ),
+        ] {
+            assert!(BRIDGE_INITIALIZATION_SCRIPT.contains(method));
+            assert!(BRIDGE_INITIALIZATION_SCRIPT.contains(command));
+        }
         for forbidden in ["Authorization", "Bearer ", CONTROLLER_ORIGIN, "token_file"] {
             assert!(!BRIDGE_INITIALIZATION_SCRIPT.contains(forbidden));
         }
+        for forbidden in [
+            "pairing",
+            "admin",
+            "command",
+            "executable",
+            "marketplaceRoot",
+        ] {
+            assert!(!BRIDGE_INITIALIZATION_SCRIPT.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn missing_worker_kits_disable_only_provisioning_without_panicking() {
+        let managed =
+            ManagedProvisioning::from_result(Err(ProvisioningInitializationError::WorkerKit(
+                cyc_provision::WorkerKitError::InvalidCatalogRoot,
+            )));
+        let error = match managed.manager() {
+            Err(error) => error,
+            Ok(_) => panic!("missing worker kits must not create a provisioning manager"),
+        };
+        let value = serde_json::to_value(error).unwrap();
+        assert_eq!(value["code"], "worker_kit_catalog_unavailable");
+        assert_eq!(value["retryable"], false);
     }
 
     #[test]

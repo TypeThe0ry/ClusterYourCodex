@@ -16,7 +16,34 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod cleanup;
+pub mod node_state;
+pub mod onboarding;
+pub mod placement_binding;
+pub mod snapshot;
 pub mod worker;
+
+pub use cleanup::{
+    CleanupFailureCodeV1, CleanupFailureV1, CleanupReceiptV1, CleanupReservationReleaseReasonV1,
+    CleanupStatusPhaseV1, CleanupStatusV1, JobRootCleanupOutcomeV1, TerminalCompletionAckV1,
+    CLEANUP_API_VERSION, COMPLETION_ACKNOWLEDGED_AT_HEADER, COMPLETION_SHA256_HEADER,
+};
+
+pub use node_state::{
+    BatteryTelemetry, CapacityPolicy, ContainmentBackend, ContainmentInventory, GpuInventory,
+    GpuTelemetry, NodeAvailability, NodeConfig, NodeDesiredState, NodeInventory, NodeMergeView,
+    NodeStateError, NodeTelemetry, PowerSource,
+};
+pub use placement_binding::{
+    PlacementBindingError, PlacementPlanBindingV1, PlacementPlanDecisionV1, SmokeRunBindingV1,
+    PLACEMENT_PLAN_BINDING_API_VERSION,
+};
+pub use snapshot::{
+    snapshot_digest_hex, validate_snapshot_digest, validate_snapshot_size, SnapshotContractError,
+    SnapshotMetadataV1, MAX_SNAPSHOT_ARCHIVE_BYTES, MAX_SNAPSHOT_ENTRIES,
+    MAX_SNAPSHOT_EXPANDED_BYTES, MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_PATH_BYTES,
+    SNAPSHOT_API_VERSION, SNAPSHOT_ARCHIVE_FORMAT, SNAPSHOT_MEDIA_TYPE,
+};
 
 /// Current wire-level API identifier used by [`JobSpec`].
 pub const API_VERSION: &str = "cyc.dev/v1";
@@ -100,7 +127,7 @@ pub enum OperatingSystem {
     Macos,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Architecture {
     X86_64,
@@ -259,7 +286,7 @@ pub struct JobOrigin {
     pub workspace_id: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum JobKind {
     Shell,
@@ -336,6 +363,69 @@ pub struct JobRequirements {
     pub min_disk_mib: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu: Option<GpuRequirement>,
+}
+
+/// Explicit consumable capacity requested for one scheduled run. Hard
+/// compatibility constraints such as OS, architecture, and capabilities stay
+/// in [`JobRequirements`]; this document is reserved for resources that are
+/// accounted and reserved by the scheduler.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GpuResourceRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<GpuVendor>,
+    #[serde(default)]
+    pub vram_mib: u64,
+    #[serde(default = "default_true")]
+    pub exclusive: bool,
+}
+
+impl Default for GpuResourceRequest {
+    fn default() -> Self {
+        Self {
+            device_id: None,
+            vendor: None,
+            vram_mib: 0,
+            exclusive: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceRequest {
+    #[serde(default = "default_resource_slots")]
+    pub slots: u32,
+    #[serde(default = "default_resource_cpu_cores")]
+    pub cpu_cores: u32,
+    #[serde(default)]
+    pub memory_mib: u64,
+    #[serde(default)]
+    pub disk_mib: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<GpuResourceRequest>,
+}
+
+const fn default_resource_slots() -> u32 {
+    1
+}
+
+const fn default_resource_cpu_cores() -> u32 {
+    1
+}
+
+impl Default for ResourceRequest {
+    fn default() -> Self {
+        Self {
+            slots: default_resource_slots(),
+            cpu_cores: default_resource_cpu_cores(),
+            memory_mib: 0,
+            disk_mib: 0,
+            gpu: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -417,6 +507,10 @@ pub struct JobSpec {
     pub source: SourceSpec,
     #[serde(default)]
     pub requirements: JobRequirements,
+    /// Omission is wire-compatible with preview clients. The deterministic
+    /// effective value is then derived from legacy `requirements`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_request: Option<ResourceRequest>,
     pub steps: Vec<JobStep>,
     #[serde(default)]
     pub artifacts: ArtifactSpec,
@@ -437,6 +531,7 @@ impl JobSpec {
             kind,
             source,
             requirements: JobRequirements::default(),
+            resource_request: None,
             steps,
             artifacts: ArtifactSpec::default(),
             timeout_seconds: None,
@@ -508,6 +603,9 @@ impl JobSpec {
         {
             return Err(ValidationError::ZeroRequirement("minVramMiB"));
         }
+        if let Some(request) = &self.resource_request {
+            validate_resource_request(request, &self.requirements)?;
+        }
         if matches!(self.artifacts.retention_days, Some(0 | 3651..)) {
             return Err(ValidationError::InvalidRetentionDays);
         }
@@ -556,22 +654,93 @@ impl JobSpec {
                     ));
                 }
             }
-            SourceSpec::Snapshot { digest, .. } => {
-                let hash = digest.strip_prefix("sha256:");
-                if hash.is_none_or(|value| {
-                    value.len() != 64
-                        || !value
-                            .bytes()
-                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                }) {
-                    return Err(ValidationError::InvalidSource(
+            SourceSpec::Snapshot { digest, size_bytes } => {
+                snapshot::validate_snapshot_digest(digest).map_err(|_| {
+                    ValidationError::InvalidSource(
                         "snapshot digest must be sha256 followed by 64 lowercase hex digits",
-                    ));
-                }
+                    )
+                })?;
+                let size_bytes = size_bytes.ok_or(ValidationError::InvalidSource(
+                    "snapshot sizeBytes is required and must bind the raw archive bytes",
+                ))?;
+                snapshot::validate_snapshot_size(size_bytes).map_err(|_| {
+                    ValidationError::InvalidSource(
+                        "snapshot sizeBytes must be in the supported bounded range",
+                    )
+                })?;
             }
         }
         Ok(())
     }
+
+    /// Produce the one scheduler resource contract for both legacy and new
+    /// clients. Explicit requests are validated not to weaken legacy minima.
+    pub fn effective_resource_request(&self) -> ResourceRequest {
+        self.resource_request
+            .clone()
+            .unwrap_or_else(|| resource_request_from_legacy(&self.requirements))
+    }
+}
+
+fn resource_request_from_legacy(requirements: &JobRequirements) -> ResourceRequest {
+    ResourceRequest {
+        slots: 1,
+        cpu_cores: requirements.min_cpu_cores.unwrap_or(1),
+        memory_mib: requirements.min_memory_mib.unwrap_or(0),
+        disk_mib: requirements.min_disk_mib.unwrap_or(0),
+        gpu: requirements.gpu.as_ref().map(|gpu| GpuResourceRequest {
+            device_id: None,
+            vendor: gpu.vendor,
+            vram_mib: gpu.min_vram_mib.unwrap_or(0),
+            exclusive: gpu.exclusive,
+        }),
+    }
+}
+
+fn validate_resource_request(
+    request: &ResourceRequest,
+    legacy: &JobRequirements,
+) -> Result<(), ValidationError> {
+    if request.slots == 0 {
+        return Err(ValidationError::ZeroResourceRequest("slots"));
+    }
+    if request.cpu_cores == 0 {
+        return Err(ValidationError::ZeroResourceRequest("cpuCores"));
+    }
+    if request.cpu_cores < legacy.min_cpu_cores.unwrap_or(1)
+        || request.memory_mib < legacy.min_memory_mib.unwrap_or(0)
+        || request.disk_mib < legacy.min_disk_mib.unwrap_or(0)
+    {
+        return Err(ValidationError::ResourceRequestWeakensLegacy);
+    }
+    if let Some(gpu) = &request.gpu {
+        if gpu.device_id.as_ref().is_some_and(|device_id| {
+            device_id.trim().is_empty()
+                || device_id.chars().count() > 256
+                || device_id.chars().any(char::is_control)
+        }) {
+            return Err(ValidationError::InvalidGpuDeviceId);
+        }
+    }
+    match (&request.gpu, &legacy.gpu) {
+        (None, Some(_)) => return Err(ValidationError::ResourceRequestWeakensLegacy),
+        (Some(request), Some(legacy)) => {
+            if request.vram_mib < legacy.min_vram_mib.unwrap_or(0)
+                || legacy.exclusive && !request.exclusive
+                || request
+                    .vendor
+                    .zip(legacy.vendor)
+                    .is_some_and(|(requested, required)| requested != required)
+            {
+                return Err(ValidationError::ResourceRequestWeakensLegacy);
+            }
+            if legacy.vendor.is_some() && request.vendor.is_none() {
+                return Err(ValidationError::ResourceRequestWeakensLegacy);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Apply scheduler-equivalent defaults before binding a job to a plan or run.
@@ -882,6 +1051,12 @@ pub enum ValidationError {
     EmptyCapability,
     #[error("{0} must be greater than zero")]
     ZeroRequirement(&'static str),
+    #[error("resourceRequest.{0} must be greater than zero")]
+    ZeroResourceRequest(&'static str),
+    #[error("resourceRequest must not weaken legacy requirements")]
+    ResourceRequestWeakensLegacy,
+    #[error("resourceRequest.gpu.deviceId is invalid")]
+    InvalidGpuDeviceId,
     #[error("retentionDays must be in the inclusive range 1..=3650")]
     InvalidRetentionDays,
     #[error("artifacts.{field}[{index}] is invalid: {source}")]
@@ -1153,6 +1328,14 @@ pub enum RejectionCode {
     GpuVendorMismatch,
     InsufficientVram,
     ExclusiveGpuUnavailable,
+    PolicyJobKindDenied,
+    BatteryDisallowed,
+    CpuLimitExceeded,
+    CpuEwmaLimitExceeded,
+    MemoryLimitExceeded,
+    TemperatureLimitExceeded,
+    SlotLimitReached,
+    ContainmentLimitReached,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1324,6 +1507,36 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_sources_require_raw_archive_digest_and_exact_bounded_size() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let mut job = JobSpec::new(
+            JobKind::Build,
+            SourceSpec::Snapshot {
+                digest: digest.clone(),
+                size_bytes: None,
+            },
+            vec![JobStep::new("build", "cargo build")],
+        );
+        assert!(matches!(
+            job.validate(),
+            Err(ValidationError::InvalidSource(_))
+        ));
+        if let SourceSpec::Snapshot { size_bytes, .. } = &mut job.source {
+            *size_bytes = Some(0);
+        }
+        assert!(job.validate().is_err());
+        if let SourceSpec::Snapshot { size_bytes, .. } = &mut job.source {
+            *size_bytes = Some(42);
+        }
+        job.validate().unwrap();
+        let SourceSpec::Snapshot { digest, .. } = &mut job.source else {
+            unreachable!()
+        };
+        *digest = format!("sha256:{}", "A".repeat(64));
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
     fn working_directories_reject_non_portable_and_traversal_paths() {
         for path in [
             "",
@@ -1399,6 +1612,63 @@ mod tests {
         assert_ne!(
             canonical_job_digest(&implicit_default).expect("original digest"),
             canonical_job_digest(&explicit_default).expect("changed digest")
+        );
+    }
+
+    #[test]
+    fn absent_resource_request_preserves_wire_and_maps_legacy_requirements() {
+        let mut job = sample_job();
+        job.requirements.min_cpu_cores = Some(4);
+        job.requirements.min_memory_mib = Some(8_192);
+        job.requirements.min_disk_mib = Some(20_000);
+        job.requirements.gpu = Some(GpuRequirement {
+            vendor: Some(GpuVendor::Nvidia),
+            min_vram_mib: Some(6_144),
+            exclusive: true,
+        });
+        let value = serde_json::to_value(&job).unwrap();
+        assert!(value.get("resourceRequest").is_none());
+        assert_eq!(
+            job.effective_resource_request(),
+            ResourceRequest {
+                slots: 1,
+                cpu_cores: 4,
+                memory_mib: 8_192,
+                disk_mib: 20_000,
+                gpu: Some(GpuResourceRequest {
+                    device_id: None,
+                    vendor: Some(GpuVendor::Nvidia),
+                    vram_mib: 6_144,
+                    exclusive: true,
+                }),
+            }
+        );
+        job.validate().unwrap();
+    }
+
+    #[test]
+    fn explicit_resource_request_is_bound_and_cannot_weaken_legacy_minima() {
+        let mut job = sample_job();
+        job.requirements.min_cpu_cores = Some(2);
+        job.resource_request = Some(ResourceRequest {
+            slots: 1,
+            cpu_cores: 3,
+            memory_mib: 4_096,
+            disk_mib: 1_024,
+            gpu: None,
+        });
+        job.validate().unwrap();
+        let encoded = serde_json::to_value(&job).unwrap();
+        assert_eq!(encoded["resourceRequest"]["cpuCores"], 3);
+
+        let original_digest = canonical_job_digest(&job).unwrap();
+        job.resource_request.as_mut().unwrap().cpu_cores = 4;
+        assert_ne!(original_digest, canonical_job_digest(&job).unwrap());
+
+        job.resource_request.as_mut().unwrap().cpu_cores = 1;
+        assert_eq!(
+            job.validate(),
+            Err(ValidationError::ResourceRequestWeakensLegacy)
         );
     }
 

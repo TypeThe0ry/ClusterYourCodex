@@ -147,7 +147,8 @@ Set-CycPrivateAcl $WorkerData -Directory
 # authenticated copy -> $WorkerData\enrollment.json
 Set-CycPrivateAcl "$WorkerData\enrollment.json"
 .\cyc-worker.exe pair --enrollment-file C:\ClusterYourCodex\enrollment.json `
-  --config C:\ClusterYourCodex\worker.json
+  --config C:\ClusterYourCodex\worker.json `
+  --workspace-root C:\CodexWorker
 Remove-Item -LiteralPath C:\ClusterYourCodex\enrollment.json
 .\cyc-worker.exe status --config C:\ClusterYourCodex\worker.json --pretty
 .\cyc-worker.exe run --config C:\ClusterYourCodex\worker.json
@@ -163,6 +164,33 @@ uid with mode `0700`, the key to be a regular non-symlink file owned by that uid
 with mode `0600`, and every component of the key/certificate path to be free of
 symbolic links.
 
+Repair preserves logical identity: create the replacement enrollment with
+`cyc pair create --node-id <existing-node-id>`, stop the installed service,
+and call `cyc-worker pair` with the same protected config and absolute
+workspace plus `--repair`. The worker requires the same controller and intended
+node ID, atomically rotates the local credential/config, and leaves the chosen
+workspace unchanged unless the installer explicitly supplies that same path.
+
+Pair and repair are one config-scoped local transaction. The worker takes the
+stable `worker.pair.lock` with an exclusive Windows file handle or Unix
+`flock` before it re-reads enrollment/config state, and holds that OS lock
+through the pair request, config commit, acknowledgement, and garbage
+collection. The protected lock inode is never unlinked, so two processes
+cannot lock different replacement files; process exit releases the kernel
+lock. A protected, atomically replaced `worker.pairing-state.json` records only
+pairing/controller/node bindings, exact credential paths, SHA-256 digests,
+times, state, and pending cleanup. It never stores credential plaintext.
+
+Credential cleanup is fail-closed. Unknown or possibly accepted requests, the
+current invocation, and the credential referenced by committed config remain
+protected. Cleanup removes only a ledger-owned canonical direct child whose
+regular-file protections and digest still match, after a definite terminal or
+superseded result, or an ACK that authorizes removal of the previous repair
+credential. A verification/removal failure leaves durable `cleanupPending`
+state for retry. If an ACK response is lost after config commit, replay uses
+the committed credential and ledger binding and completes the pending old-file
+cleanup only after an affirmative ACK.
+
 After a worker has paired and reported a fresh probe, the local client can
 submit an exact Git object ID and retrieve evidence without exposing any
 credential on the command line:
@@ -175,6 +203,60 @@ credential on the command line:
   --stream stdout --output .\stdout.log
 .\cyc.exe --token-file "$Data\controller.token" artifacts <job-id>
 ```
+
+## Inventory and telemetry ordering
+
+Inventory and telemetry are separate versioned documents. A daemon allocates
+and durably commits a monotonically increasing `bootGeneration` before it
+starts reporting. Each process also owns a random `bootId` and a monotonically
+increasing `sequence`. The controller accepts reports in lexicographic order
+by `(bootGeneration, bootId, sequence)`: a newer generation retires every
+older process, while reports in one generation must retain the same boot ID
+and advance the sequence. Generation zero is reserved for legacy workers; new
+managed workers always report a positive value.
+
+The public Fleet API, Desktop bridge, and MCP types expose `bootGeneration` as
+a non-negative JSON integer alongside `bootId` and `sequence`. A controller
+ACK echoes the accepted generation and sequence in bounded response headers.
+Delayed reports from a retired process are rejected and cannot overwrite the
+current resource snapshot. Inventory remains pending and is retransmitted
+until its digest/revision receives an affirmative ACK.
+
+`GET /v1/fleet` returns `fleetRevision` (bounded to the JavaScript exact-integer
+range) and one controller `observedAt`. The revision, merged `nodes`, split
+`nodeViews`, active reservations, and `recentJobs` are read from one SQLite WAL
+read transaction. Concurrent controller writes can therefore appear wholly
+before or wholly after a response, never as a three-query torn fleet view.
+`fleetRevision` is the authoritative placement/capacity revision, not a count
+of every heartbeat or job-document mutation; lease renewal alone does not make
+an otherwise valid placement plan stale.
+
+## Immutable placement authority
+
+`POST /v1/plans` returns the shared
+`cyc.dev/placement-plan-binding/v1` document directly. It binds `planId`, the
+normalized `JobSpec` ID and canonical SHA-256, creation/expiry times, exact
+JavaScript-safe fleet/node/policy revisions, and the selected node, score, and
+complete original explanation. The controller does not maintain a second
+private response shape.
+
+Planned submission validates and consumes that exact binding in the same
+SQLite `IMMEDIATE` transaction that stores the normalized job, run, dispatch
+lease, and `plans.used_at`. Fresh telemetry may update `run.placement` only
+when it still selects the binding's node; it never rewrites `planBinding` or
+the original explanation. Submission without a caller-created plan generates
+and consumes an equivalent controller-authored plan inside that transaction,
+so every new managed job has immutable authority.
+
+`POST /v1/jobs`, job GET/list, and fleet `recentJobs` always include the stored
+`planBinding`. A JSON `null` is an explicit pre-binding legacy marker. Migration
+backfills it only when exactly one validated used plan proves the canonical job
+and current run node; missing, malformed, or ambiguous evidence remains null.
+Database triggers reject new null bindings and mutation of a stored binding.
+After an unclaimed dispatch expires, bound jobs may rearm only on the same node
+even if another node later scores higher; an ineligible bound node leaves the
+job waiting rather than silently changing authority. Legacy null rows retain
+the prior re-selection behavior.
 
 ## Claim and lease
 
@@ -193,11 +275,37 @@ authenticate node
 No work returns `204 No Content` with bounded polling guidance. A successful
 claim returns the immutable `JobSpec`, its canonical SHA-256 digest, run ID,
 state version, job-owned relative workspace, upload limits, and lease deadline.
+The claimed node must equal the stored placement binding's selected node.
 
 Heartbeats renew both the run claim and resource lease. If a worker cannot
 renew before the local deadline, it terminates the job-owned process tree.
 Expired claims are failed atomically before resources are released; they are
 never silently reallocated while the old process may still be running.
+
+Managed terminal completion does not immediately release scheduler capacity.
+The terminal transaction revokes the run claim, stores the exact completion
+digest/ACK, and changes the same lease to durable `cleanup_pending` for 15
+minutes. A cleanup obligation binds `jobId`, `runId`, `leaseId`, terminal state
+version, final state, completion SHA-256, and acknowledgement time. Only an
+immutable, exactly matching `removed` receipt permits capacity release, and
+the receipt plus release commit in the same SQLite `IMMEDIATE` transaction.
+Duplicate receipts are idempotent; a mismatched receipt is rejected, while
+durable `not_created` evidence keeps capacity reserved.
+
+If no `removed` receipt arrives before the durable deadline, the lease reaper
+may release capacity only after re-reading and proving every terminal binding.
+It records `releaseReason=deadline_recovery` plus bounded
+`cleanupFailure.code=removed_receipt_deadline_exceeded`; cleanup phase remains
+`pending` and `jobRootDeleted=false`. It never inserts or synthesizes a
+`removed` receipt. These fields survive restart and keep Full Run fail-closed
+even though scheduler capacity is eventually recovered. Historical databases
+whose old controller already released a terminal lease are marked
+`legacy_migration` with explicit failure evidence unless a matching removed
+receipt was already durable.
+If any terminal/job/run/lease/digest binding fails revalidation, the failure is
+recorded but the expired `cleanup_pending` lease continues to count against CPU,
+memory, disk, slot, and GPU capacity until an operator repairs the evidence or
+an exact `removed` receipt resolves it.
 
 Immediately after every successful claim, and before the claimed assignment
 can poll `prepare_job` or spawn a Git/source/step process, the worker durably
@@ -225,15 +333,18 @@ a security boundary against a malicious submitted job.
 
 ## Source contract
 
-The first executable source type is a public HTTPS Git repository at an exact,
-full 40- or 64-character lowercase hexadecimal commit object ID. Userinfo,
-query strings, fragments, submodules, Git LFS, credential helpers, and
-interactive prompts are disabled in the preview.
+Executable source may be either a public HTTPS Git repository at an exact,
+full 40- or 64-character lowercase hexadecimal commit object ID or an
+immutable controller snapshot identified by the SHA-256 of its bounded
+`tar+zstd` archive. Userinfo, query strings, fragments, submodules, Git LFS,
+credential helpers, and interactive prompts are disabled for Git sources.
 
 The worker records the requested object ID, resolved `HEAD`, tree ID, and Git
 version. `HEAD` must exactly equal the requested object ID before any job step
-runs. Filtered controller snapshots and private repository credentials are a
-later protocol extension.
+runs. For snapshots, the CLI/MCP packer rejects secret/cache paths, links,
+reparse points, unsafe archive names, and size overruns; both upload and worker
+download recheck exact byte length and digest before safe extraction. Private
+repository credentials remain a later protocol extension.
 
 ## Job-owned filesystem
 

@@ -42,11 +42,23 @@ The first release is composed of:
 
 - No built-in host names, IP addresses, drive letters, users, or fixed fleet size.
 - Codex never receives worker passwords, private keys, or raw secret material.
+- Codex submits typed workload requirements; the Controller uses current
+  telemetry and reservations to atomically choose and reserve a worker. Codex
+  does not select a node from a stale status snapshot unless the user explicitly
+  requests manual placement.
 - Every run records its source identity, selected node and reason, native exit
   code, elapsed time, logs, verification, and artifact hashes.
 - Jobs own their workspaces. Cancellation and cleanup never touch unrelated
   files or processes.
-- Existing `AGENTS.md` content is preserved; managed integration is additive.
+- Existing global `AGENTS.md` content is preserved byte-for-byte outside one
+  uniquely marked ClusterYourCodex block. Install/Repair updates only that
+  block after plugin activation is verified, and Uninstall removes only that
+  block with durable journaling, compare-and-swap, and fail-closed drift checks.
+- The GUI can finish or repair only the Codex-facing step through the
+  non-elevated `bootstrap.ps1 -Action IntegrateCodex` receipt interface. It
+  verifies the exact installed/enabled plugin version and local source before
+  touching the managed block; it does not restart the controller or modify a
+  service, Scheduled Task, firewall rule, or worker configuration.
 
 See [`docs/adr/0001-product-boundary.md`](docs/adr/0001-product-boundary.md)
 for the initial architecture decision. The next execution and distribution

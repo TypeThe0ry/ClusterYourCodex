@@ -1,10 +1,18 @@
 #requires -Version 5.1
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
-    [ValidateSet('Install', 'Repair', 'Uninstall')]
+    [ValidateSet('Install', 'Repair', 'Uninstall', 'IntegrateCodex', 'CommitFirewall')]
     [string]$Action = 'Install',
 
-    [string]$BundleRoot = (Join-Path $PSScriptRoot 'payload'),
+    [string]$BundleRoot,
+
+    [string]$PackageRoot,
+
+    [string]$PackageManifest,
+
+    [string]$PackageExecutable,
+
+    [switch]$RequirePackageSignature,
 
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\ClusterYourCodex'),
 
@@ -14,7 +22,46 @@ param(
 
     [string]$WorkerConfig = (Join-Path $env:LOCALAPPDATA 'ClusterYourCodex\worker\config.json'),
 
+    [string]$WorkerPublicHost,
+
+    [ValidateRange(1, 65535)]
+    [int]$WorkerListenPort = 47832,
+
+    [switch]$DisableManagedWorkerListener,
+
+    [switch]$SkipFirewall,
+
+    [switch]$DeferFirewall,
+
+    [string]$InitiatingSid,
+
+    [string]$InitiatingProfile,
+
+    [string]$InitiatingLocalAppData,
+
+    [string]$FirewallTransactionId,
+
+    [string]$FirewallRequestSha256,
+
+    [string]$FirewallReceiptPath,
+
     [switch]$SkipCodexIntegration,
+
+    [string]$CodexHome,
+
+    [string]$CodexCliPath,
+
+    [string]$ExpectedInstallManifestSha256,
+
+    [ValidateRange(1, 30)]
+    [int]$MutexTimeoutSeconds = 10,
+
+    [ValidateRange(10, 90)]
+    [int]$ActionTimeoutSeconds = 60,
+
+    [switch]$SkipUninstallRegistration,
+
+    [string]$UninstallerPath,
 
     [switch]$PurgeData,
 
@@ -24,17 +71,60 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Windows PowerShell 5.1 does not reliably populate $PSScriptRoot while
+# evaluating param-block default expressions for a script launched with
+# `-File`. Resolve the default only after parameter binding completes.
+if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
+    $BundleRoot = Join-Path $PSScriptRoot 'payload'
+}
+
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
 $script:WorkerTaskName = 'ClusterYourCodex Worker'
+$script:FirewallRuleGroup = 'ClusterYourCodex'
+$script:FirewallRuleDescription = 'ClusterYourCodex owned managed-worker TLS listener'
+$script:FirewallReceiptSchema = 'cyc.dev/windows-firewall-receipt/v1'
+$script:FirewallLifecycleName = 'external-elevated-helper'
+$script:UninstallRegistryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ClusterYourCodex'
 $script:RequiredExecutables = @('ClusterYourCodex.exe', 'cyc-controller.exe', 'cyc.exe')
+$script:AgentsBeginMarker = '<!-- CLUSTERYOURCODEX-MANAGED:BEGIN -->'
+$script:AgentsEndMarker = '<!-- CLUSTERYOURCODEX-MANAGED:END -->'
+$script:AgentsIntegrationSchema = 'cyc.dev/agents-managed-block/v1'
+$script:AgentsJournalSchema = 'cyc.dev/agents-transaction/v1'
+$script:AgentsTemplateRelativePath = 'integrations/codex/cluster-agents-block.md'
+$script:MaxAgentsFileBytes = 16MB
+$script:AgentsMutexName = 'Local\ClusterYourCodex.GlobalAgents.v1'
+$script:CodexOnlyReceiptSchema = 'cyc.dev/codex-integration-receipt/v1'
+$script:CodexPluginId = 'cluster-your-codex@clusteryourcodex'
+$script:CodexPluginRelativePath = 'integrations/codex-marketplace/plugins/cluster-your-codex'
+$script:CodexPluginManifestRelativePath = 'integrations/codex-marketplace/plugins/cluster-your-codex/.codex-plugin/plugin.json'
+$script:CodexMarketplaceManifestRelativePath = 'integrations/codex-marketplace/.agents/plugins/marketplace.json'
+$script:MaxCodexOnlyReceiptBytes = 4096
+$script:FileCatalogSchema = 'cyc.dev/file-catalog/v1'
+$script:CodexMarketplaceRelativeRoot = 'integrations/codex-marketplace'
+$script:CodexMarketplacePrefix = 'integrations/codex-marketplace/'
 
 function Resolve-NormalizedPath {
     param([Parameter(Mandatory = $true)][string]$Path)
-    return [System.IO.Path]::GetFullPath($Path).TrimEnd(
+    $full = [System.IO.Path]::GetFullPath($Path)
+    $volumeRoot = [System.IO.Path]::GetPathRoot($full)
+    if ([string]::Equals($full, $volumeRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $volumeRoot
+    }
+    return $full.TrimEnd(
         [System.IO.Path]::DirectorySeparatorChar,
         [System.IO.Path]::AltDirectorySeparatorChar
     )
+}
+
+function Get-CycChildPrefix {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $rootPath = Resolve-NormalizedPath $Root
+    if ($rootPath.EndsWith([string][System.IO.Path]::DirectorySeparatorChar) -or
+        $rootPath.EndsWith([string][System.IO.Path]::AltDirectorySeparatorChar)) {
+        return $rootPath
+    }
+    return $rootPath + [System.IO.Path]::DirectorySeparatorChar
 }
 
 function Assert-ChildPath {
@@ -48,7 +138,7 @@ function Assert-ChildPath {
     if ($AllowRoot -and [string]::Equals($rootPath, $candidatePath, [System.StringComparison]::OrdinalIgnoreCase)) {
         return $candidatePath
     }
-    $prefix = $rootPath + [System.IO.Path]::DirectorySeparatorChar
+    $prefix = Get-CycChildPrefix $rootPath
     if (-not $candidatePath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Path escapes the owned root: $candidatePath"
     }
@@ -62,7 +152,7 @@ function Get-RelativeOwnedPath {
     )
     $rootPath = Resolve-NormalizedPath $Root
     $pathValue = Assert-ChildPath -Root $rootPath -Candidate $Path
-    return $pathValue.Substring($rootPath.Length + 1).Replace('\', '/')
+    return $pathValue.Substring((Get-CycChildPrefix $rootPath).Length).Replace('\', '/')
 }
 
 function Test-ReparsePoint {
@@ -90,6 +180,1840 @@ function Get-PayloadFiles {
     }
 }
 
+function Get-CycSha256Hex {
+    param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes)
+    if ($null -eq $Bytes) { $Bytes = [byte[]]@() }
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha256.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+function ConvertTo-CycStrictRelativePath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or $Path.Length -gt 4096 -or
+        $Path.Contains('\') -or $Path.Contains(':') -or
+        $Path.StartsWith('/', [System.StringComparison]::Ordinal) -or
+        $Path.EndsWith('/', [System.StringComparison]::Ordinal) -or
+        $Path -match '[\x00-\x1f\x7f]' -or [System.IO.Path]::IsPathRooted($Path)) {
+        throw "Install manifest contains an invalid strict relative path: $Path"
+    }
+    $segments = @($Path.Split('/'))
+    if ($segments.Count -eq 0 -or @($segments | Where-Object {
+        [string]::IsNullOrEmpty($_) -or $_ -ceq '.' -or $_ -ceq '..'
+    }).Count -gt 0) {
+        throw "Install manifest contains an invalid path segment: $Path"
+    }
+    return [string]::Join('/', $segments)
+}
+
+function Get-CycFileCatalogDigest {
+    param([Parameter(Mandatory = $true)][object[]]$Entries)
+    [string[]]$paths = @($Entries | ForEach-Object { [string]$_.relativePath })
+    [Array]::Sort($paths, [System.StringComparer]::Ordinal)
+    $byPath = [System.Collections.Generic.Dictionary[string, object]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($entry in $Entries) { $byPath.Add([string]$entry.relativePath, $entry) }
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.Append($script:FileCatalogSchema).Append("`n")
+    foreach ($path in $paths) {
+        $entry = $byPath[$path]
+        [void]$builder.Append($path).Append("`n")
+        [void]$builder.Append([string]$entry.sha256).Append("`n")
+        [void]$builder.Append(([long]$entry.length).ToString([System.Globalization.CultureInfo]::InvariantCulture)).Append("`n")
+    }
+    $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    return Get-CycSha256Hex -Bytes $utf8.GetBytes($builder.ToString())
+}
+
+function Get-CycManifestFileCatalog {
+    param([Parameter(Mandatory = $true)]$Manifest)
+    $filesProperty = $Manifest.PSObject.Properties['files']
+    if (-not $filesProperty) { throw 'Install manifest has no files catalog.' }
+    $entries = @($filesProperty.Value)
+    if ($entries.Count -lt 1 -or $entries.Count -gt 100000) {
+        throw 'Install manifest files catalog is empty or unbounded.'
+    }
+    $seen = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    $validated = New-Object System.Collections.Generic.List[object]
+    foreach ($entry in $entries) {
+        if (-not $entry) { throw 'Install manifest contains a null file receipt.' }
+        [string[]]$propertyNames = @($entry.PSObject.Properties.Name)
+        [Array]::Sort($propertyNames, [System.StringComparer]::Ordinal)
+        if ([string]::Join(',', $propertyNames) -cne 'length,relativePath,sha256') {
+            throw 'Install manifest file receipts must contain only length, relativePath, and sha256.'
+        }
+        if (-not ($entry.relativePath -is [string]) -or -not ($entry.sha256 -is [string]) -or
+            [string]$entry.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            -not ($entry.length -is [byte] -or $entry.length -is [int16] -or
+                $entry.length -is [int32] -or $entry.length -is [int64]) -or
+            [long]$entry.length -lt 0) {
+            throw 'Install manifest contains invalid file integrity metadata.'
+        }
+        $relative = ConvertTo-CycStrictRelativePath -Path ([string]$entry.relativePath)
+        if (-not $seen.Add($relative)) {
+            throw "Install manifest contains a duplicate file receipt: $relative"
+        }
+        [void]$validated.Add([PSCustomObject][ordered]@{
+            relativePath = $relative
+            sha256 = [string]$entry.sha256
+            length = [long]$entry.length
+        })
+    }
+    [object[]]$all = [object[]]::new($validated.Count)
+    $validated.CopyTo($all, 0)
+    $payload = @($all | Where-Object {
+        ([string]$_.relativePath).StartsWith($script:CodexMarketplacePrefix, [System.StringComparison]::Ordinal)
+    })
+    if ($payload.Count -lt 1) { throw 'Install manifest has no Codex marketplace payload catalog.' }
+    $buildDigest = Get-CycFileCatalogDigest -Entries $all
+    $payloadDigest = Get-CycFileCatalogDigest -Entries $payload
+    $recordedBuild = Get-CycObjectProperty -Object $Manifest -Name 'buildCatalogSha256'
+    $recordedPayload = Get-CycObjectProperty -Object $Manifest -Name 'codexPayloadCatalogSha256'
+    if ($null -ne $recordedBuild -and [string]$recordedBuild -cne $buildDigest) {
+        throw 'Install manifest build-catalog digest does not match its file receipts.'
+    }
+    if ($null -ne $recordedPayload -and [string]$recordedPayload -cne $payloadDigest) {
+        throw 'Install manifest Codex payload-catalog digest does not match its file receipts.'
+    }
+    return [PSCustomObject]@{
+        entries = $all
+        payloadEntries = $payload
+        buildCatalogSha256 = $buildDigest
+        payloadCatalogSha256 = $payloadDigest
+    }
+}
+
+function Assert-CycNoReparsePathChain {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Candidate,
+        [ValidateSet('File', 'Directory')][string]$LeafType
+    )
+    $rootPath = Resolve-NormalizedPath $Root
+    $target = Assert-ChildPath -Root $rootPath -Candidate $Candidate
+    if (-not (Test-Path -LiteralPath $rootPath -PathType Container) -or
+        (Test-ReparsePoint (Get-Item -LiteralPath $rootPath -Force))) {
+        throw 'Integrity root must be a real directory.'
+    }
+    $relative = $target.Substring((Get-CycChildPrefix $rootPath).Length)
+    $segments = @($relative.Split(@(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    ), [System.StringSplitOptions]::RemoveEmptyEntries))
+    if ($segments.Count -eq 0) { throw 'Integrity path must be below its root.' }
+    $current = $rootPath
+    for ($index = 0; $index -lt $segments.Count; $index++) {
+        $current = Join-Path $current $segments[$index]
+        $isLeaf = $index -eq ($segments.Count - 1)
+        $expectedType = if ($isLeaf) { $LeafType } else { 'Directory' }
+        $exists = if ($expectedType -eq 'File') {
+            Test-Path -LiteralPath $current -PathType Leaf
+        } else {
+            Test-Path -LiteralPath $current -PathType Container
+        }
+        if (-not $exists) { throw "Integrity path is missing: $current" }
+        $item = Get-Item -LiteralPath $current -Force
+        if (Test-ReparsePoint $item) { throw "Integrity path contains a reparse point: $current" }
+    }
+    return $target
+}
+
+function Assert-CycCodexPayloadCatalog {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$InstallRoot
+    )
+    $install = Resolve-NormalizedPath $InstallRoot
+    $catalog = Get-CycManifestFileCatalog -Manifest $Manifest
+    $marketplaceRoot = Assert-CycNoReparsePathChain `
+        -Root $install `
+        -Candidate (Join-Path $install $script:CodexMarketplaceRelativeRoot.Replace('/', '\')) `
+        -LeafType Directory
+    $expected = [System.Collections.Generic.Dictionary[string, object]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    $expectedDirectories = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($entry in $catalog.payloadEntries) {
+        [void]$expected.Add([string]$entry.relativePath, $entry)
+        $relativeToMarketplace = ([string]$entry.relativePath).Substring($script:CodexMarketplacePrefix.Length)
+        $parts = @($relativeToMarketplace.Split('/'))
+        for ($index = 1; $index -lt $parts.Count; $index++) {
+            [void]$expectedDirectories.Add([string]::Join('/', $parts[0..($index - 1)]))
+        }
+    }
+    $actual = [System.Collections.Generic.Dictionary[string, string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($item in @(Get-ChildItem -LiteralPath $marketplaceRoot -Recurse -Force)) {
+        if (Test-ReparsePoint $item) {
+            throw "Installed Codex marketplace contains a reparse point: $($item.FullName)"
+        }
+        if ($item.PSIsContainer) {
+            $directoryRelative = Get-RelativeOwnedPath -Root $marketplaceRoot -Path $item.FullName
+            if (-not $expectedDirectories.Contains($directoryRelative)) {
+                throw "Installed Codex marketplace contains an extra directory: $directoryRelative"
+            }
+            continue
+        }
+        $relative = Get-RelativeOwnedPath -Root $install -Path $item.FullName
+        if ($actual.ContainsKey($relative)) {
+            throw "Installed Codex marketplace contains a case-colliding file: $relative"
+        }
+        $actual.Add($relative, $item.FullName)
+    }
+    if ($actual.Count -ne $expected.Count) {
+        throw 'Installed Codex marketplace has missing or extra files.'
+    }
+    foreach ($pair in $actual.GetEnumerator()) {
+        if (-not $expected.ContainsKey($pair.Key)) {
+            throw "Installed Codex marketplace contains an extra file: $($pair.Key)"
+        }
+        $entry = $expected[$pair.Key]
+        if ([string]$entry.relativePath -cne [string]$pair.Key) {
+            throw "Installed Codex marketplace path casing drifted: $($pair.Key)"
+        }
+        $path = Assert-CycNoReparsePathChain -Root $install -Candidate $pair.Value -LeafType File
+        $item = Get-Item -LiteralPath $path -Force
+        if ([long]$item.Length -ne [long]$entry.length -or
+            (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$entry.sha256) {
+            throw "Installed Codex marketplace file failed length/SHA-256 verification: $($pair.Key)"
+        }
+    }
+    return $catalog
+}
+
+function Get-CycObjectProperty {
+    param(
+        $Object,
+        [Parameter(Mandatory = $true)][string]$Name,
+        $Default = $null
+    )
+    if ($null -ne $Object -and $Object.PSObject.Properties[$Name]) {
+        return $Object.$Name
+    }
+    return $Default
+}
+
+function Enter-CycAgentsMutex {
+    param([ValidateRange(1, 300)][int]$TimeoutSeconds = 120)
+    $created = $false
+    $mutex = [System.Threading.Mutex]::new($false, $script:AgentsMutexName, [ref]$created)
+    $acquired = $false
+    try {
+        try {
+            $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))
+        } catch [System.Threading.AbandonedMutexException] {
+            $acquired = $true
+        }
+        if (-not $acquired) {
+            throw 'Timed out waiting for the ClusterYourCodex global AGENTS.md transaction lock.'
+        }
+        return $mutex
+    } catch {
+        $mutex.Dispose()
+        throw
+    }
+}
+
+function Exit-CycAgentsMutex {
+    param($Mutex)
+    if ($Mutex) {
+        try { $Mutex.ReleaseMutex() } finally { $Mutex.Dispose() }
+    }
+}
+
+function Assert-CycAgentsIntegrationRecord {
+    param([Parameter(Mandatory = $true)]$Record)
+    if ([string](Get-CycObjectProperty -Object $Record -Name 'schemaVersion') -cne
+        $script:AgentsIntegrationSchema) {
+        throw 'The recorded global AGENTS.md integration schema is unsupported.'
+    }
+    foreach ($required in @(
+        'enabled', 'installed', 'path', 'codexHome', 'templateRelativePath',
+        'templateSha256', 'encoding', 'baseFileExisted', 'baseFileSha256', 'baseFileLength',
+        'installedFileSha256', 'installedFileLength', 'blockSha256',
+        'prefixSha256', 'ownedPrefixBase64'
+    )) {
+        if (-not $Record.PSObject.Properties[$required]) {
+            throw "The global AGENTS.md integration record is missing '$required'."
+        }
+    }
+    if (-not [bool]$Record.enabled -or -not [bool]$Record.installed -or
+        [string]::IsNullOrWhiteSpace([string]$Record.path) -or
+        [string]::IsNullOrWhiteSpace([string]$Record.codexHome) -or
+        [string]$Record.templateRelativePath -cne $script:AgentsTemplateRelativePath -or
+        [string]$Record.encoding -cnotin @('utf8', 'utf8-bom', 'utf16-le', 'utf16-be') -or
+        [long]$Record.baseFileLength -lt 0 -or [long]$Record.installedFileLength -lt 0) {
+        throw 'The global AGENTS.md integration record has invalid metadata.'
+    }
+    foreach ($hashName in @('templateSha256', 'installedFileSha256', 'blockSha256', 'prefixSha256')) {
+        if ([string]$Record.$hashName -cnotmatch '^[0-9a-f]{64}$') {
+            throw "The global AGENTS.md integration record has an invalid $hashName."
+        }
+    }
+    $baseHash = Get-CycObjectProperty -Object $Record -Name 'baseFileSha256'
+    if ([bool]$Record.baseFileExisted) {
+        if ([string]$baseHash -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'The global AGENTS.md integration record has an invalid base-file digest.'
+        }
+    } elseif ($null -ne $baseHash -and -not [string]::IsNullOrEmpty([string]$baseHash)) {
+        throw 'An originally absent global AGENTS.md must not have a base-file digest.'
+    }
+    try {
+        [byte[]]$prefixBytes = [System.Convert]::FromBase64String([string]$Record.ownedPrefixBase64)
+        if ((Get-CycSha256Hex -Bytes $prefixBytes) -cne [string]$Record.prefixSha256) {
+            throw 'digest mismatch'
+        }
+    } catch {
+        throw 'The global AGENTS.md integration record has an invalid owned prefix.'
+    }
+    $extendedNames = @('externalSha256', 'externalLength', 'ownedRangeSha256', 'transactionId')
+    $extendedCount = @($extendedNames | Where-Object { $Record.PSObject.Properties[$_] }).Count
+    if ($extendedCount -ne 0 -and $extendedCount -ne $extendedNames.Count) {
+        throw 'The global AGENTS.md integration record has a partial integrity-evidence extension.'
+    }
+    if ($extendedCount -eq $extendedNames.Count -and (
+        [string]$Record.externalSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [long]$Record.externalLength -lt 0 -or
+        [string]$Record.ownedRangeSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$Record.transactionId -cnotmatch '^[0-9A-Za-z-]{1,128}$')) {
+        throw 'The global AGENTS.md integration record has invalid extended integrity evidence.'
+    }
+}
+
+function Resolve-CycCodexHome {
+    param([string]$RequestedHome)
+    $candidate = $RequestedHome
+    if ([string]::IsNullOrWhiteSpace($candidate)) { $candidate = $env:CODEX_HOME }
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+            throw 'USERPROFILE or an explicit CodexHome is required for global AGENTS.md integration.'
+        }
+        $candidate = Join-Path $env:USERPROFILE '.codex'
+    }
+    if (-not [System.IO.Path]::IsPathRooted($candidate) -or
+        $candidate.Contains('"') -or $candidate.Contains("`r") -or $candidate.Contains("`n")) {
+        throw 'CodexHome must be an absolute path without quotes or line breaks.'
+    }
+    $resolved = Resolve-NormalizedPath $candidate
+    if (Test-Path -LiteralPath $resolved) {
+        if (-not (Test-Path -LiteralPath $resolved -PathType Container)) {
+            throw "CodexHome is not a directory: $resolved"
+        }
+        if (Test-ReparsePoint (Get-Item -LiteralPath $resolved -Force)) {
+            throw 'CodexHome must not be a reparse point.'
+        }
+    }
+    return $resolved
+}
+
+function Get-CycStrictTextDocument {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [ValidateRange(1, 67108864)][long]$MaxBytes = $script:MaxAgentsFileBytes
+    )
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return [PSCustomObject]@{
+            path = $Path
+            existed = $false
+            bytes = [byte[]]@()
+            text = ''
+            encoding = [System.Text.UTF8Encoding]::new($false, $true)
+            encodingName = 'utf8'
+            preamble = [byte[]]@()
+        }
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "AGENTS.md path is not a regular file: $Path"
+    }
+    $item = Get-Item -LiteralPath $Path -Force
+    if ((Test-ReparsePoint $item) -or $item.Length -gt $MaxBytes) {
+        throw 'AGENTS.md must be a bounded regular file, not a reparse point.'
+    }
+    [byte[]]$bytes = [System.IO.File]::ReadAllBytes($Path)
+    [byte[]]$preamble = @()
+    $offset = 0
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf) {
+        $encoding = [System.Text.UTF8Encoding]::new($false, $true)
+        $encodingName = 'utf8-bom'
+        $preamble = [byte[]]@(0xef, 0xbb, 0xbf)
+        $offset = 3
+    } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xff -and $bytes[1] -eq 0xfe) {
+        $encoding = [System.Text.UnicodeEncoding]::new($false, $false, $true)
+        $encodingName = 'utf16-le'
+        $preamble = [byte[]]@(0xff, 0xfe)
+        $offset = 2
+    } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xfe -and $bytes[1] -eq 0xff) {
+        $encoding = [System.Text.UnicodeEncoding]::new($true, $false, $true)
+        $encodingName = 'utf16-be'
+        $preamble = [byte[]]@(0xfe, 0xff)
+        $offset = 2
+    } else {
+        $encoding = [System.Text.UTF8Encoding]::new($false, $true)
+        $encodingName = 'utf8'
+    }
+    $bodyLength = $bytes.Length - $offset
+    [byte[]]$body = New-Object byte[] $bodyLength
+    if ($bodyLength -gt 0) {
+        [System.Buffer]::BlockCopy($bytes, $offset, $body, 0, $bodyLength)
+    }
+    try { $text = $encoding.GetString($body) } catch {
+        throw "AGENTS.md has invalid or unsupported text encoding: $Path"
+    }
+    if ($text.Contains("`0")) {
+        throw 'AGENTS.md contains NUL characters and cannot be managed safely.'
+    }
+    return [PSCustomObject]@{
+        path = $Path
+        existed = $true
+        bytes = $bytes
+        text = $text
+        encoding = $encoding
+        encodingName = $encodingName
+        preamble = $preamble
+    }
+}
+
+function ConvertTo-CycDocumentBytes {
+    param(
+        [Parameter(Mandatory = $true)]$Document,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text
+    )
+    [byte[]]$body = $Document.encoding.GetBytes($Text)
+    [byte[]]$preamble = $Document.preamble
+    [byte[]]$result = New-Object byte[] ($preamble.Length + $body.Length)
+    if ($preamble.Length -gt 0) {
+        [System.Buffer]::BlockCopy($preamble, 0, $result, 0, $preamble.Length)
+    }
+    if ($body.Length -gt 0) {
+        [System.Buffer]::BlockCopy($body, 0, $result, $preamble.Length, $body.Length)
+    }
+    # Keep an empty byte array as a byte-array value instead of letting the
+    # PowerShell pipeline erase it into $null.
+    return ,$result
+}
+
+function Get-CycStringIndexes {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Value
+    )
+    $indexes = New-Object System.Collections.Generic.List[int]
+    $offset = 0
+    while ($offset -le $Text.Length - $Value.Length) {
+        $index = $Text.IndexOf($Value, $offset, [System.StringComparison]::Ordinal)
+        if ($index -lt 0) { break }
+        [void]$indexes.Add($index)
+        $offset = $index + $Value.Length
+    }
+    return @($indexes)
+}
+
+function Get-CycAgentsMarkerState {
+    param([Parameter(Mandatory = $true)]$Document)
+    $beginIndexes = @(Get-CycStringIndexes -Text $Document.text -Value $script:AgentsBeginMarker)
+    $endIndexes = @(Get-CycStringIndexes -Text $Document.text -Value $script:AgentsEndMarker)
+    if (($beginIndexes.Count -eq 0) -xor ($endIndexes.Count -eq 0)) {
+        throw 'Global AGENTS.md has a half-present ClusterYourCodex managed marker pair.'
+    }
+    if ($beginIndexes.Count -gt 1 -or $endIndexes.Count -gt 1) {
+        throw 'Global AGENTS.md has duplicate or nested ClusterYourCodex managed markers.'
+    }
+    if ($beginIndexes.Count -eq 1 -and $beginIndexes[0] -ge $endIndexes[0]) {
+        throw 'Global AGENTS.md has an invalid ClusterYourCodex managed marker order.'
+    }
+    if ($beginIndexes.Count -eq 0) {
+        return [PSCustomObject]@{ present = $false; beginIndex = -1; endExclusive = -1; blockText = $null }
+    }
+    $endExclusive = $endIndexes[0] + $script:AgentsEndMarker.Length
+    return [PSCustomObject]@{
+        present = $true
+        beginIndex = [int]$beginIndexes[0]
+        endExclusive = [int]$endExclusive
+        blockText = $Document.text.Substring($beginIndexes[0], $endExclusive - $beginIndexes[0])
+    }
+}
+
+function Read-CycAgentsTemplate {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "ClusterYourCodex AGENTS.md block template is missing: $Path"
+    }
+    $item = Get-Item -LiteralPath $Path -Force
+    if ((Test-ReparsePoint $item) -or $item.Length -lt 1 -or $item.Length -gt 64KB) {
+        throw 'ClusterYourCodex AGENTS.md block template must be a bounded regular file.'
+    }
+    [byte[]]$bytes = [System.IO.File]::ReadAllBytes($Path)
+    $offset = if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and
+        $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf) { 3 } else { 0 }
+    [byte[]]$body = New-Object byte[] ($bytes.Length - $offset)
+    if ($body.Length -gt 0) { [System.Buffer]::BlockCopy($bytes, $offset, $body, 0, $body.Length) }
+    $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    try { $text = $strictUtf8.GetString($body) } catch {
+        throw 'ClusterYourCodex AGENTS.md block template must be valid UTF-8.'
+    }
+    $normalized = $text.Replace("`r`n", "`n").Replace("`r", "`n").TrimEnd([char[]]@("`n"))
+    $beginIndexes = @(Get-CycStringIndexes -Text $normalized -Value $script:AgentsBeginMarker)
+    $endIndexes = @(Get-CycStringIndexes -Text $normalized -Value $script:AgentsEndMarker)
+    if ($beginIndexes.Count -ne 1 -or $endIndexes.Count -ne 1 -or
+        $beginIndexes[0] -ne 0 -or
+        ($endIndexes[0] + $script:AgentsEndMarker.Length) -ne $normalized.Length) {
+        throw 'ClusterYourCodex AGENTS.md block template must contain exactly one complete outer marker pair.'
+    }
+    return [PSCustomObject]@{
+        text = $normalized
+        sha256 = Get-CycSha256Hex -Bytes $bytes
+    }
+}
+
+function Get-CycDocumentNewline {
+    param([Parameter(Mandatory = $true)]$Document)
+    if ($Document.text.Contains("`r`n")) { return "`r`n" }
+    if ($Document.text.Contains("`n")) { return "`n" }
+    if ($Document.text.Contains("`r")) { return "`r" }
+    return "`r`n"
+}
+
+function Get-CycOwnedAgentsPrefix {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Newline
+    )
+    if ($Text.Length -eq 0) { return '' }
+    $double = $Newline + $Newline
+    if ($Text.EndsWith($double, [System.StringComparison]::Ordinal)) { return '' }
+    if ($Text.EndsWith($Newline, [System.StringComparison]::Ordinal)) { return $Newline }
+    return $double
+}
+
+function Write-CycDurableAtomicBytes {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes
+    )
+    if ($null -eq $Bytes) { $Bytes = [byte[]]@() }
+    $directory = Split-Path -Parent $Path
+    if (Test-Path -LiteralPath $directory) {
+        $directoryItem = Get-Item -LiteralPath $directory -Force
+        if (-not $directoryItem.PSIsContainer -or (Test-ReparsePoint $directoryItem)) {
+            throw "AGENTS.md parent must be a real directory: $directory"
+        }
+    } else {
+        [void](New-Item -ItemType Directory -Path $directory -Force)
+    }
+    if (Test-Path -LiteralPath $Path) {
+        $targetItem = Get-Item -LiteralPath $Path -Force
+        if ($targetItem.PSIsContainer -or (Test-ReparsePoint $targetItem)) {
+            throw 'AGENTS.md target must be a regular file, not a directory or reparse point.'
+        }
+    }
+    $leaf = Split-Path -Leaf $Path
+    $temporary = Join-Path $directory ($leaf + '.cyc-tmp-' + [Guid]::NewGuid().ToString('N'))
+    $backup = Join-Path $directory ($leaf + '.cyc-bak-' + [Guid]::NewGuid().ToString('N'))
+    $stream = $null
+    $committed = $false
+    try {
+        $stream = [System.IO.FileStream]::new(
+            $temporary,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None,
+            4096,
+            [System.IO.FileOptions]::WriteThrough
+        )
+        $stream.Write($Bytes, 0, $Bytes.Length)
+        $stream.Flush($true)
+        $stream.Dispose()
+        $stream = $null
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            [System.IO.File]::Replace($temporary, $Path, $backup, $true)
+        } else {
+            [System.IO.File]::Move($temporary, $Path)
+        }
+        $stream = [System.IO.FileStream]::new(
+            $Path,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::Read,
+            4096,
+            [System.IO.FileOptions]::WriteThrough
+        )
+        $stream.Flush($true)
+        $stream.Dispose()
+        $stream = $null
+        $committed = $true
+    } finally {
+        if ($stream) { $stream.Dispose() }
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+        if ($committed -and (Test-Path -LiteralPath $backup)) { Remove-Item -LiteralPath $backup -Force }
+    }
+}
+
+function New-CycDisabledAgentsIntegrationRecord {
+    param(
+        [Parameter(Mandatory = $true)]$Plan,
+        [string]$Reason = 'plugin-not-active'
+    )
+    return [PSCustomObject][ordered]@{
+        schemaVersion = $script:AgentsIntegrationSchema
+        enabled = $false
+        installed = $false
+        path = $Plan.agentsIntegration.agentsPath
+        codexHome = $Plan.agentsIntegration.codexHome
+        templateRelativePath = $Plan.agentsIntegration.templateRelativePath
+        activationRequired = $true
+        reason = $Reason
+        changed = $false
+    }
+}
+
+function Get-CycAgentsInstallMutation {
+    param(
+        [Parameter(Mandatory = $true)]$Plan,
+        $OldManifest,
+        $PluginReceipt
+    )
+    $oldRecord = if ($OldManifest -and $OldManifest.PSObject.Properties['agentsIntegration']) {
+        $OldManifest.agentsIntegration
+    } else { $null }
+    $oldInstalled = [bool](
+        $oldRecord -and
+        (Get-CycObjectProperty -Object $oldRecord -Name 'enabled' -Default $false) -and
+        (Get-CycObjectProperty -Object $oldRecord -Name 'installed' -Default $false)
+    )
+    if (-not $Plan.agentsIntegration.enabled) {
+        if ($oldInstalled) {
+            throw 'Repair cannot disable an existing managed AGENTS.md block; uninstall it first.'
+        }
+        return [PSCustomObject]@{
+            disabled = $true
+            record = New-CycDisabledAgentsIntegrationRecord -Plan $Plan -Reason 'integration-disabled'
+        }
+    }
+
+    $agentsPath = Resolve-NormalizedPath $Plan.agentsIntegration.agentsPath
+    if ($oldInstalled) {
+        Assert-CycAgentsIntegrationRecord -Record $oldRecord
+        $oldPath = Resolve-NormalizedPath ([string](Get-CycObjectProperty -Object $oldRecord -Name 'path'))
+        if (-not [string]::Equals($oldPath, $agentsPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'CodexHome changed while a managed AGENTS.md block is installed; repair fails closed.'
+        }
+    }
+
+    $template = Read-CycAgentsTemplate -Path $Plan.agentsIntegration.templatePath
+    $document = Get-CycStrictTextDocument -Path $agentsPath
+    $markerState = Get-CycAgentsMarkerState -Document $document
+    if ($markerState.present -and -not $oldInstalled) {
+        throw 'Global AGENTS.md already contains an unowned ClusterYourCodex marker pair.'
+    }
+    if (-not $markerState.present -and $oldInstalled) {
+        throw 'The recorded ClusterYourCodex block is missing from global AGENTS.md.'
+    }
+
+    $previousFileSha256 = if ($document.existed) { Get-CycSha256Hex -Bytes $document.bytes } else { $null }
+    $newline = if ($markerState.present) {
+        Get-CycDocumentNewline -Document ([PSCustomObject]@{ text = $markerState.blockText })
+    } else {
+        Get-CycDocumentNewline -Document $document
+    }
+    $canonicalBlock = $template.text.Replace("`n", $newline)
+    [byte[]]$canonicalBlockBytes = $document.encoding.GetBytes($canonicalBlock)
+    $blockSha256 = Get-CycSha256Hex -Bytes $canonicalBlockBytes
+
+    if ($markerState.present) {
+        $expectedEncoding = [string](Get-CycObjectProperty -Object $oldRecord -Name 'encoding')
+        if ($expectedEncoding -cne [string]$document.encodingName) {
+            throw 'Global AGENTS.md encoding changed while its managed block was installed.'
+        }
+        [byte[]]$currentBlockBytes = $document.encoding.GetBytes($markerState.blockText)
+        $recordedBlockHash = [string](Get-CycObjectProperty -Object $oldRecord -Name 'blockSha256')
+        if ($recordedBlockHash -cnotmatch '^[0-9a-f]{64}$' -or
+            (Get-CycSha256Hex -Bytes $currentBlockBytes) -cne $recordedBlockHash) {
+            throw 'The ClusterYourCodex managed block has drifted; repair fails closed.'
+        }
+        $prefixBase64 = [string](Get-CycObjectProperty -Object $oldRecord -Name 'ownedPrefixBase64')
+        try {
+            [byte[]]$prefixBytes = [System.Convert]::FromBase64String($prefixBase64)
+            $ownedPrefix = $document.encoding.GetString($prefixBytes)
+        } catch {
+            throw 'The recorded ClusterYourCodex AGENTS.md prefix is invalid.'
+        }
+        $prefixStart = $markerState.beginIndex - $ownedPrefix.Length
+        if ($prefixStart -lt 0 -or
+            $document.text.Substring($prefixStart, $ownedPrefix.Length) -cne $ownedPrefix) {
+            throw 'The separator before the ClusterYourCodex managed block has drifted.'
+        }
+        $outputText = $document.text.Substring(0, $markerState.beginIndex) +
+            $canonicalBlock + $document.text.Substring($markerState.endExclusive)
+        $externalText = $document.text.Substring(0, $prefixStart) +
+            $document.text.Substring($markerState.endExclusive)
+        $baseFileExisted = [bool](Get-CycObjectProperty -Object $oldRecord -Name 'baseFileExisted')
+        $baseFileSha256 = Get-CycObjectProperty -Object $oldRecord -Name 'baseFileSha256'
+        $baseFileLength = Get-CycObjectProperty -Object $oldRecord -Name 'baseFileLength' -Default 0
+        $operation = 'Replaced'
+    } else {
+        $ownedPrefix = Get-CycOwnedAgentsPrefix -Text $document.text -Newline $newline
+        $outputText = $document.text + $ownedPrefix + $canonicalBlock
+        $externalText = $document.text
+        $baseFileExisted = [bool]$document.existed
+        $baseFileSha256 = $previousFileSha256
+        $baseFileLength = [long]$document.bytes.Length
+        $operation = 'Added'
+    }
+
+    [byte[]]$ownedPrefixBytes = $document.encoding.GetBytes($ownedPrefix)
+    [byte[]]$ownedRangeBytes = $document.encoding.GetBytes($ownedPrefix + $canonicalBlock)
+    [byte[]]$externalBytes = ConvertTo-CycDocumentBytes -Document $document -Text $externalText
+    [byte[]]$outputBytes = ConvertTo-CycDocumentBytes -Document $document -Text $outputText
+    $installedFileSha256 = Get-CycSha256Hex -Bytes $outputBytes
+    $changed = (-not $document.existed) -or
+        $document.bytes.Length -ne $outputBytes.Length -or
+        $previousFileSha256 -cne $installedFileSha256
+    if (-not $changed) {
+        $operation = 'Unchanged'
+    }
+    $prefixSha256 = Get-CycSha256Hex -Bytes $ownedPrefixBytes
+    $record = [PSCustomObject][ordered]@{
+        schemaVersion = $script:AgentsIntegrationSchema
+        enabled = $true
+        installed = $true
+        path = $agentsPath
+        codexHome = $Plan.agentsIntegration.codexHome
+        templateRelativePath = $Plan.agentsIntegration.templateRelativePath
+        templateSha256 = $template.sha256
+        encoding = $document.encodingName
+        baseFileExisted = $baseFileExisted
+        baseFileSha256 = $baseFileSha256
+        baseFileLength = [long]$baseFileLength
+        previousFileExisted = [bool]$document.existed
+        previousFileSha256 = $previousFileSha256
+        previousFileLength = [long]$document.bytes.Length
+        installedFileSha256 = $installedFileSha256
+        installedFileLength = [long]$outputBytes.Length
+        blockSha256 = $blockSha256
+        prefixSha256 = $prefixSha256
+        ownedPrefixBase64 = [System.Convert]::ToBase64String($ownedPrefixBytes)
+        externalSha256 = Get-CycSha256Hex -Bytes $externalBytes
+        externalLength = [long]$externalBytes.Length
+        ownedRangeSha256 = Get-CycSha256Hex -Bytes $ownedRangeBytes
+        pluginActivationVerified = [bool]($PluginReceipt -and
+            (Get-CycObjectProperty -Object $PluginReceipt -Name 'pluginVerified' -Default $false))
+        pluginActivationMethod = if ($PluginReceipt) { 'codex-plugin-list-json' } else { 'direct-test-harness' }
+        operation = $operation
+        changed = [bool]$changed
+        installedAtUtc = [DateTime]::UtcNow.ToString('o')
+    }
+    return [PSCustomObject]@{
+        disabled = $false
+        oldRecord = $oldRecord
+        oldInstalled = $oldInstalled
+        document = $document
+        beforeExisted = [bool]$document.existed
+        beforeSha256 = $previousFileSha256
+        beforeBytes = [byte[]]$document.bytes
+        afterExisted = $true
+        afterSha256 = $installedFileSha256
+        afterBytes = [byte[]]$outputBytes
+        templateSha256 = $template.sha256
+        blockSha256 = $blockSha256
+        prefixSha256 = $prefixSha256
+        record = $record
+    }
+}
+
+function Set-CycAgentsContentCas {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][bool]$ExpectedExisted,
+        [AllowNull()][string]$ExpectedSha256,
+        [Parameter(Mandatory = $true)][bool]$NewExisted,
+        [AllowNull()][AllowEmptyCollection()][byte[]]$NewBytes
+    )
+    $mutex = Enter-CycAgentsMutex
+    try {
+        $current = Get-CycStrictTextDocument -Path $Path
+        $currentHash = if ($current.existed) { Get-CycSha256Hex -Bytes $current.bytes } else { $null }
+        if ([bool]$current.existed -ne $ExpectedExisted -or
+            ($ExpectedExisted -and $currentHash -cne [string]$ExpectedSha256)) {
+            throw 'Global AGENTS.md compare-and-swap precondition failed.'
+        }
+        if ($NewExisted) {
+            if ($null -eq $NewBytes) { $NewBytes = [byte[]]@() }
+            Write-CycDurableAtomicBytes -Path $Path -Bytes $NewBytes
+        } elseif ($ExpectedExisted) {
+            # Product lifecycle calls are serialized by the named mutex, and
+            # deletion is permitted only for the exact expected after-image.
+            $lastCheck = Get-CycStrictTextDocument -Path $Path
+            if (-not $lastCheck.existed -or
+                (Get-CycSha256Hex -Bytes $lastCheck.bytes) -cne [string]$ExpectedSha256) {
+                throw 'Global AGENTS.md changed before compare-and-swap deletion.'
+            }
+            $item = Get-Item -LiteralPath $Path -Force
+            if ($item.PSIsContainer -or (Test-ReparsePoint $item)) {
+                throw 'Refusing to delete a non-regular AGENTS.md.'
+            }
+            Remove-Item -LiteralPath $Path -Force
+        }
+        $verified = Get-CycStrictTextDocument -Path $Path
+        if ([bool]$verified.existed -ne $NewExisted) {
+            throw 'Global AGENTS.md compare-and-swap existence verification failed.'
+        }
+        if ($NewExisted) {
+            $expectedNewHash = Get-CycSha256Hex -Bytes $NewBytes
+            if ((Get-CycSha256Hex -Bytes $verified.bytes) -cne $expectedNewHash) {
+                throw 'Global AGENTS.md compare-and-swap digest verification failed.'
+            }
+        }
+    } finally {
+        Exit-CycAgentsMutex -Mutex $mutex
+    }
+}
+
+function Read-CycAgentsJournal {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Global AGENTS.md transaction journal is missing: $Path"
+    }
+    $item = Get-Item -LiteralPath $Path -Force
+    if ((Test-ReparsePoint $item) -or $item.Length -lt 2 -or $item.Length -gt 2MB) {
+        throw 'Global AGENTS.md transaction journal is not a bounded regular file.'
+    }
+    try { $journal = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json } catch {
+        throw 'Global AGENTS.md transaction journal contains invalid JSON.'
+    }
+    if ([string](Get-CycObjectProperty -Object $journal -Name 'schemaVersion') -cne $script:AgentsJournalSchema -or
+        [string](Get-CycObjectProperty -Object $journal -Name 'operation') -cnotin @('InstallOrRepair', 'Uninstall') -or
+        [string](Get-CycObjectProperty -Object $journal -Name 'phase') -cnotin @('prepared', 'applied', 'committed', 'rolled-back')) {
+        throw 'Global AGENTS.md transaction journal metadata is unsupported.'
+    }
+    foreach ($name in @('agentsPath', 'codexHome', 'beforeExisted', 'beforeLength',
+        'beforeImageSha256', 'afterExisted', 'afterLength', 'afterImageSha256')) {
+        if (-not $journal.PSObject.Properties[$name]) {
+            throw "Global AGENTS.md transaction journal is missing '$name'."
+        }
+    }
+    $codexHome = Resolve-CycCodexHome -RequestedHome ([string]$journal.codexHome)
+    $expectedPath = Resolve-NormalizedPath (Join-Path $codexHome 'AGENTS.md')
+    if (-not [string]::Equals(
+        $expectedPath,
+        (Resolve-NormalizedPath ([string]$journal.agentsPath)),
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'Global AGENTS.md transaction journal contains an invalid target path.'
+    }
+    return $journal
+}
+
+function Get-CycAgentsJournalImages {
+    param(
+        [Parameter(Mandatory = $true)]$Journal,
+        [Parameter(Mandatory = $true)][string]$JournalPath
+    )
+    $root = Split-Path -Parent $JournalPath
+    $beforePath = Join-Path $root 'before.bin'
+    $afterPath = Join-Path $root 'after.bin'
+    foreach ($entry in @(
+        [PSCustomObject]@{ path = $beforePath; hash = [string]$Journal.beforeImageSha256; length = [long]$Journal.beforeLength },
+        [PSCustomObject]@{ path = $afterPath; hash = [string]$Journal.afterImageSha256; length = [long]$Journal.afterLength }
+    )) {
+        if (-not (Test-Path -LiteralPath $entry.path -PathType Leaf)) {
+            throw 'Global AGENTS.md transaction image is missing.'
+        }
+        $imageItem = Get-Item -LiteralPath $entry.path -Force
+        if ((Test-ReparsePoint $imageItem) -or $imageItem.Length -ne $entry.length -or
+            $entry.hash -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Global AGENTS.md transaction image metadata is invalid.'
+        }
+        [byte[]]$imageBytes = [System.IO.File]::ReadAllBytes($entry.path)
+        if ((Get-CycSha256Hex -Bytes $imageBytes) -cne $entry.hash) {
+            throw 'Global AGENTS.md transaction image failed SHA-256 validation.'
+        }
+    }
+    return [PSCustomObject]@{
+        beforePath = $beforePath
+        afterPath = $afterPath
+        beforeBytes = [System.IO.File]::ReadAllBytes($beforePath)
+        afterBytes = [System.IO.File]::ReadAllBytes($afterPath)
+    }
+}
+
+function Set-CycAgentsJournalPhase {
+    param(
+        [Parameter(Mandatory = $true)][string]$JournalPath,
+        [Parameter(Mandatory = $true)]$Journal,
+        [ValidateSet('prepared', 'applied', 'committed', 'rolled-back')][string]$Phase
+    )
+    $Journal.phase = $Phase
+    $property = switch ($Phase) {
+        'applied' { 'appliedAtUtc' }
+        'committed' { 'committedAtUtc' }
+        'rolled-back' { 'rolledBackAtUtc' }
+        default { 'preparedAtUtc' }
+    }
+    $value = [DateTime]::UtcNow.ToString('o')
+    if ($Journal.PSObject.Properties[$property]) { $Journal.$property = $value }
+    else { $Journal | Add-Member -NotePropertyName $property -NotePropertyValue $value }
+    Write-DurableAtomicJson -Path $JournalPath -Value $Journal -Depth 20
+}
+
+function Start-CycAgentsInstallTransaction {
+    param(
+        [Parameter(Mandatory = $true)]$Plan,
+        $OldManifest,
+        [Parameter(Mandatory = $true)][string]$TransactionRoot,
+        $PluginReceipt,
+        [switch]$AllowUnverifiedTestHarness
+    )
+    $mutation = Get-CycAgentsInstallMutation -Plan $Plan -OldManifest $OldManifest -PluginReceipt $PluginReceipt
+    if ($mutation.disabled) {
+        return [PSCustomObject]@{ disabled = $true; record = $mutation.record }
+    }
+    if (-not [bool]($PluginReceipt -and
+        (Get-CycObjectProperty -Object $PluginReceipt -Name 'pluginVerified' -Default $false)) -and
+        -not $AllowUnverifiedTestHarness) {
+        throw 'Global AGENTS.md integration requires a verified active-plugin receipt.'
+    }
+    $transactionId = Split-Path -Leaf (Resolve-NormalizedPath $TransactionRoot)
+    if ([string]::IsNullOrWhiteSpace($transactionId) -or
+        $transactionId -cnotmatch '^[0-9A-Za-z-]{1,128}$') {
+        throw 'Global AGENTS.md transaction identifier is invalid.'
+    }
+    if ($mutation.record.PSObject.Properties['transactionId']) {
+        $mutation.record.transactionId = $transactionId
+    } else {
+        $mutation.record | Add-Member -NotePropertyName transactionId -NotePropertyValue $transactionId
+    }
+    $root = Join-Path (Resolve-NormalizedPath $TransactionRoot) 'global-agents'
+    if (Test-Path -LiteralPath (Join-Path $root 'journal.json')) {
+        throw 'A global AGENTS.md transaction already exists in this installer transaction.'
+    }
+    [void](New-Item -ItemType Directory -Path $root -Force)
+    $beforePath = Join-Path $root 'before.bin'
+    $afterPath = Join-Path $root 'after.bin'
+    Write-CycDurableAtomicBytes -Path $beforePath -Bytes $mutation.beforeBytes
+    Write-CycDurableAtomicBytes -Path $afterPath -Bytes $mutation.afterBytes
+    $journalPath = Join-Path $root 'journal.json'
+    $journal = [PSCustomObject][ordered]@{
+        schemaVersion = $script:AgentsJournalSchema
+        operation = 'InstallOrRepair'
+        phase = 'prepared'
+        preparedAtUtc = [DateTime]::UtcNow.ToString('o')
+        transactionId = $transactionId
+        agentsPath = $mutation.record.path
+        codexHome = $mutation.record.codexHome
+        originalExisted = [bool]$mutation.beforeExisted
+        beforeExisted = [bool]$mutation.beforeExisted
+        beforeFileSha256 = $mutation.beforeSha256
+        beforeLength = [long]$mutation.beforeBytes.Length
+        beforeImageSha256 = Get-CycSha256Hex -Bytes $mutation.beforeBytes
+        afterExisted = $true
+        afterFileSha256 = $mutation.afterSha256
+        afterLength = [long]$mutation.afterBytes.Length
+        afterImageSha256 = Get-CycSha256Hex -Bytes $mutation.afterBytes
+        templateSha256 = $mutation.templateSha256
+        blockSha256 = $mutation.blockSha256
+        prefixSha256 = $mutation.prefixSha256
+        previousRecord = $mutation.oldRecord
+        receipt = $mutation.record
+    }
+    # before.bin and after.bin are durable before the prepared journal is
+    # published. AGENTS.md is not mutated until that journal verifies.
+    Write-DurableAtomicJson -Path $journalPath -Value $journal -Depth 20
+    $prepared = Read-CycAgentsJournal -Path $journalPath
+    $transaction = [PSCustomObject]@{
+        disabled = $false
+        root = $root
+        journalPath = $journalPath
+        journal = $prepared
+        record = $mutation.record
+    }
+    try {
+        [void](Get-CycAgentsJournalImages -Journal $prepared -JournalPath $journalPath)
+        if ([string]$prepared.templateSha256 -cne [string]$mutation.templateSha256 -or
+            [string]$prepared.blockSha256 -cne [string]$mutation.blockSha256 -or
+            [string]$prepared.prefixSha256 -cne [string]$mutation.prefixSha256) {
+            throw 'Global AGENTS.md prepared journal digest verification failed.'
+        }
+        if ($mutation.record.changed) {
+            Set-CycAgentsContentCas `
+                -Path $mutation.record.path `
+                -ExpectedExisted ([bool]$mutation.beforeExisted) `
+                -ExpectedSha256 $mutation.beforeSha256 `
+                -NewExisted $true `
+                -NewBytes $mutation.afterBytes
+        }
+        $verified = Get-CycStrictTextDocument -Path $mutation.record.path
+        $verifiedState = Get-CycAgentsMarkerState -Document $verified
+        if (-not $verifiedState.present -or
+            (Get-CycSha256Hex -Bytes $verified.bytes) -cne [string]$mutation.afterSha256 -or
+            (Get-CycSha256Hex -Bytes $verified.encoding.GetBytes($verifiedState.blockText)) -cne [string]$mutation.blockSha256) {
+            throw 'Global AGENTS.md managed-block transaction verification failed.'
+        }
+        Set-CycAgentsJournalPhase -JournalPath $journalPath -Journal $prepared -Phase applied
+        return $transaction
+    } catch {
+        $failure = $_
+        try {
+            Rollback-CycAgentsInstallTransaction -Transaction $transaction
+        } catch {
+            throw "Global AGENTS.md transaction failed and its range rollback is incomplete; the journal was retained. Original failure: $($failure.Exception.Message)"
+        }
+        throw $failure
+    }
+}
+
+function Complete-CycAgentsInstallTransaction {
+    param([Parameter(Mandatory = $true)]$Transaction)
+    if (-not $Transaction -or $Transaction.disabled) { return }
+    $journal = Read-CycAgentsJournal -Path $Transaction.journalPath
+    if ([string]$journal.operation -cne 'InstallOrRepair') {
+        throw 'Cannot commit a non-install AGENTS.md transaction as an install.'
+    }
+    Set-CycAgentsJournalPhase -JournalPath $Transaction.journalPath -Journal $journal -Phase committed
+}
+
+function Test-CycAgentsRecordPresent {
+    param([Parameter(Mandatory = $true)]$Record)
+    try {
+        Assert-CycAgentsIntegrationRecord -Record $Record
+        $document = Get-CycStrictTextDocument -Path ([string]$Record.path)
+        if (-not $document.existed -or [string]$document.encodingName -cne [string]$Record.encoding) { return $false }
+        $state = Get-CycAgentsMarkerState -Document $document
+        if (-not $state.present) { return $false }
+        [byte[]]$blockBytes = $document.encoding.GetBytes($state.blockText)
+        if ((Get-CycSha256Hex -Bytes $blockBytes) -cne [string]$Record.blockSha256) { return $false }
+        [byte[]]$prefixBytes = [Convert]::FromBase64String([string]$Record.ownedPrefixBase64)
+        $prefix = $document.encoding.GetString($prefixBytes)
+        $start = $state.beginIndex - $prefix.Length
+        return $start -ge 0 -and $document.text.Substring($start, $prefix.Length) -ceq $prefix
+    } catch { return $false }
+}
+
+function Get-CycStrictAgentsEvidence {
+    param([Parameter(Mandatory = $true)]$Record)
+    Assert-CycAgentsIntegrationRecord -Record $Record
+    foreach ($name in @('externalSha256', 'externalLength', 'ownedRangeSha256', 'transactionId')) {
+        if (-not $Record.PSObject.Properties[$name]) {
+            throw "Global AGENTS.md evidence is missing '$name'."
+        }
+    }
+    $document = Get-CycStrictTextDocument -Path ([string]$Record.path)
+    if (-not $document.existed -or [string]$document.encodingName -cne [string]$Record.encoding -or
+        [long]$document.bytes.Length -ne [long]$Record.installedFileLength -or
+        (Get-CycSha256Hex -Bytes $document.bytes) -cne [string]$Record.installedFileSha256) {
+        throw 'Global AGENTS.md full-file receipt drifted.'
+    }
+    $state = Get-CycAgentsMarkerState -Document $document
+    if (-not $state.present) { throw 'Global AGENTS.md does not contain exactly one managed block.' }
+    [byte[]]$blockBytes = $document.encoding.GetBytes($state.blockText)
+    if ((Get-CycSha256Hex -Bytes $blockBytes) -cne [string]$Record.blockSha256) {
+        throw 'Global AGENTS.md managed-block digest drifted.'
+    }
+    try {
+        [byte[]]$prefixBytes = [Convert]::FromBase64String([string]$Record.ownedPrefixBase64)
+        $prefixText = $document.encoding.GetString($prefixBytes)
+    } catch {
+        throw 'Global AGENTS.md owned prefix is invalid.'
+    }
+    if ((Get-CycSha256Hex -Bytes $prefixBytes) -cne [string]$Record.prefixSha256) {
+        throw 'Global AGENTS.md owned-prefix digest drifted.'
+    }
+    $prefixStart = $state.beginIndex - $prefixText.Length
+    if ($prefixStart -lt 0 -or
+        $document.text.Substring($prefixStart, $prefixText.Length) -cne $prefixText) {
+        throw 'Global AGENTS.md owned prefix is no longer adjacent to the managed block.'
+    }
+    [byte[]]$ownedRangeBytes = $document.encoding.GetBytes($prefixText + $state.blockText)
+    if ((Get-CycSha256Hex -Bytes $ownedRangeBytes) -cne [string]$Record.ownedRangeSha256) {
+        throw 'Global AGENTS.md owned-range digest drifted.'
+    }
+    $externalText = $document.text.Substring(0, $prefixStart) +
+        $document.text.Substring($state.endExclusive)
+    [byte[]]$externalBytes = ConvertTo-CycDocumentBytes -Document $document -Text $externalText
+    if ([long]$externalBytes.Length -ne [long]$Record.externalLength -or
+        (Get-CycSha256Hex -Bytes $externalBytes) -cne [string]$Record.externalSha256) {
+        throw 'Global AGENTS.md bytes outside the managed range drifted.'
+    }
+    return [PSCustomObject][ordered]@{
+        agentsFileSha256 = [string]$Record.installedFileSha256
+        agentsBlockSha256 = [string]$Record.blockSha256
+        agentsExternalSha256 = [string]$Record.externalSha256
+        agentsOwnedRangeSha256 = [string]$Record.ownedRangeSha256
+    }
+}
+
+function Test-CycManifestOwnsAgentsReceipt {
+    param($Manifest, [Parameter(Mandatory = $true)]$Receipt)
+    if (-not $Manifest -or -not $Manifest.PSObject.Properties['agentsIntegration']) { return $false }
+    $record = $Manifest.agentsIntegration
+    foreach ($name in @('path', 'installedFileSha256', 'blockSha256', 'templateSha256')) {
+        if ([string](Get-CycObjectProperty -Object $record -Name $name) -cne
+            [string](Get-CycObjectProperty -Object $Receipt -Name $name)) { return $false }
+    }
+    $receiptTransactionId = [string](Get-CycObjectProperty -Object $Receipt -Name 'transactionId')
+    if (-not [string]::IsNullOrWhiteSpace($receiptTransactionId) -and
+        [string](Get-CycObjectProperty -Object $record -Name 'transactionId') -cne $receiptTransactionId) {
+        return $false
+    }
+    return [bool](Get-CycObjectProperty -Object $record -Name 'installed' -Default $false)
+}
+
+function Rollback-CycAgentsInstallTransaction {
+    param([Parameter(Mandatory = $true)]$Transaction)
+    if (-not $Transaction -or $Transaction.disabled) { return }
+    $journalPath = [string]$Transaction.journalPath
+    $journal = Read-CycAgentsJournal -Path $journalPath
+    if ([string]$journal.operation -cne 'InstallOrRepair') {
+        throw 'Cannot roll back a non-install AGENTS.md transaction as an install.'
+    }
+    if ([string]$journal.phase -ceq 'rolled-back') { return }
+    if ([string]$journal.phase -ceq 'committed') {
+        throw 'A committed global AGENTS.md install transaction cannot be rolled back.'
+    }
+    $images = Get-CycAgentsJournalImages -Journal $journal -JournalPath $journalPath
+    $current = Get-CycStrictTextDocument -Path ([string]$journal.agentsPath)
+    $currentHash = if ($current.existed) { Get-CycSha256Hex -Bytes $current.bytes } else { $null }
+    $matchesBefore = [bool]$current.existed -eq [bool]$journal.beforeExisted -and
+        ((-not [bool]$journal.beforeExisted) -or $currentHash -ceq [string]$journal.beforeFileSha256)
+    if ($matchesBefore) {
+        Set-CycAgentsJournalPhase -JournalPath $journalPath -Journal $journal -Phase 'rolled-back'
+        return
+    }
+    $receipt = $journal.receipt
+    if ([string]$receipt.operation -ceq 'Added') {
+        $state = Get-CycAgentsMarkerState -Document $current
+        if (-not $state.present) {
+            Set-CycAgentsJournalPhase -JournalPath $journalPath -Journal $journal -Phase 'rolled-back'
+            return
+        }
+    } elseif ([string]$receipt.operation -in @('Replaced', 'Unchanged') -and
+        $journal.previousRecord -and (Test-CycAgentsRecordPresent -Record $journal.previousRecord)) {
+        Set-CycAgentsJournalPhase -JournalPath $journalPath -Journal $journal -Phase 'rolled-back'
+        return
+    }
+    if (-not (Test-CycAgentsRecordPresent -Record $receipt)) {
+        throw 'Global AGENTS.md no longer contains the exact transaction-owned block; rollback fails closed.'
+    }
+    if ([string]$receipt.operation -ceq 'Added') {
+        $removal = Get-CycAgentsRemovalPlan -Record $receipt
+        Remove-CycAgentsManagedBlock -RemovalPlan $removal
+    } elseif ([string]$receipt.operation -in @('Replaced', 'Unchanged')) {
+        if (-not [bool]$journal.beforeExisted) {
+            throw 'A replace transaction has no valid before-image.'
+        }
+        $beforeDocument = Get-CycStrictTextDocument -Path $images.beforePath
+        $beforeState = Get-CycAgentsMarkerState -Document $beforeDocument
+        if (-not $beforeState.present) {
+            throw 'The replace transaction before-image has no owned block.'
+        }
+        $current = Get-CycStrictTextDocument -Path ([string]$journal.agentsPath)
+        $currentState = Get-CycAgentsMarkerState -Document $current
+        if (-not $currentState.present) {
+            throw 'The replacement block disappeared before rollback.'
+        }
+        $restoredText = $current.text.Substring(0, $currentState.beginIndex) +
+            $beforeState.blockText + $current.text.Substring($currentState.endExclusive)
+        [byte[]]$restoredBytes = ConvertTo-CycDocumentBytes -Document $current -Text $restoredText
+        Set-CycAgentsContentCas `
+            -Path ([string]$journal.agentsPath) `
+            -ExpectedExisted $true `
+            -ExpectedSha256 (Get-CycSha256Hex -Bytes $current.bytes) `
+            -NewExisted $true `
+            -NewBytes $restoredBytes
+        if ($journal.previousRecord -and -not (Test-CycAgentsRecordPresent -Record $journal.previousRecord)) {
+            throw 'The previous managed AGENTS.md block could not be verified after rollback.'
+        }
+    } else {
+        throw 'Global AGENTS.md transaction has an unsupported mutation operation.'
+    }
+    Set-CycAgentsJournalPhase -JournalPath $journalPath -Journal $journal -Phase 'rolled-back'
+}
+
+function Install-CycAgentsManagedBlock {
+    param(
+        [Parameter(Mandatory = $true)]$Plan,
+        $OldManifest,
+        [switch]$TestHarness
+    )
+    if (-not $TestHarness) {
+        throw 'Direct AGENTS.md mutation is reserved for the isolated packaging test harness; use the plugin-gated lifecycle.'
+    }
+    if (-not $Plan.agentsIntegration.enabled) {
+        return (Get-CycAgentsInstallMutation -Plan $Plan -OldManifest $OldManifest).record
+    }
+    $mutex = Enter-CycAgentsMutex
+    $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('cyc-agents-direct-' + [Guid]::NewGuid().ToString('N'))
+    $transaction = $null
+    $preserveTemporary = $false
+    try {
+        [void](New-Item -ItemType Directory -Path $temporaryRoot -Force)
+        $transaction = Start-CycAgentsInstallTransaction `
+            -Plan $Plan `
+            -OldManifest $OldManifest `
+            -TransactionRoot $temporaryRoot `
+            -AllowUnverifiedTestHarness
+        Complete-CycAgentsInstallTransaction -Transaction $transaction
+        return $transaction.record
+    } catch {
+        if (-not $transaction) {
+            $pendingJournal = Join-Path $temporaryRoot 'global-agents\journal.json'
+            if (Test-Path -LiteralPath $pendingJournal -PathType Leaf) {
+                $transaction = [PSCustomObject]@{ disabled = $false; journalPath = $pendingJournal }
+            }
+        }
+        if ($transaction -and -not $transaction.disabled) {
+            try { Rollback-CycAgentsInstallTransaction -Transaction $transaction } catch {
+                $preserveTemporary = $true
+            }
+        }
+        throw
+    } finally {
+        if (-not $preserveTemporary -and (Test-Path -LiteralPath $temporaryRoot -PathType Container)) {
+            Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
+        }
+        Exit-CycAgentsMutex -Mutex $mutex
+    }
+}
+
+function Get-CycAgentsRemovalPlan {
+    param([Parameter(Mandatory = $true)]$Record)
+    if (-not [bool](Get-CycObjectProperty -Object $Record -Name 'enabled' -Default $false) -or
+        -not [bool](Get-CycObjectProperty -Object $Record -Name 'installed' -Default $false)) {
+        return [PSCustomObject]@{ required = $false; alreadyApplied = $true }
+    }
+    Assert-CycAgentsIntegrationRecord -Record $Record
+    $cleanup = Get-CycObjectProperty -Object $Record -Name 'cleanup'
+    if ($cleanup -and [string](Get-CycObjectProperty -Object $cleanup -Name 'phase') -ceq 'completed') {
+        return [PSCustomObject]@{
+            required = $false
+            alreadyApplied = $true
+            completed = $true
+            path = [string](Get-CycObjectProperty -Object $Record -Name 'path')
+        }
+    }
+
+    $codexHome = Resolve-CycCodexHome -RequestedHome ([string](Get-CycObjectProperty -Object $Record -Name 'codexHome'))
+    $agentsPath = Resolve-NormalizedPath ([string](Get-CycObjectProperty -Object $Record -Name 'path'))
+    $expectedPath = Resolve-NormalizedPath (Join-Path $codexHome 'AGENTS.md')
+    if (-not [string]::Equals($agentsPath, $expectedPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The install manifest contains an invalid global AGENTS.md path.'
+    }
+
+    $prepared = $cleanup -and [string](Get-CycObjectProperty -Object $cleanup -Name 'phase') -ceq 'prepared'
+    $document = Get-CycStrictTextDocument -Path $agentsPath
+    $currentSha256 = if ($document.existed) { Get-CycSha256Hex -Bytes $document.bytes } else { $null }
+    if ($prepared) {
+        $expectedAfterAbsent = [bool](Get-CycObjectProperty -Object $cleanup -Name 'afterAbsent')
+        $expectedAfterSha256 = Get-CycObjectProperty -Object $cleanup -Name 'afterFileSha256'
+        $matchesAfter = if ($expectedAfterAbsent) {
+            -not $document.existed
+        } else {
+            $document.existed -and $currentSha256 -ceq [string]$expectedAfterSha256
+        }
+        if ($matchesAfter) {
+            return [PSCustomObject]@{
+                required = $true
+                alreadyApplied = $true
+                path = $agentsPath
+                beforeFileSha256 = Get-CycObjectProperty -Object $cleanup -Name 'beforeFileSha256'
+                afterFileSha256 = $expectedAfterSha256
+                afterAbsent = $expectedAfterAbsent
+            }
+        }
+        if (-not $document.existed -or
+            $currentSha256 -cne [string](Get-CycObjectProperty -Object $cleanup -Name 'beforeFileSha256')) {
+            throw 'Global AGENTS.md drifted after uninstall cleanup was prepared.'
+        }
+    }
+    if (-not $document.existed) {
+        throw 'Global AGENTS.md is missing while its managed block is still recorded.'
+    }
+    $recordedEncoding = [string](Get-CycObjectProperty -Object $Record -Name 'encoding')
+    if ($recordedEncoding -cne [string]$document.encodingName) {
+        throw 'Global AGENTS.md encoding drifted before uninstall.'
+    }
+    $markerState = Get-CycAgentsMarkerState -Document $document
+    if (-not $markerState.present) {
+        throw 'The ClusterYourCodex managed block is missing from global AGENTS.md.'
+    }
+    [byte[]]$blockBytes = $document.encoding.GetBytes($markerState.blockText)
+    $recordedBlockHash = [string](Get-CycObjectProperty -Object $Record -Name 'blockSha256')
+    if ($recordedBlockHash -cnotmatch '^[0-9a-f]{64}$' -or
+        (Get-CycSha256Hex -Bytes $blockBytes) -cne $recordedBlockHash) {
+        throw 'The ClusterYourCodex managed block drifted before uninstall.'
+    }
+    try {
+        [byte[]]$prefixBytes = [System.Convert]::FromBase64String(
+            [string](Get-CycObjectProperty -Object $Record -Name 'ownedPrefixBase64')
+        )
+        $ownedPrefix = $document.encoding.GetString($prefixBytes)
+    } catch {
+        throw 'The recorded ClusterYourCodex AGENTS.md prefix is invalid.'
+    }
+    $removeStart = $markerState.beginIndex - $ownedPrefix.Length
+    if ($removeStart -lt 0 -or
+        $document.text.Substring($removeStart, $ownedPrefix.Length) -cne $ownedPrefix) {
+        throw 'The separator before the ClusterYourCodex managed block drifted before uninstall.'
+    }
+    $remainingText = $document.text.Remove(
+        $removeStart,
+        $markerState.endExclusive - $removeStart
+    )
+    $baseFileExisted = [bool](Get-CycObjectProperty -Object $Record -Name 'baseFileExisted')
+    $afterAbsent = (-not $baseFileExisted) -and [string]::IsNullOrWhiteSpace($remainingText)
+    [byte[]]$afterBytes = if ($afterAbsent) {
+        [byte[]]@()
+    } else {
+        ConvertTo-CycDocumentBytes -Document $document -Text $remainingText
+    }
+    return [PSCustomObject]@{
+        required = $true
+        alreadyApplied = $false
+        path = $agentsPath
+        beforeFileSha256 = $currentSha256
+        afterFileSha256 = if ($afterAbsent) { $null } else { Get-CycSha256Hex -Bytes $afterBytes }
+        afterAbsent = [bool]$afterAbsent
+        afterBytes = $afterBytes
+    }
+}
+
+function Set-CycAgentsCleanupState {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ManifestPath,
+        [Parameter(Mandatory = $true)]$Cleanup
+    )
+    if (-not $Manifest.PSObject.Properties['agentsIntegration']) {
+        throw 'Install manifest has no global AGENTS.md integration record.'
+    }
+    if ($Manifest.agentsIntegration.PSObject.Properties['cleanup']) {
+        $Manifest.agentsIntegration.cleanup = $Cleanup
+    } else {
+        $Manifest.agentsIntegration | Add-Member -NotePropertyName cleanup -NotePropertyValue $Cleanup
+    }
+    Write-DurableAtomicJson -Path $ManifestPath -Value $Manifest -Depth 12
+}
+
+function Prepare-CycAgentsRemoval {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ManifestPath,
+        [Parameter(Mandatory = $true)]$RemovalPlan
+    )
+    if (-not $RemovalPlan.required -or $RemovalPlan.alreadyApplied) { return }
+    $cleanup = [PSCustomObject][ordered]@{
+        phase = 'prepared'
+        preparedAtUtc = [DateTime]::UtcNow.ToString('o')
+        beforeFileSha256 = $RemovalPlan.beforeFileSha256
+        afterFileSha256 = $RemovalPlan.afterFileSha256
+        afterAbsent = $RemovalPlan.afterAbsent
+    }
+    Set-CycAgentsCleanupState -Manifest $Manifest -ManifestPath $ManifestPath -Cleanup $cleanup
+}
+
+function Remove-CycAgentsManagedBlock {
+    param([Parameter(Mandatory = $true)]$RemovalPlan)
+    if (-not $RemovalPlan.required -or $RemovalPlan.alreadyApplied) { return }
+    if ($RemovalPlan.afterAbsent) {
+        Set-CycAgentsContentCas `
+            -Path $RemovalPlan.path `
+            -ExpectedExisted $true `
+            -ExpectedSha256 $RemovalPlan.beforeFileSha256 `
+            -NewExisted $false `
+            -NewBytes $null
+    } else {
+        Set-CycAgentsContentCas `
+            -Path $RemovalPlan.path `
+            -ExpectedExisted $true `
+            -ExpectedSha256 $RemovalPlan.beforeFileSha256 `
+            -NewExisted $true `
+            -NewBytes $RemovalPlan.afterBytes
+    }
+}
+
+function Complete-CycAgentsRemoval {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ManifestPath,
+        [Parameter(Mandatory = $true)]$RemovalPlan
+    )
+    if (-not $RemovalPlan.required) { return }
+    $cleanup = [PSCustomObject][ordered]@{
+        phase = 'completed'
+        completedAtUtc = [DateTime]::UtcNow.ToString('o')
+        beforeFileSha256 = $RemovalPlan.beforeFileSha256
+        afterFileSha256 = $RemovalPlan.afterFileSha256
+        afterAbsent = $RemovalPlan.afterAbsent
+    }
+    Set-CycAgentsCleanupState -Manifest $Manifest -ManifestPath $ManifestPath -Cleanup $cleanup
+}
+
+function Start-CycAgentsRemovalTransaction {
+    param(
+        [Parameter(Mandatory = $true)]$Record,
+        [Parameter(Mandatory = $true)]$RemovalPlan,
+        [Parameter(Mandatory = $true)][string]$TransactionRoot
+    )
+    if (-not $RemovalPlan.required -or $RemovalPlan.alreadyApplied) {
+        return [PSCustomObject]@{ disabled = $true }
+    }
+    Assert-CycAgentsIntegrationRecord -Record $Record
+    $document = Get-CycStrictTextDocument -Path $RemovalPlan.path
+    $documentHash = if ($document.existed) { Get-CycSha256Hex -Bytes $document.bytes } else { $null }
+    if (-not $document.existed -or $documentHash -cne [string]$RemovalPlan.beforeFileSha256) {
+        throw 'Global AGENTS.md changed before the uninstall transaction could be prepared.'
+    }
+    $state = Get-CycAgentsMarkerState -Document $document
+    if (-not $state.present) { throw 'The uninstall transaction has no managed block to own.' }
+    [byte[]]$prefixBytes = [Convert]::FromBase64String([string]$Record.ownedPrefixBase64)
+    $prefix = $document.encoding.GetString($prefixBytes)
+    $removeStart = $state.beginIndex - $prefix.Length
+    if ($removeStart -lt 0 -or $document.text.Substring($removeStart, $prefix.Length) -cne $prefix) {
+        throw 'The uninstall transaction cannot prove its owned separator.'
+    }
+    $removeEnd = $state.endExclusive
+    $ownedRange = $document.text.Substring($removeStart, $removeEnd - $removeStart)
+    $left = $document.text.Substring(0, $removeStart)
+    $right = $document.text.Substring($removeEnd)
+    $anchorLength = 256
+    $leftAnchor = if ($left.Length -gt $anchorLength) {
+        $left.Substring($left.Length - $anchorLength)
+    } else { $left }
+    $rightAnchor = if ($right.Length -gt $anchorLength) {
+        $right.Substring(0, $anchorLength)
+    } else { $right }
+
+    $root = Join-Path (Resolve-NormalizedPath $TransactionRoot) 'global-agents-uninstall'
+    if (Test-Path -LiteralPath (Join-Path $root 'journal.json')) {
+        throw 'A global AGENTS.md uninstall transaction already exists here.'
+    }
+    [void](New-Item -ItemType Directory -Path $root -Force)
+    $beforePath = Join-Path $root 'before.bin'
+    $afterPath = Join-Path $root 'after.bin'
+    [byte[]]$afterBytes = if ($RemovalPlan.afterAbsent) { New-Object byte[] 0 } else { [byte[]]$RemovalPlan.afterBytes }
+    Write-CycDurableAtomicBytes -Path $beforePath -Bytes $document.bytes
+    Write-CycDurableAtomicBytes -Path $afterPath -Bytes $afterBytes
+    $journalPath = Join-Path $root 'journal.json'
+    $journal = [PSCustomObject][ordered]@{
+        schemaVersion = $script:AgentsJournalSchema
+        operation = 'Uninstall'
+        phase = 'prepared'
+        preparedAtUtc = [DateTime]::UtcNow.ToString('o')
+        transactionId = Split-Path -Leaf (Resolve-NormalizedPath $TransactionRoot)
+        agentsPath = [string]$Record.path
+        codexHome = [string]$Record.codexHome
+        originalExisted = [bool]$Record.baseFileExisted
+        beforeExisted = $true
+        beforeFileSha256 = $documentHash
+        beforeLength = [long]$document.bytes.Length
+        beforeImageSha256 = Get-CycSha256Hex -Bytes $document.bytes
+        afterExisted = -not [bool]$RemovalPlan.afterAbsent
+        afterFileSha256 = $RemovalPlan.afterFileSha256
+        afterLength = [long]$afterBytes.Length
+        afterImageSha256 = Get-CycSha256Hex -Bytes $afterBytes
+        blockSha256 = [string]$Record.blockSha256
+        prefixSha256 = [string]$Record.prefixSha256
+        ownedRangeBase64 = [Convert]::ToBase64String($document.encoding.GetBytes($ownedRange))
+        leftAnchorBase64 = [Convert]::ToBase64String($document.encoding.GetBytes($leftAnchor))
+        rightAnchorBase64 = [Convert]::ToBase64String($document.encoding.GetBytes($rightAnchor))
+        receipt = $Record
+    }
+    Write-DurableAtomicJson -Path $journalPath -Value $journal -Depth 20
+    $prepared = Read-CycAgentsJournal -Path $journalPath
+    [void](Get-CycAgentsJournalImages -Journal $prepared -JournalPath $journalPath)
+    return [PSCustomObject]@{
+        disabled = $false
+        root = $root
+        journalPath = $journalPath
+        journal = $prepared
+        record = $Record
+        removalPlan = $RemovalPlan
+    }
+}
+
+function Apply-CycAgentsRemovalTransaction {
+    param([Parameter(Mandatory = $true)]$Transaction)
+    if (-not $Transaction -or $Transaction.disabled) { return }
+    $journal = Read-CycAgentsJournal -Path $Transaction.journalPath
+    if ([string]$journal.operation -cne 'Uninstall' -or [string]$journal.phase -cne 'prepared') {
+        throw 'Global AGENTS.md uninstall transaction is not prepared.'
+    }
+    Remove-CycAgentsManagedBlock -RemovalPlan $Transaction.removalPlan
+    Set-CycAgentsJournalPhase -JournalPath $Transaction.journalPath -Journal $journal -Phase applied
+}
+
+function Find-CycAgentsRollbackInsertionIndex {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$LeftAnchor,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$RightAnchor
+    )
+    if ($LeftAnchor.Length -gt 0 -and $RightAnchor.Length -gt 0) {
+        $combined = $LeftAnchor + $RightAnchor
+        $matches = @(Get-CycStringIndexes -Text $Text -Value $combined)
+        if ($matches.Count -eq 1) { return [int]($matches[0] + $LeftAnchor.Length) }
+    } elseif ($LeftAnchor.Length -gt 0) {
+        $matches = @(Get-CycStringIndexes -Text $Text -Value $LeftAnchor)
+        if ($matches.Count -eq 1) { return [int]($matches[0] + $LeftAnchor.Length) }
+    } elseif ($RightAnchor.Length -gt 0) {
+        $matches = @(Get-CycStringIndexes -Text $Text -Value $RightAnchor)
+        if ($matches.Count -eq 1) { return [int]$matches[0] }
+    } else {
+        return 0
+    }
+    throw 'Global AGENTS.md rollback anchor is missing or ambiguous; user content is preserved unchanged.'
+}
+
+function Rollback-CycAgentsRemovalTransaction {
+    param([Parameter(Mandatory = $true)]$Transaction)
+    if (-not $Transaction -or $Transaction.disabled) { return }
+    $journalPath = [string]$Transaction.journalPath
+    $journal = Read-CycAgentsJournal -Path $journalPath
+    if ([string]$journal.operation -cne 'Uninstall') {
+        throw 'Cannot roll back a non-uninstall AGENTS.md transaction as an uninstall.'
+    }
+    if ([string]$journal.phase -ceq 'rolled-back') { return }
+    if ([string]$journal.phase -ceq 'committed') {
+        throw 'A committed global AGENTS.md uninstall transaction cannot be rolled back.'
+    }
+    [void](Get-CycAgentsJournalImages -Journal $journal -JournalPath $journalPath)
+    if (Test-CycAgentsRecordPresent -Record $journal.receipt) {
+        Set-CycAgentsJournalPhase -JournalPath $journalPath -Journal $journal -Phase 'rolled-back'
+        return
+    }
+    $current = Get-CycStrictTextDocument -Path ([string]$journal.agentsPath)
+    $state = Get-CycAgentsMarkerState -Document $current
+    if ($state.present) {
+        throw 'A non-owned managed marker pair appeared during uninstall rollback; rollback fails closed.'
+    }
+    $encoding = $current.encoding
+    if ([string]$current.encodingName -cne [string]$journal.receipt.encoding) {
+        # An absent after-image has no encoding to preserve. Use the receipt's
+        # before-image encoding by decoding the validated before image file.
+        if (-not $current.existed) {
+            $images = Get-CycAgentsJournalImages -Journal $journal -JournalPath $journalPath
+            $beforeDocument = Get-CycStrictTextDocument -Path $images.beforePath
+            $encoding = $beforeDocument.encoding
+            $current = [PSCustomObject]@{
+                existed = $false; bytes = [byte[]]@(); text = ''
+                encoding = $beforeDocument.encoding
+                encodingName = $beforeDocument.encodingName
+                preamble = $beforeDocument.preamble
+            }
+        } else {
+            throw 'Global AGENTS.md encoding changed during uninstall rollback.'
+        }
+    }
+    try {
+        $ownedRange = $encoding.GetString([Convert]::FromBase64String([string]$journal.ownedRangeBase64))
+        $leftAnchor = $encoding.GetString([Convert]::FromBase64String([string]$journal.leftAnchorBase64))
+        $rightAnchor = $encoding.GetString([Convert]::FromBase64String([string]$journal.rightAnchorBase64))
+    } catch {
+        throw 'Global AGENTS.md uninstall rollback anchor metadata is invalid.'
+    }
+    $insertAt = Find-CycAgentsRollbackInsertionIndex `
+        -Text $current.text `
+        -LeftAnchor $leftAnchor `
+        -RightAnchor $rightAnchor
+    $restoredText = $current.text.Insert($insertAt, $ownedRange)
+    [byte[]]$restoredBytes = ConvertTo-CycDocumentBytes -Document $current -Text $restoredText
+    $currentHash = if ($current.existed) { Get-CycSha256Hex -Bytes $current.bytes } else { $null }
+    Set-CycAgentsContentCas `
+        -Path ([string]$journal.agentsPath) `
+        -ExpectedExisted ([bool]$current.existed) `
+        -ExpectedSha256 $currentHash `
+        -NewExisted $true `
+        -NewBytes $restoredBytes
+    if (-not (Test-CycAgentsRecordPresent -Record $journal.receipt)) {
+        throw 'Global AGENTS.md owned range could not be verified after uninstall rollback.'
+    }
+    Set-CycAgentsJournalPhase -JournalPath $journalPath -Journal $journal -Phase 'rolled-back'
+}
+
+function Complete-CycAgentsRemovalTransaction {
+    param([Parameter(Mandatory = $true)]$Transaction)
+    if (-not $Transaction -or $Transaction.disabled) { return }
+    $journal = Read-CycAgentsJournal -Path $Transaction.journalPath
+    Set-CycAgentsJournalPhase -JournalPath $Transaction.journalPath -Journal $journal -Phase committed
+}
+
+function Recover-CycAgentsTransactions {
+    param(
+        [Parameter(Mandatory = $true)][string]$DataRoot,
+        [Parameter(Mandatory = $true)][string]$ManifestPath
+    )
+    $transactionsRoot = Join-Path (Resolve-NormalizedPath $DataRoot) '.installer\transactions'
+    if (-not (Test-Path -LiteralPath $transactionsRoot -PathType Container)) { return @() }
+    $manifest = Read-InstallManifest -ManifestPath $ManifestPath
+    $results = New-Object System.Collections.Generic.List[object]
+    foreach ($journalItem in @(Get-ChildItem -LiteralPath $transactionsRoot -Filter journal.json -File -Recurse -Force |
+        Sort-Object FullName)) {
+        [void](Assert-ChildPath -Root $transactionsRoot -Candidate $journalItem.FullName)
+        $journal = Read-CycAgentsJournal -Path $journalItem.FullName
+        if ([string]$journal.phase -in @('committed', 'rolled-back')) { continue }
+        $transaction = [PSCustomObject]@{
+            disabled = $false
+            journalPath = $journalItem.FullName
+            journal = $journal
+            record = $journal.receipt
+        }
+        if ([string]$journal.operation -ceq 'InstallOrRepair') {
+            if ((Test-CycManifestOwnsAgentsReceipt -Manifest $manifest -Receipt $journal.receipt) -and
+                (Test-CycAgentsRecordPresent -Record $journal.receipt)) {
+                Complete-CycAgentsInstallTransaction -Transaction $transaction
+                [void]$results.Add([PSCustomObject]@{ journal = $journalItem.FullName; action = 'finalized-install' })
+            } else {
+                Rollback-CycAgentsInstallTransaction -Transaction $transaction
+                [void]$results.Add([PSCustomObject]@{ journal = $journalItem.FullName; action = 'rolled-back-install' })
+            }
+        } else {
+            $cleanupCompleted = [bool]($manifest -and $manifest.PSObject.Properties['agentsIntegration'] -and
+                $manifest.agentsIntegration.PSObject.Properties['cleanup'] -and
+                [string]$manifest.agentsIntegration.cleanup.phase -ceq 'completed')
+            if ($cleanupCompleted -and -not (Test-CycAgentsRecordPresent -Record $journal.receipt)) {
+                Complete-CycAgentsRemovalTransaction -Transaction $transaction
+                [void]$results.Add([PSCustomObject]@{ journal = $journalItem.FullName; action = 'finalized-uninstall' })
+            } else {
+                Rollback-CycAgentsRemovalTransaction -Transaction $transaction
+                if ($manifest -and $manifest.PSObject.Properties['agentsIntegration']) {
+                    $rolledBackCleanup = [PSCustomObject][ordered]@{
+                        phase = 'rolled-back'
+                        rolledBackAtUtc = [DateTime]::UtcNow.ToString('o')
+                    }
+                    Set-CycAgentsCleanupState `
+                        -Manifest $manifest `
+                        -ManifestPath $ManifestPath `
+                        -Cleanup $rolledBackCleanup
+                }
+                [void]$results.Add([PSCustomObject]@{ journal = $journalItem.FullName; action = 'rolled-back-uninstall' })
+            }
+        }
+    }
+    return @($results | ForEach-Object { $_ })
+}
+
+function ConvertTo-SafePackageRelativePath {
+    param([Parameter(Mandatory = $true)][string]$RelativePath)
+    if ([string]::IsNullOrWhiteSpace($RelativePath) -or
+        $RelativePath.Contains('\') -or $RelativePath.Contains(':') -or
+        $RelativePath.Contains("`0") -or $RelativePath.StartsWith('/') -or
+        $RelativePath.EndsWith('/')) {
+        throw "Package manifest contains an unsafe path: $RelativePath"
+    }
+    $segments = @($RelativePath.Split('/'))
+    if ($segments.Count -eq 0 -or @($segments | Where-Object { $_ -in @('', '.', '..') }).Count -gt 0) {
+        throw "Package manifest contains an unsafe path: $RelativePath"
+    }
+    return ($segments -join [System.IO.Path]::DirectorySeparatorChar)
+}
+
+function Assert-CycPackageManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$ManifestPath,
+        [Parameter(Mandatory = $true)][string]$PayloadRoot
+    )
+    $packageRoot = Resolve-NormalizedPath $Root
+    $manifestFile = Assert-ChildPath -Root $packageRoot -Candidate $ManifestPath
+    $payload = Assert-ChildPath -Root $packageRoot -Candidate $PayloadRoot
+    if (-not (Test-Path -LiteralPath $manifestFile -PathType Leaf)) {
+        throw "Package manifest is missing: $manifestFile"
+    }
+    $manifestItem = Get-Item -LiteralPath $manifestFile -Force
+    if ((Test-ReparsePoint $manifestItem) -or $manifestItem.Length -gt 8MB) {
+        throw 'Package manifest must be a bounded regular file, not a reparse point.'
+    }
+    try { $manifest = Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json } catch {
+        throw 'Package manifest contains invalid JSON.'
+    }
+    if ($manifest.schemaVersion -cne 'cyc.dev/windows-preview/v1') {
+        throw 'Unsupported Windows package manifest schema.'
+    }
+    $entries = @($manifest.files)
+    if ($entries.Count -lt 1 -or $entries.Count -gt 20000) {
+        throw 'Package manifest contains an invalid number of files.'
+    }
+    $seen = @{}
+    foreach ($entry in $entries) {
+        $relative = [string]$entry.path
+        $key = $relative.ToLowerInvariant()
+        if ($seen.ContainsKey($key)) {
+            throw "Package manifest contains a case-insensitive duplicate: $relative"
+        }
+        $seen[$key] = $true
+        $nativeRelative = ConvertTo-SafePackageRelativePath -RelativePath $relative
+        $candidate = Assert-ChildPath -Root $packageRoot -Candidate (Join-Path $packageRoot $nativeRelative)
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            throw "Package manifest entry is missing: $relative"
+        }
+        $item = Get-Item -LiteralPath $candidate -Force
+        if ((Test-ReparsePoint $item) -or [long]$entry.length -ne [long]$item.Length -or
+            ([string]$entry.sha256) -cnotmatch '^[0-9a-f]{64}$') {
+            throw "Package manifest metadata is invalid for: $relative"
+        }
+        $actualHash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualHash -cne [string]$entry.sha256) {
+            throw "Package payload failed SHA-256 validation: $relative"
+        }
+    }
+    foreach ($payloadFile in Get-PayloadFiles -Root $payload) {
+        $relative = Get-RelativeOwnedPath -Root $packageRoot -Path $payloadFile.FullName
+        if (-not $seen.ContainsKey($relative.ToLowerInvariant())) {
+            throw "Package payload is not covered by the manifest: $relative"
+        }
+    }
+    foreach ($requiredOuterFile in @(
+        'bootstrap.ps1',
+        'Install-ClusterYourCodex.cmd',
+        'Invoke-ClusterYourCodexLifecycle.ps1',
+        'Invoke-ClusterYourCodexFirewall.ps1'
+    )) {
+        if (-not $seen.ContainsKey($requiredOuterFile.ToLowerInvariant())) {
+            throw "Package manifest does not cover $requiredOuterFile."
+        }
+    }
+}
+
+function Assert-CycPackageSignature {
+    param([Parameter(Mandatory = $true)][string]$Executable)
+    $path = Resolve-NormalizedPath $Executable
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw 'Signed setup executable is missing.'
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $path
+    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
+        -not $signature.SignerCertificate) {
+        throw "Setup Authenticode verification failed: $($signature.Status)"
+    }
+}
+
+function Get-CurrentUserSid {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    if (-not $identity.User -or [string]::IsNullOrWhiteSpace($identity.User.Value)) {
+        throw 'The current Windows account has no stable SID.'
+    }
+    return [string]$identity.User.Value
+}
+
+function Get-CycInitiatorBinding {
+    param(
+        [string]$RequestedSid,
+        [string]$RequestedProfile,
+        [string]$RequestedLocalAppData
+    )
+    $sid = Get-CurrentUserSid
+    if ([string]::IsNullOrWhiteSpace($env:USERPROFILE) -or
+        [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        throw 'The initiating user profile is incomplete.'
+    }
+    $profile = Resolve-NormalizedPath $env:USERPROFILE
+    $localAppData = Resolve-NormalizedPath $env:LOCALAPPDATA
+    if (-not [string]::IsNullOrWhiteSpace($RequestedSid) -and $RequestedSid -cne $sid) {
+        throw 'The initiating SID changed before the per-user core lifecycle ran.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RequestedProfile) -and
+        -not [string]::Equals(
+            (Resolve-NormalizedPath $RequestedProfile),
+            $profile,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'The initiating profile changed before the per-user core lifecycle ran.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RequestedLocalAppData) -and
+        -not [string]::Equals(
+            (Resolve-NormalizedPath $RequestedLocalAppData),
+            $localAppData,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'The initiating LOCALAPPDATA changed before the per-user core lifecycle ran.'
+    }
+    return [PSCustomObject]@{
+        sid = $sid
+        profile = $profile
+        localAppData = $localAppData
+    }
+}
+
+function Assert-CycManifestInitiatorBinding {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$CurrentBinding
+    )
+    if (-not $Manifest.PSObject.Properties['initiator']) { return }
+    $record = $Manifest.initiator
+    if ([string]$record.sid -cne [string]$CurrentBinding.sid -or
+        -not [string]::Equals(
+            (Resolve-NormalizedPath ([string]$record.profile)),
+            [string]$CurrentBinding.profile,
+            [System.StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not [string]::Equals(
+            (Resolve-NormalizedPath ([string]$record.localAppData)),
+            [string]$CurrentBinding.localAppData,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'Installed state belongs to a different initiating SID or profile.'
+    }
+}
+
+function Get-PreferredWorkerPublicHost {
+    param([string]$RequestedHost)
+    $hostValue = if ([string]::IsNullOrWhiteSpace($RequestedHost)) { $null } else { $RequestedHost.Trim() }
+    if (-not $hostValue) {
+        try {
+            $configurations = @(Get-NetIPConfiguration -ErrorAction Stop | Where-Object {
+                $_.NetAdapter.Status -eq 'Up' -and $_.IPv4Address
+            })
+            $withGateway = @($configurations | Where-Object IPv4DefaultGateway)
+            $selected = @($withGateway + $configurations | Select-Object -Unique | Select-Object -First 1)
+            if ($selected.Count -gt 0) {
+                $hostValue = [string]$selected[0].IPv4Address.IPAddress
+            }
+        } catch {
+            # A minimal Windows image may not expose NetTCPIP. DNS hostname is
+            # the deterministic fallback and is encoded into the certificate SAN.
+        }
+    }
+    if (-not $hostValue) {
+        $hostValue = [System.Net.Dns]::GetHostName()
+    }
+    if ($hostValue.Contains('"') -or $hostValue.Contains("`r") -or $hostValue.Contains("`n") -or
+        $hostValue.Contains('/') -or $hostValue.Contains('\') -or $hostValue.Contains('@')) {
+        throw 'WorkerPublicHost contains characters that are not valid in a host name.'
+    }
+    $kind = [Uri]::CheckHostName($hostValue)
+    if ($kind -eq [UriHostNameType]::Unknown) {
+        throw "WorkerPublicHost is not a valid DNS name or IP address: $hostValue"
+    }
+    return $hostValue
+}
+
+function ConvertTo-WorkerPublicOrigin {
+    param(
+        [Parameter(Mandatory = $true)][string]$HostName,
+        [Parameter(Mandatory = $true)][int]$Port
+    )
+    $urlHost = if ([Uri]::CheckHostName($HostName) -eq [UriHostNameType]::IPv6) {
+        "[$HostName]"
+    } else {
+        $HostName
+    }
+    return "https://${urlHost}:$Port"
+}
+
+function Get-CycFirewallRuleName {
+    $sidSuffix = (Get-CurrentUserSid).Replace('-', '_')
+    return "ClusterYourCodex.ManagedWorker.$sidSuffix"
+}
+
 function Get-InstallPlan {
     [CmdletBinding()]
     param(
@@ -98,15 +2022,32 @@ function Get-InstallPlan {
         [Parameter(Mandatory = $true)][string]$DataRoot,
         [switch]$EnableWorker,
         [string]$WorkerConfig,
-        [switch]$SkipCodexIntegration
+        [switch]$SkipCodexIntegration,
+        [string]$CodexHome,
+        [string]$WorkerPublicHost,
+        [ValidateRange(1, 65535)][int]$WorkerListenPort = 47832,
+        [switch]$DisableManagedWorkerListener,
+        [switch]$SkipFirewall,
+        [switch]$DeferFirewall,
+        [string]$InitiatingSid,
+        [string]$InitiatingProfile,
+        [string]$InitiatingLocalAppData,
+        [string]$FirewallTransactionId,
+        [string]$FirewallRequestSha256,
+        [switch]$SkipUninstallRegistration,
+        [string]$UninstallerPath
     )
     $bundle = Resolve-NormalizedPath $BundleRoot
     $install = Resolve-NormalizedPath $InstallRoot
     $data = Resolve-NormalizedPath $DataRoot
+    $initiator = Get-CycInitiatorBinding `
+        -RequestedSid $InitiatingSid `
+        -RequestedProfile $InitiatingProfile `
+        -RequestedLocalAppData $InitiatingLocalAppData
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
         throw 'LOCALAPPDATA is required for the current-user Windows install.'
     }
-    $localAppData = Resolve-NormalizedPath $env:LOCALAPPDATA
+    $localAppData = [string]$initiator.localAppData
     [void](Assert-ChildPath -Root $localAppData -Candidate $install)
     [void](Assert-ChildPath -Root $localAppData -Candidate $data)
     if ([string]::Equals($install, $data, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -137,6 +2078,20 @@ function Get-InstallPlan {
     if ($EnableWorker -and -not ($files.relativePath -contains 'cyc-worker.exe')) {
         throw 'EnableWorker requires cyc-worker.exe in the bundle payload.'
     }
+    $installedBootstrapRelative = 'installer/bootstrap.ps1'
+    $installedUninstallWrapperRelative = 'installer/Uninstall-ClusterYourCodex.ps1'
+    $installedLifecycleRelative = 'installer/Invoke-ClusterYourCodexLifecycle.ps1'
+    $installedFirewallHelperRelative = 'installer/Invoke-ClusterYourCodexFirewall.ps1'
+    foreach ($requiredInstallerFile in @(
+        $installedBootstrapRelative,
+        $installedUninstallWrapperRelative,
+        $installedLifecycleRelative,
+        $installedFirewallHelperRelative
+    )) {
+        if (-not $SkipUninstallRegistration -and -not ($files.relativePath -contains $requiredInstallerFile)) {
+            throw "Uninstall registration requires $requiredInstallerFile in the bundle payload."
+        }
+    }
     $marketplaceManifestRelative = 'integrations/codex-marketplace/.agents/plugins/marketplace.json'
     $pluginPrefix = 'integrations/codex-marketplace/plugins/cluster-your-codex/'
     $hasMarketplaceManifest = $files.relativePath -contains $marketplaceManifestRelative
@@ -160,6 +2115,25 @@ function Get-InstallPlan {
         }
     }
     $hasCodexMarketplace = $hasMarketplaceManifest -and $hasPluginFiles
+    $buildCatalogSha256 = Get-CycFileCatalogDigest -Entries @($files)
+    $codexPayloadCatalogSha256 = if ($hasCodexMarketplace) {
+        Get-CycFileCatalogDigest -Entries @($files | Where-Object {
+            ([string]$_.relativePath).StartsWith($script:CodexMarketplacePrefix, [System.StringComparison]::Ordinal)
+        })
+    } else { $null }
+    $agentsTemplateFiles = @($files | Where-Object {
+        [string]::Equals(
+            [string]$_.relativePath,
+            $script:AgentsTemplateRelativePath,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    })
+    if ($agentsTemplateFiles.Count -ne 1) {
+        throw "Bundle payload must contain exactly one $($script:AgentsTemplateRelativePath)."
+    }
+    [void](Read-CycAgentsTemplate -Path $agentsTemplateFiles[0].sourcePath)
+    $resolvedCodexHome = Resolve-CycCodexHome -RequestedHome $CodexHome
+    $agentsPath = Join-Path $resolvedCodexHome 'AGENTS.md'
     $workerConfigPath = if ([string]::IsNullOrWhiteSpace($WorkerConfig)) {
         Join-Path $data 'worker\config.json'
     } else {
@@ -173,9 +2147,35 @@ function Get-InstallPlan {
     }
     $controllerDatabase = Join-Path $data 'controller.db'
     $controllerTokenFile = Join-Path $data 'controller.token'
+    $managedWorkerEnabled = -not [bool]$DisableManagedWorkerListener
+    $firewallDesired = $managedWorkerEnabled -and -not [bool]$SkipFirewall
+    if (-not [string]::IsNullOrWhiteSpace($FirewallTransactionId) -and
+        $FirewallTransactionId -cnotmatch '^[0-9a-f]{32}$') {
+        throw 'Deferred firewall lifecycle transaction identifier is invalid.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($FirewallRequestSha256) -and
+        $FirewallRequestSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Deferred firewall lifecycle request digest is invalid.'
+    }
+    $publicHost = if ($managedWorkerEnabled) {
+        Get-PreferredWorkerPublicHost -RequestedHost $WorkerPublicHost
+    } else { $null }
+    $workerPublicUrl = if ($managedWorkerEnabled) {
+        ConvertTo-WorkerPublicOrigin -HostName $publicHost -Port $WorkerListenPort
+    } else { $null }
+    $tlsDirectory = Join-Path $data 'tls'
+    $tlsCertificate = Join-Path $tlsDirectory 'controller.crt.pem'
+    $tlsPrivateKey = Join-Path $tlsDirectory 'controller.key.pem'
+    $controllerArguments = '--bind 127.0.0.1:47831 --database "' + $controllerDatabase + '" --token-file "' + $controllerTokenFile + '"'
+    if ($managedWorkerEnabled) {
+        $controllerArguments += ' --worker-bind 0.0.0.0:' + $WorkerListenPort
+        $controllerArguments += ' --worker-public-url "' + $workerPublicUrl + '"'
+        $controllerArguments += ' --worker-cert "' + $tlsCertificate + '"'
+        $controllerArguments += ' --worker-key "' + $tlsPrivateKey + '"'
+    }
     $controllerAction = [PSCustomObject]@{
         executable = Join-Path $install 'cyc-controller.exe'
-        arguments = '--bind 127.0.0.1:47831 --database "' + $controllerDatabase + '" --token-file "' + $controllerTokenFile + '"'
+        arguments = $controllerArguments
         workingDirectory = $install
     }
     $workerAction = if ($EnableWorker) {
@@ -186,24 +2186,92 @@ function Get-InstallPlan {
         }
     } else { $null }
     $marketplaceRoot = Join-Path $install 'integrations\codex-marketplace'
+    $installedBootstrap = Join-Path $install $installedBootstrapRelative
+    $installedUninstallWrapper = Join-Path $install $installedUninstallWrapperRelative
+    $resolvedUninstaller = if ([string]::IsNullOrWhiteSpace($UninstallerPath)) {
+        $installedUninstallWrapper
+    } else {
+        $candidate = Resolve-NormalizedPath $UninstallerPath
+        [void](Assert-ChildPath -Root $install -Candidate $candidate)
+        if ($candidate.Contains('"') -or $candidate.Contains("`r") -or $candidate.Contains("`n")) {
+            throw 'UninstallerPath must not contain quotes or line breaks.'
+        }
+        $candidate
+    }
+    if ([System.IO.Path]::GetExtension($resolvedUninstaller) -ieq '.ps1') {
+        $powerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $uninstallCommand = '"' + $powerShell + '" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "' +
+            $resolvedUninstaller + '"'
+        $quietUninstallCommand = $uninstallCommand + ' -Quiet'
+    } else {
+        $uninstallCommand = '"' + $resolvedUninstaller + '"'
+        $quietUninstallCommand = '"' + $resolvedUninstaller + '" /S'
+    }
     [PSCustomObject]@{
         schemaVersion = $script:ManifestSchema
         action = 'InstallOrRepair'
+        initiator = $initiator
         installRoot = $install
         dataRoot = $data
         manifestPath = Join-Path $data '.installer\install-manifest.json'
+        buildCatalogSha256 = $buildCatalogSha256
+        codexPayloadCatalogSha256 = $codexPayloadCatalogSha256
         files = $files
         tasks = @(
             [PSCustomObject]@{ name = $script:ControllerTaskName; action = $controllerAction; enabled = $true },
             [PSCustomObject]@{ name = $script:WorkerTaskName; action = $workerAction; enabled = [bool]$EnableWorker }
         )
         workerConfig = $workerConfigPath
+        managedWorker = [PSCustomObject]@{
+            enabled = $managedWorkerEnabled
+            publicHost = $publicHost
+            publicUrl = $workerPublicUrl
+            listenPort = $WorkerListenPort
+            tlsDirectory = $tlsDirectory
+            certificatePath = $tlsCertificate
+            privateKeyPath = $tlsPrivateKey
+            identityCli = Join-Path $install 'cyc.exe'
+            firewall = [PSCustomObject]@{
+                enabled = $firewallDesired
+                name = Get-CycFirewallRuleName
+                displayName = 'ClusterYourCodex Managed Worker'
+                group = $script:FirewallRuleGroup
+                description = $script:FirewallRuleDescription
+                lifecycle = if ($firewallDesired) { $script:FirewallLifecycleName } else { 'disabled' }
+                state = if ($firewallDesired) { 'pending' } else { 'disabled' }
+                transactionId = if ($firewallDesired) { $FirewallTransactionId } else { $null }
+                requestSha256 = if ($firewallDesired) { $FirewallRequestSha256 } else { $null }
+                program = $controllerAction.executable
+                port = $WorkerListenPort
+                profile = 'Private'
+                remoteAddress = 'LocalSubnet'
+                protocol = 'TCP'
+            }
+        }
+        uninstallRegistration = [PSCustomObject]@{
+            enabled = -not [bool]$SkipUninstallRegistration
+            registryPath = $script:UninstallRegistryPath
+            uninstallString = $uninstallCommand
+            quietUninstallString = $quietUninstallCommand
+            installedBootstrap = $installedBootstrap
+            uninstallerPath = $resolvedUninstaller
+        }
         codexIntegration = [PSCustomObject]@{
             enabled = (-not [bool]$SkipCodexIntegration) -and $hasCodexMarketplace
             available = $hasCodexMarketplace
             marketplaceRoot = $marketplaceRoot
             marketplaceManifest = Join-Path $marketplaceRoot '.agents\plugins\marketplace.json'
             plugin = 'cluster-your-codex@clusteryourcodex'
+        }
+        agentsIntegration = [PSCustomObject]@{
+            schemaVersion = $script:AgentsIntegrationSchema
+            enabled = (-not [bool]$SkipCodexIntegration) -and $hasCodexMarketplace
+            available = $true
+            codexHome = $resolvedCodexHome
+            agentsPath = $agentsPath
+            templatePath = $agentsTemplateFiles[0].targetPath
+            templateSourcePath = $agentsTemplateFiles[0].sourcePath
+            templateRelativePath = $script:AgentsTemplateRelativePath
         }
     }
 }
@@ -356,6 +2424,346 @@ function Set-PrivateDirectoryAcl {
     }
 }
 
+function Invoke-CycIdentityCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+    if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
+        throw "Identity CLI is missing: $Executable"
+    }
+    try {
+        $lines = @(& $Executable @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } catch {
+        throw 'Controller TLS identity command failed to start.'
+    }
+    $raw = [string]::Join([Environment]::NewLine, @($lines | ForEach-Object { [string]$_ }))
+    if ($raw.Length -gt 1MB) {
+        throw 'Controller TLS identity command returned oversized output.'
+    }
+    if ($exitCode -ne 0) {
+        throw "Controller TLS identity command failed (exit=$exitCode)."
+    }
+    try { return $raw | ConvertFrom-Json } catch {
+        throw 'Controller TLS identity command returned invalid JSON.'
+    }
+}
+
+function Ensure-CycTlsIdentity {
+    param([Parameter(Mandatory = $true)]$Plan)
+    if (-not $Plan.managedWorker.enabled) {
+        return [PSCustomObject]@{ enabled = $false; created = $false; fingerprint = $null }
+    }
+    $certificatePath = Resolve-NormalizedPath $Plan.managedWorker.certificatePath
+    $privateKeyPath = Resolve-NormalizedPath $Plan.managedWorker.privateKeyPath
+    $tlsDirectory = Resolve-NormalizedPath $Plan.managedWorker.tlsDirectory
+    [void](Assert-ChildPath -Root $Plan.dataRoot -Candidate $tlsDirectory)
+    [void](Assert-ChildPath -Root $tlsDirectory -Candidate $certificatePath)
+    [void](Assert-ChildPath -Root $tlsDirectory -Candidate $privateKeyPath)
+    $certificateExists = Test-Path -LiteralPath $certificatePath -PathType Leaf
+    $privateKeyExists = Test-Path -LiteralPath $privateKeyPath -PathType Leaf
+    if ((Test-Path -LiteralPath $certificatePath) -and -not $certificateExists) {
+        throw 'Controller TLS certificate path is not a regular file.'
+    }
+    if ((Test-Path -LiteralPath $privateKeyPath) -and -not $privateKeyExists) {
+        throw 'Controller TLS private-key path is not a regular file.'
+    }
+    if ($certificateExists -xor $privateKeyExists) {
+        throw 'Controller TLS identity is incomplete; refusing an implicit certificate rotation.'
+    }
+
+    [void](New-Item -ItemType Directory -Path $tlsDirectory -Force)
+    Set-PrivateDirectoryAcl -Path $tlsDirectory
+    $created = $false
+    try {
+        if (-not $certificateExists) {
+            $result = Invoke-CycIdentityCommand `
+                -Executable $Plan.managedWorker.identityCli `
+                -Arguments @(
+                    'identity', 'init',
+                    '--output-dir', $tlsDirectory,
+                    '--host', [string]$Plan.managedWorker.publicHost
+                )
+            $created = $true
+            if (-not $result.certificatePath -or -not $result.privateKeyPath -or
+                -not [string]::Equals(
+                    (Resolve-NormalizedPath ([string]$result.certificatePath)),
+                    $certificatePath,
+                    [System.StringComparison]::OrdinalIgnoreCase
+                ) -or
+                -not [string]::Equals(
+                    (Resolve-NormalizedPath ([string]$result.privateKeyPath)),
+                    $privateKeyPath,
+                    [System.StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw 'Controller TLS identity command returned unexpected output paths.'
+            }
+        }
+        if (-not (Test-Path -LiteralPath $certificatePath -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $privateKeyPath -PathType Leaf)) {
+            throw 'Controller TLS identity files were not created atomically.'
+        }
+        Set-PrivateDirectoryAcl -Path $tlsDirectory
+        $verification = Invoke-CycIdentityCommand `
+            -Executable $Plan.managedWorker.identityCli `
+            -Arguments @(
+                'identity', 'verify',
+                '--certificate', $certificatePath,
+                '--private-key', $privateKeyPath,
+                '--host', [string]$Plan.managedWorker.publicHost,
+                '--json'
+            )
+        if (-not $verification.sha256Fingerprint) {
+            throw 'Controller TLS identity verification omitted its safe fingerprint.'
+        }
+        return [PSCustomObject]@{
+            enabled = $true
+            created = $created
+            fingerprint = [string]$verification.sha256Fingerprint
+        }
+    } catch {
+        $failure = $_
+        if ($created -or (-not $certificateExists -and -not $privateKeyExists)) {
+            foreach ($path in @($privateKeyPath, $certificatePath)) {
+                if (Test-Path -LiteralPath $path -PathType Leaf) {
+                    Remove-Item -LiteralPath $path -Force
+                }
+            }
+        }
+        throw $failure
+    }
+}
+
+function Remove-NewCycTlsIdentity {
+    param(
+        [Parameter(Mandatory = $true)]$Plan,
+        $IdentityResult
+    )
+    if (-not $IdentityResult -or -not $IdentityResult.created) { return }
+    foreach ($path in @($Plan.managedWorker.privateKeyPath, $Plan.managedWorker.certificatePath)) {
+        $owned = Assert-ChildPath -Root $Plan.managedWorker.tlsDirectory -Candidate $path
+        if (Test-Path -LiteralPath $owned -PathType Leaf) {
+            Remove-Item -LiteralPath $owned -Force
+        }
+    }
+}
+
+function Test-IsAdministrator {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Get-OwnedCycFirewallRule {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $rules = @(Get-NetFirewallRule -Name $Name -ErrorAction SilentlyContinue)
+    if ($rules.Count -gt 1) {
+        throw "More than one firewall rule uses the owned name $Name."
+    }
+    if ($rules.Count -eq 0) { return $null }
+    $rule = $rules[0]
+    if ([string]$rule.Group -ne $script:FirewallRuleGroup -or
+        [string]$rule.Description -ne $script:FirewallRuleDescription) {
+        throw "Firewall rule name collision: $Name is not owned by ClusterYourCodex."
+    }
+    return $rule
+}
+
+function Get-CycFirewallSnapshot {
+    param([Parameter(Mandatory = $true)]$Firewall)
+    $rule = Get-OwnedCycFirewallRule -Name $Firewall.name
+    if (-not $rule) {
+        return [PSCustomObject]@{ existed = $false; name = $Firewall.name }
+    }
+    $port = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
+    $address = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
+    $application = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
+    return [PSCustomObject]@{
+        existed = $true
+        name = [string]$rule.Name
+        displayName = [string]$rule.DisplayName
+        enabled = [string]$rule.Enabled
+        profile = [string]$rule.Profile
+        direction = [string]$rule.Direction
+        action = [string]$rule.Action
+        protocol = [string]$port.Protocol
+        localPort = [string]$port.LocalPort
+        remoteAddress = @($address.RemoteAddress)
+        program = [string]$application.Program
+    }
+}
+
+function Remove-CycFirewallRule {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $rule = Get-OwnedCycFirewallRule -Name $Name
+    if ($rule) {
+        Remove-NetFirewallRule -Name $Name -ErrorAction Stop
+    }
+}
+
+function Set-CycFirewallRule {
+    param(
+        [Parameter(Mandatory = $true)]$Plan,
+        [Parameter(Mandatory = $true)][bool]$Enabled
+    )
+    if (-not (Test-IsAdministrator)) {
+        throw 'Managed-worker firewall configuration requires the one-time elevated installer.'
+    }
+    $firewall = $Plan.managedWorker.firewall
+    Remove-CycFirewallRule -Name $firewall.name
+    if (-not $Enabled) { return }
+    New-NetFirewallRule `
+        -Name $firewall.name `
+        -DisplayName $firewall.displayName `
+        -Group $firewall.group `
+        -Description $firewall.description `
+        -Direction Inbound `
+        -Action Allow `
+        -Enabled True `
+        -Profile Private `
+        -Protocol TCP `
+        -LocalPort $Plan.managedWorker.listenPort `
+        -RemoteAddress LocalSubnet `
+        -Program $Plan.tasks[0].action.executable `
+        -EdgeTraversalPolicy Block | Out-Null
+    $rule = Get-OwnedCycFirewallRule -Name $firewall.name
+    if (-not $rule) { throw 'Managed-worker firewall rule was not created.' }
+    $port = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
+    $address = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
+    $application = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
+    if ([string]$rule.Enabled -ne 'True' -or
+        [string]$rule.Direction -ne 'Inbound' -or
+        [string]$rule.Action -ne 'Allow' -or
+        [string]$rule.Profile -notmatch '^(2|Private)$' -or
+        [string]$port.Protocol -notmatch '^(6|TCP)$' -or
+        [string]$port.LocalPort -ne [string]$Plan.managedWorker.listenPort -or
+        @($address.RemoteAddress) -notcontains 'LocalSubnet' -or
+        -not [string]::Equals(
+            (Resolve-NormalizedPath ([string]$application.Program)),
+            (Resolve-NormalizedPath $Plan.tasks[0].action.executable),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'Managed-worker firewall rule failed post-install verification.'
+    }
+}
+
+function Restore-CycFirewallSnapshot {
+    param([Parameter(Mandatory = $true)]$Snapshot)
+    Remove-CycFirewallRule -Name $Snapshot.name
+    if (-not $Snapshot.existed) { return }
+    New-NetFirewallRule `
+        -Name $Snapshot.name `
+        -DisplayName $Snapshot.displayName `
+        -Group $script:FirewallRuleGroup `
+        -Description $script:FirewallRuleDescription `
+        -Direction $Snapshot.direction `
+        -Action $Snapshot.action `
+        -Enabled $Snapshot.enabled `
+        -Profile $Snapshot.profile `
+        -Protocol $Snapshot.protocol `
+        -LocalPort $Snapshot.localPort `
+        -RemoteAddress $Snapshot.remoteAddress `
+        -Program $Snapshot.program `
+        -EdgeTraversalPolicy Block | Out-Null
+}
+
+function Get-CycUninstallRegistrationSnapshot {
+    param([Parameter(Mandatory = $true)][string]$RegistryPath)
+    if (-not (Test-Path -LiteralPath $RegistryPath)) {
+        return [PSCustomObject]@{ existed = $false; values = @() }
+    }
+    $key = Get-Item -LiteralPath $RegistryPath -ErrorAction Stop
+    $values = @($key.GetValueNames() | ForEach-Object {
+        [PSCustomObject]@{
+            name = [string]$_
+            kind = [string]$key.GetValueKind($_)
+            value = $key.GetValue(
+                $_,
+                $null,
+                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+            )
+        }
+    })
+    return [PSCustomObject]@{ existed = $true; values = $values }
+}
+
+function Restore-CycUninstallRegistrationSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$RegistryPath,
+        [Parameter(Mandatory = $true)]$Snapshot
+    )
+    if (Test-Path -LiteralPath $RegistryPath) {
+        Remove-Item -LiteralPath $RegistryPath -Recurse -Force
+    }
+    if (-not $Snapshot.existed) { return }
+    [void](New-Item -Path $RegistryPath -Force)
+    foreach ($entry in $Snapshot.values) {
+        New-ItemProperty `
+            -LiteralPath $RegistryPath `
+            -Name $entry.name `
+            -Value $entry.value `
+            -PropertyType $entry.kind `
+            -Force | Out-Null
+    }
+}
+
+function Set-CycUninstallRegistration {
+    param([Parameter(Mandatory = $true)]$Plan)
+    if (-not $Plan.uninstallRegistration.enabled) { return }
+    if (-not (Test-Path -LiteralPath $Plan.uninstallRegistration.installedBootstrap -PathType Leaf)) {
+        throw 'Installed bootstrap is missing; refusing a broken uninstall registration.'
+    }
+    if (-not (Test-Path -LiteralPath $Plan.uninstallRegistration.uninstallerPath -PathType Leaf)) {
+        throw 'Installed uninstaller is missing; refusing a broken uninstall registration.'
+    }
+    $estimatedKilobytes = [Math]::Ceiling(
+        (@($Plan.files | Measure-Object -Property length -Sum).Sum) / 1KB
+    )
+    [void](New-Item -Path $Plan.uninstallRegistration.registryPath -Force)
+    $properties = [ordered]@{
+        DisplayName = 'ClusterYourCodex'
+        DisplayVersion = '0.1.0'
+        Publisher = 'TypeThe0ry'
+        URLInfoAbout = 'https://github.com/TypeThe0ry/ClusterYourCodex'
+        InstallLocation = $Plan.installRoot
+        DataLocation = $Plan.dataRoot
+        DisplayIcon = (Join-Path $Plan.installRoot 'ClusterYourCodex.exe')
+        UninstallString = $Plan.uninstallRegistration.uninstallString
+        QuietUninstallString = $Plan.uninstallRegistration.quietUninstallString
+    }
+    foreach ($entry in $properties.GetEnumerator()) {
+        New-ItemProperty -LiteralPath $Plan.uninstallRegistration.registryPath `
+            -Name $entry.Key -Value $entry.Value -PropertyType String -Force | Out-Null
+    }
+    foreach ($entry in @(
+        @{ Name = 'NoModify'; Value = 1 },
+        @{ Name = 'NoRepair'; Value = 1 },
+        @{ Name = 'EstimatedSize'; Value = [int][Math]::Min($estimatedKilobytes, [int]::MaxValue) }
+    )) {
+        New-ItemProperty -LiteralPath $Plan.uninstallRegistration.registryPath `
+            -Name $entry.Name -Value $entry.Value -PropertyType DWord -Force | Out-Null
+    }
+}
+
+function Remove-CycUninstallRegistration {
+    param(
+        [Parameter(Mandatory = $true)][string]$RegistryPath,
+        [Parameter(Mandatory = $true)][string]$ExpectedInstallRoot
+    )
+    if (-not (Test-Path -LiteralPath $RegistryPath)) { return }
+    $registration = Get-ItemProperty -LiteralPath $RegistryPath -ErrorAction Stop
+    if (-not $registration.InstallLocation -or
+        -not [string]::Equals(
+            (Resolve-NormalizedPath ([string]$registration.InstallLocation)),
+            (Resolve-NormalizedPath $ExpectedInstallRoot),
+            [System.StringComparison]::OrdinalIgnoreCase
+        ) -or [string]$registration.Publisher -ne 'TypeThe0ry') {
+        throw 'Uninstall registry key is not owned by this ClusterYourCodex installation.'
+    }
+    Remove-Item -LiteralPath $RegistryPath -Recurse -Force
+}
+
 function Read-InstallManifest {
     param([Parameter(Mandatory = $true)][string]$ManifestPath)
     if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) { return $null }
@@ -498,6 +2906,20 @@ function Stop-CycRuntime {
     }
 }
 
+function Assert-CycListenPortsAvailable {
+    param([Parameter(Mandatory = $true)][int[]]$Ports)
+    foreach ($port in @($Ports | Sort-Object -Unique)) {
+        $listeners = @(Get-NetTCPConnection `
+            -State Listen `
+            -LocalPort $port `
+            -ErrorAction SilentlyContinue)
+        if ($listeners.Count -gt 0) {
+            $owners = @($listeners | ForEach-Object { [int]$_.OwningProcess } | Sort-Object -Unique)
+            throw "TCP port $port is already listening (PID $($owners -join ','))."
+        }
+    }
+}
+
 function Restore-CycTaskSnapshots {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Snapshots)
     foreach ($name in @($script:WorkerTaskName, $script:ControllerTaskName)) {
@@ -582,6 +3004,67 @@ function Wait-CycControllerReady {
     throw 'Controller failed the loopback health check.'
 }
 
+function Wait-CycManagedWorkerListenerReady {
+    param(
+        [Parameter(Mandatory = $true)]$ManagedWorker,
+        [int]$TimeoutSeconds = 15
+    )
+    if (-not $ManagedWorker.enabled) { return }
+    try {
+        $expectedCertificate = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(
+            $ManagedWorker.certificatePath
+        )
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $expectedHash = [Convert]::ToBase64String(
+                $sha256.ComputeHash($expectedCertificate.RawData)
+            )
+        } finally {
+            $sha256.Dispose()
+            $expectedCertificate.Dispose()
+        }
+    } catch {
+        throw 'Managed-worker TLS certificate could not be loaded for readiness verification.'
+    }
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $client = $null
+        $stream = $null
+        try {
+            $client = New-Object System.Net.Sockets.TcpClient
+            $async = $client.BeginConnect('127.0.0.1', [int]$ManagedWorker.listenPort, $null, $null)
+            if (-not $async.AsyncWaitHandle.WaitOne(1000)) {
+                throw 'TLS listener connect timed out.'
+            }
+            $client.EndConnect($async)
+            $callback = {
+                param($sender, $certificate, $chain, $errors)
+                if (-not $certificate) { return $false }
+                $remote = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certificate)
+                $hash = [System.Security.Cryptography.SHA256]::Create()
+                try {
+                    $actual = [Convert]::ToBase64String($hash.ComputeHash($remote.RawData))
+                    return [string]::Equals($actual, $expectedHash, [System.StringComparison]::Ordinal)
+                } finally {
+                    $hash.Dispose()
+                    $remote.Dispose()
+                }
+            }.GetNewClosure()
+            $stream = New-Object System.Net.Security.SslStream($client.GetStream(), $false, $callback)
+            $stream.AuthenticateAsClient([string]$ManagedWorker.publicHost)
+            if ($stream.IsAuthenticated -and $stream.IsEncrypted) { return }
+        } catch {
+            # Startup is bounded and retried without serializing certificate data.
+        } finally {
+            if ($stream) { $stream.Dispose() }
+            if ($client) { $client.Dispose() }
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw 'Managed-worker TLS listener failed certificate-pinned readiness verification.'
+}
+
 function New-FileRollbackSnapshot {
     param(
         [Parameter(Mandatory = $true)]$Plan,
@@ -660,6 +3143,329 @@ function Remove-FileRollbackSnapshot {
     }
 }
 
+function Get-CodexCliCandidates {
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    foreach ($value in @($env:CYC_CODEX_CLI, $env:CODEX_CLI_PATH)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$value)) {
+            [void]$candidates.Add([string]$value)
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $managedBin = Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin'
+        if (Test-Path -LiteralPath $managedBin -PathType Container) {
+            foreach ($directory in @(Get-ChildItem -LiteralPath $managedBin -Directory -Force -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTimeUtc -Descending)) {
+                [void]$candidates.Add((Join-Path $directory.FullName 'codex.exe'))
+            }
+            [void]$candidates.Add((Join-Path $managedBin 'codex.exe'))
+        }
+    }
+
+    $homeRoot = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
+        [string]$env:CODEX_HOME
+    } elseif (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        Join-Path $env:USERPROFILE '.codex'
+    } else {
+        $null
+    }
+    if ($homeRoot) {
+        [void]$candidates.Add((Join-Path $homeRoot 'plugins\.plugin-appserver\codex.exe'))
+    }
+
+    foreach ($command in @(Get-Command codex -All -CommandType Application, ExternalScript -ErrorAction SilentlyContinue)) {
+        if ($command.Source) {
+            [void]$candidates.Add([string]$command.Source)
+        }
+    }
+
+    $seen = @{}
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        try { $fullPath = [System.IO.Path]::GetFullPath($candidate) } catch { continue }
+        $key = $fullPath.ToLowerInvariant()
+        if (-not $seen.ContainsKey($key)) {
+            $seen[$key] = $true
+            $fullPath
+        }
+    }
+}
+
+function Invoke-CycBoundedCodexProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [ValidateRange(100, 90000)][int]$TimeoutMilliseconds = 20000
+    )
+    $path = Resolve-NormalizedPath $Executable
+    if (-not [System.IO.Path]::IsPathRooted($path) -or $path.Contains('"') -or
+        $path.Contains("`r") -or $path.Contains("`n")) {
+        throw 'Codex CLI path is not a strict absolute executable path.'
+    }
+    $extension = [System.IO.Path]::GetExtension($path)
+    $start = [System.Diagnostics.ProcessStartInfo]::new()
+    if ($extension -ieq '.cmd' -or $extension -ieq '.bat') {
+        if ($path -match '[%!]') { throw 'Test CLI script path contains unsupported expansion characters.' }
+        $start.FileName = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
+        $start.Arguments = '/d /s /c ""' + $path + '" ' + ([string]::Join(' ', $Arguments)) + '"'
+    } else {
+        $start.FileName = $path
+        $start.Arguments = [string]::Join(' ', $Arguments)
+    }
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    try {
+        if (-not $process.Start()) { throw 'Codex CLI process did not start.' }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+            try { $process.Kill() } catch { }
+            try { $process.WaitForExit() } catch { }
+            throw 'Codex CLI process exceeded its bounded verification timeout.'
+        }
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        return [PSCustomObject]@{
+            exitCode = [int]$process.ExitCode
+            stdout = [string]$stdout
+            stderr = [string]$stderr
+        }
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Resolve-CodexCli {
+    param(
+        [string]$RequestedPath,
+        [ValidateRange(100, 30000)][int]$TimeoutMilliseconds = 10000
+    )
+    # The Store-packaged desktop can expose a WindowsApps resource through
+    # Get-Command even when that path cannot be launched by an external
+    # installer. Probe each candidate and continue to the app-managed CLI
+    # under LocalAppData instead of treating a regular file as availability.
+    $candidates = if ([string]::IsNullOrWhiteSpace($RequestedPath)) {
+        @(Get-CodexCliCandidates)
+    } else {
+        if (-not [System.IO.Path]::IsPathRooted($RequestedPath) -or
+            $RequestedPath.Contains('"') -or $RequestedPath.Contains("`r") -or $RequestedPath.Contains("`n")) {
+            throw 'IntegrateCodex requires an exact absolute Codex CLI path from the native host.'
+        }
+        @((Resolve-NormalizedPath $RequestedPath))
+    }
+    foreach ($candidate in $candidates) {
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+        try {
+            $volumeRoot = [System.IO.Path]::GetPathRoot((Resolve-NormalizedPath $candidate))
+            [void](Assert-CycNoReparsePathChain -Root $volumeRoot -Candidate $candidate -LeafType File)
+            $probe = Invoke-CycBoundedCodexProcess `
+                -Executable $candidate `
+                -Arguments @('--version') `
+                -TimeoutMilliseconds $TimeoutMilliseconds
+            if ($probe.exitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($probe.stdout) -and
+                $probe.stdout.Length -le 256 -and -not $probe.stdout.Contains("`0")) {
+                return [PSCustomObject]@{ Source = (Resolve-NormalizedPath $candidate) }
+            }
+        } catch {
+            # Candidate is present but not executable in this security context.
+        }
+    }
+    return $null
+}
+
+function Resolve-CycComparablePath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $candidate = $Path.Trim()
+    if ($candidate.StartsWith('\\?\UNC\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $candidate = '\\' + $candidate.Substring(8)
+    } elseif ($candidate.StartsWith('\\?\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $candidate = $candidate.Substring(4)
+    }
+    return Resolve-NormalizedPath $candidate
+}
+
+function Read-CycCodexPluginManifest {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "ClusterYourCodex plugin manifest is missing: $Path"
+    }
+    $item = Get-Item -LiteralPath $Path -Force
+    if ((Test-ReparsePoint $item) -or $item.Length -lt 2 -or $item.Length -gt 256KB) {
+        throw 'ClusterYourCodex plugin manifest must be a bounded regular file.'
+    }
+    [byte[]]$bytes = [System.IO.File]::ReadAllBytes($Path)
+    $offset = if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and
+        $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf) { 3 } else { 0 }
+    [byte[]]$body = New-Object byte[] ($bytes.Length - $offset)
+    if ($body.Length -gt 0) { [System.Buffer]::BlockCopy($bytes, $offset, $body, 0, $body.Length) }
+    $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    try { $raw = $strictUtf8.GetString($body) } catch {
+        throw 'ClusterYourCodex plugin manifest must be valid UTF-8.'
+    }
+    try { $manifest = $raw | ConvertFrom-Json } catch {
+        throw 'ClusterYourCodex plugin manifest contains invalid JSON.'
+    }
+    $nameProperty = $manifest.PSObject.Properties['name']
+    $versionProperty = $manifest.PSObject.Properties['version']
+    if (-not $nameProperty -or -not ($nameProperty.Value -is [string]) -or
+        [string]$nameProperty.Value -cne 'cluster-your-codex' -or
+        -not $versionProperty -or -not ($versionProperty.Value -is [string]) -or
+        [string]$versionProperty.Value -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
+        throw 'ClusterYourCodex plugin manifest has an invalid name or semantic version.'
+    }
+    return [PSCustomObject]@{
+        name = [string]$nameProperty.Value
+        version = [string]$versionProperty.Value
+        path = Resolve-NormalizedPath $Path
+        sha256 = Get-CycSha256Hex -Bytes $bytes
+    }
+}
+
+function Get-CycCodexPluginExpectation {
+    param(
+        [Parameter(Mandatory = $true)][string]$MarketplaceRoot,
+        [string]$PluginId = $script:CodexPluginId
+    )
+    if ($PluginId -cne $script:CodexPluginId) {
+        throw 'Unexpected ClusterYourCodex plugin identity.'
+    }
+    $marketplace = Assert-CycRealDirectory -Path $MarketplaceRoot -Label 'Codex marketplace'
+    $sourcePath = Assert-CycRealDirectory `
+        -Path (Assert-ChildPath `
+            -Root $marketplace `
+            -Candidate (Join-Path $marketplace 'plugins\cluster-your-codex')) `
+        -Label 'ClusterYourCodex plugin source'
+    $pluginManifest = Read-CycCodexPluginManifest `
+        -Path (Join-Path $sourcePath '.codex-plugin\plugin.json')
+    return [PSCustomObject]@{
+        pluginId = $PluginId
+        pluginName = 'cluster-your-codex'
+        marketplaceName = 'clusteryourcodex'
+        marketplaceRoot = $marketplace
+        sourceType = 'local'
+        sourcePath = $sourcePath
+        version = $pluginManifest.version
+        pluginManifestPath = $pluginManifest.path
+        pluginManifestSha256 = $pluginManifest.sha256
+    }
+}
+
+function New-CycInactivePluginVerification {
+    param(
+        [int]$ExitCode,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+    return [PSCustomObject]@{
+        active = $false
+        exitCode = $ExitCode
+        reason = $Reason
+        pluginVersion = $null
+        sourceType = $null
+        sourcePath = $null
+    }
+}
+
+function Test-CycCodexPluginActive {
+    param(
+        [Parameter(Mandatory = $true)]$Codex,
+        [Parameter(Mandatory = $true)]$ExpectedPlugin,
+        [ValidateRange(100, 30000)][int]$TimeoutMilliseconds = 20000
+    )
+    try {
+        $result = Invoke-CycBoundedCodexProcess `
+            -Executable ([string]$Codex.Source) `
+            -Arguments @('plugin', 'list', '--json') `
+            -TimeoutMilliseconds $TimeoutMilliseconds
+        $exitCode = [int]$result.exitCode
+        $raw = [string]$result.stdout
+    } catch {
+        return New-CycInactivePluginVerification -ExitCode -1 -Reason 'plugin-list-launch-failed'
+    }
+    if ($exitCode -ne 0) {
+        return New-CycInactivePluginVerification -ExitCode $exitCode -Reason 'plugin-list-nonzero'
+    }
+    if ([string]::IsNullOrWhiteSpace($raw) -or $raw.Length -gt 1MB) {
+        return New-CycInactivePluginVerification -ExitCode $exitCode -Reason 'plugin-list-unbounded-or-empty'
+    }
+    try { $listing = $raw | ConvertFrom-Json } catch {
+        return New-CycInactivePluginVerification -ExitCode $exitCode -Reason 'plugin-list-invalid-json'
+    }
+    $installedProperty = $listing.PSObject.Properties['installed']
+    if (-not $installedProperty -or -not ($installedProperty.Value -is [System.Array])) {
+        return New-CycInactivePluginVerification -ExitCode $exitCode -Reason 'plugin-list-missing-installed-array'
+    }
+    $installedEntries = @($installedProperty.Value)
+    if ($installedEntries.Count -gt 10000) {
+        return New-CycInactivePluginVerification -ExitCode $exitCode -Reason 'plugin-list-too-many-entries'
+    }
+    $matches = @($installedEntries | Where-Object {
+        $_ -and $_.PSObject.Properties['pluginId'] -and
+        $_.PSObject.Properties['pluginId'].Value -is [string] -and
+        [string]$_.PSObject.Properties['pluginId'].Value -ceq [string]$ExpectedPlugin.pluginId
+    })
+    if ($matches.Count -ne 1) {
+        return New-CycInactivePluginVerification -ExitCode $exitCode -Reason 'plugin-id-missing-or-duplicate'
+    }
+    $entry = $matches[0]
+    foreach ($booleanName in @('installed', 'enabled')) {
+        $property = $entry.PSObject.Properties[$booleanName]
+        if (-not $property -or -not ($property.Value -is [bool]) -or -not [bool]$property.Value) {
+            return New-CycInactivePluginVerification -ExitCode $exitCode -Reason ("plugin-$booleanName-not-true")
+        }
+    }
+    foreach ($stringCheck in @(
+        [PSCustomObject]@{ name = 'name'; expected = [string]$ExpectedPlugin.pluginName },
+        [PSCustomObject]@{ name = 'marketplaceName'; expected = [string]$ExpectedPlugin.marketplaceName },
+        [PSCustomObject]@{ name = 'version'; expected = [string]$ExpectedPlugin.version }
+    )) {
+        $property = $entry.PSObject.Properties[$stringCheck.name]
+        if (-not $property -or -not ($property.Value -is [string]) -or
+            [string]$property.Value -cne $stringCheck.expected) {
+            return New-CycInactivePluginVerification `
+                -ExitCode $exitCode `
+                -Reason ("plugin-$($stringCheck.name)-mismatch")
+        }
+    }
+    $sourceProperty = $entry.PSObject.Properties['source']
+    if (-not $sourceProperty -or -not $sourceProperty.Value) {
+        return New-CycInactivePluginVerification -ExitCode $exitCode -Reason 'plugin-source-missing'
+    }
+    $source = $sourceProperty.Value
+    $sourceTypeProperty = $source.PSObject.Properties['source']
+    $sourcePathProperty = $source.PSObject.Properties['path']
+    if (-not $sourceTypeProperty -or -not ($sourceTypeProperty.Value -is [string]) -or
+        [string]$sourceTypeProperty.Value -cne [string]$ExpectedPlugin.sourceType -or
+        -not $sourcePathProperty -or -not ($sourcePathProperty.Value -is [string])) {
+        return New-CycInactivePluginVerification -ExitCode $exitCode -Reason 'plugin-source-metadata-mismatch'
+    }
+    try {
+        $actualSourcePath = Resolve-CycComparablePath ([string]$sourcePathProperty.Value)
+        $expectedSourcePath = Resolve-CycComparablePath ([string]$ExpectedPlugin.sourcePath)
+    } catch {
+        return New-CycInactivePluginVerification -ExitCode $exitCode -Reason 'plugin-source-path-invalid'
+    }
+    if (-not [string]::Equals(
+        $actualSourcePath,
+        $expectedSourcePath,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        return New-CycInactivePluginVerification -ExitCode $exitCode -Reason 'plugin-source-path-mismatch'
+    }
+    return [PSCustomObject]@{
+        active = $true
+        exitCode = $exitCode
+        reason = 'verified'
+        pluginVersion = [string]$entry.version
+        sourceType = [string]$source.source
+        sourcePath = $actualSourcePath
+    }
+}
+
 function Invoke-CodexIntegration {
     param(
         [Parameter(Mandatory = $true)]$Plan,
@@ -675,6 +3481,7 @@ function Invoke-CodexIntegration {
             succeeded = ($Operation -eq 'Uninstall')
             marketplaceAdded = $false
             pluginAdded = $false
+            pluginVerified = $false
             pluginRemoved = $false
             marketplaceRemoved = $false
             pluginExitCode = $null
@@ -701,6 +3508,7 @@ function Invoke-CodexIntegration {
             succeeded = $true
             marketplaceAdded = $false
             pluginAdded = $false
+            pluginVerified = $false
             pluginRemoved = $true
             marketplaceRemoved = $true
             pluginExitCode = $null
@@ -710,7 +3518,7 @@ function Invoke-CodexIntegration {
     if ($Operation -eq 'Uninstall' -and -not $CleanupCheckpoint) {
         throw 'Codex integration cleanup requires a durable manifest checkpoint callback.'
     }
-    $codex = Get-Command codex -CommandType Application, ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
+    $codex = Resolve-CodexCli
     if (-not $codex) {
         return [PSCustomObject]@{
             operation = $Operation
@@ -720,6 +3528,7 @@ function Invoke-CodexIntegration {
             succeeded = $false
             marketplaceAdded = $false
             pluginAdded = $false
+            pluginVerified = $false
             pluginRemoved = $pluginRemoved
             marketplaceRemoved = $marketplaceRemoved
             pluginExitCode = $null
@@ -741,12 +3550,16 @@ function Invoke-CodexIntegration {
                 succeeded = $false
                 marketplaceAdded = $false
                 pluginAdded = $false
+                pluginVerified = $false
                 pluginRemoved = $false
                 marketplaceRemoved = $false
                 pluginExitCode = $null
                 marketplaceExitCode = $null
             }
         }
+        $expectedPlugin = Get-CycCodexPluginExpectation `
+            -MarketplaceRoot $Plan.codexIntegration.marketplaceRoot `
+            -PluginId $Plan.codexIntegration.plugin
         try {
             & $codex.Source plugin marketplace add $Plan.codexIntegration.marketplaceRoot *> $null
             $marketplaceExitCode = $LASTEXITCODE
@@ -763,14 +3576,32 @@ function Invoke-CodexIntegration {
                 $pluginExitCode = -1
             }
         }
+        $verification = if ($marketplaceAdded -and $pluginAdded) {
+            Test-CycCodexPluginActive -Codex $codex -ExpectedPlugin $expectedPlugin
+        } else {
+            [PSCustomObject]@{
+                active = $false
+                exitCode = $null
+                reason = 'registration-failed'
+                pluginVersion = $null
+                sourceType = $null
+                sourcePath = $null
+            }
+        }
         return [PSCustomObject]@{
             operation = $Operation
             required = $true
             attempted = $true
             cliFound = $true
-            succeeded = ($marketplaceAdded -and $pluginAdded)
+            succeeded = ($marketplaceAdded -and $pluginAdded -and $verification.active)
             marketplaceAdded = $marketplaceAdded
             pluginAdded = $pluginAdded
+            pluginVerified = [bool]$verification.active
+            pluginVerificationExitCode = $verification.exitCode
+            pluginVerificationReason = $verification.reason
+            pluginVersion = $verification.pluginVersion
+            pluginSourceType = $verification.sourceType
+            pluginSourcePath = $verification.sourcePath
             pluginRemoved = $false
             marketplaceRemoved = $false
             pluginExitCode = $pluginExitCode
@@ -795,6 +3626,7 @@ function Invoke-CodexIntegration {
                 succeeded = ($pluginRemoved -and $marketplaceRemoved)
                 marketplaceAdded = $false
                 pluginAdded = $false
+                pluginVerified = $false
                 pluginRemoved = $pluginRemoved
                 marketplaceRemoved = $marketplaceRemoved
                 pluginExitCode = $pluginExitCode
@@ -819,6 +3651,7 @@ function Invoke-CodexIntegration {
                 succeeded = ($pluginRemoved -and $marketplaceRemoved)
                 marketplaceAdded = $false
                 pluginAdded = $false
+                pluginVerified = $false
                 pluginRemoved = $pluginRemoved
                 marketplaceRemoved = $marketplaceRemoved
                 pluginExitCode = $pluginExitCode
@@ -834,6 +3667,7 @@ function Invoke-CodexIntegration {
         succeeded = ($pluginRemoved -and $marketplaceRemoved)
         marketplaceAdded = $false
         pluginAdded = $false
+        pluginVerified = $false
         pluginRemoved = $pluginRemoved
         marketplaceRemoved = $marketplaceRemoved
         pluginExitCode = $pluginExitCode
@@ -926,7 +3760,9 @@ function Write-CodexCleanupState {
 function Write-InstallManifest {
     param(
         [Parameter(Mandatory = $true)]$Plan,
-        [Parameter(Mandatory = $true)]$CodexResult
+        [Parameter(Mandatory = $true)]$CodexResult,
+        [Parameter(Mandatory = $true)]$AgentsResult,
+        $TlsIdentityResult
     )
     $manifestDirectory = Split-Path -Parent $Plan.manifestPath
     [void](New-Item -ItemType Directory -Path $manifestDirectory -Force)
@@ -936,27 +3772,654 @@ function Write-InstallManifest {
         installedAtUtc = [DateTime]::UtcNow.ToString('o')
         installRoot = $Plan.installRoot
         dataRoot = $Plan.dataRoot
+        initiator = [ordered]@{
+            sid = [string]$Plan.initiator.sid
+            profile = [string]$Plan.initiator.profile
+            localAppData = [string]$Plan.initiator.localAppData
+        }
+        buildCatalogSha256 = $Plan.buildCatalogSha256
+        codexPayloadCatalogSha256 = $Plan.codexPayloadCatalogSha256
         files = @($Plan.files | ForEach-Object {
             [ordered]@{ relativePath = $_.relativePath; sha256 = $_.sha256; length = $_.length }
         })
         tasks = @($Plan.tasks | Where-Object enabled | ForEach-Object { $_.name })
+        managedWorker = [ordered]@{
+            enabled = $Plan.managedWorker.enabled
+            publicHost = $Plan.managedWorker.publicHost
+            publicUrl = $Plan.managedWorker.publicUrl
+            listenPort = $Plan.managedWorker.listenPort
+            certificatePath = $Plan.managedWorker.certificatePath
+            privateKeyPath = $Plan.managedWorker.privateKeyPath
+            certificateFingerprint = if ($TlsIdentityResult) { $TlsIdentityResult.fingerprint } else { $null }
+            firewall = [ordered]@{
+                enabled = $Plan.managedWorker.firewall.enabled
+                name = $Plan.managedWorker.firewall.name
+                group = $Plan.managedWorker.firewall.group
+                description = $Plan.managedWorker.firewall.description
+                lifecycle = $Plan.managedWorker.firewall.lifecycle
+                state = $Plan.managedWorker.firewall.state
+                transactionId = $Plan.managedWorker.firewall.transactionId
+                requestSha256 = $Plan.managedWorker.firewall.requestSha256
+                program = $Plan.managedWorker.firewall.program
+                port = $Plan.managedWorker.firewall.port
+                profile = $Plan.managedWorker.firewall.profile
+                remoteAddress = $Plan.managedWorker.firewall.remoteAddress
+                protocol = $Plan.managedWorker.firewall.protocol
+                receiptSha256 = $null
+                appliedAtUtc = $null
+            }
+        }
+        uninstallRegistration = [ordered]@{
+            enabled = $Plan.uninstallRegistration.enabled
+            registryPath = $Plan.uninstallRegistration.registryPath
+            uninstallerPath = $Plan.uninstallRegistration.uninstallerPath
+        }
         codexIntegration = [ordered]@{
             enabled = $Plan.codexIntegration.enabled
             available = $Plan.codexIntegration.available
             marketplaceRoot = $Plan.codexIntegration.marketplaceRoot
             plugin = $Plan.codexIntegration.plugin
+            payloadCatalogSha256 = $Plan.codexPayloadCatalogSha256
+            buildCatalogSha256 = $Plan.buildCatalogSha256
             attempted = $CodexResult.attempted
             cliFound = $CodexResult.cliFound
             succeeded = $CodexResult.succeeded
             marketplaceAdded = $CodexResult.marketplaceAdded
             pluginAdded = $CodexResult.pluginAdded
+            pluginVerified = [bool](Get-CycObjectProperty -Object $CodexResult -Name 'pluginVerified' -Default $false)
+            pluginVerificationExitCode = Get-CycObjectProperty -Object $CodexResult -Name 'pluginVerificationExitCode'
+            pluginVerificationReason = Get-CycObjectProperty -Object $CodexResult -Name 'pluginVerificationReason'
+            pluginVersion = Get-CycObjectProperty -Object $CodexResult -Name 'pluginVersion'
+            pluginSourceType = Get-CycObjectProperty -Object $CodexResult -Name 'pluginSourceType'
+            pluginSourcePath = Get-CycObjectProperty -Object $CodexResult -Name 'pluginSourcePath'
             pluginExitCode = $CodexResult.pluginExitCode
             marketplaceExitCode = $CodexResult.marketplaceExitCode
         }
+        agentsIntegration = $AgentsResult
     }
-    $temporary = $Plan.manifestPath + '.tmp'
-    $record | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $temporary -Encoding UTF8
-    Move-Item -LiteralPath $temporary -Destination $Plan.manifestPath -Force
+    Write-DurableAtomicJson -Path $Plan.manifestPath -Value $record -Depth 12
+}
+
+function Set-CycObjectPropertyValue {
+    param(
+        [Parameter(Mandatory = $true)]$Object,
+        [Parameter(Mandatory = $true)][string]$Name,
+        $Value
+    )
+    if ($Object.PSObject.Properties[$Name]) {
+        $Object.$Name = $Value
+    } else {
+        $Object | Add-Member -NotePropertyName $Name -NotePropertyValue $Value
+    }
+}
+
+function Assert-CycRealDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $resolved = Resolve-NormalizedPath $Path
+    if (-not (Test-Path -LiteralPath $resolved -PathType Container)) {
+        throw "$Label directory is missing: $resolved"
+    }
+    if (Test-ReparsePoint (Get-Item -LiteralPath $resolved -Force)) {
+        throw "$Label directory must not be a reparse point."
+    }
+    return $resolved
+}
+
+function Assert-CycInstalledManifestFile {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$RelativePath
+    )
+    $fileProperty = $Manifest.PSObject.Properties['files']
+    if (-not $fileProperty) {
+        throw 'Install manifest has no owned-file receipt.'
+    }
+    $matches = @(@($fileProperty.Value) | Where-Object {
+        $_ -and $_.PSObject.Properties['relativePath'] -and
+        $_.PSObject.Properties['relativePath'].Value -is [string] -and
+        [string]::Equals(
+            [string]$_.PSObject.Properties['relativePath'].Value,
+            $RelativePath,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    })
+    if ($matches.Count -ne 1) {
+        throw "Install manifest must own exactly one $RelativePath."
+    }
+    $entry = $matches[0]
+    $hash = [string](Get-CycObjectProperty -Object $entry -Name 'sha256')
+    $length = Get-CycObjectProperty -Object $entry -Name 'length' -Default -1
+    if ($hash -cnotmatch '^[0-9a-f]{64}$' -or [long]$length -lt 0) {
+        throw "Install manifest has invalid integrity metadata for $RelativePath."
+    }
+    $nativeRelative = $RelativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+    $target = Assert-ChildPath -Root $InstallRoot -Candidate (Join-Path $InstallRoot $nativeRelative)
+    $rootPath = Resolve-NormalizedPath $InstallRoot
+    $relativeTarget = $target.Substring((Get-CycChildPrefix $rootPath).Length)
+    $segments = @($relativeTarget.Split(@(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    ), [System.StringSplitOptions]::RemoveEmptyEntries))
+    $ancestor = $rootPath
+    for ($index = 0; $index -lt ($segments.Count - 1); $index++) {
+        $ancestor = Join-Path $ancestor $segments[$index]
+        if (-not (Test-Path -LiteralPath $ancestor -PathType Container) -or
+            (Test-ReparsePoint (Get-Item -LiteralPath $ancestor -Force))) {
+            throw "Installed owned file has a missing or reparse-point parent: $RelativePath"
+        }
+    }
+    if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
+        throw "Installed owned file is missing: $RelativePath"
+    }
+    $item = Get-Item -LiteralPath $target -Force
+    if ((Test-ReparsePoint $item) -or $item.Length -ne [long]$length) {
+        throw "Installed owned file metadata changed: $RelativePath"
+    }
+    $actualHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -cne $hash) {
+        throw "Installed owned file failed SHA-256 validation: $RelativePath"
+    }
+    return $target
+}
+
+function Get-CycCodexOnlyInstallState {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$DataRoot,
+        [string]$CodexHome,
+        [string]$ExpectedInstallManifestSha256
+    )
+    $install = Assert-CycRealDirectory -Path $InstallRoot -Label 'InstallRoot'
+    $data = Assert-CycRealDirectory -Path $DataRoot -Label 'DataRoot'
+    $installerRoot = Assert-CycRealDirectory -Path (Join-Path $data '.installer') -Label 'Installer state'
+    $manifestPath = Assert-ChildPath -Root $installerRoot -Candidate (Join-Path $installerRoot 'install-manifest.json')
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw 'IntegrateCodex requires an existing ClusterYourCodex install manifest.'
+    }
+    $manifestItem = Get-Item -LiteralPath $manifestPath -Force
+    if ((Test-ReparsePoint $manifestItem) -or $manifestItem.Length -lt 2 -or $manifestItem.Length -gt 2MB) {
+        throw 'ClusterYourCodex install manifest must be a bounded regular file.'
+    }
+    [byte[]]$manifestBytes = [System.IO.File]::ReadAllBytes($manifestPath)
+    $manifestSha256 = Get-CycSha256Hex -Bytes $manifestBytes
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedInstallManifestSha256) -and
+        ([string]$ExpectedInstallManifestSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            [string]$ExpectedInstallManifestSha256 -cne $manifestSha256)) {
+        throw 'IntegrateCodex install-manifest digest does not match the native verifier receipt.'
+    }
+    $manifest = Read-InstallManifest -ManifestPath $manifestPath
+    foreach ($rootName in @('installRoot', 'dataRoot')) {
+        $property = $manifest.PSObject.Properties[$rootName]
+        if (-not $property -or -not ($property.Value -is [string]) -or
+            [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            throw "Install manifest is missing a valid $rootName."
+        }
+    }
+    if (-not [string]::Equals(
+        (Resolve-NormalizedPath ([string]$manifest.installRoot)),
+        $install,
+        [System.StringComparison]::OrdinalIgnoreCase
+    ) -or -not [string]::Equals(
+        (Resolve-NormalizedPath ([string]$manifest.dataRoot)),
+        $data,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'IntegrateCodex install/data roots do not match the install manifest.'
+    }
+    if (-not $manifest.PSObject.Properties['codexIntegration']) {
+        throw 'Install manifest has no Codex plugin integration receipt.'
+    }
+    $codexRecord = $manifest.codexIntegration
+    if ([string](Get-CycObjectProperty -Object $codexRecord -Name 'plugin') -cne $script:CodexPluginId) {
+        throw 'Install manifest contains an unexpected Codex plugin identity.'
+    }
+    $marketplaceProperty = $codexRecord.PSObject.Properties['marketplaceRoot']
+    if (-not $marketplaceProperty -or -not ($marketplaceProperty.Value -is [string]) -or
+        [string]::IsNullOrWhiteSpace([string]$marketplaceProperty.Value)) {
+        throw 'Install manifest has no valid Codex marketplace root.'
+    }
+    $expectedMarketplace = Assert-CycRealDirectory `
+        -Path (Assert-ChildPath `
+            -Root $install `
+            -Candidate (Join-Path $install 'integrations\codex-marketplace')) `
+        -Label 'Codex marketplace'
+    if (-not [string]::Equals(
+        (Resolve-NormalizedPath ([string](Get-CycObjectProperty -Object $codexRecord -Name 'marketplaceRoot'))),
+        $expectedMarketplace,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'Install manifest Codex marketplace root does not match this installation.'
+    }
+    $catalog = Assert-CycCodexPayloadCatalog -Manifest $manifest -InstallRoot $install
+    foreach ($catalogBinding in @(
+        [PSCustomObject]@{ name = 'payloadCatalogSha256'; value = $catalog.payloadCatalogSha256 },
+        [PSCustomObject]@{ name = 'buildCatalogSha256'; value = $catalog.buildCatalogSha256 }
+    )) {
+        $recorded = Get-CycObjectProperty -Object $codexRecord -Name $catalogBinding.name
+        if ($null -ne $recorded -and [string]$recorded -cne [string]$catalogBinding.value) {
+            throw "Install manifest Codex integration $($catalogBinding.name) drifted."
+        }
+    }
+
+    $templatePath = Assert-CycInstalledManifestFile `
+        -Manifest $manifest `
+        -InstallRoot $install `
+        -RelativePath $script:AgentsTemplateRelativePath
+    [void](Read-CycAgentsTemplate -Path $templatePath)
+    [void](Assert-CycInstalledManifestFile `
+        -Manifest $manifest `
+        -InstallRoot $install `
+        -RelativePath $script:CodexMarketplaceManifestRelativePath)
+    $pluginManifestPath = Assert-CycInstalledManifestFile `
+        -Manifest $manifest `
+        -InstallRoot $install `
+        -RelativePath $script:CodexPluginManifestRelativePath
+    $expectedPlugin = Get-CycCodexPluginExpectation `
+        -MarketplaceRoot $expectedMarketplace `
+        -PluginId $script:CodexPluginId
+    if (-not [string]::Equals(
+        (Resolve-NormalizedPath $pluginManifestPath),
+        (Resolve-NormalizedPath $expectedPlugin.pluginManifestPath),
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'Installed plugin manifest path is inconsistent.'
+    }
+
+    $requestedHome = $CodexHome
+    if ([string]::IsNullOrWhiteSpace($requestedHome) -and
+        $manifest.PSObject.Properties['agentsIntegration']) {
+        $recordedHome = Get-CycObjectProperty -Object $manifest.agentsIntegration -Name 'codexHome'
+        if ($recordedHome -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$recordedHome)) {
+            $requestedHome = [string]$recordedHome
+        }
+    }
+    $resolvedHome = Resolve-CycCodexHome -RequestedHome $requestedHome
+    return [PSCustomObject]@{
+        installRoot = $install
+        dataRoot = $data
+        manifestPath = $manifestPath
+        manifestSha256 = $manifestSha256
+        buildCatalogSha256 = $catalog.buildCatalogSha256
+        payloadCatalogSha256 = $catalog.payloadCatalogSha256
+        manifest = $manifest
+        expectedPlugin = $expectedPlugin
+        plan = [PSCustomObject]@{
+            codexIntegration = [PSCustomObject]@{
+                enabled = $true
+                available = $true
+                marketplaceRoot = $expectedMarketplace
+                marketplaceManifest = Join-Path $expectedMarketplace '.agents\plugins\marketplace.json'
+                plugin = $script:CodexPluginId
+            }
+            agentsIntegration = [PSCustomObject]@{
+                schemaVersion = $script:AgentsIntegrationSchema
+                enabled = $true
+                available = $true
+                codexHome = $resolvedHome
+                agentsPath = Join-Path $resolvedHome 'AGENTS.md'
+                templatePath = $templatePath
+                templateRelativePath = $script:AgentsTemplateRelativePath
+            }
+        }
+    }
+}
+
+function New-CycCodexOnlyTransactionRoot {
+    param([Parameter(Mandatory = $true)][string]$DataRoot)
+    $installerRoot = Assert-CycRealDirectory -Path (Join-Path $DataRoot '.installer') -Label 'Installer state'
+    $transactionsRoot = Join-Path $installerRoot 'transactions'
+    if (Test-Path -LiteralPath $transactionsRoot) {
+        [void](Assert-CycRealDirectory -Path $transactionsRoot -Label 'Installer transactions')
+    } else {
+        [void](New-Item -ItemType Directory -Path $transactionsRoot)
+        [void](Assert-CycRealDirectory -Path $transactionsRoot -Label 'Installer transactions')
+    }
+    $transactionRoot = Assert-ChildPath `
+        -Root $transactionsRoot `
+        -Candidate (Join-Path $transactionsRoot ('codex-only-' + [Guid]::NewGuid().ToString('N')))
+    [void](New-Item -ItemType Directory -Path $transactionRoot)
+    [void](Assert-CycRealDirectory -Path $transactionRoot -Label 'Codex-only transaction')
+    return $transactionRoot
+}
+
+function Remove-CycCodexOnlyTransactionRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$DataRoot,
+        [Parameter(Mandatory = $true)][string]$TransactionRoot
+    )
+    $transactionsRoot = Resolve-NormalizedPath (Join-Path $DataRoot '.installer\transactions')
+    $target = Assert-ChildPath -Root $transactionsRoot -Candidate $TransactionRoot
+    if ((Split-Path -Leaf $target) -cnotmatch '^codex-only-[0-9a-f]{32}$') {
+        throw 'Refusing to clean a transaction not owned by IntegrateCodex.'
+    }
+    if (Test-Path -LiteralPath $target -PathType Container) {
+        $item = Get-Item -LiteralPath $target -Force
+        if (Test-ReparsePoint $item) {
+            throw 'Refusing to clean a reparse-point transaction directory.'
+        }
+        # The exact absolute target and owned name were proven before this
+        # only recursive cleanup in the Codex-only lifecycle.
+        Remove-Item -LiteralPath $target -Recurse -Force
+    }
+}
+
+function New-CycCodexOnlyReceipt {
+    param(
+        [ValidateSet('installed', 'repaired', 'unchanged')][string]$Status,
+        [Parameter(Mandatory = $true)]$PluginVerification,
+        [Parameter(Mandatory = $true)]$AgentsRecord,
+        [Parameter(Mandatory = $true)]$InstallState,
+        [Parameter(Mandatory = $true)]$AgentsEvidence
+    )
+    $version = [string](Get-CycObjectProperty -Object $PluginVerification -Name 'pluginVersion')
+    $blockHash = [string](Get-CycObjectProperty -Object $AgentsRecord -Name 'blockSha256')
+    if ($version -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$' -or
+        $blockHash -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$InstallState.payloadCatalogSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$InstallState.buildCatalogSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$InstallState.manifestSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$AgentsEvidence.agentsFileSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$AgentsEvidence.agentsExternalSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$AgentsEvidence.agentsOwnedRangeSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Cannot publish an invalid Codex-only integration receipt.'
+    }
+    return [PSCustomObject][ordered]@{
+        schemaVersion = $script:CodexOnlyReceiptSchema
+        status = $Status
+        pluginId = $script:CodexPluginId
+        pluginVersion = $version
+        agentsBlockSha256 = $blockHash
+        payloadCatalogSha256 = [string]$InstallState.payloadCatalogSha256
+        buildCatalogSha256 = [string]$InstallState.buildCatalogSha256
+        installManifestSha256 = [string]$InstallState.manifestSha256
+        agentsFileSha256 = [string]$AgentsEvidence.agentsFileSha256
+        agentsExternalSha256 = [string]$AgentsEvidence.agentsExternalSha256
+        agentsOwnedRangeSha256 = [string]$AgentsEvidence.agentsOwnedRangeSha256
+    }
+}
+
+function Set-CycCodexOnlyManifestReceipt {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)]$PluginVerification,
+        [Parameter(Mandatory = $true)]$AgentsRecord,
+        [Parameter(Mandatory = $true)]$Receipt
+    )
+    if (-not $Manifest.PSObject.Properties['codexIntegration']) {
+        throw 'Install manifest has no Codex integration object to update.'
+    }
+    $codexRecord = $Manifest.codexIntegration
+    Set-CycObjectPropertyValue -Object $codexRecord -Name 'succeeded' -Value $true
+    Set-CycObjectPropertyValue -Object $codexRecord -Name 'pluginVerified' -Value $true
+    Set-CycObjectPropertyValue -Object $codexRecord -Name 'pluginVerificationExitCode' -Value ([int]$PluginVerification.exitCode)
+    Set-CycObjectPropertyValue -Object $codexRecord -Name 'pluginVerificationReason' -Value 'verified'
+    Set-CycObjectPropertyValue -Object $codexRecord -Name 'pluginVersion' -Value ([string]$PluginVerification.pluginVersion)
+    Set-CycObjectPropertyValue -Object $codexRecord -Name 'pluginSourceType' -Value ([string]$PluginVerification.sourceType)
+    Set-CycObjectPropertyValue -Object $codexRecord -Name 'pluginSourcePath' -Value ([string]$PluginVerification.sourcePath)
+    Set-CycObjectPropertyValue -Object $codexRecord -Name 'verifiedAtUtc' -Value ([DateTime]::UtcNow.ToString('o'))
+    $manifestReceipt = [PSCustomObject][ordered]@{
+        schemaVersion = $Receipt.schemaVersion
+        status = $Receipt.status
+        pluginId = $Receipt.pluginId
+        pluginVersion = $Receipt.pluginVersion
+        agentsBlockSha256 = $Receipt.agentsBlockSha256
+        payloadCatalogSha256 = $Receipt.payloadCatalogSha256
+        buildCatalogSha256 = $Receipt.buildCatalogSha256
+        installManifestSha256 = $Receipt.installManifestSha256
+        agentsFileSha256 = $Receipt.agentsFileSha256
+        agentsExternalSha256 = $Receipt.agentsExternalSha256
+        agentsOwnedRangeSha256 = $Receipt.agentsOwnedRangeSha256
+        recordedAtUtc = [DateTime]::UtcNow.ToString('o')
+    }
+    Set-CycObjectPropertyValue -Object $codexRecord -Name 'integrateCodexReceipt' -Value $manifestReceipt
+    Set-CycObjectPropertyValue -Object $Manifest -Name 'agentsIntegration' -Value $AgentsRecord
+}
+
+function ConvertTo-CycCodexOnlyReceiptJson {
+    param([Parameter(Mandatory = $true)]$Receipt)
+    $json = $Receipt | ConvertTo-Json -Compress -Depth 6
+    if ([string]::IsNullOrWhiteSpace($json) -or $json.Contains("`r") -or $json.Contains("`n") -or
+        [System.Text.Encoding]::UTF8.GetByteCount($json) -gt $script:MaxCodexOnlyReceiptBytes) {
+        throw 'Codex-only integration receipt is not a single bounded JSON object.'
+    }
+    return $json
+}
+
+function Invoke-CycCodexOnlyIntegration {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$DataRoot,
+        [string]$CodexHome,
+        [Parameter(Mandatory = $true)][string]$CodexCliPath,
+        [string]$ExpectedInstallManifestSha256,
+        [ValidateRange(1, 30)][int]$MutexTimeoutSeconds = 10,
+        [ValidateRange(10, 90)][int]$ActionTimeoutSeconds = 60
+    )
+    $data = Resolve-NormalizedPath $DataRoot
+    $manifestPath = Join-Path $data '.installer\install-manifest.json'
+    $deadline = [DateTime]::UtcNow.AddSeconds($ActionTimeoutSeconds)
+    $mutexBudget = [Math]::Max(1, [Math]::Min(
+        $MutexTimeoutSeconds,
+        [int][Math]::Floor(($deadline - [DateTime]::UtcNow).TotalSeconds)
+    ))
+    $mutex = Enter-CycAgentsMutex -TimeoutSeconds $mutexBudget
+    $transactionRoot = $null
+    $transaction = $null
+    $receipt = $null
+    $preserveTransaction = $false
+    try {
+        # Validate the product-owned manifest container before any recovery
+        # logic is allowed to trust a journal or manifest path.
+        $state = Get-CycCodexOnlyInstallState `
+            -InstallRoot $InstallRoot `
+            -DataRoot $data `
+            -CodexHome $CodexHome `
+            -ExpectedInstallManifestSha256 $ExpectedInstallManifestSha256
+        [void](Recover-CycAgentsTransactions -DataRoot $data -ManifestPath $manifestPath)
+        # Recovery can finalize a manifest receipt, so read the authoritative
+        # state again before plugin verification and mutation planning.
+        $state = Get-CycCodexOnlyInstallState `
+            -InstallRoot $InstallRoot `
+            -DataRoot $data `
+            -CodexHome $CodexHome
+        $remainingMs = [int][Math]::Floor(($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+        if ($remainingMs -lt 1000) { throw 'IntegrateCodex action deadline expired before Codex verification.' }
+        $codex = Resolve-CodexCli `
+            -RequestedPath $CodexCliPath `
+            -TimeoutMilliseconds ([Math]::Min(10000, $remainingMs))
+        if (-not $codex) {
+            throw 'Codex CLI is unavailable; the global AGENTS.md block was not changed.'
+        }
+        $verification = Test-CycCodexPluginActive `
+            -Codex $codex `
+            -ExpectedPlugin $state.expectedPlugin `
+            -TimeoutMilliseconds ([Math]::Min(20000, [Math]::Max(100, [int][Math]::Floor(($deadline - [DateTime]::UtcNow).TotalMilliseconds))))
+        if (-not $verification.active) {
+            throw "Codex plugin activation receipt failed strict verification ($($verification.reason)); the global AGENTS.md block was not changed."
+        }
+        if (($deadline - [DateTime]::UtcNow).TotalSeconds -lt 10) {
+            throw 'IntegrateCodex action deadline leaves insufficient time to begin a durable AGENTS.md transaction.'
+        }
+
+        $oldInstalled = [bool]($state.manifest.PSObject.Properties['agentsIntegration'] -and
+            (Get-CycObjectProperty -Object $state.manifest.agentsIntegration -Name 'installed' -Default $false))
+        $transactionRoot = New-CycCodexOnlyTransactionRoot -DataRoot $state.dataRoot
+        $transaction = Start-CycAgentsInstallTransaction `
+            -Plan $state.plan `
+            -OldManifest $state.manifest `
+            -TransactionRoot $transactionRoot `
+            -PluginReceipt ([PSCustomObject]@{
+                pluginVerified = $true
+                succeeded = $true
+                pluginVersion = $verification.pluginVersion
+                pluginSourceType = $verification.sourceType
+                pluginSourcePath = $verification.sourcePath
+            })
+        $status = if (-not $oldInstalled) {
+            'installed'
+        } elseif ([bool]$transaction.record.changed) {
+            'repaired'
+        } else {
+            'unchanged'
+        }
+        $agentsEvidence = Get-CycStrictAgentsEvidence -Record $transaction.record
+        $receipt = New-CycCodexOnlyReceipt `
+            -Status $status `
+            -PluginVerification $verification `
+            -AgentsRecord $transaction.record `
+            -InstallState $state `
+            -AgentsEvidence $agentsEvidence
+        Set-CycCodexOnlyManifestReceipt `
+            -Manifest $state.manifest `
+            -PluginVerification $verification `
+            -AgentsRecord $transaction.record `
+            -Receipt $receipt
+        Write-DurableAtomicJson -Path $state.manifestPath -Value $state.manifest -Depth 20
+        $published = Read-InstallManifest -ManifestPath $state.manifestPath
+        if (-not (Test-CycManifestOwnsAgentsReceipt -Manifest $published -Receipt $transaction.record) -or
+            -not (Test-CycAgentsRecordPresent -Record $transaction.record)) {
+            throw 'Codex-only manifest/AGENTS.md commit verification failed.'
+        }
+        [void](Get-CycStrictAgentsEvidence -Record $published.agentsIntegration)
+        Complete-CycAgentsInstallTransaction -Transaction $transaction
+        try { Remove-CycCodexOnlyTransactionRoot -DataRoot $state.dataRoot -TransactionRoot $transactionRoot } catch {
+            # A committed journal is safe to retain for later housekeeping.
+        }
+        return $receipt
+    } catch {
+        $failure = $_
+        if (-not $transaction -and $transactionRoot) {
+            $pendingJournal = Join-Path $transactionRoot 'global-agents\journal.json'
+            if (Test-Path -LiteralPath $pendingJournal -PathType Leaf) {
+                try {
+                    $pending = Read-CycAgentsJournal -Path $pendingJournal
+                    $transaction = [PSCustomObject]@{
+                        disabled = $false
+                        journalPath = $pendingJournal
+                        record = $pending.receipt
+                    }
+                } catch {
+                    $preserveTransaction = $true
+                }
+            }
+        }
+        if ($transaction) {
+            try {
+                [void](Recover-CycAgentsTransactions -DataRoot $data -ManifestPath $manifestPath)
+                $latestManifest = Read-InstallManifest -ManifestPath $manifestPath
+                if ((Test-CycManifestOwnsAgentsReceipt -Manifest $latestManifest -Receipt $transaction.record) -and
+                    (Test-CycAgentsRecordPresent -Record $transaction.record)) {
+                    try { Remove-CycCodexOnlyTransactionRoot -DataRoot $data -TransactionRoot $transactionRoot } catch { }
+                    return $receipt
+                }
+                try { Remove-CycCodexOnlyTransactionRoot -DataRoot $data -TransactionRoot $transactionRoot } catch { }
+            } catch {
+                $preserveTransaction = $true
+                throw "IntegrateCodex failed and its owned-range recovery is incomplete; the transaction was retained. Original failure: $($failure.Exception.Message)"
+            }
+        }
+        throw $failure
+    } finally {
+        if ($transactionRoot -and -not $transaction -and -not $preserveTransaction) {
+            try { Remove-CycCodexOnlyTransactionRoot -DataRoot $data -TransactionRoot $transactionRoot } catch { }
+        }
+        Exit-CycAgentsMutex -Mutex $mutex
+    }
+}
+
+function Assert-CycFirewallReceiptProperties {
+    param([Parameter(Mandatory = $true)]$Receipt)
+    [string[]]$actual = @($Receipt.PSObject.Properties.Name)
+    [string[]]$expected = @(
+        'action', 'failureCode', 'initiatorLocalAppData', 'initiatorProfile',
+        'initiatorSid', 'port', 'program', 'programSha256', 'requestSha256',
+        'result', 'ruleName', 'schemaVersion', 'transactionId', 'verifiedAtUtc'
+    )
+    [Array]::Sort($actual, [System.StringComparer]::Ordinal)
+    [Array]::Sort($expected, [System.StringComparer]::Ordinal)
+    if ([string]::Join(',', $actual) -cne [string]::Join(',', $expected)) {
+        throw 'Firewall receipt contains unsupported or missing fields.'
+    }
+}
+
+function Invoke-CycCommitFirewallReceipt {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$DataRoot,
+        [Parameter(Mandatory = $true)][string]$ReceiptPath,
+        [Parameter(Mandatory = $true)][string]$TransactionId,
+        [Parameter(Mandatory = $true)]$CurrentBinding
+    )
+    if ($TransactionId -cnotmatch '^[0-9a-f]{32}$') {
+        throw 'Firewall commit transaction identifier is invalid.'
+    }
+    $install = Resolve-NormalizedPath $InstallRoot
+    $data = Resolve-NormalizedPath $DataRoot
+    $manifestPath = Join-Path $data '.installer\install-manifest.json'
+    $manifest = Read-InstallManifest -ManifestPath $manifestPath
+    if (-not $manifest) { throw 'Firewall commit requires the installed manifest.' }
+    Assert-CycManifestInitiatorBinding -Manifest $manifest -CurrentBinding $CurrentBinding
+    if (-not $manifest.PSObject.Properties['managedWorker'] -or
+        -not $manifest.managedWorker.PSObject.Properties['firewall']) {
+        throw 'Installed manifest has no deferred firewall record.'
+    }
+    $firewall = $manifest.managedWorker.firewall
+    if (-not [bool]$firewall.enabled -or
+        [string]$firewall.lifecycle -cne $script:FirewallLifecycleName -or
+        [string]$firewall.transactionId -cne $TransactionId -or
+        [string]$firewall.requestSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Installed manifest is not awaiting this firewall transaction.'
+    }
+    $receiptsRoot = Resolve-NormalizedPath (Join-Path $data '.installer\firewall-receipts')
+    $receiptFile = Assert-ChildPath -Root $receiptsRoot -Candidate $ReceiptPath
+    if (-not (Test-Path -LiteralPath $receiptFile -PathType Leaf)) {
+        throw 'Durable firewall receipt is missing.'
+    }
+    $receiptItem = Get-Item -LiteralPath $receiptFile -Force
+    if ((Test-ReparsePoint $receiptItem) -or $receiptItem.Length -lt 2 -or $receiptItem.Length -gt 32768) {
+        throw 'Durable firewall receipt must be a bounded regular file.'
+    }
+    try { $receipt = Get-Content -LiteralPath $receiptFile -Raw | ConvertFrom-Json } catch {
+        throw 'Durable firewall receipt contains invalid JSON.'
+    }
+    Assert-CycFirewallReceiptProperties -Receipt $receipt
+    $controllerRecord = @($manifest.files | Where-Object { [string]$_.relativePath -ceq 'cyc-controller.exe' })
+    if ($controllerRecord.Count -ne 1) { throw 'Installed manifest has no unique controller binary.' }
+    if ([string]$receipt.schemaVersion -cne $script:FirewallReceiptSchema -or
+        [string]$receipt.result -cne 'verified' -or
+        [string]$receipt.action -cne 'Apply' -or
+        [string]$receipt.transactionId -cne $TransactionId -or
+        [string]$receipt.requestSha256 -cne [string]$firewall.requestSha256 -or
+        [string]$receipt.initiatorSid -cne [string]$CurrentBinding.sid -or
+        -not [string]::Equals((Resolve-NormalizedPath ([string]$receipt.initiatorProfile)), [string]$CurrentBinding.profile, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals((Resolve-NormalizedPath ([string]$receipt.initiatorLocalAppData)), [string]$CurrentBinding.localAppData, [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]$receipt.ruleName -cne [string]$firewall.name -or
+        [int]$receipt.port -ne [int]$firewall.port -or
+        -not [string]::Equals((Resolve-NormalizedPath ([string]$receipt.program)), (Resolve-NormalizedPath ([string]$firewall.program)), [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]$receipt.programSha256 -cne [string]$controllerRecord[0].sha256) {
+        throw 'Firewall receipt is not bound to the exact installed plan.'
+    }
+    $receiptHash = (Get-FileHash -LiteralPath $receiptFile -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ([string]$firewall.state -ceq 'applied') {
+        if ([string]$firewall.receiptSha256 -cne $receiptHash) {
+            throw 'A different firewall receipt is already committed.'
+        }
+        return [PSCustomObject]@{ status = 'unchanged'; transactionId = $TransactionId; receiptSha256 = $receiptHash }
+    }
+    if ([string]$firewall.state -cne 'pending') {
+        throw 'Firewall manifest state is not commit-eligible.'
+    }
+    $firewall.state = 'applied'
+    $firewall.receiptSha256 = $receiptHash
+    $firewall.appliedAtUtc = [string]$receipt.verifiedAtUtc
+    Write-DurableAtomicJson -Path $manifestPath -Value $manifest -Depth 20
+    return [PSCustomObject]@{ status = 'applied'; transactionId = $TransactionId; receiptSha256 = $receiptHash }
 }
 
 function Assert-SafePurgeTarget {
@@ -977,10 +4440,17 @@ function Assert-SafePurgeTarget {
     return $target
 }
 
-function Invoke-InstallOrRepair {
+function Invoke-InstallOrRepairCore {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param([Parameter(Mandatory = $true)]$Plan)
     if ($PlanOnly) { return $Plan }
+    if ($Plan.managedWorker.firewall.enabled -and
+        (-not $DeferFirewall -or
+         [string]$Plan.managedWorker.firewall.lifecycle -cne $script:FirewallLifecycleName -or
+         [string]$Plan.managedWorker.firewall.transactionId -cnotmatch '^[0-9a-f]{32}$' -or
+         [string]$Plan.managedWorker.firewall.requestSha256 -cnotmatch '^[0-9a-f]{64}$')) {
+        throw 'Per-user core install requires a valid deferred firewall-only transaction.'
+    }
     if ($Plan.tasks[1].enabled -and -not (Test-Path -LiteralPath $Plan.workerConfig -PathType Leaf)) {
         throw 'Worker task requested but the paired worker config does not exist.'
     }
@@ -991,13 +4461,29 @@ function Invoke-InstallOrRepair {
     Set-PrivateDirectoryAcl -Path $Plan.dataRoot
     $taskSnapshots = @(Get-CycTaskSnapshots)
     Stop-CycRuntime -InstallRoot $Plan.installRoot
+    $requiredPorts = @(47831)
+    if ($Plan.managedWorker.enabled) { $requiredPorts += [int]$Plan.managedWorker.listenPort }
+    Assert-CycListenPortsAvailable -Ports $requiredPorts
     $rollback = $null
+    $agentsTransaction = $null
+    $agentsResult = $null
     $codexResult = $null
+    $tlsIdentityResult = $null
+    $uninstallRegistrationSnapshot = $null
+    $preserveRollbackSnapshot = $false
     try {
         $rollback = New-FileRollbackSnapshot -Plan $Plan -OldManifest $oldManifest
         Install-PlannedFiles -Plan $Plan
         Set-PrivateDirectoryAcl -Path $Plan.installRoot
         Set-PrivateDirectoryAcl -Path $Plan.dataRoot
+
+        $tlsIdentityResult = Ensure-CycTlsIdentity -Plan $Plan
+
+        if ($Plan.uninstallRegistration.enabled) {
+            $uninstallRegistrationSnapshot = Get-CycUninstallRegistrationSnapshot `
+                -RegistryPath $Plan.uninstallRegistration.registryPath
+            Set-CycUninstallRegistration -Plan $Plan
+        }
 
         if ($oldManifest) {
             Remove-OwnedFiles `
@@ -1014,10 +4500,38 @@ function Invoke-InstallOrRepair {
         }
 
         $codexResult = Invoke-CodexIntegration -Plan $Plan -Operation Install
-        Write-InstallManifest -Plan $Plan -CodexResult $codexResult
+        $oldAgentsInstalled = [bool]($oldManifest -and
+            $oldManifest.PSObject.Properties['agentsIntegration'] -and
+            (Get-CycObjectProperty -Object $oldManifest.agentsIntegration -Name 'installed' -Default $false))
+        if ($Plan.agentsIntegration.enabled -and
+            [bool](Get-CycObjectProperty -Object $codexResult -Name 'pluginVerified' -Default $false)) {
+            $agentsTransaction = Start-CycAgentsInstallTransaction `
+                -Plan $Plan `
+                -OldManifest $oldManifest `
+                -TransactionRoot $rollback.root `
+                -PluginReceipt $codexResult
+            $agentsResult = $agentsTransaction.record
+        } elseif ($oldAgentsInstalled) {
+            throw 'Codex plugin activation could not be verified; Repair left the previous managed AGENTS.md block unchanged.'
+        } else {
+            $reason = if (-not $Plan.agentsIntegration.enabled) {
+                'integration-disabled'
+            } elseif (-not $codexResult.cliFound) {
+                'codex-cli-unavailable'
+            } else {
+                'plugin-activation-unverified'
+            }
+            $agentsResult = New-CycDisabledAgentsIntegrationRecord -Plan $Plan -Reason $reason
+        }
+        Write-InstallManifest `
+            -Plan $Plan `
+            -CodexResult $codexResult `
+            -AgentsResult $agentsResult `
+            -TlsIdentityResult $tlsIdentityResult
         Start-ScheduledTask -TaskName $script:ControllerTaskName
         Wait-CycTaskStable -Name $script:ControllerTaskName -StableSeconds 2
         Wait-CycControllerReady
+        Wait-CycManagedWorkerListenerReady -ManagedWorker $Plan.managedWorker
         Wait-CycTaskStable -Name $script:ControllerTaskName -StableSeconds 1
         if ($Plan.tasks[1].enabled) {
             Start-ScheduledTask -TaskName $script:WorkerTaskName
@@ -1025,9 +4539,11 @@ function Invoke-InstallOrRepair {
             Test-CycWorkerStatus -Action $Plan.tasks[1].action -Config $Plan.workerConfig
             Wait-CycTaskStable -Name $script:WorkerTaskName -StableSeconds 1
         }
+        Complete-CycAgentsInstallTransaction -Transaction $agentsTransaction
     } catch {
         $failure = $_
         Stop-CycRuntime -InstallRoot $Plan.installRoot
+        $rollbackFailures = New-Object System.Collections.Generic.List[string]
         $oldCodexSucceeded = $false
         if ($oldManifest -and $oldManifest.PSObject.Properties['codexIntegration'] -and
             $oldManifest.codexIntegration.PSObject.Properties['succeeded']) {
@@ -1036,31 +4552,69 @@ function Invoke-InstallOrRepair {
         if ($codexResult -and
             ($codexResult.succeeded -or $codexResult.marketplaceAdded -or $codexResult.pluginAdded) -and
             -not $oldCodexSucceeded) {
-            $rollbackManifest = Read-InstallManifest -ManifestPath $Plan.manifestPath
-            if (-not $rollbackManifest) {
-                throw 'Codex rollback requires the durable install manifest.'
-            }
-            $rollbackPlan = [PSCustomObject]@{
-                codexIntegration = $rollbackManifest.codexIntegration
-            }
-            $rollbackManifestPath = $Plan.manifestPath
-            $rollbackCheckpoint = {
-                param($result)
-                Write-CodexCleanupState `
-                    -Manifest $rollbackManifest `
-                    -ManifestPath $rollbackManifestPath `
-                    -Result $result
-            }
-            [void](Invoke-CodexIntegration `
-                -Plan $rollbackPlan `
-                -Operation Uninstall `
-                -CleanupCheckpoint $rollbackCheckpoint)
+            try {
+                $rollbackManifest = Read-InstallManifest -ManifestPath $Plan.manifestPath
+                if (-not $rollbackManifest) {
+                    throw 'Codex rollback requires the durable install manifest.'
+                }
+                $rollbackPlan = [PSCustomObject]@{
+                    codexIntegration = $rollbackManifest.codexIntegration
+                }
+                $rollbackManifestPath = $Plan.manifestPath
+                $rollbackCheckpoint = {
+                    param($result)
+                    Write-CodexCleanupState `
+                        -Manifest $rollbackManifest `
+                        -ManifestPath $rollbackManifestPath `
+                        -Result $result
+                }
+                [void](Invoke-CodexIntegration `
+                    -Plan $rollbackPlan `
+                    -Operation Uninstall `
+                    -CleanupCheckpoint $rollbackCheckpoint)
+            } catch { [void]$rollbackFailures.Add('Codex integration') }
         }
-        if ($rollback) { Restore-FileRollbackSnapshot -Snapshot $rollback }
-        Restore-CycTaskSnapshots -Snapshots $taskSnapshots
+        if ($uninstallRegistrationSnapshot) {
+            try {
+                Restore-CycUninstallRegistrationSnapshot `
+                    -RegistryPath $Plan.uninstallRegistration.registryPath `
+                    -Snapshot $uninstallRegistrationSnapshot
+            } catch { [void]$rollbackFailures.Add('uninstall registration') }
+        }
+        try { Remove-NewCycTlsIdentity -Plan $Plan -IdentityResult $tlsIdentityResult } catch {
+            [void]$rollbackFailures.Add('new TLS identity')
+        }
+        if (-not $agentsTransaction -and $rollback) {
+            $pendingAgentsJournal = Join-Path $rollback.root 'global-agents\journal.json'
+            if (Test-Path -LiteralPath $pendingAgentsJournal -PathType Leaf) {
+                $agentsTransaction = [PSCustomObject]@{
+                    disabled = $false
+                    journalPath = $pendingAgentsJournal
+                }
+            }
+        }
+        if ($agentsTransaction) {
+            try { Rollback-CycAgentsInstallTransaction -Transaction $agentsTransaction } catch {
+                [void]$rollbackFailures.Add('global AGENTS.md')
+            }
+        }
+        if ($rollback) {
+            try { Restore-FileRollbackSnapshot -Snapshot $rollback } catch {
+                [void]$rollbackFailures.Add('installed files')
+            }
+        }
+        try { Restore-CycTaskSnapshots -Snapshots $taskSnapshots } catch {
+            [void]$rollbackFailures.Add('Scheduled Tasks')
+        }
+        if ($rollbackFailures.Count -gt 0) {
+            $preserveRollbackSnapshot = $true
+            throw "Installation failed and rollback was incomplete for: $($rollbackFailures -join ', '). Original failure: $($failure.Exception.Message)"
+        }
         throw $failure
     } finally {
-        if ($rollback) { Remove-FileRollbackSnapshot -Snapshot $rollback }
+        if ($rollback -and -not $preserveRollbackSnapshot) {
+            Remove-FileRollbackSnapshot -Snapshot $rollback
+        }
     }
     [PSCustomObject]@{
         action = $Action
@@ -1069,10 +4623,24 @@ function Invoke-InstallOrRepair {
         controllerTask = $script:ControllerTaskName
         workerTaskEnabled = $Plan.tasks[1].enabled
         codexIntegration = $codexResult
+        agentsIntegration = $agentsResult
     }
 }
 
-function Invoke-Uninstall {
+function Invoke-InstallOrRepair {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([Parameter(Mandatory = $true)]$Plan)
+    if ($PlanOnly) { return Invoke-InstallOrRepairCore -Plan $Plan }
+    $mutex = Enter-CycAgentsMutex
+    try {
+        [void](Recover-CycAgentsTransactions -DataRoot $Plan.dataRoot -ManifestPath $Plan.manifestPath)
+        return Invoke-InstallOrRepairCore -Plan $Plan
+    } finally {
+        Exit-CycAgentsMutex -Mutex $mutex
+    }
+}
+
+function Invoke-UninstallCore {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory = $true)][string]$InstallRoot,
@@ -1093,6 +4661,21 @@ function Invoke-Uninstall {
             dataPreserved = $true
             alreadyAbsent = $true
         }
+    }
+    $currentBinding = Get-CycInitiatorBinding `
+        -RequestedSid $InitiatingSid `
+        -RequestedProfile $InitiatingProfile `
+        -RequestedLocalAppData $InitiatingLocalAppData
+    Assert-CycManifestInitiatorBinding -Manifest $manifest -CurrentBinding $currentBinding
+    $agentsRecord = if ($manifest.PSObject.Properties['agentsIntegration']) {
+        $manifest.agentsIntegration
+    } else { $null }
+    # Validate marker ownership and drift before removing the Codex plugin or
+    # changing any local lifecycle resource.
+    $agentsPreflight = if ($agentsRecord) {
+        Get-CycAgentsRemovalPlan -Record $agentsRecord
+    } else {
+        [PSCustomObject]@{ required = $false; alreadyApplied = $true }
     }
     $codexCleanupRequired = $false
     if ($manifest.codexIntegration -and $manifest.codexIntegration.enabled) {
@@ -1123,6 +4706,14 @@ function Invoke-Uninstall {
         preserveData = -not [bool]$PurgeData
         codexIntegration = $manifest.codexIntegration
         codexCleanupRequired = $codexCleanupRequired
+        agentsIntegration = $agentsRecord
+        agentsCleanupRequired = [bool]$agentsPreflight.required
+        managedWorker = if ($manifest.PSObject.Properties['managedWorker']) {
+            $manifest.managedWorker
+        } else { $null }
+        uninstallRegistration = if ($manifest.PSObject.Properties['uninstallRegistration']) {
+            $manifest.uninstallRegistration
+        } else { $null }
     }
     if ($PlanOnly) { return $plan }
     if (-not $PSCmdlet.ShouldProcess($install, 'Uninstall ClusterYourCodex')) { return }
@@ -1155,17 +4746,109 @@ function Invoke-Uninstall {
         }
     }
 
-    Unregister-CycTask -Name $script:WorkerTaskName
-    Unregister-CycTask -Name $script:ControllerTaskName
-    Stop-CycRuntime -InstallRoot $install
-    Remove-OwnedFiles -Manifest $manifest -ExpectedInstallRoot $install
+    # Re-read the durable cleanup checkpoint before making local lifecycle
+    # changes so a rollback never resurrects stale plugin cleanup state.
+    $manifest = Read-InstallManifest -ManifestPath $manifestPath
+    $agentsRecord = if ($manifest.PSObject.Properties['agentsIntegration']) {
+        $manifest.agentsIntegration
+    } else { $null }
+    $agentsRemovalPlan = if ($agentsRecord) {
+        Get-CycAgentsRemovalPlan -Record $agentsRecord
+    } else {
+        [PSCustomObject]@{ required = $false; alreadyApplied = $true }
+    }
+    $taskSnapshots = @(Get-CycTaskSnapshots)
+    $uninstallRollbackPlan = [PSCustomObject]@{
+        installRoot = $install
+        dataRoot = $data
+        manifestPath = $manifestPath
+        files = @($manifest.files)
+    }
+    $fileSnapshot = New-FileRollbackSnapshot -Plan $uninstallRollbackPlan -OldManifest $manifest
+    $agentsRemovalTransaction = if ($agentsRecord -and $agentsRemovalPlan.required -and
+        -not $agentsRemovalPlan.alreadyApplied) {
+        Start-CycAgentsRemovalTransaction `
+            -Record $agentsRecord `
+            -RemovalPlan $agentsRemovalPlan `
+            -TransactionRoot $fileSnapshot.root
+    } else { $null }
+    $uninstallRegistrationSnapshot = $null
+    $preserveUninstallSnapshot = $false
+    try {
+        if ($agentsRemovalPlan.required) {
+            Prepare-CycAgentsRemoval `
+                -Manifest $manifest `
+                -ManifestPath $manifestPath `
+                -RemovalPlan $agentsRemovalPlan
+            if ($agentsRemovalTransaction) {
+                Apply-CycAgentsRemovalTransaction -Transaction $agentsRemovalTransaction
+            }
+            Complete-CycAgentsRemoval `
+                -Manifest $manifest `
+                -ManifestPath $manifestPath `
+                -RemovalPlan $agentsRemovalPlan
+        }
+        if ($plan.uninstallRegistration -and $plan.uninstallRegistration.enabled) {
+            $uninstallRegistrationSnapshot = Get-CycUninstallRegistrationSnapshot `
+                -RegistryPath $plan.uninstallRegistration.registryPath
+        }
 
+        Unregister-CycTask -Name $script:WorkerTaskName
+        Unregister-CycTask -Name $script:ControllerTaskName
+        Stop-CycRuntime -InstallRoot $install
+        Remove-OwnedFiles -Manifest $manifest -ExpectedInstallRoot $install
+
+        if ($plan.uninstallRegistration -and $plan.uninstallRegistration.enabled) {
+            Remove-CycUninstallRegistration `
+                -RegistryPath $plan.uninstallRegistration.registryPath `
+                -ExpectedInstallRoot $install
+        }
+
+        if (-not $PurgeData) {
+            Remove-Item -LiteralPath $manifestPath -Force
+        }
+        Complete-CycAgentsRemovalTransaction -Transaction $agentsRemovalTransaction
+    } catch {
+        $failure = $_
+        $rollbackFailures = New-Object System.Collections.Generic.List[string]
+        if ($uninstallRegistrationSnapshot) {
+            try {
+                Restore-CycUninstallRegistrationSnapshot `
+                    -RegistryPath $plan.uninstallRegistration.registryPath `
+                    -Snapshot $uninstallRegistrationSnapshot
+            } catch { [void]$rollbackFailures.Add('uninstall registration') }
+        }
+        if ($agentsRemovalTransaction) {
+            try { Rollback-CycAgentsRemovalTransaction -Transaction $agentsRemovalTransaction } catch {
+                [void]$rollbackFailures.Add('global AGENTS.md')
+            }
+        }
+        try { Restore-FileRollbackSnapshot -Snapshot $fileSnapshot } catch {
+            [void]$rollbackFailures.Add('installed files')
+        }
+        try { Restore-CycTaskSnapshots -Snapshots $taskSnapshots } catch {
+            [void]$rollbackFailures.Add('Scheduled Tasks')
+        }
+        if ($rollbackFailures.Count -eq 0) {
+            try { Remove-FileRollbackSnapshot -Snapshot $fileSnapshot } catch {
+                [void]$rollbackFailures.Add('transaction cleanup')
+            }
+        }
+        if ($rollbackFailures.Count -gt 0) {
+            $preserveUninstallSnapshot = $true
+            throw "Uninstall failed and rollback was incomplete for: $($rollbackFailures -join ', '). Original failure: $($failure.Exception.Message)"
+        }
+        throw $failure
+    }
+
+    if (-not $preserveUninstallSnapshot) {
+        Remove-FileRollbackSnapshot -Snapshot $fileSnapshot
+    }
     if ($PurgeData) {
         $purgeTarget = Assert-SafePurgeTarget -DataRoot $data -Manifest $manifest
         # The exact resolved target is checked above before the only recursive delete.
         Remove-Item -LiteralPath $purgeTarget -Recurse -Force
     } else {
-        Remove-Item -LiteralPath $manifestPath -Force
         $manifestDirectory = Split-Path -Parent $manifestPath
         if ((Test-Path -LiteralPath $manifestDirectory -PathType Container) -and
             -not (Get-ChildItem -LiteralPath $manifestDirectory -Force | Select-Object -First 1)) {
@@ -1179,11 +4862,94 @@ function Invoke-Uninstall {
         dataPreserved = -not [bool]$PurgeData
         alreadyAbsent = $false
         codexIntegration = $codexResult
+        agentsIntegration = [PSCustomObject]@{
+            required = [bool]$agentsRemovalPlan.required
+            removed = [bool]($agentsRemovalPlan.required -or
+                (Get-CycObjectProperty -Object $agentsRemovalPlan -Name 'completed' -Default $false))
+            path = if ($agentsRemovalPlan.PSObject.Properties['path']) { $agentsRemovalPlan.path } else { $null }
+        }
+    }
+}
+
+function Invoke-Uninstall {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$DataRoot
+    )
+    if ($PlanOnly) { return Invoke-UninstallCore -InstallRoot $InstallRoot -DataRoot $DataRoot }
+    $data = Resolve-NormalizedPath $DataRoot
+    $manifestPath = Join-Path $data '.installer\install-manifest.json'
+    $mutex = Enter-CycAgentsMutex
+    try {
+        [void](Recover-CycAgentsTransactions -DataRoot $data -ManifestPath $manifestPath)
+        return Invoke-UninstallCore -InstallRoot $InstallRoot -DataRoot $data
+    } finally {
+        Exit-CycAgentsMutex -Mutex $mutex
     }
 }
 
 function Invoke-ClusterYourCodexBootstrap {
+    if ($Action -eq 'IntegrateCodex') {
+        if ($PlanOnly) {
+            throw 'IntegrateCodex is a machine-verifiable commit action and does not support PlanOnly.'
+        }
+        if ([string]::IsNullOrWhiteSpace($CodexCliPath) -or
+            $ExpectedInstallManifestSha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'IntegrateCodex requires the native host exact Codex CLI path and install-manifest digest.'
+        }
+        return Invoke-CycCodexOnlyIntegration `
+            -InstallRoot $InstallRoot `
+            -DataRoot $DataRoot `
+            -CodexHome $CodexHome `
+            -CodexCliPath $CodexCliPath `
+            -ExpectedInstallManifestSha256 $ExpectedInstallManifestSha256 `
+            -MutexTimeoutSeconds $MutexTimeoutSeconds `
+            -ActionTimeoutSeconds $ActionTimeoutSeconds
+    }
+    if ($Action -eq 'CommitFirewall') {
+        if ([string]::IsNullOrWhiteSpace($FirewallReceiptPath) -or
+            $FirewallTransactionId -cnotmatch '^[0-9a-f]{32}$') {
+            throw 'CommitFirewall requires the transaction id and durable receipt path.'
+        }
+        $binding = Get-CycInitiatorBinding `
+            -RequestedSid $InitiatingSid `
+            -RequestedProfile $InitiatingProfile `
+            -RequestedLocalAppData $InitiatingLocalAppData
+        return Invoke-CycCommitFirewallReceipt `
+            -InstallRoot $InstallRoot `
+            -DataRoot $DataRoot `
+            -ReceiptPath $FirewallReceiptPath `
+            -TransactionId $FirewallTransactionId `
+            -CurrentBinding $binding
+    }
+    $packageIntegrityConfigured = -not [string]::IsNullOrWhiteSpace($PackageRoot) -or
+        -not [string]::IsNullOrWhiteSpace($PackageManifest)
+    if ($packageIntegrityConfigured) {
+        if ([string]::IsNullOrWhiteSpace($PackageRoot) -or
+            [string]::IsNullOrWhiteSpace($PackageManifest)) {
+            throw 'PackageRoot and PackageManifest are required together.'
+        }
+        Assert-CycPackageManifest `
+            -Root $PackageRoot `
+            -ManifestPath $PackageManifest `
+            -PayloadRoot $BundleRoot
+    }
+    if ($RequirePackageSignature) {
+        if ([string]::IsNullOrWhiteSpace($PackageExecutable)) {
+            throw 'RequirePackageSignature requires PackageExecutable.'
+        }
+        Assert-CycPackageSignature -Executable $PackageExecutable
+    }
     if ($Action -eq 'Uninstall') {
+        if (-not $DeferFirewall) {
+            $manifest = Read-InstallManifest -ManifestPath (Join-Path (Resolve-NormalizedPath $DataRoot) '.installer\install-manifest.json')
+            if ($manifest -and $manifest.PSObject.Properties['managedWorker'] -and
+                $manifest.managedWorker.PSObject.Properties['firewall'] -and
+                [bool]$manifest.managedWorker.firewall.enabled) {
+                throw 'Per-user core uninstall requires the deferred firewall-only coordinator.'
+            }
+        }
         return Invoke-Uninstall -InstallRoot $InstallRoot -DataRoot $DataRoot
     }
     $plan = Get-InstallPlan `
@@ -1192,10 +4958,37 @@ function Invoke-ClusterYourCodexBootstrap {
         -DataRoot $DataRoot `
         -EnableWorker:$EnableWorker `
         -WorkerConfig $WorkerConfig `
-        -SkipCodexIntegration:$SkipCodexIntegration
+        -SkipCodexIntegration:$SkipCodexIntegration `
+        -CodexHome $CodexHome `
+        -WorkerPublicHost $WorkerPublicHost `
+        -WorkerListenPort $WorkerListenPort `
+        -DisableManagedWorkerListener:$DisableManagedWorkerListener `
+        -SkipFirewall:$SkipFirewall `
+        -DeferFirewall:$DeferFirewall `
+        -InitiatingSid $InitiatingSid `
+        -InitiatingProfile $InitiatingProfile `
+        -InitiatingLocalAppData $InitiatingLocalAppData `
+        -FirewallTransactionId $FirewallTransactionId `
+        -FirewallRequestSha256 $FirewallRequestSha256 `
+        -SkipUninstallRegistration:$SkipUninstallRegistration `
+        -UninstallerPath $UninstallerPath
     return Invoke-InstallOrRepair -Plan $plan
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
+    if ($Action -eq 'IntegrateCodex') {
+        try {
+            $codexReceipt = Invoke-ClusterYourCodexBootstrap
+            $receiptJson = ConvertTo-CycCodexOnlyReceiptJson -Receipt $codexReceipt
+            [Console]::Out.WriteLine($receiptJson)
+            exit 0
+        } catch {
+            $message = [string]$_.Exception.Message
+            $message = $message.Replace("`r", ' ').Replace("`n", ' ')
+            if ($message.Length -gt 2048) { $message = $message.Substring(0, 2048) }
+            [Console]::Error.WriteLine($message)
+            exit 1
+        }
+    }
     Invoke-ClusterYourCodexBootstrap
 }

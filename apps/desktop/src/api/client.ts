@@ -6,9 +6,11 @@ import type {
   HealthResponse,
   JobResponse,
   JobSummary,
+  FleetNodeViewPayload,
   NodePayload,
   NodeSummary,
   PlacementExplanationPayload,
+  PlacementPlanBindingV1,
   PlanRequest,
   PlanResponse,
   SubmitJobRequest,
@@ -81,19 +83,19 @@ export class ControllerClient {
   }
 
   plan(payload: PlanRequest): Promise<PlanResponse> {
-    return this.request("POST", "/v1/plans", payload);
+    return this.request<unknown>("POST", "/v1/plans", payload).then(parsePlanBinding);
   }
 
   submit(payload: SubmitJobRequest): Promise<SubmitJobResponse> {
-    return this.request("POST", "/v1/jobs", payload);
+    return this.request<unknown>("POST", "/v1/jobs", payload).then(parseJobResponse);
   }
 
   job(jobId: string): Promise<JobResponse> {
-    return this.request("GET", `/v1/jobs/${encodeURIComponent(jobId)}`);
+    return this.request<unknown>("GET", `/v1/jobs/${encodeURIComponent(jobId)}`).then(parseJobResponse);
   }
 
   cancel(jobId: string): Promise<CancelJobResponse> {
-    return this.request("POST", `/v1/jobs/${encodeURIComponent(jobId)}/cancel`);
+    return this.request<unknown>("POST", `/v1/jobs/${encodeURIComponent(jobId)}/cancel`).then(parseJobResponse);
   }
 
   private async request<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
@@ -147,6 +149,173 @@ export class ControllerClient {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+const uuidPattern = /^(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const sha256Pattern = /^[0-9a-f]{64}$/;
+const rejectionCodes = new Set([
+  "disabled", "offline", "draining", "stale_node", "manual_node_required", "manual_node_mismatch",
+  "wrong_os", "wrong_architecture", "missing_capability", "insufficient_cpu", "insufficient_memory",
+  "insufficient_disk", "gpu_required", "gpu_unavailable", "gpu_vendor_mismatch", "insufficient_vram",
+  "exclusive_gpu_unavailable", "policy_job_kind_denied", "battery_disallowed", "cpu_limit_exceeded",
+  "cpu_ewma_limit_exceeded", "memory_limit_exceeded", "temperature_limit_exceeded", "slot_limit_reached",
+  "containment_limit_reached",
+]);
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const allowed = new Set(keys);
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+export function isStrictRfc3339(value: unknown): value is string {
+  if (typeof value !== "string" || value.length < 20 || value.length > 64) return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/.exec(value);
+  if (!match) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, , zone] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthDays = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > monthDays[month - 1]! ||
+      hour > 23 || minute > 59 || second > 59) return false;
+  if (zone !== "Z") {
+    const offsetHour = Number(zone!.slice(1, 3));
+    const offsetMinute = Number(zone!.slice(4, 6));
+    if (offsetHour > 23 || offsetMinute > 59) return false;
+  }
+  return Number.isFinite(Date.parse(value));
+}
+
+function validTimestamp(value: unknown): value is string {
+  return isStrictRfc3339(value);
+}
+
+function validEvidenceText(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 &&
+    new TextEncoder().encode(value).length <= 256 && !/[\u0000-\u001f\u007f-\u009f]/u.test(value);
+}
+
+function parsePlanBinding(value: unknown): PlacementPlanBindingV1 {
+  const invalid = () => new ControllerApiError("Controller returned an invalid placement plan binding", {
+    code: "invalid_response",
+  });
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    "apiVersion", "planId", "jobId", "jobDigest", "createdAt", "expiresAt",
+    "fleetRevision", "nodeRevision", "policyRevision", "decision",
+  ])) throw invalid();
+  if (
+    value.apiVersion !== "cyc.dev/placement-plan-binding/v1" ||
+    typeof value.planId !== "string" || !uuidPattern.test(value.planId) ||
+    typeof value.jobId !== "string" || !uuidPattern.test(value.jobId) ||
+    typeof value.jobDigest !== "string" || !sha256Pattern.test(value.jobDigest) ||
+    !validTimestamp(value.createdAt) || !validTimestamp(value.expiresAt) ||
+    Date.parse(value.createdAt) >= Date.parse(value.expiresAt) ||
+    !safeNonnegativeInteger(value.fleetRevision) ||
+    !safeNonnegativeInteger(value.nodeRevision) ||
+    !safeNonnegativeInteger(value.policyRevision) ||
+    !isRecord(value.decision) ||
+    !hasOnlyKeys(value.decision, ["nodeId", "score", "explanation"]) ||
+    typeof value.decision.nodeId !== "string" || !uuidPattern.test(value.decision.nodeId) ||
+    typeof value.decision.score !== "number" || !Number.isSafeInteger(value.decision.score)
+  ) throw invalid();
+  const decisionNodeId = value.decision.nodeId;
+  const decisionScore = value.decision.score;
+  const explanation = parseStrictPlacement(value.decision.explanation);
+  if (
+    explanation.selectedNodeId !== decisionNodeId ||
+    explanation.candidates.filter((candidate) => candidate.nodeId === decisionNodeId && candidate.eligible && candidate.score === decisionScore).length !== 1
+  ) throw invalid();
+  return {
+    apiVersion: value.apiVersion,
+    planId: value.planId,
+    jobId: value.jobId,
+    jobDigest: value.jobDigest,
+    createdAt: value.createdAt,
+    expiresAt: value.expiresAt,
+    fleetRevision: value.fleetRevision,
+    nodeRevision: value.nodeRevision,
+    policyRevision: value.policyRevision,
+    decision: { nodeId: decisionNodeId, score: decisionScore, explanation },
+  };
+}
+
+function parseStrictPlacement(value: unknown): PlacementExplanationPayload {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["policy", "selectedNodeId", "candidates"]) ||
+      !["balanced", "performance", "manual"].includes(String(value.policy)) ||
+      typeof value.selectedNodeId !== "string" || !uuidPattern.test(value.selectedNodeId) ||
+      !Array.isArray(value.candidates) || value.candidates.length < 1 || value.candidates.length > 256) {
+    throw new ControllerApiError("Controller returned invalid placement evidence", { code: "invalid_response" });
+  }
+  const nodeIds = new Set<string>();
+  const candidates = value.candidates.map((entry) => {
+    if (!isRecord(entry) || !hasOnlyKeys(entry, ["nodeId", "nodeName", "eligible", "score", "scoreComponents", "rejectionReasons"]) ||
+        typeof entry.nodeId !== "string" || !uuidPattern.test(entry.nodeId) || nodeIds.has(entry.nodeId) ||
+        !validEvidenceText(entry.nodeName) ||
+        typeof entry.eligible !== "boolean" ||
+        (entry.score !== undefined && (typeof entry.score !== "number" || !Number.isSafeInteger(entry.score))) ||
+        !Array.isArray(entry.scoreComponents) || entry.scoreComponents.length > 64 ||
+        !Array.isArray(entry.rejectionReasons) || entry.rejectionReasons.length > 64) {
+      throw new ControllerApiError("Controller returned invalid placement evidence", { code: "invalid_response" });
+    }
+    nodeIds.add(entry.nodeId);
+    const componentKeys = new Set<string>();
+    let componentSum = 0;
+    const scoreComponents = entry.scoreComponents.map((component) => {
+      if (!isRecord(component) || !hasOnlyKeys(component, ["key", "value", "detail"]) ||
+          !validEvidenceText(component.key) || componentKeys.has(component.key) ||
+          typeof component.value !== "number" || !Number.isSafeInteger(component.value) || typeof component.detail !== "string" ||
+          !validEvidenceText(component.detail) || !Number.isSafeInteger(componentSum + component.value)) {
+        throw new ControllerApiError("Controller returned invalid placement evidence", { code: "invalid_response" });
+      }
+      componentKeys.add(component.key);
+      componentSum += component.value;
+      return { key: component.key, value: component.value, detail: component.detail };
+    });
+    const rejectionCodeSet = new Set<string>();
+    const rejectionReasons = entry.rejectionReasons.map((rejection) => {
+      if (!isRecord(rejection) || !hasOnlyKeys(rejection, ["code", "detail"]) ||
+          typeof rejection.code !== "string" || !rejectionCodes.has(rejection.code) || rejectionCodeSet.has(rejection.code) ||
+          !validEvidenceText(rejection.detail)) {
+        throw new ControllerApiError("Controller returned invalid placement evidence", { code: "invalid_response" });
+      }
+      rejectionCodeSet.add(rejection.code);
+      return { code: rejection.code, detail: rejection.detail };
+    });
+    if (entry.eligible ? (entry.score === undefined || scoreComponents.length < 1 || componentSum !== entry.score || rejectionReasons.length !== 0) :
+      (entry.score !== undefined || scoreComponents.length !== 0 || rejectionReasons.length < 1)) {
+      throw new ControllerApiError("Controller returned invalid placement evidence", { code: "invalid_response" });
+    }
+    return { nodeId: entry.nodeId, nodeName: entry.nodeName, eligible: entry.eligible,
+      ...(entry.score === undefined ? {} : { score: entry.score }), scoreComponents, rejectionReasons };
+  });
+  return { policy: value.policy as PlacementExplanationPayload["policy"], selectedNodeId: value.selectedNodeId, candidates };
+}
+
+function safeNonnegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function parseJobResponse(value: unknown): JobResponse {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["job", "run", "planBinding", "version", "cancelRequested"]) ||
+      !isRecord(value.job) || !isRecord(value.run) || typeof value.job.id !== "string" || !uuidPattern.test(value.job.id) ||
+      typeof value.run.id !== "string" || !uuidPattern.test(value.run.id) || value.run.jobId !== value.job.id ||
+      !validTimestamp(value.run.createdAt) ||
+      (value.run.startedAt !== undefined && !validTimestamp(value.run.startedAt)) ||
+      (value.run.finishedAt !== undefined && !validTimestamp(value.run.finishedAt)) ||
+      (validTimestamp(value.run.startedAt) && Date.parse(value.run.startedAt) < Date.parse(value.run.createdAt)) ||
+      (validTimestamp(value.run.startedAt) && validTimestamp(value.run.finishedAt) && Date.parse(value.run.finishedAt) < Date.parse(value.run.startedAt)) ||
+      !safeNonnegativeInteger(value.version) || typeof value.cancelRequested !== "boolean") {
+    throw new ControllerApiError("Controller returned an invalid job document", { code: "invalid_response" });
+  }
+  const planBinding = value.planBinding === null ? null : parsePlanBinding(value.planBinding);
+  if (planBinding !== null && (planBinding.jobId !== value.job.id || value.run.nodeId !== planBinding.decision.nodeId)) {
+    throw new ControllerApiError("Controller returned a job with mismatched placement authority", { code: "invalid_response" });
+  }
+  return value as unknown as JobResponse;
 }
 
 function safeText(value: unknown, maximum: number): string | undefined {
@@ -243,35 +412,84 @@ function nodeAddress(node: NodePayload): string {
   }
 }
 
-function normalizeNode(node: NodePayload): NodeSummary {
-  const gpu = node.resources.gpus[0];
-  const status =
-    node.status === "offline"
-      ? "offline"
-      : node.load.runningJobs > 0
-        ? "busy"
-        : node.status === "online"
-          ? "online"
-          : "unknown";
+export function nodeDashboardStatus(
+  availability: NodeSummary["availability"],
+  legacyStatus: NodePayload["status"],
+  activeJobs: number,
+): NodeSummary["status"] {
+  if (availability) {
+    switch (availability) {
+      case "available":
+      case "degraded":
+        return activeJobs > 0 ? "busy" : "online";
+      case "offline":
+      case "stale":
+      case "disabled":
+        return "offline";
+      case "draining":
+        return "unknown";
+    }
+  }
+  switch (legacyStatus) {
+    case "online":
+    case "degraded":
+      return activeJobs > 0 ? "busy" : "online";
+    case "offline":
+      return "offline";
+    case "draining":
+      return "unknown";
+  }
+}
+
+function normalizeNode(node: NodePayload, view?: FleetNodeViewPayload): NodeSummary {
+  const telemetry = view?.telemetry.document;
+  const inventory = view?.inventory.document;
+  const resources = view?.effectiveResources ?? node.resources;
+  const gpu = resources.gpus[0];
+  const activeJobs = Math.max(
+    node.load.runningJobs,
+    telemetry?.activeRunIds.length ?? 0,
+    view?.reservations.length ?? 0,
+  );
+  const status = nodeDashboardStatus(view?.availability, node.status, activeJobs);
 
   return {
     id: node.id,
     name: node.name,
     address: nodeAddress(node),
-    os: node.os,
-    arch: node.arch,
+    os: inventory?.os ?? node.os,
+    arch: inventory?.arch ?? node.arch,
     status,
     priority: node.priority,
-    capabilities: node.capabilities,
+    capabilities: inventory?.capabilities ?? node.capabilities,
     resources: {
-      cpuPercent: node.load.cpuPercent,
-      memoryUsedMiB: Math.max(0, node.resources.memoryMib - node.resources.availableMemoryMib),
-      memoryTotalMiB: node.resources.memoryMib,
+      cpuPercent: telemetry?.load.cpuPercent ?? node.load.cpuPercent,
+      memoryUsedMiB: Math.max(
+        0,
+        (inventory?.memoryMiB ?? node.resources.memoryMib) -
+          (telemetry?.availableMemoryMiB ?? node.resources.availableMemoryMib),
+      ),
+      memoryTotalMiB: inventory?.memoryMiB ?? node.resources.memoryMib,
       vramUsedMiB: gpu ? Math.max(0, gpu.totalVramMib - gpu.availableVramMib) : undefined,
       vramTotalMiB: gpu?.totalVramMib,
     },
-    lastSeenAt: node.lastSeenAt,
-    activeJobs: node.load.runningJobs,
+    lastSeenAt: view?.telemetry.receivedAt ?? node.lastSeenAt,
+    activeJobs,
+    availability: view?.availability,
+    availabilityReasons: view?.availabilityReasons,
+    slots: view?.effectiveSlots,
+    telemetry: view
+      ? {
+          observedAt: view.telemetry.document.observedAt,
+          receivedAt: view.telemetry.receivedAt,
+          bootGeneration: view.telemetry.document.bootGeneration,
+          bootId: view.telemetry.document.bootId,
+          sequence: view.telemetry.document.sequence,
+          cpuEwmaPercent: view.telemetry.document.cpuEwmaPercent,
+          powerSource: view.telemetry.document.powerSource,
+          temperatureC: view.telemetry.document.temperatureC,
+        }
+      : undefined,
   };
 }
 
@@ -293,17 +511,30 @@ function normalizeJob(
     finishedAt: view.run.finishedAt,
     exitCode: view.run.exitCode,
     elapsedMs: started === undefined ? undefined : Math.max(0, (finished ?? Date.now()) - started),
+    placement: view.run.placement,
   };
 }
 
 function normalizeFleet(payload: FleetPayload): FleetInfo {
-  const nodes = payload.nodes.map(normalizeNode);
+  if (
+    !Number.isSafeInteger(payload.fleetRevision) ||
+    payload.fleetRevision < 0 ||
+    !isStrictRfc3339(payload.observedAt)
+  ) {
+    throw new ControllerApiError("Controller returned invalid fleet snapshot metadata", {
+      code: "invalid_response",
+    });
+  }
+  const views = new Map((payload.nodeViews ?? []).map((view) => [view.nodeId, view]));
+  const nodes = payload.nodes.map((node) => normalizeNode(node, views.get(node.id)));
   const nodeNames = new Map(nodes.map((node) => [node.id, node.name]));
-  const recentJobs = payload.recentJobs.map((job) => normalizeJob(job, nodeNames));
+  const recentJobs = payload.recentJobs.map((job) => normalizeJob(parseJobResponse(job), nodeNames));
   const runningStates = new Set(["preparing", "running", "verifying"]);
   const today = new Date().toDateString();
 
   return {
+    fleetRevision: payload.fleetRevision,
+    observedAt: payload.observedAt,
     controller: {
       status: "ready",
       version: payload.controller.version,
@@ -314,11 +545,27 @@ function normalizeFleet(payload: FleetPayload): FleetInfo {
       ).length,
     },
     codex: {
-      connected: payload.codex.status === "available" || payload.codex.status === "connected",
+      // "available" means the controller supports an MCP integration route;
+      // it is not evidence that Codex loaded the plugin. Only a real heartbeat
+      // or the native MCP self-test may report a connected integration.
+      connected: payload.codex.status === "connected",
     },
     nodes,
     recentJobs,
   };
+}
+
+/** Prevent an older overlapping fleet request from overwriting newer
+ * telemetry. Equal revisions use the authoritative observedAt timestamp. */
+export function preferNewerFleetSnapshot(
+  current: FleetInfo | undefined,
+  incoming: FleetInfo,
+): FleetInfo {
+  if (!current || incoming.fleetRevision > current.fleetRevision) return incoming;
+  if (incoming.fleetRevision === current.fleetRevision && Date.parse(incoming.observedAt) > Date.parse(current.observedAt)) {
+    return incoming;
+  }
+  return current;
 }
 
 export const controllerClient = new ControllerClient({

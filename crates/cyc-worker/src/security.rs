@@ -65,13 +65,43 @@ pub fn write_secret_file(path: &Path, value: &str) -> Result<()> {
     write_protected_file(path, value.as_bytes())
 }
 
+pub(crate) fn remove_protected_file(path: &Path) -> Result<()> {
+    ensure_protected_input(path)?;
+    let parent = containing_directory(path);
+    verify_private_directory(&parent)?;
+    fs::remove_file(path).with_context(|| format!("remove protected file {}", path.display()))?;
+    #[cfg(unix)]
+    sync_directory(&parent)?;
+    Ok(())
+}
+
 /// Persist trusted worker state without ever repairing and then consuming an
 /// existing file. The containing directory may be freshly provisioned, but an
 /// existing directory is verify-only. The target itself is always create-new.
 pub(crate) fn write_protected_file(path: &Path, value: &[u8]) -> Result<()> {
+    persist_protected_file(path, value, false)
+}
+
+/// Atomically replace a controller-owned protected state file. The old file is
+/// verified before replacement and the containing private directory prevents
+/// an untrusted process from winning the final rename race.
+pub(crate) fn replace_protected_file(path: &Path, value: &[u8]) -> Result<()> {
+    persist_protected_file(path, value, true)
+}
+
+fn persist_protected_file(path: &Path, value: &[u8], replace: bool) -> Result<()> {
     let parent = containing_directory(path);
     prepare_private_directory(&parent)?;
-    if path_entry_exists(path)? {
+    let exists = path_entry_exists(path)?;
+    if replace {
+        if !exists {
+            bail!(
+                "protected replacement target is missing: {}",
+                path.display()
+            );
+        }
+        ensure_protected_input(path)?;
+    } else if exists {
         bail!("protected output already exists: {}", path.display());
     }
 
@@ -99,36 +129,65 @@ pub(crate) fn write_protected_file(path: &Path, value: &[u8]) -> Result<()> {
 
         ensure_protected_input(&temporary)?;
         ensure_no_links_or_reparse_points(path)?;
-        if path_entry_exists(path)? {
+        let target_exists = path_entry_exists(path)?;
+        if replace {
+            if !target_exists {
+                bail!(
+                    "protected replacement target disappeared concurrently: {}",
+                    path.display()
+                );
+            }
+            ensure_protected_input(path)?;
+        } else if target_exists {
             bail!("protected output appeared concurrently: {}", path.display());
         }
 
         #[cfg(unix)]
         {
-            fs::hard_link(&temporary, path).with_context(|| {
-                format!(
-                    "atomically install protected file {} -> {}",
-                    temporary.display(),
-                    path.display()
-                )
-            })?;
-            sync_directory(&parent)?;
-            fs::remove_file(&temporary)
-                .with_context(|| format!("remove protected temporary {}", temporary.display()))?;
+            if replace {
+                fs::rename(&temporary, path).with_context(|| {
+                    format!(
+                        "atomically replace protected file {} -> {}",
+                        temporary.display(),
+                        path.display()
+                    )
+                })?;
+            } else {
+                fs::hard_link(&temporary, path).with_context(|| {
+                    format!(
+                        "atomically install protected file {} -> {}",
+                        temporary.display(),
+                        path.display()
+                    )
+                })?;
+                sync_directory(&parent)?;
+                fs::remove_file(&temporary).with_context(|| {
+                    format!("remove protected temporary {}", temporary.display())
+                })?;
+            }
             sync_directory(&parent)?;
         }
         #[cfg(windows)]
-        atomic_install_private_file_windows(&temporary, path)?;
+        atomic_install_private_file_windows(&temporary, path, replace)?;
         #[cfg(not(any(unix, windows)))]
         compile_error!("protected file atomic installation is not implemented for this platform");
 
         ensure_protected_input(path)?;
         Ok(())
     })();
-    if result.is_err() && !path_entry_exists(path).unwrap_or(false) {
-        let _ = fs::remove_file(&temporary);
-    }
+    // `temporary` is unique to this invocation.  No outcome makes it shared
+    // state, so every failed path must attempt to remove it.  Conditioning
+    // cleanup on destination existence leaked a secret-bearing temporary when
+    // a concurrent destination appeared or a replacement failed after the
+    // destination had already been verified.
+    cleanup_failed_temporary(&temporary, result.is_err());
     result
+}
+
+fn cleanup_failed_temporary(temporary: &Path, failed: bool) {
+    if failed {
+        let _ = fs::remove_file(temporary);
+    }
 }
 
 /// Provision a missing private directory, or verify an existing one without
@@ -417,9 +476,15 @@ fn sync_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn atomic_install_private_file_windows(source: &Path, destination: &Path) -> Result<()> {
+fn atomic_install_private_file_windows(
+    source: &Path,
+    destination: &Path,
+    replace: bool,
+) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
 
     let source_wide = source
         .as_os_str()
@@ -435,7 +500,12 @@ fn atomic_install_private_file_windows(source: &Path, destination: &Path) -> Res
         MoveFileExW(
             source_wide.as_ptr(),
             destination_wide.as_ptr(),
-            MOVEFILE_WRITE_THROUGH,
+            MOVEFILE_WRITE_THROUGH
+                | if replace {
+                    MOVEFILE_REPLACE_EXISTING
+                } else {
+                    0
+                },
         )
     };
     if moved == 0 {
@@ -820,5 +890,22 @@ mod tests {
         fs::remove_file(&link).unwrap();
         #[cfg(windows)]
         fs::remove_dir(&link).unwrap();
+    }
+
+    #[test]
+    fn failed_persistence_cleanup_never_depends_on_destination_existence() {
+        let directory = tempdir().unwrap();
+        let protected = directory.path().join("private");
+        prepare_private_directory(&protected).unwrap();
+        let destination = protected.join("state.json");
+        write_protected_file(&destination, b"committed").unwrap();
+        let temporary = protected.join(".state.json.tmp-owned-by-this-call");
+        write_protected_file(&temporary, b"secret-temporary-bytes").unwrap();
+
+        // This models every failure after the unique temporary was created,
+        // including the historically leaky case where the destination exists.
+        cleanup_failed_temporary(&temporary, true);
+        assert!(!temporary.exists());
+        assert_eq!(fs::read(destination).unwrap(), b"committed");
     }
 }

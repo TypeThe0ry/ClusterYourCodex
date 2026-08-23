@@ -1,5 +1,19 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { ControllerApiError, controllerClient } from "./api/client";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ControllerApiError, controllerClient, preferNewerFleetSnapshot } from "./api/client";
+import { ProvisioningComputers } from "./ProvisioningComputers";
+import {
+  INTEGRATION_STATUS_MAX_AGE_MS,
+  integrationClient,
+  fullRunLayerIds,
+  fullRunStaleReason,
+  integrationStatusIdentity,
+  type FullRunCheckResult,
+  type FullRunEvidenceBaseline,
+  type IntegrationActionResult,
+  type IntegrationSelfTestResult,
+  type IntegrationState,
+  type IntegrationStatus,
+} from "./api/integration";
 import type { FleetInfo, JobStatus, NodeStatus, NodeSummary } from "./api/types";
 
 type Page = "home" | "computers" | "tasks" | "rules" | "integration";
@@ -148,6 +162,10 @@ function NodeRow({ node }: { node: NodeSummary }) {
       <div className="node-main">
         <div className="node-title"><StatusDot status={node.status} /><strong>{node.name}</strong></div>
         <span>{node.os} · {node.arch} · {node.address}</span>
+        <span>{node.availability ? `Availability: ${node.availability}` : `Status: ${node.status}`}</span>
+        {node.slots && <span>{node.slots.available}/{node.slots.effective} execution slots available</span>}
+        {node.availabilityReasons?.[0] && <span className="capacity-reason">{node.availabilityReasons[0]}</span>}
+        {node.telemetry && <span className="capacity-reason">Telemetry seq {node.telemetry.sequence} · boot {node.telemetry.bootGeneration} · received {new Date(node.telemetry.receivedAt).toLocaleTimeString()}</span>}
       </div>
       <div className="node-capabilities">
         {node.capabilities.slice(0, 3).map((capability) => <span key={capability}>{capability}</span>)}
@@ -165,7 +183,7 @@ function NodeRow({ node }: { node: NodeSummary }) {
   );
 }
 
-function HomePage({ fleet, online, openPage }: { fleet?: FleetInfo; online: boolean; openPage: (page: Page) => void }) {
+function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetInfo; online: boolean; openPage: (page: Page) => void; openAddComputer: () => void }) {
   const nodes = fleet?.nodes ?? [];
   const onlineNodes = nodes.filter((node) => node.status === "online" || node.status === "busy").length;
   const recentJobs = fleet?.recentJobs ?? [];
@@ -179,7 +197,7 @@ function HomePage({ fleet, online, openPage }: { fleet?: FleetInfo; online: bool
           <h2>Let Codex use every<br />computer you own.</h2>
           <p>Add Windows, Linux, and GPU machines. ClusterYourCodex chooses the right one, runs the work, and brings the result back.</p>
           <div className="hero-actions">
-            <button className="button button-dark" onClick={() => openPage("computers")}><Icon name="plus" /> Add a computer</button>
+            <button className="button button-dark" onClick={openAddComputer}><Icon name="plus" /> Add a computer</button>
             <button className="text-button" onClick={() => openPage("integration")}>Connect Codex <Icon name="arrow" /></button>
           </div>
         </div>
@@ -219,7 +237,7 @@ function HomePage({ fleet, online, openPage }: { fleet?: FleetInfo; online: bool
               icon="computer"
               title="No computers connected yet"
               copy="Add your first machine and Codex can start delegating heavy work."
-              action={<button className="button button-primary" onClick={() => openPage("computers")}><Icon name="plus" /> Add computer</button>}
+              action={<button className="button button-primary" onClick={openAddComputer}><Icon name="plus" /> Add computer</button>}
             />
           )}
         </article>
@@ -248,25 +266,26 @@ function HomePage({ fleet, online, openPage }: { fleet?: FleetInfo; online: bool
   );
 }
 
-function ComputersPage({ fleet }: { fleet?: FleetInfo }) {
+function ComputersPage({ fleet, addRequest }: { fleet?: FleetInfo; addRequest: number }) {
   const nodes = fleet?.nodes ?? [];
   return (
-    <section className="panel page-panel">
-      <header className="panel-header with-actions">
-        <div><h3>Connected computers</h3><p>Each machine is probed before Codex schedules work.</p></div>
-        <button className="button button-primary"><Icon name="plus" /> Add computer</button>
-      </header>
-      {nodes.length ? (
-        <div className="node-list full">{nodes.map((node) => <NodeRow key={node.id} node={node} />)}</div>
-      ) : (
-        <EmptyState
-          icon="computer"
-          title="Build your first Codex fleet"
-          copy="Connect over SSH, verify the host key, and let the setup wizard discover the machine's tools and capacity."
-          action={<button className="button button-primary"><Icon name="plus" /> Add your first computer</button>}
-        />
-      )}
-    </section>
+    <div className="computers-layout">
+      <ProvisioningComputers addRequest={addRequest} />
+      <section className="panel page-panel">
+        <header className="panel-header">
+          <div><h3>Connected computers</h3><p>Only workers that completed pairing, heartbeat, and smoke check appear here.</p></div>
+        </header>
+        {nodes.length ? (
+          <div className="node-list full">{nodes.map((node) => <NodeRow key={node.id} node={node} />)}</div>
+        ) : (
+          <EmptyState
+            icon="computer"
+            title="No ready workers yet"
+            copy="The setup record above moves here only after the real controller reports a healthy managed worker."
+          />
+        )}
+      </section>
+    </div>
   );
 }
 
@@ -283,7 +302,10 @@ function TasksPage({ fleet }: { fleet?: FleetInfo }) {
           <div className="table-head"><span>Task</span><span>Computer</span><span>Status</span><span>Duration</span></div>
           {jobs.map((job) => (
             <div className="table-row" key={job.id}>
-              <div><strong>{job.title ?? `${job.kind} task`}</strong><span>{job.id}</span></div>
+              <div>
+                <strong>{job.title ?? `${job.kind} task`}</strong><span>{job.id}</span>
+                {job.placement ? <PlacementDetails job={job} /> : null}
+              </div>
               <span>{job.nodeName ?? "—"}</span>
               <span className={`status-pill job-${job.status}`}>{statusLabel(job.status)}</span>
               <span>{formatElapsed(job.elapsedMs)}</span>
@@ -292,6 +314,32 @@ function TasksPage({ fleet }: { fleet?: FleetInfo }) {
         </div>
       ) : <EmptyState icon="tasks" title="Your task history is empty" copy="Ask Codex to run a meaningful build, test, container, or GPU workload. ClusterYourCodex will record it here." />}
     </section>
+  );
+}
+
+function PlacementDetails({ job }: { job: NonNullable<FleetInfo["recentJobs"]>[number] }) {
+  const selectedId = job.placement?.selectedNodeId ?? job.nodeId;
+  const selected = job.placement?.candidates.find((candidate) => candidate.nodeId === selectedId);
+  const excluded = job.placement?.candidates.filter((candidate) => !candidate.eligible) ?? [];
+  if (!job.placement || (!selected && excluded.length === 0)) return null;
+  return (
+    <details className="placement-details">
+      <summary>Why this computer</summary>
+      {selected ? (
+        <div>
+          <strong>Selected: {selected.nodeName}</strong>
+          {selected.scoreComponents.map((component) => (
+            <span key={`${component.key}:${component.detail}`}>{component.value >= 0 ? "+" : "−"} {component.detail}</span>
+          ))}
+        </div>
+      ) : null}
+      {excluded.slice(0, 4).map((candidate) => (
+        <div key={candidate.nodeId}>
+          <strong>{candidate.nodeName} excluded</strong>
+          {candidate.rejectionReasons.slice(0, 3).map((reason) => <span key={`${reason.code}:${reason.detail}`}>− {reason.detail}</span>)}
+        </div>
+      ))}
+    </details>
   );
 }
 
@@ -332,25 +380,277 @@ function RulesPage() {
   );
 }
 
-function IntegrationPage({ online, fleet }: { online: boolean; fleet?: FleetInfo }) {
-  const pluginConnected = fleet?.codex.connected ?? false;
+const integrationLabels: Record<IntegrationState, string> = {
+  not_found: "Codex not found",
+  not_installed: "Not installed",
+  installed: "Installed",
+  restart_required: "Restart required",
+  connected: "Connected",
+  stale: "Check stale",
+  broken: "Needs repair",
+  version_mismatch: "Update required",
+};
+
+function IntegrationPage({
+  online,
+  fleet,
+  fleetRevision,
+  fleetObservedAt,
+}: {
+  online: boolean;
+  fleet?: FleetInfo;
+  fleetRevision?: number;
+  fleetObservedAt?: string;
+}) {
+  const [status, setStatus] = useState<IntegrationStatus>();
+  const [statusFresh, setStatusFresh] = useState(false);
+  const [statusChecking, setStatusChecking] = useState(true);
+  const [autoPollStatus, setAutoPollStatus] = useState(false);
+  const [operation, setOperation] = useState<"install" | "check" | "full_check">();
+  const [error, setError] = useState<string>();
+  const [result, setResult] = useState<IntegrationActionResult | IntegrationSelfTestResult>();
+  const [fullRunResult, setFullRunResult] = useState<FullRunCheckResult>();
+  const [fullRunBaseline, setFullRunBaseline] = useState<FullRunEvidenceBaseline>();
+  const [fullRunError, setFullRunError] = useState<string>();
+  const [integrationGeneration, setIntegrationGeneration] = useState(0);
+  const statusSequence = useRef(0);
+  const fullRunOperationSequence = useRef(0);
+
+  const refreshStatus = useCallback(async () => {
+    const sequence = ++statusSequence.current;
+    setStatusChecking(true);
+    setStatusFresh(false);
+    try {
+      const next = await integrationClient.status();
+      if (sequence !== statusSequence.current) return;
+      setStatus(next);
+      setStatusFresh(true);
+      setAutoPollStatus(["restart_required", "installed", "stale"].includes(next.state));
+      setError(undefined);
+    } catch (caught) {
+      if (sequence !== statusSequence.current) return;
+      setStatus(undefined);
+      setStatusFresh(false);
+      setError(caught instanceof Error ? caught.message : "Could not read Codex integration status");
+    } finally {
+      if (sequence === statusSequence.current) setStatusChecking(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshStatus();
+  }, [refreshStatus]);
+
+  useEffect(() => {
+    if (!statusFresh || !status) return undefined;
+    const remaining = Math.max(0, status.checkedAtMs + INTEGRATION_STATUS_MAX_AGE_MS - Date.now());
+    const timer = window.setTimeout(() => setStatusFresh(false), remaining);
+    return () => window.clearTimeout(timer);
+  }, [status, statusFresh]);
+
+  useEffect(() => () => {
+    fullRunOperationSequence.current += 1;
+  }, []);
+
+  const busy = operation !== undefined;
+  useEffect(() => {
+    if (busy || statusChecking || !autoPollStatus) return undefined;
+    const timer = window.setTimeout(() => void refreshStatus(), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [autoPollStatus, busy, refreshStatus, statusChecking]);
+
+  const install = useCallback(async () => {
+    setIntegrationGeneration((current) => current + 1);
+    setOperation("install");
+    setStatusFresh(false);
+    setError(undefined);
+    setResult(undefined);
+    try {
+      const installResult = await integrationClient.installOrRepair();
+      setStatus(installResult.status);
+      setStatusFresh(true);
+      setAutoPollStatus(["restart_required", "installed", "stale"].includes(installResult.status.state));
+      setResult(installResult);
+    } catch (caught) {
+      setStatus(undefined);
+      setStatusFresh(false);
+      setError(caught instanceof Error ? caught.message : "Codex plugin installation failed");
+    } finally {
+      setOperation(undefined);
+    }
+  }, []);
+
+  const runPluginCheck = useCallback(async () => {
+    setOperation("check");
+    setStatusFresh(false);
+    setError(undefined);
+    setResult(undefined);
+    try {
+      const checkResult = await integrationClient.selfTest();
+      setStatus(checkResult.status);
+      setStatusFresh(true);
+      setAutoPollStatus(["restart_required", "installed", "stale"].includes(checkResult.status.state));
+      setResult(checkResult);
+    } catch (caught) {
+      setStatus(undefined);
+      setStatusFresh(false);
+      setError(caught instanceof Error ? caught.message : "Codex plugin check failed");
+    } finally {
+      setOperation(undefined);
+    }
+  }, []);
+
+  const runFullCheck = useCallback(async () => {
+    if (!status || !statusFresh) return;
+    const sequence = ++fullRunOperationSequence.current;
+    setOperation("full_check");
+    setFullRunError(undefined);
+    setFullRunResult(undefined);
+    setFullRunBaseline(undefined);
+    try {
+      const check = await integrationClient.fullRunCheckWithProgress((progress) => {
+        if (sequence === fullRunOperationSequence.current) setFullRunResult(progress);
+      });
+      if (sequence !== fullRunOperationSequence.current) return;
+      setFullRunResult(check);
+      if (check.state === "passed" && check.finalFleet && check.selectedNode) {
+        const provedStatus = check.integration
+          ? {
+              ...status,
+              activeRuntime: {
+                pid: check.integration.activeRuntime.pid,
+                startedAt: check.integration.activeRuntime.startedAt,
+                bridgeVersion: check.integration.activeRuntime.bridgeVersion,
+              },
+            }
+          : status;
+        setFullRunBaseline({
+          integrationIdentity: integrationStatusIdentity(provedStatus),
+          integrationGeneration,
+          fleetRevision: check.finalFleet.fleetRevision,
+          selectedNodeId: check.selectedNode.id,
+          selectedNodeHeartbeatAt: check.selectedNode.heartbeatAt,
+        });
+      }
+    } catch (caught) {
+      if (sequence !== fullRunOperationSequence.current) return;
+      setFullRunResult(undefined);
+      setFullRunError(caught instanceof Error ? caught.message : "Full Run Check failed to start");
+    } finally {
+      if (sequence === fullRunOperationSequence.current) {
+        setOperation(undefined);
+        void refreshStatus();
+      }
+    }
+  }, [integrationGeneration, refreshStatus, status, statusFresh]);
+
+  const pluginConnected = statusFresh && status?.state === "connected" && status.agentsIntegrated;
+  const pluginInstalled = statusFresh && status?.pluginEnabled && status.agentsIntegrated &&
+    Boolean(status.payloadCatalogSha256) && Boolean(status.buildCatalogSha256) &&
+    status.installedVersion === status.desiredVersion &&
+    ["installed", "restart_required", "connected", "stale"].includes(status.state);
+  const installLabel = status?.state === "not_installed" || status?.state === "not_found"
+    ? "Install plugin"
+    : status?.state === "version_mismatch"
+      ? "Update plugin"
+      : "Repair plugin";
+  const resultSteps = result && "steps" in result ? result.steps : result?.checks;
+  const standalonePassed = result && "passed" in result ? result.passed : undefined;
+  const actionPassed = result && "steps" in result
+    ? result.steps.every((step) => step.passed) && result.status.state !== "broken"
+    : standalonePassed;
+  const staleReason = fullRunResult?.state === "passed"
+    ? fullRunStaleReason(fullRunBaseline, {
+        controllerOnline: online,
+        statusFresh,
+        status,
+        integrationGeneration,
+        fleetRevision,
+        selectedNode: fullRunResult?.selectedNode
+          ? fleet?.nodes.find((node) => node.id === fullRunResult.selectedNode?.id)
+          : undefined,
+      })
+    : undefined;
+  const fullRunVisualState = operation === "full_check"
+    ? "running"
+    : staleReason
+      ? "stale"
+      : fullRunResult?.state ?? "ready";
+
   return (
     <div className="integration-layout">
       <section className="integration-hero panel">
         <div className="integration-mark"><Icon name="codex" size={40} /><span><i /><i /><i /></span></div>
         <span className="eyebrow">CODEX + YOUR COMPUTERS</span>
         <h2>{pluginConnected ? "Codex is connected." : "Connect Codex to your fleet."}</h2>
-        <p>The plugin gives Codex five focused tools to inspect, plan, submit, monitor, and cancel delegated work. Machine credentials stay inside the local controller.</p>
+        <p>The plugin gives Codex eight focused tools to inspect, snapshot, plan, submit, monitor, and cancel delegated work. Machine credentials stay inside the local controller.</p>
         <div className="connection-statuses">
           <div><StatusDot status={online ? "connected" : "disconnected"} /><span>Desktop controller</span><strong>{online ? "Online" : "Offline"}</strong></div>
-          <div><StatusDot status={pluginConnected ? "connected" : "disconnected"} /><span>Codex plugin</span><strong>{pluginConnected ? "Connected" : "Not detected"}</strong></div>
+          <div><StatusDot status={pluginConnected ? "connected" : "disconnected"} /><span>Codex plugin</span><strong>{statusFresh && status ? integrationLabels[status.state] : statusChecking ? "Checking…" : "Unknown"}</strong></div>
         </div>
+        {statusFresh && status ? (
+          <div className={`integration-state state-${status.state}`}>
+            <strong>{integrationLabels[status.state]}</strong><span>{status.message}</span>
+            {status.installedVersion ? <small>Plugin v{status.installedVersion}{status.cliVersion ? ` · ${status.cliVersion}` : ""}{status.agentsIntegrated ? " · global AGENTS verified" : " · global AGENTS missing or drifted"}</small> : null}
+            {status.activeRuntime ? <small>Active Codex runtime online · PID {status.activeRuntime.pid} · started {new Date(status.activeRuntime.startedAt).toLocaleString()} · bridge {status.activeRuntime.bridgeVersion}</small> : null}
+            <small>Status checked {new Date(status.checkedAtMs).toLocaleString()}</small>
+            <button className="text-button small" disabled={busy || statusChecking} onClick={() => void refreshStatus()}>{statusChecking ? "Checking…" : "Check again"}</button>
+          </div>
+        ) : (
+          <div className="integration-state state-stale"><strong>Status not verified</strong><span>A fresh native status response is required before Connected or Full Run is enabled.</span><button className="text-button small" disabled={busy || statusChecking} onClick={() => void refreshStatus()}>{statusChecking ? "Checking…" : "Check again"}</button></div>
+        )}
       </section>
       <section className="panel setup-panel">
         <header className="panel-header"><div><h3>Setup checklist</h3><p>Three steps, no manual JSON editing.</p></div></header>
-        <div className="setup-step done"><span><Icon name="check" /></span><div><strong>Install the controller</strong><p>Local API is available only on loopback.</p></div></div>
-        <div className={`setup-step ${pluginConnected ? "done" : "current"}`}><span>{pluginConnected ? <Icon name="check" /> : "2"}</span><div><strong>Install the Codex plugin</strong><p>Add the Skill and local MCP bridge to Codex.</p></div><button className="button button-secondary">Install plugin</button></div>
-        <div className="setup-step"><span>3</span><div><strong>Run connection check</strong><p>Verify Codex can see eligible computers without seeing credentials.</p></div><button className="text-button small">Run check <Icon name="arrow" size={14} /></button></div>
+        <div className={`setup-step ${online ? "done" : "current"}`}><span>{online ? <Icon name="check" /> : "1"}</span><div><strong>Install the controller</strong><p>{online ? "Authenticated local API and fleet snapshot are responding on loopback." : "Start or repair the local controller first."}</p></div></div>
+        <div className={`setup-step ${pluginInstalled ? "done" : "current"}`}><span>{pluginInstalled ? <Icon name="check" /> : "2"}</span><div><strong>Install the Codex plugin</strong><p>Add or repair only the bundled Skill and MCP bridge.</p></div><button className="button button-secondary" disabled={busy || statusChecking || status?.state === "not_found"} onClick={() => void install()}>{operation === "install" ? "Working…" : installLabel}</button></div>
+        <div className={`setup-step ${pluginConnected ? "done" : pluginInstalled ? "current" : ""}`}><span>{pluginConnected ? <Icon name="check" /> : "3"}</span><div><strong>Codex Plugin Check</strong><p>Start a standalone installed-package MCP self-test, then separately require the live Codex runtime receipt before reporting Connected.</p></div><button className="text-button small" disabled={busy || statusChecking || !online || !pluginInstalled} onClick={() => void runPluginCheck()}>{operation === "check" ? "Checking…" : "Run plugin check"} <Icon name="arrow" size={14} /></button></div>
+        {error ? <div className="integration-result is-error" role="alert"><strong>Integration operation failed</strong><span>{error}</span><button className="text-button small" disabled={busy || statusChecking} onClick={() => void refreshStatus()}>Refresh status</button></div> : null}
+        {result && resultSteps ? (
+          <div className={`integration-result ${actionPassed ? "is-success" : "is-error"}`} aria-live="polite">
+            <strong>{"passed" in result
+              ? result.passed
+                ? result.status.state === "connected" ? "Standalone plugin self-test passed; live runtime is Connected" : `Standalone plugin self-test passed; live runtime is ${integrationLabels[result.status.state]}`
+                : "Standalone plugin self-test failed"
+              : actionPassed
+                ? result.restartRequired ? "Plugin installed — restart Codex" : "Plugin install/repair transaction completed"
+                : "Plugin install/repair did not reach a healthy installed state"}</strong>
+            {resultSteps.map((item) => <span key={item.id}><i>{item.passed ? "✓" : "!"}</i>{item.message}</span>)}
+            {"durationMs" in result ? <small>Standalone check completed in {result.durationMs} ms{result.restartRecommended ? " · Codex restart is still recommended" : ""}</small> : null}
+            {"durationMs" in result && result.selfTestExecutor ? <small>Isolated installed-MCP executor · PID {result.selfTestExecutor.pid} · session {result.selfTestExecutor.sessionId} · bridge {result.selfTestExecutor.bridgeVersion}</small> : null}
+          </div>
+        ) : null}
+      </section>
+      <section className="panel full-run-check">
+        <header><div><span className="eyebrow">END-TO-END VALIDATION</span><h3>Full Run Check</h3></div><span className={`status-pill check-${fullRunVisualState}`}>{fullRunVisualState === "running" ? "Running" : fullRunVisualState === "passed" ? "Passed" : fullRunVisualState === "failed" ? "Failed" : fullRunVisualState === "stale" ? "Stale" : "Ready"}</span></header>
+        <p>This is a real bounded proof: require an active Codex runtime online, separately run an isolated installed-MCP end-to-end executor, require a fresh managed-worker heartbeat, execute over managed HTTPS, verify outputs, and require an authoritative removal receipt.</p>
+        <ol>{(fullRunResult?.layers ?? fullRunLayerIds.map((id, index) => ({ id, state: operation === "full_check" && index === 0 ? "running" as const : "pending" as const, message: operation === "full_check" && index === 0 ? "Native end-to-end check is running." : "Waiting for the native check." }))).map((layer) => <li className={`layer-${layer.state}`} key={layer.id} title={layer.message}><i>{layer.state === "passed" ? "✓" : layer.state === "failed" ? "!" : layer.state === "running" ? "↻" : layer.state === "skipped" ? "×" : "—"}</i><span><strong>{layer.id.split("_").map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ")}</strong><small>{layer.message}</small></span></li>)}</ol>
+        {fullRunError ? <div className="full-run-evidence is-error" role="alert"><strong>Full Run Check could not complete</strong><span>{fullRunError}</span></div> : null}
+        {staleReason ? <div className="full-run-evidence is-stale" role="status"><strong>Historical PASS is stale</strong><span>{staleReason}</span><span>Run Full Check again before relying on this proof.</span></div> : null}
+        {fullRunResult ? (
+          <div className={`full-run-evidence ${fullRunResult.state === "running" ? "is-running" : fullRunResult.state === "passed" && !staleReason ? "is-success" : fullRunResult.state === "failed" ? "is-error" : "is-stale"}`} aria-live="polite">
+            <strong>{fullRunResult.state === "running"
+              ? `Full Run Check running${fullRunResult.failure ? ` · cleanup after ${fullRunResult.failure.code}` : ""}`
+              : fullRunResult.state === "passed"
+                ? staleReason ? "Previous end-to-end proof (stale)" : "End-to-end worker proof passed"
+                : `Full Run Check failed${fullRunResult.failure ? ` · ${fullRunResult.failure.code}` : ""}`}</strong>
+            <span>{fullRunResult.finishedAt
+              ? `Check window ${new Date(fullRunResult.startedAt).toLocaleString()} → ${new Date(fullRunResult.finishedAt).toLocaleString()} · ${fullRunResult.durationMs} ms`
+              : `Check started ${new Date(fullRunResult.startedAt).toLocaleString()} · ${fullRunResult.durationMs} ms elapsed`}</span>
+            <span>{fullRunResult.integration ? `Active Codex runtime online · PID ${fullRunResult.integration.activeRuntime.pid} · started ${new Date(fullRunResult.integration.activeRuntime.startedAt).toLocaleString()} · bridge ${fullRunResult.integration.activeRuntime.bridgeVersion} · independently reverified ${fullRunResult.integration.activeRuntime.reverifiedAfterRun ? "yes" : "no"}` : "No active Codex runtime evidence was accepted."}</span>
+            <span>{fullRunResult.integration?.selfTestExecutor ? `Isolated installed-MCP end-to-end executor · PID ${fullRunResult.integration.selfTestExecutor.pid} · session ${fullRunResult.integration.selfTestExecutor.sessionId} · MCP tools: ${fullRunResult.integration.selfTestExecutor.mcpToolsExercised.join(", ")} · controller round trip ${new Date(fullRunResult.integration.selfTestExecutor.controllerRoundTripAt).toLocaleString()}` : "No isolated installed-MCP executor evidence was accepted."}</span>
+            <span>{fullRunResult.selectedNode ? `Worker ${fullRunResult.selectedNode.name} (${fullRunResult.selectedNode.id}) · heartbeat ${new Date(fullRunResult.selectedNode.heartbeatAt).toLocaleString()}` : "No worker evidence was accepted."}</span>
+            <span>{fullRunResult.transport ? `${fullRunResult.transport.transport} · TLS ${fullRunResult.transport.tls ? "verified" : "missing"} · per-node credential reference ${fullRunResult.transport.credentialReferencePresent ? "present" : "missing"} · ${fullRunResult.transport.endpoint}` : "No managed transport evidence was accepted."}</span>
+            <span>{fullRunResult.placement ? `Plan ${fullRunResult.placement.planId} · score ${fullRunResult.placement.score} · revisions ${fullRunResult.placement.fleetRevision}/${fullRunResult.placement.nodeRevision}/${fullRunResult.placement.policyRevision}${fleetObservedAt ? ` · current fleet observed ${new Date(fleetObservedAt).toLocaleString()}` : ""}` : "No controller placement evidence was accepted."}</span>
+            <span>{fullRunResult.finalFleet ? `Post-run fleet revision ${fullRunResult.finalFleet.fleetRevision} · observed ${new Date(fullRunResult.finalFleet.observedAt).toLocaleString()}${fleetRevision !== undefined ? ` · current revision ${fleetRevision}` : ""}` : "No post-run fleet freshness evidence was accepted."}</span>
+            <span>{fullRunResult.snapshot ? `${fullRunResult.snapshot.digest} · ${fullRunResult.snapshot.sizeBytes} bytes` : "No snapshot receipt was accepted."}</span>
+            <span>{fullRunResult.job ? `Job ${fullRunResult.job.jobId} · run ${fullRunResult.job.runId} · ${fullRunResult.job.observedStates.join(" → ")} · exit ${fullRunResult.job.exitCode ?? "pending"}` : "No job receipt has been accepted yet."}</span>
+            {fullRunResult.logs.map((log) => <span key={log.stream}>Log {log.stream} · {log.sizeBytes} bytes · {log.chunkCount} chunk(s) · SHA-256 {log.sha256}</span>)}
+            {fullRunResult.artifacts.map((artifact) => <span key={artifact.id}>Artifact {artifact.name} · {artifact.sizeBytes} bytes · SHA-256 {artifact.sha256}</span>)}
+            <span>{fullRunResult.cleanup ? `Cleanup ${fullRunResult.cleanup.status} · ${fullRunResult.cleanup.relativeRoot} deleted · terminal version ${fullRunResult.cleanup.terminalStateVersion} · reservation released by ${fullRunResult.cleanup.releaseReason} at ${new Date(fullRunResult.cleanup.reservationReleasedAt).toLocaleString()}` : "No authoritative cleanup receipt was accepted."}</span>
+          </div>
+        ) : null}
+        <button className="button button-secondary" disabled={busy || statusChecking || !online || !pluginConnected} onClick={() => void runFullCheck()}>{operation === "full_check" ? "Running real worker proof…" : staleReason ? "Run Full Check again" : "Run Full Check"}</button>
       </section>
     </div>
   );
@@ -361,39 +661,48 @@ export function App() {
   const [fleet, setFleet] = useState<FleetInfo>();
   const [online, setOnline] = useState(false);
   const [accessError, setAccessError] = useState<string>();
-  const [loading, setLoading] = useState(true);
+  const [loadingCount, setLoadingCount] = useState(0);
   const [lastCheckedAt, setLastCheckedAt] = useState<Date>();
+  const [addComputerRequest, setAddComputerRequest] = useState(0);
+  const refreshSequence = useRef(0);
+  const lastAppliedRefresh = useRef(0);
+  const loading = loadingCount > 0 || !lastCheckedAt;
+
+  const openAddComputer = useCallback(() => {
+    setPage("computers");
+    setAddComputerRequest((current) => current + 1);
+  }, []);
 
   const refresh = useCallback(async () => {
-    setLoading(true);
+    const sequence = ++refreshSequence.current;
+    setLoadingCount((current) => current + 1);
     try {
       const health = await controllerClient.health();
+      const fleetInfo = await controllerClient.fleet();
+      if (sequence !== refreshSequence.current || sequence < lastAppliedRefresh.current) return;
+      lastAppliedRefresh.current = sequence;
       setOnline(health.status === "ready" || health.status === "degraded");
-      try {
-        const fleetInfo = await controllerClient.fleet();
-        setFleet(fleetInfo);
-        setAccessError(undefined);
-      } catch (error) {
-        setFleet(undefined);
-        setAccessError(error instanceof Error ? error.message : "Controller authentication failed");
-      }
+      setFleet((current) => preferNewerFleetSnapshot(current, fleetInfo));
+      setAccessError(undefined);
     } catch (error) {
+      if (sequence !== refreshSequence.current || sequence < lastAppliedRefresh.current) return;
+      lastAppliedRefresh.current = sequence;
       setOnline(false);
       setFleet(undefined);
       setAccessError(
-        error instanceof ControllerApiError && error.code === "transport_unavailable"
+        error instanceof ControllerApiError && (error.code === "transport_unavailable" || error.status === 401 || error.status === 403)
           ? error.message
           : undefined,
       );
     } finally {
-      setLastCheckedAt(new Date());
-      setLoading(false);
+      if (sequence === refreshSequence.current && sequence >= lastAppliedRefresh.current) setLastCheckedAt(new Date());
+      setLoadingCount((current) => Math.max(0, current - 1));
     }
   }, []);
 
   useEffect(() => {
     void refresh();
-    const interval = window.setInterval(() => void refresh(), 15_000);
+    const interval = window.setInterval(() => void refresh(), 5_000);
     return () => window.clearInterval(interval);
   }, [refresh]);
 
@@ -402,7 +711,7 @@ export function App() {
     if (loading && !lastCheckedAt) return "Checking controller…";
     if (accessError) return "Secure proxy unavailable";
     if (!online) return "Controller offline";
-    return `${fleet?.nodes.filter((node) => node.status !== "offline").length ?? 0} computers available`;
+    return `${fleet?.nodes.filter((node) => node.status === "online" || node.status === "busy").length ?? 0} computers available`;
   }, [accessError, fleet, lastCheckedAt, loading, online]);
 
   return (
@@ -437,7 +746,7 @@ export function App() {
           <div className="topbar-actions">
             <span className={`live-status ${online ? "is-online" : ""}`}><StatusDot status={online ? "connected" : "disconnected"} />{statusCopy}</span>
             <button className={`icon-button refresh-button ${loading ? "spinning" : ""}`} onClick={() => void refresh()} aria-label="Refresh controller status"><Icon name="refresh" /></button>
-            <button className="button button-primary" onClick={() => setPage("computers")}><Icon name="plus" /> Add computer</button>
+            <button className="button button-primary" onClick={openAddComputer}><Icon name="plus" /> Add computer</button>
           </div>
         </header>
 
@@ -449,11 +758,11 @@ export function App() {
         ) : null}
 
         <div className="page-content">
-          {page === "home" ? <HomePage fleet={fleet} online={online} openPage={setPage} /> : null}
-          {page === "computers" ? <ComputersPage fleet={fleet} /> : null}
+          {page === "home" ? <HomePage fleet={fleet} online={online} openAddComputer={openAddComputer} openPage={setPage} /> : null}
+          {page === "computers" ? <ComputersPage addRequest={addComputerRequest} fleet={fleet} /> : null}
           {page === "tasks" ? <TasksPage fleet={fleet} /> : null}
           {page === "rules" ? <RulesPage /> : null}
-          {page === "integration" ? <IntegrationPage fleet={fleet} online={online} /> : null}
+          {page === "integration" ? <IntegrationPage fleet={fleet} fleetObservedAt={fleet?.observedAt} fleetRevision={fleet?.fleetRevision} online={online} /> : null}
         </div>
       </main>
     </div>

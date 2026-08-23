@@ -1,0 +1,22 @@
+[package]
+name = "cyc-secrets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security_Credentials",
+] }
+
+[dev-dependencies]
+serde_json.workspace = true
+uuid.workspace = true

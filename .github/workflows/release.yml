@@ -65,7 +65,7 @@ jobs:
       - name: Lint full Rust workspace
         run: cargo clippy --workspace --all-targets --locked --target ${{ matrix.target }} -- -D warnings
       - name: Test full Rust workspace
-        run: cargo test --workspace --locked --target ${{ matrix.target }}
+        run: cargo test --workspace --locked --target ${{ matrix.target }} -- --test-threads=1
       - name: Build native release binaries
         run: >-
           cargo build --locked --release --target ${{ matrix.target }}
@@ -136,6 +136,27 @@ jobs:
             "$path" --version
             "$path" --help >/dev/null
           done
+      - name: Materialize worker-kit publisher key
+        if: matrix.include_worker == 'true'
+        shell: pwsh
+        env:
+          CYC_SIGNING_KEY_PEM_B64: ${{ secrets.CYC_WORKER_KIT_SIGNING_KEY_PEM_B64 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SIGNING_KEY_PEM_B64)) {
+            throw 'CYC_WORKER_KIT_SIGNING_KEY_PEM_B64 is required; unsigned worker kits are forbidden.'
+          }
+          try {
+            $bytes = [Convert]::FromBase64String([string]$env:CYC_SIGNING_KEY_PEM_B64)
+          } catch {
+            throw 'CYC_WORKER_KIT_SIGNING_KEY_PEM_B64 is not valid Base64.'
+          }
+          if ($bytes.Length -lt 64 -or $bytes.Length -gt 65536) {
+            throw 'Worker-kit signing key length is invalid.'
+          }
+          $path = Join-Path $env:RUNNER_TEMP "cyc-worker-kit-signing-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-${{ matrix.label }}.pem"
+          [IO.File]::WriteAllBytes($path, $bytes)
+          "CYC_WORKER_KIT_SIGNING_KEY_PATH=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Stage portable developer-preview archive
         shell: pwsh
         run: |
@@ -160,6 +181,30 @@ jobs:
               if ($LASTEXITCODE -ne 0) { throw "chmod failed for $destination" }
             }
           }
+
+          if ('${{ matrix.include_worker }}' -eq 'true') {
+            $workerKitTarget = if ('${{ matrix.platform }}' -eq 'windows') {
+              'windows-x86_64'
+            } else {
+              'linux-x86_64'
+            }
+            $workerKit = Join-Path $stage 'worker-kit'
+            $workerSource = Join-Path $PWD "target/${{ matrix.target }}/release/cyc-worker${{ matrix.suffix }}"
+            & ./packaging/worker-kits/New-WorkerKit.ps1 `
+              -Target $workerKitTarget `
+              -WorkerExecutable $workerSource `
+              -OutputDirectory $workerKit
+            if ($LASTEXITCODE -ne 0) { throw 'Worker-kit generation failed.' }
+            if ('${{ runner.os }}' -ne 'Windows') {
+              foreach ($path in @(
+                (Join-Path $workerKit 'cyc-worker'),
+                (Join-Path $workerKit 'install-worker.sh')
+              )) {
+                & chmod 'u+x' $path
+                if ($LASTEXITCODE -ne 0) { throw "chmod failed for $path" }
+              }
+            }
+          }
           Copy-Item -LiteralPath README.md, LICENSE -Destination $stage
 
           $managedState = if ('${{ matrix.include_worker }}' -eq 'true') {
@@ -175,7 +220,8 @@ jobs:
           $notice = @"
           # ClusterYourCodex developer preview
 
-          This is an unsigned, unattested portable developer-preview archive, not a stable installer.
+          This is a code-unsigned, unattested portable developer-preview archive, not a stable installer.
+          Included Windows/Linux worker kits carry a controller-verified Ed25519 publisher signature.
 
           Platform: ${{ matrix.platform }}
           Architecture: ${{ matrix.native_arch }}
@@ -184,8 +230,10 @@ jobs:
           $managedReason
 
           Verify the adjacent `.sha256` sidecar or the workflow-level `SHA256SUMS`
-          before extracting. No code-signing, notarization, SBOM, provenance, service
-          installation, automatic update, or rollback behavior is claimed by this archive.
+          before extracting. No code-signing, notarization, SBOM, or provenance is
+          claimed by this archive. Windows and Linux archives include an explicit
+          worker-kit lifecycle script with install, repair, uninstall, and rollback
+          support; nothing runs automatically when the archive is extracted.
           "@
           $notice | Set-Content -LiteralPath (Join-Path $stage 'PREVIEW-NOTICE.md') -Encoding UTF8
 
@@ -198,6 +246,7 @@ jobs:
             portableArchive = $true
             nativeRunner = '${{ matrix.os }}'
             binaries = $binaryNames
+            workerKitIncluded = ('${{ matrix.include_worker }}' -eq 'true')
             managedExecution = [ordered]@{
               workerIncluded = ('${{ matrix.include_worker }}' -eq 'true')
               state = $managedState
@@ -245,10 +294,109 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
           "$hash  $(Split-Path $archive -Leaf)" |
             Set-Content -NoNewline -Encoding ascii "$archive.sha256"
+      - name: Destroy worker-kit publisher key
+        if: always() && matrix.include_worker == 'true'
+        shell: pwsh
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace([string]$env:CYC_WORKER_KIT_SIGNING_KEY_PATH)) {
+            [IO.File]::Delete([string]$env:CYC_WORKER_KIT_SIGNING_KEY_PATH)
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: ClusterYourCodex-${{ matrix.label }}-preview
           path: release-assets/*
+          if-no-files-found: error
+      - name: Upload managed worker kit for controller aggregation
+        if: matrix.include_worker == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClusterYourCodex-worker-kit-${{ matrix.label }}
+          path: release-stage/*/worker-kit/*
+          if-no-files-found: error
+
+  linux-arm64-worker-kit:
+    name: Linux arm64 managed worker kit
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+      AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-preview-aarch64-unknown-linux-gnu
+      - name: Install Linux arm64 cross linker
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+      - name: Build Linux arm64 worker
+        shell: bash
+        run: >-
+          cargo build --locked --release --target aarch64-unknown-linux-gnu
+          --package cyc-worker
+      - name: Materialize worker-kit publisher key
+        shell: pwsh
+        env:
+          CYC_SIGNING_KEY_PEM_B64: ${{ secrets.CYC_WORKER_KIT_SIGNING_KEY_PEM_B64 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SIGNING_KEY_PEM_B64)) {
+            throw 'CYC_WORKER_KIT_SIGNING_KEY_PEM_B64 is required; unsigned worker kits are forbidden.'
+          }
+          try {
+            $bytes = [Convert]::FromBase64String([string]$env:CYC_SIGNING_KEY_PEM_B64)
+          } catch {
+            throw 'CYC_WORKER_KIT_SIGNING_KEY_PEM_B64 is not valid Base64.'
+          }
+          if ($bytes.Length -lt 64 -or $bytes.Length -gt 65536) {
+            throw 'Worker-kit signing key length is invalid.'
+          }
+          $path = Join-Path $env:RUNNER_TEMP "cyc-worker-kit-signing-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-linux-arm64.pem"
+          [IO.File]::WriteAllBytes($path, $bytes)
+          "CYC_WORKER_KIT_SIGNING_KEY_PATH=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Verify Linux arm64 worker and stage kit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $worker = Join-Path $PWD 'target/aarch64-unknown-linux-gnu/release/cyc-worker'
+          if (-not (Test-Path -LiteralPath $worker -PathType Leaf)) {
+            throw "Missing cross-compiled worker: $worker"
+          }
+          $elfHeader = @(& readelf -h $worker 2>&1)
+          if ($LASTEXITCODE -ne 0 -or -not ($elfHeader -match 'Machine:\s+AArch64')) {
+            throw 'The cross-compiled worker is not a Linux AArch64 ELF.'
+          }
+          & ./packaging/worker-kits/New-WorkerKit.ps1 `
+            -Target linux-aarch64 `
+            -WorkerExecutable $worker `
+            -OutputDirectory (Join-Path $PWD 'worker-kit-artifact')
+          if ($LASTEXITCODE -ne 0) { throw 'Linux arm64 worker-kit generation failed.' }
+          foreach ($path in @(
+            (Join-Path $PWD 'worker-kit-artifact/cyc-worker'),
+            (Join-Path $PWD 'worker-kit-artifact/install-worker.sh')
+          )) {
+            & chmod 'u+x' $path
+            if ($LASTEXITCODE -ne 0) { throw "chmod failed for $path" }
+          }
+          & bash -n (Join-Path $PWD 'worker-kit-artifact/install-worker.sh')
+          if ($LASTEXITCODE -ne 0) { throw 'Linux arm64 lifecycle script failed syntax validation.' }
+      - name: Destroy worker-kit publisher key
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace([string]$env:CYC_WORKER_KIT_SIGNING_KEY_PATH)) {
+            [IO.File]::Delete([string]$env:CYC_WORKER_KIT_SIGNING_KEY_PATH)
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClusterYourCodex-worker-kit-linux-arm64
+          path: worker-kit-artifact/*
           if-no-files-found: error
 
   integration-artifact:
@@ -273,7 +421,7 @@ jobs:
       - name: Lint full Rust workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test full Rust workspace
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --test-threads=1
       - run: pnpm -r lint
       - run: pnpm -r test
       - run: pnpm -r build
@@ -305,7 +453,7 @@ jobs:
           This archive contains the compiled renderer and Codex marketplace/plugin assets.
           It is not a native desktop application, controller, worker, CLI, or installer.
           The MCP bridge in this archive requires Node.js 20 or newer on PATH.
-          It is unsigned and unattested, and does not claim an SBOM or provenance.
+          It is code-unsigned and unattested, and does not claim an SBOM or provenance.
           '@ | Set-Content -LiteralPath (Join-Path $stage 'PREVIEW-NOTICE.md') -Encoding UTF8
           [ordered]@{
             schemaVersion = 'cyc.dev/platform-status/v1'
@@ -360,9 +508,16 @@ jobs:
 
   windows-preview:
     name: Windows x64 self-contained preview
+    needs: [rust-artifacts, linux-arm64-worker-kit]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Download cross-platform managed worker kits
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ClusterYourCodex-worker-kit-*
+          path: ${{ runner.temp }}\cyc-managed-worker-kits
+          merge-multiple: false
       - uses: dtolnay/rust-toolchain@1.98.0
       - uses: Swatinem/rust-cache@v2
         with:
@@ -380,16 +535,24 @@ jobs:
       - name: Lint full Rust workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test full Rust workspace
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --test-threads=1
       - run: pnpm -r lint
       - run: pnpm -r test
-      - run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -- --test-threads=1
       - run: cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
       - name: Validate Windows install lifecycle
         shell: powershell
         run: >-
           powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
           -File .\packaging\windows\Test-WindowsPackaging.ps1
+      - name: Validate managed worker kits
+        shell: powershell
+        run: >-
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+          -File .\packaging\worker-kits\Test-WorkerKits.ps1
+      - name: Install NSIS setup compiler
+        shell: powershell
+        run: choco install nsis --yes --no-progress
       - run: pnpm -r build
       - run: cargo build --locked --release --bin cyc-controller --bin cyc-worker --bin cyc
       - run: pnpm --filter @clusteryourcodex/desktop exec tauri build --no-bundle
@@ -495,25 +658,30 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($safeRef)) { $safeRef = 'build' }
           $name = "ClusterYourCodex-$safeRef-windows-x64-self-contained-preview"
           $preview = Join-Path $env:RUNNER_TEMP $name
+          $workerKits = Join-Path $env:RUNNER_TEMP 'cyc-managed-worker-kits'
           & .\packaging\windows\New-PreviewPayload.ps1 `
             -McpDeployRoot $mcpDeploy `
             -NodeExecutable $node `
             -NodeLicense $nodeLicense `
+            -WorkerKitsRoot $workerKits `
             -OutputRoot $preview
           if ($LASTEXITCODE -ne 0) { throw 'failed to stage Windows preview payload' }
 
           @'
           # ClusterYourCodex Windows developer preview
 
-          This self-contained ZIP contains the Windows GUI, controller, managed worker,
-          CLI, per-user bootstrap lifecycle, Codex marketplace/plugin, and private Node
-          runtime. It is a developer preview for trusted single-user jobs. Submitted
-          steps execute as the worker account; this is not a hostile-workload sandbox.
+          This self-contained ZIP contains the Windows GUI, controller, local managed
+          worker, CLI, per-user bootstrap lifecycle, Codex marketplace/plugin, private
+          Node runtime, and integrity-bound Windows x64/Linux x64/Linux arm64 worker
+          kits for SSH provisioning. It is a developer preview for trusted single-user
+          jobs. Submitted steps execute as the worker account; this is not a
+          hostile-workload sandbox.
 
-          The ZIP and bootstrap are unsigned and unattested. This is not a signed or
-          one-click NSIS distribution, and no SBOM, provenance, automatic update, or
-          stable-release support is claimed. Keep the extracted directory so the same
-          bootstrap can perform repair or uninstall.
+          The job also publishes a code-unsigned one-click NSIS Setup.exe built from this
+          exact manifest-bound payload. The ZIP, bootstrap, and Setup.exe are code-unsigned
+          and unattested; no SBOM, provenance, automatic update, or stable-release
+          support is claimed. Managed Worker Kits inside the payload have detached
+          Ed25519 publisher signatures. The installer registers its own repair-safe uninstaller.
           '@ | Set-Content -LiteralPath (Join-Path $preview 'PREVIEW-NOTICE.md') -Encoding UTF8
           [ordered]@{
             schemaVersion = 'cyc.dev/platform-status/v1'
@@ -521,9 +689,10 @@ jobs:
             platform = 'windows'
             architecture = 'x86_64'
             rustTarget = 'x86_64-pc-windows-msvc'
-            package = 'self-contained-bootstrap-zip'
+            package = 'self-contained-bootstrap-zip-and-nsis-setup'
             nativeRunner = 'windows-latest'
             binaries = @('ClusterYourCodex.exe', 'cyc-controller.exe', 'cyc-worker.exe', 'cyc.exe')
+            workerKits = @('windows-x86_64', 'linux-x86_64', 'linux-aarch64')
             managedExecution = [ordered]@{
               workerIncluded = $true
               state = 'developer-preview-enabled-for-trusted-single-user-jobs'
@@ -571,6 +740,14 @@ jobs:
 
           $archiveRoot = Join-Path $PWD 'release-assets'
           New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
+          $setup = Join-Path $archiveRoot 'ClusterYourCodex-Setup.exe'
+          & .\packaging\windows\New-SetupExecutable.ps1 `
+            -PackageRoot $preview `
+            -OutputPath $setup `
+            -Force
+          if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
+            throw 'failed to build ClusterYourCodex-Setup.exe'
+          }
           $archive = Join-Path $archiveRoot "$name.zip"
           Compress-Archive -LiteralPath $preview -DestinationPath $archive
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
@@ -599,8 +776,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
           $sidecars = @(Get-ChildItem -LiteralPath $inputRoot -File -Recurse -Filter '*.sha256' |
             Sort-Object FullName)
-          if ($sidecars.Count -ne 6) {
-            throw "Expected six preview archive sidecars, found $($sidecars.Count)."
+          if ($sidecars.Count -ne 7) {
+            throw "Expected seven preview artifact sidecars, found $($sidecars.Count)."
           }
 
           $records = New-Object System.Collections.Generic.List[object]
@@ -643,7 +820,8 @@ jobs:
             '-macos-x64-preview.tar.gz',
             '-macos-arm64-preview.tar.gz',
             '-integration-preview.zip',
-            '-windows-x64-self-contained-preview.zip'
+            '-windows-x64-self-contained-preview.zip',
+            'ClusterYourCodex-Setup.exe'
           )
           foreach ($suffix in $requiredSuffixes) {
             $matches = @($records | Where-Object { $_.name.EndsWith($suffix, [StringComparison]::Ordinal) })

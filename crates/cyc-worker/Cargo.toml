@@ -25,9 +25,11 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 sysinfo = "0.33"
+tar = "0.4"
 tokio.workspace = true
 uuid.workspace = true
 walkdir = "2.5"
+zstd = "0.13"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

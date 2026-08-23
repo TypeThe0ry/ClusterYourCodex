@@ -5,28 +5,54 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use cyc_protocol::worker::{ExecutionEvidence, RunCompletion, StreamEvidence, TerminationReason};
-use cyc_protocol::{
-    canonical_job_digest, normalize_job_spec, validate_portable_relative_path, JobKind, JobSpec,
-    JobState, Node, NodeTransport, OperatingSystem, Run, Shell, SourceSpec,
+use cyc_protocol::onboarding::PairingPhaseV1;
+use cyc_protocol::worker::{
+    ExecutionEvidence, NodeReportRequest, RunCompletion, StreamEvidence, TerminationReason,
+    MAX_SAFE_JSON_INTEGER,
 };
-use cyc_scheduler::{PlacementDecision, ScheduleError, Scheduler};
+use cyc_protocol::{
+    canonical_job_digest, normalize_job_spec, validate_portable_relative_path,
+    CleanupFailureCodeV1, CleanupFailureV1, CleanupReceiptV1, CleanupReservationReleaseReasonV1,
+    GpuResourceRequest, JobKind, JobSpec, JobState, Node, NodeConfig, NodeInventory, NodeMergeView,
+    NodeStateError, NodeTelemetry, NodeTransport, OperatingSystem, PlacementPlanBindingV1,
+    PlacementPlanDecisionV1, Run, Shell, SnapshotMetadataV1, SourceSpec,
+    MAX_SNAPSHOT_ARCHIVE_BYTES, PLACEMENT_PLAN_BINDING_API_VERSION, SNAPSHOT_API_VERSION,
+    SNAPSHOT_ARCHIVE_FORMAT,
+};
+use cyc_scheduler::{PlacementDecision, ScheduleError, Scheduler, SchedulingNode};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
 pub const PLAN_TTL_SECONDS: i64 = 60;
-pub const NODE_FRESHNESS_SECONDS: i64 = 120;
-pub const POLICY_REVISION: i64 = 2;
+pub const NODE_FRESHNESS_SECONDS: i64 = cyc_scheduler::DEFAULT_NODE_FRESHNESS_TTL.as_secs() as i64;
+pub const POLICY_REVISION: i64 = 3;
 pub const PAIRING_TTL_SECONDS: i64 = 600;
+pub const DISPATCH_TTL_SECONDS: i64 = 30;
 pub const CLAIM_TTL_SECONDS: i64 = 90;
+/// A terminal managed run keeps its capacity reservation while the worker
+/// removes the run-owned workspace.  This durable deadline bounds leakage if
+/// the worker never returns the authoritative `removed` receipt.
+pub const CLEANUP_RESERVATION_TTL_SECONDS: i64 = 15 * 60;
 pub const MAX_RUN_LOG_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_RUN_LOG_CHUNKS: u64 = 4_096;
 pub const MAX_RUN_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_RUN_ARTIFACT_COUNT: u32 = 1_000;
-const DEFAULT_LEASE_SECONDS: u64 = 900;
-const LEASE_GRACE_SECONDS: u64 = 300;
+
+const LEASE_PHASE_DISPATCH: &str = "dispatch";
+const LEASE_PHASE_EXECUTION: &str = "execution";
+const LEASE_PHASE_CLEANUP_PENDING: &str = "cleanup_pending";
+const PLACEMENT_ATTEMPT_INITIAL: &str = "initial_dispatch";
+const PLACEMENT_ATTEMPT_DISPATCH_EXPIRED: &str = "dispatch_lease_expired";
+const CLEANUP_RELEASE_REMOVED: &str = "removed_receipt";
+const CLEANUP_RELEASE_DEADLINE: &str = "deadline_recovery";
+const CLEANUP_RELEASE_LEGACY: &str = "legacy_migration";
+const CLEANUP_FAILURE_DEADLINE: &str = "removed_receipt_deadline_exceeded";
+const CLEANUP_FAILURE_LEGACY: &str = "legacy_release_without_cleanup_evidence";
+#[cfg(test)]
+const LEASE_PHASE_LEGACY: &str = "legacy";
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -36,6 +62,14 @@ pub enum StoreError {
     Database(#[from] rusqlite::Error),
     #[error("stored document is invalid")]
     Document(#[from] serde_json::Error),
+    #[error("stored node state is invalid")]
+    NodeState(#[from] NodeStateError),
+    #[error("node config or reserved policy labels are invalid")]
+    InvalidNodeConfig,
+    #[error("worker node report is invalid")]
+    InvalidNodeReport,
+    #[error("stored node row identity does not match its document")]
+    NodeIdentityMismatch,
     #[error("stored identifier is invalid")]
     Identifier(#[from] uuid::Error),
     #[error("stored timestamp is invalid")]
@@ -54,6 +88,8 @@ pub enum StoreError {
     InvalidRunEvidence,
     #[error("optimistic concurrency version mismatch")]
     VersionConflict { current_version: u64 },
+    #[error("node config revision mismatch")]
+    NodeConfigVersionConflict { current_revision: i64 },
     #[error("worker run state changed")]
     WorkerStateConflict {
         current_version: u64,
@@ -66,12 +102,26 @@ pub enum StoreError {
     PlanStale,
     #[error("plan JobSpec digest does not match")]
     PlanDigestMismatch,
+    #[error("stored placement plan binding is invalid")]
+    InvalidPlanBinding,
     #[error("placement failed")]
     Schedule(#[from] ScheduleError),
     #[error("worker authentication failed")]
     WorkerUnauthorized,
     #[error("pairing code is expired, used, or revoked")]
     PairingUnavailable,
+    #[error("pairing request does not match the consumed pairing binding")]
+    PairingBindingMismatch,
+    #[error("pairing credential digest is invalid")]
+    InvalidCredentialDigest,
+    #[error("pairing acknowledgement is not authorized for this staged credential")]
+    PairingAcknowledgementUnavailable,
+    #[error("pairing idempotency key is invalid")]
+    InvalidPairingOperationKey,
+    #[error("pairing idempotency key was already used with a different request")]
+    PairingIdempotencyMismatch,
+    #[error("pairing idempotency operation is no longer pending ({phase:?})")]
+    PairingIdempotencyFinalized { phase: PairingPhaseV1 },
     #[error("paired node is not a managed worker")]
     InvalidManagedNode,
     #[error("worker does not own this run")]
@@ -88,6 +138,14 @@ pub enum StoreError {
     LogQuotaExceeded,
     #[error("run artifact quota is exhausted")]
     ArtifactQuotaExceeded,
+    #[error("snapshot archive exceeds the controller limit")]
+    SnapshotQuotaExceeded,
+    #[error("cleanup receipt is invalid or does not match the terminal acknowledgement")]
+    InvalidCleanupReceipt,
+    #[error("cleanup receipt conflicts with the immutable stored receipt")]
+    CleanupConflict,
+    #[error("controller fleet revision is outside the exact JSON integer range")]
+    InvalidFleetRevision,
     #[error("controller object storage failed")]
     Io(#[from] std::io::Error),
 }
@@ -98,12 +156,17 @@ pub type StoreResult<T> = Result<T, StoreError>;
 pub struct Store {
     connection: Arc<Mutex<Connection>>,
     object_root: Arc<PathBuf>,
+    snapshot_root: Arc<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
 pub struct StoredJob {
     pub job: JobSpec,
     pub run: Run,
+    /// Controller-authored evidence for the active placement attempt. Every
+    /// superseded value remains immutable in `job_placement_attempts`. `None`
+    /// is reserved for pre-binding legacy rows which could not be backfilled.
+    pub plan_binding: Option<PlacementPlanBindingV1>,
     pub version: u64,
     pub cancel_requested: bool,
     pub lease_id: Option<Uuid>,
@@ -111,15 +174,7 @@ pub struct StoredJob {
 
 #[derive(Debug, Clone)]
 pub struct StoredPlan {
-    pub id: Uuid,
-    pub job_id: Uuid,
-    pub job_digest: String,
-    pub decision: PlacementDecision,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-    pub fleet_revision: i64,
-    pub node_revision: i64,
-    pub policy_revision: i64,
+    pub binding: PlacementPlanBindingV1,
     pub used_at: Option<DateTime<Utc>>,
 }
 
@@ -140,20 +195,59 @@ pub struct LeaseRenewal {
 }
 
 // Deliberately not `Debug`: this value owns a one-time plaintext pairing code.
-#[derive(Clone)]
 pub struct PairingSecret {
     pub id: Uuid,
+    pub intended_node_id: Uuid,
     pub code: String,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
 
-// Deliberately not `Debug`: this value owns the worker's plaintext credential.
-#[derive(Clone)]
+/// Result of an idempotent enrollment issue. The one-time code remains in the
+/// non-`Debug` `PairingSecret`; endpoint material is the immutable snapshot
+/// captured by the first request, so retries return byte-for-byte equivalent
+/// enrollment fields even if the active listener identity later changes.
+pub struct IdempotentPairing {
+    pub pairing: PairingSecret,
+    pub worker_url: String,
+    pub certificate_pem: String,
+    pub replayed: bool,
+}
+
+impl Drop for PairingSecret {
+    fn drop(&mut self) {
+        unsafe { self.code.as_bytes_mut().fill(0) };
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredPairingStatus {
+    pub pairing_id: Uuid,
+    pub intended_node_id: Uuid,
+    pub node_id: Option<Uuid>,
+    pub phase: PairingPhaseV1,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
+    pub acknowledged_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct PairedWorker {
     pub pairing_id: Uuid,
     pub node_id: Uuid,
-    pub credential: String,
+    pub credential_sha256: String,
+    pub consumed_at: DateTime<Utc>,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PairingAcknowledgement {
+    pub pairing_id: Uuid,
+    pub node_id: Uuid,
+    pub credential_sha256: String,
+    pub acknowledged_at: DateTime<Utc>,
 }
 
 // Deliberately not `Debug`: this value owns the run's plaintext credential.
@@ -194,19 +288,155 @@ pub struct StoredArtifact {
 }
 
 #[derive(Debug, Clone)]
+pub struct StoredSnapshot {
+    pub metadata: SnapshotMetadataV1,
+    relative_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct SnapshotDownload {
+    pub metadata: SnapshotMetadataV1,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
 pub struct StoredCompletion {
     pub completion: RunCompletion,
     pub sha256: String,
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct StoredCleanup {
+    pub receipt: cyc_protocol::CleanupReceiptV1,
+    pub received_at: DateTime<Utc>,
+}
+
+/// Durable controller-side binding for the post-terminal cleanup reservation.
+/// No credential material is stored here: only identifiers, the immutable
+/// terminal receipt digest, and cleanup/recovery evidence.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct StoredCleanupObligation {
+    pub job_id: Uuid,
+    pub run_id: Uuid,
+    pub lease_id: Uuid,
+    pub state_version: u64,
+    pub final_state: JobState,
+    pub completion_sha256: String,
+    pub terminal_acknowledged_at: DateTime<Utc>,
+    pub cleanup_deadline_at: DateTime<Utc>,
+    pub reservation_released_at: Option<DateTime<Utc>>,
+    pub release_reason: Option<CleanupReservationReleaseReasonV1>,
+    pub cleanup_failure: Option<CleanupFailureV1>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CleanupSnapshot {
+    pub stored: StoredJob,
+    pub cleanup: Option<StoredCleanup>,
+    pub completion: Option<StoredCompletion>,
+    pub obligation: Option<StoredCleanupObligation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredNodeConfig {
+    pub node_id: Uuid,
+    pub revision: i64,
+    pub config: NodeConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeReportOutcome {
+    pub node_id: Uuid,
+    pub accepted: bool,
+    pub inventory_revision: i64,
+    pub inventory_digest: String,
+    pub telemetry_boot_generation: u64,
+    pub telemetry_boot_id: Uuid,
+    pub telemetry_sequence: u64,
+    pub received_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FleetDocument<T> {
+    pub document: T,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    pub observed_at: DateTime<Utc>,
+    pub received_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FleetSlotView {
+    pub configured: u32,
+    pub containment_max_safe: u32,
+    pub effective: u32,
+    pub reserved: u32,
+    pub available: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FleetReservationView {
+    pub lease_id: Uuid,
+    pub run_id: Uuid,
+    pub job_id: Uuid,
+    pub phase: String,
+    pub slots: u32,
+    pub cpu_cores: u32,
+    pub memory_mib: u64,
+    pub disk_mib: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_device_id: Option<String>,
+    pub gpu_vram_mib: u64,
+    pub gpu_exclusive: bool,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FleetNodeView {
+    pub node_id: Uuid,
+    pub config: FleetDocument<NodeConfig>,
+    pub inventory: FleetDocument<NodeInventory>,
+    pub telemetry: FleetDocument<NodeTelemetry>,
+    pub availability: cyc_protocol::NodeAvailability,
+    pub availability_reasons: Vec<String>,
+    pub effective_slots: FleetSlotView,
+    pub effective_resources: cyc_protocol::NodeResources,
+    pub reservations: Vec<FleetReservationView>,
+}
+
+/// One authoritative `/v1/fleet` read.  Every field is decoded from the same
+/// SQLite snapshot and uses the same controller observation timestamp.
+#[derive(Debug, Clone)]
+pub struct FleetSnapshot {
+    pub fleet_revision: u64,
+    pub observed_at: DateTime<Utc>,
+    pub nodes: Vec<Node>,
+    pub node_views: Vec<FleetNodeView>,
+    pub recent_jobs: Vec<StoredJob>,
+}
+
 #[derive(Default)]
 struct ReservationTotals {
+    slots: u64,
     cpu_cores: u64,
     memory_mib: u64,
     disk_mib: u64,
     gpu_reservations: u64,
     count: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct GpuReservationTotals {
+    vram_mib: u64,
+    exclusive: bool,
+    count: u32,
 }
 
 impl Store {
@@ -237,9 +467,15 @@ impl Store {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
+        let snapshot_root = object_root
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .join("snapshots");
         let store = Self {
             connection: Arc::new(Mutex::new(connection)),
             object_root: Arc::new(object_root),
+            snapshot_root: Arc::new(snapshot_root),
         };
         store.migrate()?;
         Ok(store)
@@ -250,7 +486,7 @@ impl Store {
     }
 
     fn migrate(&self) -> StoreResult<()> {
-        let connection = self.connection()?;
+        let mut connection = self.connection()?;
         connection.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS controller_meta (
@@ -263,12 +499,45 @@ impl Store {
                 singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),
                 id TEXT UNIQUE NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS controller_secrets (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS nodes (
                 id TEXT PRIMARY KEY NOT NULL,
                 document TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 revision INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS node_configs (
+                node_id TEXT PRIMARY KEY NOT NULL,
+                document TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS node_inventories (
+                node_id TEXT PRIMARY KEY NOT NULL,
+                document TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 0,
+                digest TEXT NOT NULL DEFAULT '',
+                observed_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00'
+            );
+            CREATE TABLE IF NOT EXISTS node_telemetry (
+                node_id TEXT PRIMARY KEY NOT NULL,
+                document TEXT NOT NULL,
+                received_at TEXT NOT NULL,
+                boot_generation INTEGER NOT NULL DEFAULT 0,
+                boot_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+                sequence INTEGER NOT NULL DEFAULT 0,
+                observed_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00'
+            );
+            CREATE TABLE IF NOT EXISTS node_telemetry_boots (
+                node_id TEXT NOT NULL,
+                boot_id TEXT NOT NULL,
+                first_received_at TEXT NOT NULL,
+                PRIMARY KEY(node_id, boot_id)
             );
             CREATE TABLE IF NOT EXISTS plans (
                 id TEXT PRIMARY KEY NOT NULL,
@@ -291,8 +560,21 @@ impl Store {
                 updated_at TEXT NOT NULL,
                 version INTEGER NOT NULL DEFAULT 0,
                 cancel_requested INTEGER NOT NULL DEFAULT 0,
-                lease_id TEXT
+                lease_id TEXT,
+                plan_binding TEXT
             );
+            CREATE TABLE IF NOT EXISTS job_placement_attempts (
+                run_id TEXT NOT NULL,
+                attempt INTEGER NOT NULL,
+                plan_id TEXT UNIQUE NOT NULL,
+                node_id TEXT NOT NULL,
+                plan_binding TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY(run_id, attempt)
+            );
+            CREATE INDEX IF NOT EXISTS job_placement_attempts_run_idx
+                ON job_placement_attempts(run_id, attempt DESC);
             CREATE TABLE IF NOT EXISTS leases (
                 id TEXT PRIMARY KEY NOT NULL,
                 run_id TEXT UNIQUE NOT NULL,
@@ -302,6 +584,8 @@ impl Store {
                 memory_mib INTEGER NOT NULL,
                 disk_mib INTEGER NOT NULL,
                 gpu_reserved INTEGER NOT NULL,
+                slots INTEGER NOT NULL DEFAULT 1,
+                phase TEXT NOT NULL DEFAULT 'legacy',
                 created_at INTEGER NOT NULL,
                 expires_at INTEGER NOT NULL,
                 released_at INTEGER
@@ -310,17 +594,36 @@ impl Store {
             CREATE INDEX IF NOT EXISTS leases_active_node_idx
                 ON leases(node_id, expires_at, released_at);
 
+            CREATE TABLE IF NOT EXISTS lease_gpu_reservations (
+                lease_id TEXT PRIMARY KEY NOT NULL,
+                device_id TEXT NOT NULL,
+                vram_mib INTEGER NOT NULL,
+                exclusive INTEGER NOT NULL,
+                FOREIGN KEY(lease_id) REFERENCES leases(id)
+            );
+
             CREATE TABLE IF NOT EXISTS pairings (
                 id TEXT PRIMARY KEY NOT NULL,
                 code_hash TEXT UNIQUE NOT NULL,
                 created_at INTEGER NOT NULL,
                 expires_at INTEGER NOT NULL,
                 used_at INTEGER,
+                acknowledged_at INTEGER,
                 revoked_at INTEGER,
-                node_id TEXT
+                node_id TEXT,
+                intended_node_id TEXT
             );
             CREATE INDEX IF NOT EXISTS pairings_expiry_idx
                 ON pairings(expires_at, used_at, revoked_at);
+
+            CREATE TABLE IF NOT EXISTS pairing_operations (
+                operation_key TEXT PRIMARY KEY NOT NULL,
+                pairing_id TEXT UNIQUE NOT NULL,
+                requested_node_id TEXT,
+                worker_url TEXT NOT NULL,
+                certificate_pem TEXT NOT NULL,
+                FOREIGN KEY(pairing_id) REFERENCES pairings(id)
+            );
 
             CREATE TABLE IF NOT EXISTS worker_credentials (
                 id TEXT PRIMARY KEY NOT NULL,
@@ -328,6 +631,7 @@ impl Store {
                 node_id TEXT NOT NULL,
                 credential_hash TEXT UNIQUE NOT NULL,
                 created_at INTEGER NOT NULL,
+                activated_at INTEGER,
                 last_used_at INTEGER,
                 revoked_at INTEGER,
                 FOREIGN KEY(pairing_id) REFERENCES pairings(id)
@@ -373,6 +677,15 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS artifacts_run_idx ON artifacts(run_id, created_at);
 
+            CREATE TABLE IF NOT EXISTS snapshots (
+                digest TEXT PRIMARY KEY NOT NULL,
+                size INTEGER NOT NULL,
+                api_version TEXT NOT NULL,
+                archive_format TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS run_completions (
                 run_id TEXT PRIMARY KEY NOT NULL,
                 document TEXT NOT NULL,
@@ -380,12 +693,45 @@ impl Store {
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY(run_id) REFERENCES jobs(run_id)
             );
+
+            CREATE TABLE IF NOT EXISTS run_cleanups (
+                run_id TEXT PRIMARY KEY NOT NULL,
+                document TEXT NOT NULL,
+                document_sha256 TEXT NOT NULL,
+                received_at INTEGER NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES jobs(run_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS run_cleanup_obligations (
+                run_id TEXT PRIMARY KEY NOT NULL,
+                job_id TEXT NOT NULL,
+                lease_id TEXT UNIQUE NOT NULL,
+                state_version INTEGER NOT NULL,
+                final_state TEXT NOT NULL,
+                completion_sha256 TEXT NOT NULL,
+                terminal_acknowledged_at INTEGER NOT NULL,
+                cleanup_deadline_at INTEGER NOT NULL,
+                reservation_released_at INTEGER,
+                release_reason TEXT,
+                cleanup_failure_code TEXT,
+                failure_observed_at INTEGER,
+                FOREIGN KEY(run_id) REFERENCES jobs(run_id),
+                FOREIGN KEY(lease_id) REFERENCES leases(id)
+            );
+            CREATE INDEX IF NOT EXISTS run_cleanup_obligations_deadline_idx
+                ON run_cleanup_obligations(cleanup_deadline_at, reservation_released_at);
             "#,
         )?;
+
+        migrate_pairing_ack_schema(&mut connection)?;
 
         connection.execute(
             "INSERT OR IGNORE INTO controller_identity(singleton, id) VALUES (1, ?1)",
             [Uuid::new_v4().to_string()],
+        )?;
+        connection.execute(
+            "INSERT OR IGNORE INTO controller_secrets(key, value) VALUES ('pairing_prf_seed_v1', ?1)",
+            [random_secret()],
         )?;
 
         ensure_column(
@@ -393,6 +739,64 @@ impl Store {
             "nodes",
             "revision",
             "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(
+            &connection,
+            "node_configs",
+            "revision",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(
+            &connection,
+            "node_inventories",
+            "revision",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(
+            &connection,
+            "node_inventories",
+            "digest",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        ensure_column(
+            &connection,
+            "node_inventories",
+            "observed_at",
+            "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00'",
+        )?;
+        ensure_column(
+            &connection,
+            "node_telemetry",
+            "boot_generation",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(
+            &connection,
+            "node_telemetry",
+            "boot_id",
+            "TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000'",
+        )?;
+        ensure_column(
+            &connection,
+            "node_telemetry",
+            "sequence",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(
+            &connection,
+            "node_telemetry",
+            "observed_at",
+            "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00'",
+        )?;
+        migrate_legacy_node_documents(&connection)?;
+        backfill_node_report_metadata(&connection)?;
+        connection.execute(
+            r#"
+            INSERT OR IGNORE INTO node_telemetry_boots(node_id, boot_id, first_received_at)
+            SELECT node_id, boot_id, received_at FROM node_telemetry
+            WHERE boot_id != '' AND boot_id != ?1
+            "#,
+            [Uuid::nil().to_string()],
         )?;
         ensure_column(
             &connection,
@@ -433,6 +837,42 @@ impl Store {
             "INTEGER NOT NULL DEFAULT 0",
         )?;
         ensure_column(&connection, "jobs", "lease_id", "TEXT")?;
+        ensure_column(&connection, "jobs", "plan_binding", "TEXT")?;
+        ensure_column(&connection, "leases", "slots", "INTEGER NOT NULL DEFAULT 1")?;
+        ensure_column(
+            &connection,
+            "leases",
+            "phase",
+            "TEXT NOT NULL DEFAULT 'legacy'",
+        )?;
+        // A historical live worker_claim proves execution ownership. Other
+        // historical leases retain `legacy` timeout behavior rather than being
+        // silently reinterpreted as never-started dispatches.
+        connection.execute(
+            r#"
+            UPDATE leases SET phase = 'execution'
+            WHERE phase = 'legacy' AND released_at IS NULL
+              AND expires_at > CAST(strftime('%s', 'now') AS INTEGER)
+              AND EXISTS(
+                SELECT 1 FROM worker_claims c
+                WHERE c.lease_id = leases.id AND c.revoked_at IS NULL
+                  AND c.expires_at > CAST(strftime('%s', 'now') AS INTEGER)
+            )
+            "#,
+            [],
+        )?;
+        migrate_cleanup_reservation_schema(&mut connection)?;
+        ensure_column(&connection, "pairings", "intended_node_id", "TEXT")?;
+        // Historical consumed rows already carry their stable identity in
+        // node_id. Historical pending rows use their unique pairing id as a
+        // deterministic intended identity so status/pairing remains stable.
+        connection.execute(
+            r#"
+            UPDATE pairings SET intended_node_id = COALESCE(node_id, id)
+            WHERE intended_node_id IS NULL OR intended_node_id = ''
+            "#,
+            [],
+        )?;
         connection.execute(
             "UPDATE controller_meta SET value = ?1 WHERE key = 'policy_revision' AND value < ?1",
             [POLICY_REVISION],
@@ -443,6 +883,8 @@ impl Store {
             "DELETE FROM plans WHERE job_digest = '' OR expires_at <= 0",
             [],
         )?;
+        migrate_job_plan_bindings(&mut connection)?;
+        migrate_job_placement_attempts(&mut connection)?;
         Ok(())
     }
 
@@ -470,7 +912,7 @@ impl Store {
     pub fn upsert_node(&self, node: &Node) -> StoreResult<()> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        upsert_node_tx(&transaction, node)?;
+        upsert_node_tx(&transaction, node, NodeWriteAuthority::Controller)?;
         transaction.commit()?;
         Ok(())
     }
@@ -478,26 +920,192 @@ impl Store {
     /// Refresh node liveness without invalidating placement plans. Scheduling
     /// material must continue to flow through `upsert_node`.
     pub fn touch_node(&self, node_id: Uuid) -> StoreResult<()> {
-        let connection = self.connection()?;
-        let changed = connection.execute(
-            "UPDATE nodes SET updated_at = ?1 WHERE id = ?2",
-            params![Utc::now().to_rfc3339(), node_id.to_string()],
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "UPDATE node_telemetry SET received_at = ?1 WHERE node_id = ?2",
+            params![now, node_id.to_string()],
         )?;
         if changed == 0 {
             return Err(StoreError::NotFound);
         }
+        transaction.execute(
+            "UPDATE nodes SET updated_at = ?1 WHERE id = ?2",
+            params![now, node_id.to_string()],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
     pub fn list_nodes(&self) -> StoreResult<Vec<Node>> {
+        self.list_node_views()?
+            .into_iter()
+            .map(|view| view.to_node().map_err(StoreError::from))
+            .collect()
+    }
+
+    pub fn list_node_views(&self) -> StoreResult<Vec<NodeMergeView>> {
         let connection = self.connection()?;
-        list_all_nodes(&connection)
+        list_all_node_views(&connection, Utc::now())
+    }
+
+    pub fn list_fleet_node_views(&self) -> StoreResult<Vec<FleetNodeView>> {
+        let now = Utc::now();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        expire_leases(&transaction, now.timestamp())?;
+        let views = list_fleet_node_views_tx(&transaction, now)?;
+        transaction.commit()?;
+        Ok(views)
+    }
+
+    /// Return every `/v1/fleet` data source from one SQLite read snapshot.
+    /// Lease/deadline maintenance is committed first; the following deferred
+    /// transaction is read-only and pins one WAL snapshot across all queries.
+    pub fn fleet_snapshot(&self, recent_job_limit: usize) -> StoreResult<FleetSnapshot> {
+        let mut connection = self.connection()?;
+        {
+            let maintenance =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            expire_leases(&maintenance, Utc::now().timestamp())?;
+            maintenance.commit()?;
+        }
+
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        // The revision SELECT is deliberately first: it pins the WAL read
+        // snapshot before the controller observation clock is captured. No
+        // later concurrent commit can therefore appear to predate observedAt.
+        let fleet_revision = read_safe_fleet_revision(&transaction)?;
+        let observed_at = Utc::now();
+        let snapshot =
+            read_fleet_snapshot_tx(&transaction, fleet_revision, observed_at, recent_job_limit)?;
+        transaction.commit()?;
+        Ok(snapshot)
+    }
+
+    pub fn get_node_config(&self, node_id: Uuid) -> StoreResult<StoredNodeConfig> {
+        let connection = self.connection()?;
+        let (document, revision) = connection
+            .query_row(
+                "SELECT document, revision FROM node_configs WHERE node_id = ?1",
+                [node_id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound)?;
+        Ok(StoredNodeConfig {
+            node_id,
+            revision,
+            config: serde_json::from_str(&document)?,
+        })
+    }
+
+    pub fn update_node_config(
+        &self,
+        node_id: Uuid,
+        expected_revision: i64,
+        config: &NodeConfig,
+    ) -> StoreResult<StoredNodeConfig> {
+        config
+            .validate()
+            .map_err(|_| StoreError::InvalidNodeConfig)?;
+        validate_reserved_policy_labels(config)?;
+        effective_capacity_policy(config)?;
+        if expected_revision < 0 {
+            return Err(StoreError::InvalidNodeConfig);
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = transaction
+            .query_row(
+                r#"
+                SELECT c.revision, i.document, t.document, t.received_at, n.revision
+                FROM node_configs c
+                JOIN node_inventories i ON i.node_id = c.node_id
+                JOIN node_telemetry t ON t.node_id = c.node_id
+                JOIN nodes n ON n.id = c.node_id
+                WHERE c.node_id = ?1
+                "#,
+                [node_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound)?;
+        if row.0 != expected_revision {
+            return Err(StoreError::NodeConfigVersionConflict {
+                current_revision: row.0,
+            });
+        }
+        let next_revision = row.0.saturating_add(1);
+        let now = Utc::now();
+        let received_at = DateTime::parse_from_rfc3339(&row.3)
+            .map_err(|_| StoreError::Timestamp)?
+            .with_timezone(&Utc);
+        let view = NodeMergeView::merge(
+            node_id,
+            config.clone(),
+            serde_json::from_str(&row.1)?,
+            serde_json::from_str(&row.2)?,
+            received_at,
+            now,
+            Duration::from_secs(u64::try_from(NODE_FRESHNESS_SECONDS).unwrap_or_default()),
+        )?;
+        let changed = transaction.execute(
+            r#"
+            UPDATE node_configs SET document = ?1, updated_at = ?2, revision = ?3
+            WHERE node_id = ?4 AND revision = ?5
+            "#,
+            params![
+                serde_json::to_string(config)?,
+                now.to_rfc3339(),
+                next_revision,
+                node_id.to_string(),
+                expected_revision,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::NodeConfigVersionConflict {
+                current_revision: row.0,
+            });
+        }
+        transaction.execute(
+            r#"
+            UPDATE nodes SET document = ?1, updated_at = ?2, revision = ?3 WHERE id = ?4
+            "#,
+            params![
+                serde_json::to_string(&view.to_node()?)?,
+                now.to_rfc3339(),
+                row.4.saturating_add(1),
+                node_id.to_string(),
+            ],
+        )?;
+        increment_meta(&transaction, "fleet_revision")?;
+        transaction.commit()?;
+        Ok(StoredNodeConfig {
+            node_id,
+            revision: next_revision,
+            config: config.clone(),
+        })
     }
 
     pub fn create_pairing(&self) -> StoreResult<PairingSecret> {
-        let now = Utc::now();
+        self.create_pairing_for(None)
+    }
+
+    pub fn create_pairing_for(&self, intended_node_id: Option<Uuid>) -> StoreResult<PairingSecret> {
+        let now = timestamp(Utc::now().timestamp())?;
         let pairing = PairingSecret {
             id: Uuid::new_v4(),
+            intended_node_id: intended_node_id.unwrap_or_else(Uuid::new_v4),
             code: random_secret(),
             created_at: now,
             expires_at: now + chrono::Duration::seconds(PAIRING_TTL_SECONDS),
@@ -505,17 +1113,254 @@ impl Store {
         let hash = secret_hash(&pairing.code);
         self.connection()?.execute(
             r#"
-            INSERT INTO pairings(id, code_hash, created_at, expires_at, used_at, revoked_at, node_id)
-            VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL)
+            INSERT INTO pairings(
+                id, code_hash, created_at, expires_at, used_at, revoked_at, node_id,
+                intended_node_id
+            )
+            VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5)
             "#,
             params![
                 pairing.id.to_string(),
                 hash,
                 pairing.created_at.timestamp(),
                 pairing.expires_at.timestamp(),
+                pairing.intended_node_id.to_string(),
             ],
         )?;
         Ok(pairing)
+    }
+
+    /// Issue or replay an enrollment bundle under a durable controller-side
+    /// operation key. The plaintext pairing code is never persisted: it is
+    /// deterministically derived from a private controller seed plus immutable
+    /// operation fields, while only its normal verifier hash is stored in the
+    /// `pairings` table.
+    pub fn create_pairing_idempotent(
+        &self,
+        operation_key: &str,
+        requested_node_id: Option<Uuid>,
+        worker_url: &str,
+        certificate_pem: &str,
+    ) -> StoreResult<IdempotentPairing> {
+        if !valid_pairing_operation_key(operation_key) {
+            return Err(StoreError::InvalidPairingOperationKey);
+        }
+        if worker_url.is_empty()
+            || worker_url.len() > 2_048
+            || worker_url.chars().any(char::is_control)
+            || certificate_pem.is_empty()
+            || certificate_pem.len() > 128 * 1024
+        {
+            return Err(StoreError::InvalidUpload);
+        }
+
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let seed = transaction.query_row(
+            "SELECT value FROM controller_secrets WHERE key = 'pairing_prf_seed_v1'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        let existing = transaction
+            .query_row(
+                r#"
+                SELECT
+                    p.id, p.intended_node_id, p.created_at, p.expires_at,
+                    p.used_at, p.revoked_at, o.requested_node_id,
+                    o.worker_url, o.certificate_pem
+                FROM pairing_operations o
+                JOIN pairings p ON p.id = o.pairing_id
+                WHERE o.operation_key = ?1
+                "#,
+                [operation_key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        if let Some(existing) = existing {
+            let original_request = existing.6.as_deref().map(Uuid::parse_str).transpose()?;
+            if original_request != requested_node_id {
+                return Err(StoreError::PairingIdempotencyMismatch);
+            }
+            let created_at = timestamp(existing.2)?;
+            let expires_at = timestamp(existing.3)?;
+            let phase = if existing.5.is_some() {
+                Some(PairingPhaseV1::Revoked)
+            } else if existing.4.is_some() {
+                Some(PairingPhaseV1::Consumed)
+            } else if expires_at <= Utc::now() {
+                Some(PairingPhaseV1::Expired)
+            } else {
+                None
+            };
+            if let Some(phase) = phase {
+                return Err(StoreError::PairingIdempotencyFinalized { phase });
+            }
+            let pairing_id = Uuid::parse_str(&existing.0)?;
+            let intended_node_id = Uuid::parse_str(&existing.1)?;
+            let code = derive_pairing_code(
+                &seed,
+                operation_key,
+                pairing_id,
+                intended_node_id,
+                created_at.timestamp(),
+            );
+            return Ok(IdempotentPairing {
+                pairing: PairingSecret {
+                    id: pairing_id,
+                    intended_node_id,
+                    code,
+                    created_at,
+                    expires_at,
+                },
+                worker_url: existing.7,
+                certificate_pem: existing.8,
+                replayed: true,
+            });
+        }
+
+        let created_at = timestamp(Utc::now().timestamp())?;
+        let expires_at = created_at + chrono::Duration::seconds(PAIRING_TTL_SECONDS);
+        let pairing_id = Uuid::new_v4();
+        let intended_node_id = requested_node_id.unwrap_or_else(Uuid::new_v4);
+        let code = derive_pairing_code(
+            &seed,
+            operation_key,
+            pairing_id,
+            intended_node_id,
+            created_at.timestamp(),
+        );
+        transaction.execute(
+            r#"
+            INSERT INTO pairings(
+                id, code_hash, created_at, expires_at, used_at, revoked_at, node_id,
+                intended_node_id
+            ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5)
+            "#,
+            params![
+                pairing_id.to_string(),
+                secret_hash(&code),
+                created_at.timestamp(),
+                expires_at.timestamp(),
+                intended_node_id.to_string(),
+            ],
+        )?;
+        transaction.execute(
+            r#"
+            INSERT INTO pairing_operations(
+                operation_key, pairing_id, requested_node_id, worker_url, certificate_pem
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                operation_key,
+                pairing_id.to_string(),
+                requested_node_id.map(|id| id.to_string()),
+                worker_url,
+                certificate_pem,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(IdempotentPairing {
+            pairing: PairingSecret {
+                id: pairing_id,
+                intended_node_id,
+                code,
+                created_at,
+                expires_at,
+            },
+            worker_url: worker_url.to_owned(),
+            certificate_pem: certificate_pem.to_owned(),
+            replayed: false,
+        })
+    }
+
+    pub fn get_pairing_status(&self, pairing_id: Uuid) -> StoreResult<StoredPairingStatus> {
+        let connection = self.connection()?;
+        let row = connection
+            .query_row(
+                r#"
+                SELECT
+                    p.intended_node_id,
+                    p.node_id,
+                    p.created_at,
+                    p.expires_at,
+                    p.used_at,
+                    p.acknowledged_at,
+                    p.revoked_at,
+                    EXISTS(
+                        SELECT 1 FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                          AND wc.activated_at IS NOT NULL
+                          AND wc.revoked_at IS NULL
+                    ),
+                    EXISTS(
+                        SELECT 1 FROM nodes n WHERE n.id = p.node_id
+                    )
+                FROM pairings p WHERE p.id = ?1
+                "#,
+                [pairing_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, i64>(7)? != 0,
+                        row.get::<_, i64>(8)? != 0,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound)?;
+        let intended_node_id = Uuid::parse_str(&row.0)?;
+        let node_id = row.1.as_deref().map(Uuid::parse_str).transpose()?;
+        let created_at = timestamp(row.2)?;
+        let expires_at = timestamp(row.3)?;
+        let consumed_at = row.4.map(timestamp).transpose()?;
+        let acknowledged_at = row.5.map(timestamp).transpose()?;
+        let revoked_at = row.6.map(timestamp).transpose()?;
+        let ready = acknowledged_at.is_some()
+            && consumed_at.is_some()
+            && node_id == Some(intended_node_id)
+            && row.7
+            && row.8;
+        let phase = if revoked_at.is_some() {
+            PairingPhaseV1::Revoked
+        } else if ready {
+            PairingPhaseV1::Ready
+        } else if consumed_at.is_some() {
+            PairingPhaseV1::Consumed
+        } else if expires_at <= Utc::now() {
+            PairingPhaseV1::Expired
+        } else {
+            PairingPhaseV1::Pending
+        };
+        Ok(StoredPairingStatus {
+            pairing_id,
+            intended_node_id,
+            node_id,
+            phase,
+            created_at,
+            expires_at,
+            consumed_at,
+            acknowledged_at,
+            revoked_at,
+        })
     }
 
     /// Validate a one-time pairing code without consuming it. The worker
@@ -528,8 +1373,7 @@ impl Store {
             .query_row(
                 r#"
                 SELECT 1 FROM pairings
-                WHERE code_hash = ?1 AND used_at IS NULL AND revoked_at IS NULL
-                  AND expires_at > ?2
+                WHERE code_hash = ?1 AND revoked_at IS NULL AND expires_at > ?2
                 "#,
                 params![secret_hash(code), Utc::now().timestamp()],
                 |_| Ok(()),
@@ -538,50 +1382,124 @@ impl Store {
         available.ok_or(StoreError::PairingUnavailable)
     }
 
-    /// Atomically consume a one-time pairing code, bind it to the probed node,
-    /// and persist only the hash of the newly issued long-lived credential.
-    pub fn consume_pairing(&self, code: &str, node: &Node) -> StoreResult<PairedWorker> {
+    /// Atomically bind a pairing code to a worker-generated credential digest.
+    /// A byte-identical retry is a read-only replay, including after the first
+    /// transaction committed but its response was lost. The staged credential
+    /// remains inactive until `acknowledge_pairing` commits the worker's local
+    /// config installation.
+    pub fn consume_pairing(
+        &self,
+        code: &str,
+        pairing_id: Uuid,
+        intended_node_id: Uuid,
+        credential_sha256: &str,
+        node: &Node,
+    ) -> StoreResult<PairedWorker> {
         if !matches!(&node.transport, NodeTransport::Managed { .. }) {
             return Err(StoreError::InvalidManagedNode);
         }
+        if !valid_sha256(credential_sha256) {
+            return Err(StoreError::InvalidCredentialDigest);
+        }
         let now = Utc::now().timestamp();
         let code_hash = secret_hash(code);
-        let credential = random_secret();
-        let credential_hash = secret_hash(&credential);
         let credential_id = Uuid::new_v4();
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let pairing_id = transaction
+        let pairing = transaction
             .query_row(
                 r#"
-                SELECT id FROM pairings
-                WHERE code_hash = ?1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?2
+                SELECT id, intended_node_id, node_id, used_at, acknowledged_at
+                FROM pairings
+                WHERE code_hash = ?1 AND revoked_at IS NULL AND expires_at > ?2
                 "#,
                 params![code_hash, now],
-                |row| row.get::<_, String>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or(StoreError::PairingUnavailable)?;
-        let pairing_id = Uuid::parse_str(&pairing_id)?;
+        let stored_pairing_id = Uuid::parse_str(&pairing.0)?;
+        let stored_intended_node_id = Uuid::parse_str(&pairing.1)?;
+        if pairing_id != stored_pairing_id
+            || intended_node_id != stored_intended_node_id
+            || node.id != stored_intended_node_id
+        {
+            return Err(StoreError::PairingBindingMismatch);
+        }
 
-        upsert_node_tx(&transaction, node)?;
-        // Pairing the same stable node again is credential rotation. Old
-        // credentials are revoked before the replacement is committed.
-        transaction.execute(
-            "UPDATE worker_credentials SET revoked_at = ?1 WHERE node_id = ?2 AND revoked_at IS NULL",
-            params![now, node.id.to_string()],
-        )?;
+        if let Some(consumed_at) = pairing.3 {
+            let stored_node_id = pairing
+                .2
+                .as_deref()
+                .map(Uuid::parse_str)
+                .transpose()?
+                .ok_or(StoreError::PairingBindingMismatch)?;
+            if stored_node_id != intended_node_id {
+                return Err(StoreError::PairingBindingMismatch);
+            }
+            let exact = transaction
+                .query_row(
+                    r#"
+                    SELECT 1 FROM worker_credentials
+                    WHERE pairing_id = ?1 AND node_id = ?2 AND credential_hash = ?3
+                      AND revoked_at IS NULL
+                    "#,
+                    params![
+                        pairing_id.to_string(),
+                        intended_node_id.to_string(),
+                        credential_sha256,
+                    ],
+                    |_| Ok(()),
+                )
+                .optional()?;
+            if exact.is_none() {
+                return Err(StoreError::PairingBindingMismatch);
+            }
+            transaction.commit()?;
+            return Ok(PairedWorker {
+                pairing_id,
+                node_id: intended_node_id,
+                credential_sha256: credential_sha256.to_owned(),
+                consumed_at: timestamp(consumed_at)?,
+                replayed: true,
+            });
+        }
+
+        if transaction
+            .query_row(
+                "SELECT 1 FROM worker_credentials WHERE credential_hash = ?1",
+                [credential_sha256],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some()
+        {
+            return Err(StoreError::PairingBindingMismatch);
+        }
+
+        let mut node = node.clone();
+        node.id = intended_node_id;
+        upsert_node_tx(&transaction, &node, NodeWriteAuthority::PairingProbe)?;
         transaction.execute(
             r#"
             INSERT INTO worker_credentials(
-                id, pairing_id, node_id, credential_hash, created_at, last_used_at, revoked_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL)
+                id, pairing_id, node_id, credential_hash, created_at, activated_at,
+                last_used_at, revoked_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL)
             "#,
             params![
                 credential_id.to_string(),
                 pairing_id.to_string(),
-                node.id.to_string(),
-                credential_hash,
+                intended_node_id.to_string(),
+                credential_sha256,
                 now,
             ],
         )?;
@@ -590,7 +1508,7 @@ impl Store {
             UPDATE pairings SET used_at = ?1, node_id = ?2
             WHERE id = ?3 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?1
             "#,
-            params![now, node.id.to_string(), pairing_id.to_string()],
+            params![now, intended_node_id.to_string(), pairing_id.to_string()],
         )?;
         if changed != 1 {
             return Err(StoreError::PairingUnavailable);
@@ -598,8 +1516,134 @@ impl Store {
         transaction.commit()?;
         Ok(PairedWorker {
             pairing_id,
-            node_id: node.id,
-            credential,
+            node_id: intended_node_id,
+            credential_sha256: credential_sha256.to_owned(),
+            consumed_at: timestamp(now)?,
+            replayed: false,
+        })
+    }
+
+    /// Header-only preauthorization for the ACK route. Pending credentials are
+    /// accepted here and nowhere else; the strict body binding is checked in
+    /// `acknowledge_pairing` inside the same database transaction.
+    pub fn preauthorize_pairing_ack(&self, credential: &str) -> StoreResult<()> {
+        self.connection()?
+            .query_row(
+                r#"
+                SELECT 1 FROM worker_credentials
+                WHERE credential_hash = ?1 AND revoked_at IS NULL
+                "#,
+                [secret_hash(credential)],
+                |_| Ok(()),
+            )
+            .optional()?
+            .ok_or(StoreError::PairingAcknowledgementUnavailable)
+    }
+
+    /// Activate the staged credential only after the worker has durably
+    /// installed it. Credential rotation and old-credential revocation are one
+    /// transaction, so readers observe either the old identity or the new one,
+    /// never a partially switched state.
+    pub fn acknowledge_pairing(
+        &self,
+        credential: &str,
+        pairing_id: Uuid,
+        node_id: Uuid,
+        credential_sha256: &str,
+    ) -> StoreResult<PairingAcknowledgement> {
+        if !valid_sha256(credential_sha256) || secret_hash(credential) != credential_sha256 {
+            return Err(StoreError::PairingAcknowledgementUnavailable);
+        }
+        let now = Utc::now().timestamp();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = transaction
+            .query_row(
+                r#"
+                SELECT p.used_at, p.acknowledged_at, wc.activated_at
+                FROM worker_credentials wc
+                JOIN pairings p ON p.id = wc.pairing_id
+                WHERE wc.credential_hash = ?1 AND wc.pairing_id = ?2
+                  AND wc.node_id = ?3 AND p.node_id = ?3
+                  AND wc.revoked_at IS NULL AND p.revoked_at IS NULL
+                "#,
+                params![
+                    credential_sha256,
+                    pairing_id.to_string(),
+                    node_id.to_string(),
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(StoreError::PairingAcknowledgementUnavailable)?;
+        if row.0.is_none() {
+            return Err(StoreError::PairingAcknowledgementUnavailable);
+        }
+
+        let acknowledged_at = if let Some(acknowledged_at) = row.1 {
+            if row.2.is_none() {
+                return Err(StoreError::PairingAcknowledgementUnavailable);
+            }
+            acknowledged_at
+        } else {
+            transaction.execute(
+                r#"
+                UPDATE worker_credentials SET revoked_at = ?1
+                WHERE node_id = ?2 AND pairing_id != ?3 AND revoked_at IS NULL
+                "#,
+                params![now, node_id.to_string(), pairing_id.to_string()],
+            )?;
+            let activated = transaction.execute(
+                r#"
+                UPDATE worker_credentials SET activated_at = ?1, last_used_at = ?1
+                WHERE pairing_id = ?2 AND node_id = ?3 AND credential_hash = ?4
+                  AND activated_at IS NULL AND revoked_at IS NULL
+                "#,
+                params![
+                    now,
+                    pairing_id.to_string(),
+                    node_id.to_string(),
+                    credential_sha256,
+                ],
+            )?;
+            if activated != 1 {
+                return Err(StoreError::PairingAcknowledgementUnavailable);
+            }
+            let acknowledged = transaction.execute(
+                r#"
+                UPDATE pairings SET acknowledged_at = ?1
+                WHERE id = ?2 AND node_id = ?3 AND acknowledged_at IS NULL
+                  AND revoked_at IS NULL
+                "#,
+                params![now, pairing_id.to_string(), node_id.to_string()],
+            )?;
+            if acknowledged != 1 {
+                return Err(StoreError::PairingAcknowledgementUnavailable);
+            }
+            // Any competing unacknowledged enrollment for this stable node has
+            // lost the activation race and must not rotate the identity later.
+            transaction.execute(
+                r#"
+                UPDATE pairings SET revoked_at = ?1
+                WHERE intended_node_id = ?2 AND id != ?3
+                  AND acknowledged_at IS NULL AND revoked_at IS NULL
+                "#,
+                params![now, node_id.to_string(), pairing_id.to_string()],
+            )?;
+            now
+        };
+        transaction.commit()?;
+        Ok(PairingAcknowledgement {
+            pairing_id,
+            node_id,
+            credential_sha256: credential_sha256.to_owned(),
+            acknowledged_at: timestamp(acknowledged_at)?,
         })
     }
 
@@ -630,7 +1674,8 @@ impl Store {
             .query_row(
                 r#"
                 SELECT node_id FROM worker_credentials
-                WHERE credential_hash = ?1 AND revoked_at IS NULL
+                WHERE credential_hash = ?1 AND activated_at IS NOT NULL
+                  AND revoked_at IS NULL
                 "#,
                 [hash],
                 |row| row.get::<_, String>(0),
@@ -642,6 +1687,212 @@ impl Store {
             params![now, secret_hash(credential)],
         )?;
         Ok(Uuid::parse_str(&node_id)?)
+    }
+
+    /// Persist one authenticated, sequenced worker report. Node identity comes
+    /// only from the credential lookup. A replay or out-of-order report is a
+    /// successful no-op and cannot refresh either document or controller
+    /// receive time.
+    pub fn record_node_report(
+        &self,
+        credential: &str,
+        report: &NodeReportRequest,
+    ) -> StoreResult<NodeReportOutcome> {
+        report
+            .validate()
+            .map_err(|_| StoreError::InvalidNodeReport)?;
+        let now = Utc::now();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        expire_leases(&transaction, now.timestamp())?;
+        let node_id = authenticate_worker_tx(&transaction, credential, now.timestamp())?;
+
+        let existing = transaction
+            .query_row(
+                r#"
+                SELECT i.document, i.revision, i.digest, i.observed_at,
+                       t.boot_generation, t.boot_id, t.sequence, t.received_at,
+                       c.document, n.revision
+                FROM node_inventories i
+                JOIN node_telemetry t ON t.node_id = i.node_id
+                JOIN node_configs c ON c.node_id = i.node_id
+                JOIN nodes n ON n.id = i.node_id
+                WHERE i.node_id = ?1
+                "#,
+                [node_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, i64>(9)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound)?;
+        let previous_generation = as_u64(existing.4);
+        let previous_boot = Uuid::parse_str(&existing.5)?;
+        let previous_sequence = as_u64(existing.6);
+        let legacy_retired_boot_replay = previous_generation == 0
+            && report.telemetry.boot_generation == 0
+            && previous_boot != report.telemetry.boot_id
+            && transaction
+                .query_row(
+                    r#"
+                    SELECT 1 FROM node_telemetry_boots
+                    WHERE node_id = ?1 AND boot_id = ?2
+                    "#,
+                    params![node_id.to_string(), report.telemetry.boot_id.to_string()],
+                    |_row| Ok(()),
+                )
+                .optional()?
+                .is_some();
+        let generation_order_reject =
+            if previous_generation == 0 && report.telemetry.boot_generation == 0 {
+                (previous_boot == report.telemetry.boot_id
+                    && report.telemetry.sequence <= previous_sequence)
+                    || legacy_retired_boot_replay
+            } else {
+                report.telemetry.boot_generation < previous_generation
+                    || (report.telemetry.boot_generation == previous_generation
+                        && (report.telemetry.boot_id != previous_boot
+                            || report.telemetry.sequence <= previous_sequence))
+            };
+        if generation_order_reject {
+            let received_at = DateTime::parse_from_rfc3339(&existing.7)
+                .map_err(|_| StoreError::Timestamp)?
+                .with_timezone(&Utc);
+            transaction.commit()?;
+            return Ok(NodeReportOutcome {
+                node_id,
+                accepted: false,
+                inventory_revision: existing.1,
+                inventory_digest: existing.2,
+                telemetry_boot_generation: previous_generation,
+                telemetry_boot_id: previous_boot,
+                telemetry_sequence: previous_sequence,
+                received_at,
+            });
+        }
+
+        let previous_inventory: NodeInventory = serde_json::from_str(&existing.0)?;
+        let inventory = report
+            .inventory
+            .as_ref()
+            .unwrap_or(&previous_inventory)
+            .clone();
+        inventory.validate()?;
+        if !matches!(&inventory.transport, NodeTransport::Managed { .. }) {
+            return Err(StoreError::InvalidManagedNode);
+        }
+        report.telemetry.validate(&inventory)?;
+        let inventory_document = serde_json::to_string(&inventory)?;
+        let inventory_supplied = report.inventory.is_some();
+        let inventory_changed = inventory_supplied && inventory_document != existing.0;
+        let inventory_revision = if inventory_changed {
+            existing.1.saturating_add(1)
+        } else {
+            existing.1
+        };
+        let inventory_digest = if inventory_supplied {
+            format!("sha256:{}", bytes_sha256(inventory_document.as_bytes()))
+        } else {
+            existing.2.clone()
+        };
+        let config: NodeConfig = serde_json::from_str(&existing.8)?;
+        let view = NodeMergeView::merge(
+            node_id,
+            config,
+            inventory.clone(),
+            report.telemetry.clone(),
+            now,
+            now,
+            Duration::from_secs(u64::try_from(NODE_FRESHNESS_SECONDS).unwrap_or_default()),
+        )?;
+        if inventory_supplied {
+            transaction.execute(
+                r#"
+                UPDATE node_inventories SET
+                    document = ?1, updated_at = ?2, revision = ?3,
+                    digest = ?4, observed_at = ?5
+                WHERE node_id = ?6
+                "#,
+                params![
+                    inventory_document,
+                    now.to_rfc3339(),
+                    inventory_revision,
+                    inventory_digest,
+                    report.telemetry.observed_at.to_rfc3339(),
+                    node_id.to_string(),
+                ],
+            )?;
+        }
+        transaction.execute(
+            r#"
+            UPDATE node_telemetry SET
+                document = ?1, received_at = ?2, boot_generation = ?3,
+                boot_id = ?4, sequence = ?5, observed_at = ?6
+            WHERE node_id = ?7
+            "#,
+            params![
+                serde_json::to_string(&report.telemetry)?,
+                now.to_rfc3339(),
+                as_i64(report.telemetry.boot_generation),
+                report.telemetry.boot_id.to_string(),
+                as_i64(report.telemetry.sequence),
+                report.telemetry.observed_at.to_rfc3339(),
+                node_id.to_string(),
+            ],
+        )?;
+        transaction.execute(
+            r#"
+            INSERT OR IGNORE INTO node_telemetry_boots(node_id, boot_id, first_received_at)
+            VALUES (?1, ?2, ?3)
+            "#,
+            params![
+                node_id.to_string(),
+                report.telemetry.boot_id.to_string(),
+                now.to_rfc3339(),
+            ],
+        )?;
+        transaction.execute(
+            r#"
+            UPDATE nodes SET document = ?1, updated_at = ?2, revision = ?3
+            WHERE id = ?4
+            "#,
+            params![
+                serde_json::to_string(&view.to_node()?)?,
+                now.to_rfc3339(),
+                if inventory_changed {
+                    existing.9.saturating_add(1)
+                } else {
+                    existing.9
+                },
+                node_id.to_string(),
+            ],
+        )?;
+        if inventory_changed {
+            increment_meta(&transaction, "fleet_revision")?;
+        }
+        redispatch_queued_jobs(&transaction, now.timestamp(), &Scheduler::default())?;
+        transaction.commit()?;
+        Ok(NodeReportOutcome {
+            node_id,
+            accepted: true,
+            inventory_revision,
+            inventory_digest,
+            telemetry_boot_generation: report.telemetry.boot_generation,
+            telemetry_boot_id: report.telemetry.boot_id,
+            telemetry_sequence: report.telemetry.sequence,
+            received_at: now,
+        })
     }
 
     /// Authenticate the worker and bind a run credential to the URL's run id
@@ -701,56 +1952,41 @@ impl Store {
         job.validate().map_err(ScheduleError::from)?;
         let normalized_job = normalize_job_spec(job);
         let digest = canonical_job_digest(&normalized_job)?;
-        let now = Utc::now();
+        // The plans table stores second-resolution timestamps. Build the
+        // public binding at that same resolution so the document returned by
+        // POST /v1/plans is exactly the document later persisted on the job.
+        let now = timestamp(Utc::now().timestamp())?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         expire_leases(&transaction, now.timestamp())?;
         let nodes_with_revisions = fresh_available_nodes(&transaction, now)?;
         let nodes = nodes_with_revisions
             .iter()
-            .map(|(node, _)| node.clone())
+            .map(|record| record.scheduling.clone())
             .collect::<Vec<_>>();
-        let decision = scheduler.schedule(&normalized_job, &nodes)?;
+        let decision = scheduler.schedule_contexts(&normalized_job, &nodes)?;
         let node_revision = nodes_with_revisions
             .iter()
-            .find(|(node, _)| node.id == decision.node_id)
-            .map(|(_, revision)| *revision)
+            .find(|record| record.scheduling.node.id == decision.node_id)
+            .map(|record| record.revision)
             .ok_or(StoreError::PlanStale)?;
         let fleet_revision = get_meta(&transaction, "fleet_revision")?;
         let policy_revision = get_meta(&transaction, "policy_revision")?;
-        let plan = StoredPlan {
-            id: Uuid::new_v4(),
-            job_id: job.id,
-            job_digest: digest,
+        let binding = new_plan_binding(
+            &normalized_job,
+            digest,
             decision,
-            created_at: now,
-            expires_at: now + chrono::Duration::seconds(PLAN_TTL_SECONDS),
+            now,
             fleet_revision,
             node_revision,
             policy_revision,
-            used_at: None,
-        };
-        transaction.execute(
-            r#"
-            INSERT INTO plans(
-                id, job_id, decision, created_at, job_digest, expires_at,
-                fleet_revision, node_revision, policy_revision, used_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)
-            "#,
-            params![
-                plan.id.to_string(),
-                plan.job_id.to_string(),
-                serde_json::to_string(&plan.decision)?,
-                plan.created_at.timestamp(),
-                plan.job_digest,
-                plan.expires_at.timestamp(),
-                plan.fleet_revision,
-                plan.node_revision,
-                plan.policy_revision,
-            ],
         )?;
+        insert_plan_tx(&transaction, &binding, None)?;
         transaction.commit()?;
-        Ok(plan)
+        Ok(StoredPlan {
+            binding,
+            used_at: None,
+        })
     }
 
     pub fn get_plan(&self, plan_id: Uuid) -> StoreResult<StoredPlan> {
@@ -767,7 +2003,7 @@ impl Store {
         job.validate().map_err(ScheduleError::from)?;
         let normalized_job = normalize_job_spec(job);
         let digest = canonical_job_digest(&normalized_job)?;
-        let now = Utc::now();
+        let now = timestamp(Utc::now().timestamp())?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
@@ -787,78 +2023,121 @@ impl Store {
         let nodes_with_revisions = fresh_available_nodes(&transaction, now)?;
         let nodes = nodes_with_revisions
             .iter()
-            .map(|(node, _)| node.clone())
+            .map(|record| record.scheduling.clone())
             .collect::<Vec<_>>();
         let current_fleet_revision = get_meta(&transaction, "fleet_revision")?;
         let current_policy_revision = get_meta(&transaction, "policy_revision")?;
 
-        let decision = if let Some(plan_id) = plan_id {
+        let (decision, plan_binding, created_internal_plan) = if let Some(plan_id) = plan_id {
             let plan = get_plan(&transaction, plan_id)?;
-            if plan.job_id != job.id || plan.job_digest != digest {
+            if plan.binding.job_id != normalized_job.id || plan.binding.job_digest != digest {
                 return Err(StoreError::PlanDigestMismatch);
             }
             if plan.used_at.is_some() {
                 return Err(StoreError::PlanStale);
             }
-            if plan.expires_at <= now {
+            if plan.binding.expires_at <= now {
                 return Err(StoreError::PlanExpired);
             }
-            if plan.fleet_revision != current_fleet_revision
-                || plan.policy_revision != current_policy_revision
+            plan.binding
+                .validate(Some(&normalized_job), Some(now))
+                .map_err(|_| StoreError::InvalidPlanBinding)?;
+            if plan.binding.fleet_revision != current_fleet_revision
+                || plan.binding.policy_revision != current_policy_revision
             {
                 return Err(StoreError::PlanStale);
             }
             let current_node_revision = nodes_with_revisions
                 .iter()
-                .find(|(node, _)| node.id == plan.decision.node_id)
-                .map(|(_, revision)| *revision)
+                .find(|record| record.scheduling.node.id == plan.binding.decision.node_id)
+                .map(|record| record.revision)
                 .ok_or(StoreError::PlanStale)?;
-            if current_node_revision != plan.node_revision {
+            if current_node_revision != plan.binding.node_revision {
                 return Err(StoreError::PlanStale);
             }
-            let refreshed = scheduler.schedule(&normalized_job, &nodes)?;
-            if refreshed.node_id != plan.decision.node_id {
+            let refreshed = scheduler.schedule_contexts(&normalized_job, &nodes)?;
+            if refreshed.node_id != plan.binding.decision.node_id {
                 return Err(StoreError::PlanStale);
             }
-            refreshed
+            (refreshed, plan.binding, false)
         } else {
-            scheduler.schedule(&normalized_job, &nodes)?
+            let decision = scheduler.schedule_contexts(&normalized_job, &nodes)?;
+            let node_revision = nodes_with_revisions
+                .iter()
+                .find(|record| record.scheduling.node.id == decision.node_id)
+                .map(|record| record.revision)
+                .ok_or(StoreError::PlanStale)?;
+            let binding = new_plan_binding(
+                &normalized_job,
+                digest,
+                decision.clone(),
+                now,
+                current_fleet_revision,
+                node_revision,
+                current_policy_revision,
+            )?;
+            // A submit without an external planning round still receives a
+            // controller-authored, already-used plan in this same transaction.
+            insert_plan_tx(&transaction, &binding, Some(now))?;
+            (decision, binding, true)
         };
 
         let mut run = unique_queued_run(&transaction, job.id)?;
         run.node_id = Some(decision.node_id);
         run.placement = Some(decision.explanation);
         let lease_id = Uuid::new_v4();
-        let lease_seconds = lease_duration_seconds(&normalized_job);
-        let gpu_reserved = i64::from(job.kind == JobKind::Gpu || job.requirements.gpu.is_some());
+        let resources = normalized_job.effective_resource_request();
+        let gpu_request = effective_gpu_request(&normalized_job);
+        let gpu_reservation = select_gpu_reservation(
+            &nodes_with_revisions,
+            decision.node_id,
+            gpu_request.as_ref(),
+        )?;
+        let gpu_reserved = i64::from(gpu_request.is_some());
         transaction.execute(
             r#"
             INSERT INTO leases(
                 id, run_id, job_id, node_id, cpu_cores, memory_mib, disk_mib,
-                gpu_reserved, created_at, expires_at, released_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)
+                gpu_reserved, slots, phase, created_at, expires_at, released_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL)
             "#,
             params![
                 lease_id.to_string(),
                 run.id.to_string(),
                 job.id.to_string(),
                 decision.node_id.to_string(),
-                i64::from(job.requirements.min_cpu_cores.unwrap_or(1)),
-                as_i64(job.requirements.min_memory_mib.unwrap_or_default()),
-                as_i64(job.requirements.min_disk_mib.unwrap_or_default()),
+                i64::from(resources.cpu_cores),
+                as_i64(resources.memory_mib),
+                as_i64(resources.disk_mib),
                 gpu_reserved,
+                i64::from(resources.slots),
+                LEASE_PHASE_DISPATCH,
                 now.timestamp(),
-                now.timestamp().saturating_add(as_i64(lease_seconds)),
+                now.timestamp().saturating_add(DISPATCH_TTL_SECONDS),
             ],
         )?;
+        if let Some((device_id, request)) = gpu_reservation {
+            transaction.execute(
+                r#"
+                INSERT INTO lease_gpu_reservations(lease_id, device_id, vram_mib, exclusive)
+                VALUES (?1, ?2, ?3, ?4)
+                "#,
+                params![
+                    lease_id.to_string(),
+                    device_id,
+                    as_i64(request.vram_mib),
+                    i64::from(request.exclusive),
+                ],
+            )?;
+        }
 
         let now_text = now.to_rfc3339();
         transaction.execute(
             r#"
             INSERT INTO jobs(
                 run_id, job_id, job, run, created_at, updated_at,
-                version, cancel_requested, lease_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, 0, 0, ?6)
+                version, cancel_requested, lease_id, plan_binding
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, 0, 0, ?6, ?7)
             "#,
             params![
                 run.id.to_string(),
@@ -867,10 +2146,18 @@ impl Store {
                 serde_json::to_string(&run)?,
                 now_text,
                 lease_id.to_string(),
+                serde_json::to_string(&plan_binding)?,
             ],
         )?;
+        insert_placement_attempt_tx(
+            &transaction,
+            run.id,
+            &plan_binding,
+            PLACEMENT_ATTEMPT_INITIAL,
+        )?;
 
-        if let Some(plan_id) = plan_id {
+        if !created_internal_plan {
+            let plan_id = plan_id.ok_or(StoreError::InvalidPlanBinding)?;
             let changed = transaction.execute(
                 "UPDATE plans SET used_at = ?1 WHERE id = ?2 AND used_at IS NULL",
                 params![now.timestamp(), plan_id.to_string()],
@@ -879,10 +2166,14 @@ impl Store {
                 return Err(StoreError::PlanStale);
             }
         }
+        // The active reservation is part of the authoritative fleet state and
+        // must invalidate stale placement plans/snapshots.
+        increment_meta(&transaction, "fleet_revision")?;
         transaction.commit()?;
         Ok(StoredJob {
             job: normalized_job,
             run,
+            plan_binding: Some(plan_binding),
             version: 0,
             cancel_requested: false,
             lease_id: Some(lease_id),
@@ -905,12 +2196,16 @@ impl Store {
         if node_id != observed_node.id {
             return Err(StoreError::WorkerUnauthorized);
         }
-        upsert_node_tx(&transaction, observed_node)?;
+        // Legacy claim probes remain a compatibility liveness path only until
+        // a sequenced NodeReport has been observed. They must never overwrite
+        // a modern report or defeat its monotonic boot/sequence contract.
+        upsert_legacy_probe_tx(&transaction, observed_node)?;
 
         let rows = {
             let mut statement = transaction.prepare(
                 r#"
-                SELECT j.job, j.run, j.version, j.cancel_requested, j.lease_id
+                SELECT j.job, j.run, j.version, j.cancel_requested, j.lease_id,
+                       j.plan_binding
                 FROM jobs j
                 JOIN leases l ON l.run_id = j.run_id
                 WHERE l.node_id = ?1 AND l.released_at IS NULL AND l.expires_at > ?2
@@ -934,6 +2229,13 @@ impl Store {
         };
         if stored.cancel_requested {
             return Err(StoreError::CancellationPending);
+        }
+        if stored
+            .plan_binding
+            .as_ref()
+            .is_some_and(|binding| binding.decision.node_id != node_id)
+        {
+            return Err(StoreError::InvalidPlanBinding);
         }
         let lease_id = stored.lease_id.ok_or(StoreError::InvalidTransition)?;
         stored
@@ -961,13 +2263,15 @@ impl Store {
         )?;
         let changed = transaction.execute(
             r#"
-            UPDATE leases SET expires_at = ?1
+            UPDATE leases SET expires_at = ?1, phase = ?4
             WHERE id = ?2 AND run_id = ?3 AND released_at IS NULL
+              AND phase IN ('dispatch', 'legacy')
             "#,
             params![
                 expires_at.timestamp(),
                 lease_id.to_string(),
                 stored.run.id.to_string(),
+                LEASE_PHASE_EXECUTION,
             ],
         )?;
         if changed != 1 {
@@ -1034,6 +2338,7 @@ impl Store {
             r#"
             UPDATE leases SET expires_at = ?1
             WHERE id = ?2 AND run_id = ?3 AND released_at IS NULL AND expires_at > ?4
+              AND phase IN ('execution', 'legacy')
             "#,
             params![
                 expires_at.timestamp(),
@@ -1045,17 +2350,9 @@ impl Store {
         if claim_changed != 1 || lease_changed != 1 {
             return Err(StoreError::RunUnauthorized);
         }
-        transaction.execute(
-            "UPDATE nodes SET updated_at = ?1 WHERE id = ?2",
-            params![
-                now.to_rfc3339(),
-                stored
-                    .run
-                    .node_id
-                    .ok_or(StoreError::RunUnauthorized)?
-                    .to_string(),
-            ],
-        )?;
+        // Run heartbeats renew only execution ownership. Node telemetry
+        // freshness is refreshed exclusively by monotonic NodeReport writes;
+        // an old run heartbeat with probe=None can never resurrect a node.
         transaction.commit()?;
         Ok(WorkerHeartbeat {
             stored,
@@ -1119,7 +2416,8 @@ impl Store {
     /// Validate the managed worker's complete execution receipt and commit it
     /// together with the terminal run transition. A byte-for-byte equivalent
     /// retry (represented by the same serialized receipt digest) is
-    /// idempotent even after the claim and lease have been released.
+    /// idempotent after the claim is revoked and while the cleanup reservation
+    /// remains held (or after it is released by authoritative cleanup/reaper).
     pub fn worker_complete_managed(
         &self,
         worker_credential: &str,
@@ -1218,20 +2516,124 @@ impl Store {
             "UPDATE worker_claims SET revoked_at = ?1 WHERE run_id = ?2 AND revoked_at IS NULL",
             params![now.timestamp(), completion.run_id.to_string()],
         )?;
-        release_lease(&transaction, Some(completion.lease_id), now.timestamp())?;
+        let cleanup_deadline = now
+            .timestamp()
+            .saturating_add(CLEANUP_RESERVATION_TTL_SECONDS);
+        transaction.execute(
+            r#"
+            INSERT INTO run_cleanup_obligations(
+                run_id, job_id, lease_id, state_version, final_state,
+                completion_sha256, terminal_acknowledged_at, cleanup_deadline_at,
+                reservation_released_at, release_reason, cleanup_failure_code,
+                failure_observed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, NULL, NULL)
+            "#,
+            params![
+                completion.run_id.to_string(),
+                stored.job.id.to_string(),
+                completion.lease_id.to_string(),
+                as_i64(stored.version),
+                job_state_token(stored.run.state)?,
+                document_sha256,
+                now.timestamp(),
+                cleanup_deadline,
+            ],
+        )?;
+        let changed = transaction.execute(
+            r#"
+            UPDATE leases SET phase = ?1, expires_at = ?2
+            WHERE id = ?3 AND run_id = ?4 AND job_id = ?5
+              AND released_at IS NULL AND phase = ?6
+            "#,
+            params![
+                LEASE_PHASE_CLEANUP_PENDING,
+                cleanup_deadline,
+                completion.lease_id.to_string(),
+                completion.run_id.to_string(),
+                stored.job.id.to_string(),
+                LEASE_PHASE_EXECUTION,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidTransition);
+        }
         transaction.commit()?;
         Ok(stored)
     }
 
     pub fn get_completion(&self, run_id: Uuid) -> StoreResult<StoredCompletion> {
         let connection = self.connection()?;
-        let (document, sha256, created_at) = connection
+        get_completion_tx(&connection, run_id)?.ok_or(StoreError::NotFound)
+    }
+
+    /// Persist immutable evidence that the worker removed (or never created)
+    /// the exact job-owned root after receiving the terminal completion ACK.
+    pub fn record_cleanup(
+        &self,
+        worker_credential: &str,
+        run_credential: &str,
+        receipt: &CleanupReceiptV1,
+    ) -> StoreResult<StoredCleanup> {
+        receipt
+            .validate()
+            .map_err(|_| StoreError::InvalidCleanupReceipt)?;
+        let document = serde_json::to_string(receipt)?;
+        let document_sha256 = bytes_sha256(document.as_bytes());
+        let received_at = timestamp(Utc::now().timestamp())?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        expire_leases(&transaction, received_at.timestamp())?;
+        let node_id = authorize_completion_receipt_tx(
+            &transaction,
+            worker_credential,
+            run_credential,
+            receipt.run_id,
+            receipt.lease_id,
+            received_at.timestamp(),
+        )?;
+        let stored = get_job_by_run_id(&transaction, receipt.run_id)?;
+        if stored.run.node_id != Some(node_id)
+            || stored.run.state != receipt.terminal_ack.final_state
+            || stored.version != receipt.terminal_ack.state_version
+        {
+            return Err(StoreError::InvalidCleanupReceipt);
+        }
+        let obligation = get_cleanup_obligation_tx(&transaction, receipt.run_id)?
+            .ok_or(StoreError::InvalidCleanupReceipt)?;
+        if obligation.job_id != stored.job.id
+            || obligation.run_id != receipt.run_id
+            || obligation.lease_id != receipt.lease_id
+            || obligation.state_version != receipt.terminal_ack.state_version
+            || obligation.final_state != receipt.terminal_ack.final_state
+            || obligation.completion_sha256 != receipt.terminal_ack.completion_sha256
+            || obligation.terminal_acknowledged_at != receipt.terminal_ack.acknowledged_at
+        {
+            return Err(StoreError::InvalidCleanupReceipt);
+        }
+        let completion = transaction
             .query_row(
                 r#"
-                SELECT document, document_sha256, created_at
-                FROM run_completions WHERE run_id = ?1
+                SELECT document_sha256, created_at FROM run_completions
+                WHERE run_id = ?1
                 "#,
-                [run_id.to_string()],
+                [receipt.run_id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+            .ok_or(StoreError::InvalidCleanupReceipt)?;
+        if completion.0 != receipt.terminal_ack.completion_sha256
+            || timestamp(completion.1)? != receipt.terminal_ack.acknowledged_at
+        {
+            return Err(StoreError::InvalidCleanupReceipt);
+        }
+
+        if let Some((existing_document, existing_digest, existing_received_at)) = transaction
+            .query_row(
+                r#"
+                SELECT document, document_sha256, received_at FROM run_cleanups
+                WHERE run_id = ?1
+                "#,
+                [receipt.run_id.to_string()],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -1241,11 +2643,74 @@ impl Store {
                 },
             )
             .optional()?
-            .ok_or(StoreError::NotFound)?;
-        Ok(StoredCompletion {
-            completion: serde_json::from_str(&document)?,
-            sha256,
-            created_at: timestamp(created_at)?,
+        {
+            if existing_digest != document_sha256 || existing_document != document {
+                return Err(StoreError::CleanupConflict);
+            }
+            if receipt.outcome == cyc_protocol::JobRootCleanupOutcomeV1::Removed {
+                release_cleanup_reservation_tx(
+                    &transaction,
+                    receipt.run_id,
+                    receipt.lease_id,
+                    received_at.timestamp(),
+                )?;
+            }
+            transaction.commit()?;
+            return Ok(StoredCleanup {
+                receipt: serde_json::from_str(&existing_document)?,
+                received_at: timestamp(existing_received_at)?,
+            });
+        }
+
+        transaction.execute(
+            r#"
+            INSERT INTO run_cleanups(run_id, document, document_sha256, received_at)
+            VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![
+                receipt.run_id.to_string(),
+                document,
+                document_sha256,
+                received_at.timestamp(),
+            ],
+        )?;
+        if receipt.outcome == cyc_protocol::JobRootCleanupOutcomeV1::Removed {
+            release_cleanup_reservation_tx(
+                &transaction,
+                receipt.run_id,
+                receipt.lease_id,
+                received_at.timestamp(),
+            )?;
+        }
+        transaction.commit()?;
+        Ok(StoredCleanup {
+            receipt: receipt.clone(),
+            received_at,
+        })
+    }
+
+    pub fn get_cleanup(&self, run_id: Uuid) -> StoreResult<Option<StoredCleanup>> {
+        let connection = self.connection()?;
+        get_cleanup_tx(&connection, run_id)
+    }
+
+    /// Coherent cleanup status read. Deadline recovery runs first and commits;
+    /// the returned job/completion/receipt/obligation then come from one
+    /// transaction so API clients cannot observe a torn terminal ACK.
+    pub fn get_cleanup_snapshot(&self, id: Uuid) -> StoreResult<CleanupSnapshot> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        expire_leases(&transaction, Utc::now().timestamp())?;
+        let stored = get_job_prefer_job_id(&transaction, id)?;
+        let cleanup = get_cleanup_tx(&transaction, stored.run.id)?;
+        let completion = get_completion_tx(&transaction, stored.run.id)?;
+        let obligation = get_cleanup_obligation_tx(&transaction, stored.run.id)?;
+        transaction.commit()?;
+        Ok(CleanupSnapshot {
+            stored,
+            cleanup,
+            completion,
+            obligation,
         })
     }
 
@@ -1307,6 +2772,124 @@ impl Store {
         }
         transaction.commit()?;
         Ok(stored)
+    }
+
+    /// Store one immutable content-addressed snapshot outside SQLite. The
+    /// digest is over `data` exactly as received, including the zstd frame.
+    pub fn put_snapshot(
+        &self,
+        digest: &str,
+        declared_size: u64,
+        data: &[u8],
+    ) -> StoreResult<SnapshotMetadataV1> {
+        let candidate = SnapshotMetadataV1::new(digest.to_owned(), declared_size, Utc::now());
+        candidate
+            .validate()
+            .map_err(|_| StoreError::InvalidUpload)?;
+        let actual_size = u64::try_from(data.len()).unwrap_or(u64::MAX);
+        if actual_size > MAX_SNAPSHOT_ARCHIVE_BYTES {
+            return Err(StoreError::SnapshotQuotaExceeded);
+        }
+        if actual_size != declared_size {
+            return Err(StoreError::InvalidUpload);
+        }
+        let actual_digest = format!("sha256:{}", bytes_sha256(data));
+        if actual_digest != digest {
+            return Err(StoreError::DigestMismatch);
+        }
+
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = get_snapshot(&transaction, digest)? {
+            if existing.metadata.size_bytes != declared_size
+                || existing.metadata.api_version != SNAPSHOT_API_VERSION
+                || existing.metadata.format != SNAPSHOT_ARCHIVE_FORMAT
+            {
+                return Err(StoreError::UploadConflict);
+            }
+            verify_snapshot_object(&self.snapshot_root, &existing)?;
+            transaction.commit()?;
+            return Ok(existing.metadata);
+        }
+
+        let relative = generated_snapshot_relative_path(digest)?;
+        write_immutable_snapshot(&self.snapshot_root, &relative, data, digest)?;
+        // SQLite stores snapshot creation time as epoch seconds. Return the
+        // same canonical precision so an idempotent PUT is byte-for-byte
+        // stable with a later metadata read.
+        let now = timestamp(Utc::now().timestamp())?;
+        transaction.execute(
+            r#"
+            INSERT INTO snapshots(
+                digest, size, api_version, archive_format, relative_path, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                digest,
+                as_i64(declared_size),
+                SNAPSHOT_API_VERSION,
+                SNAPSHOT_ARCHIVE_FORMAT,
+                relative.to_string_lossy(),
+                now.timestamp(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(SnapshotMetadataV1::new(
+            digest.to_owned(),
+            declared_size,
+            now,
+        ))
+    }
+
+    pub fn get_snapshot_metadata(&self, digest: &str) -> StoreResult<SnapshotMetadataV1> {
+        cyc_protocol::validate_snapshot_digest(digest).map_err(|_| StoreError::InvalidUpload)?;
+        let connection = self.connection()?;
+        let stored = get_snapshot(&connection, digest)?.ok_or(StoreError::NotFound)?;
+        verify_snapshot_object(&self.snapshot_root, &stored)?;
+        Ok(stored.metadata)
+    }
+
+    /// Bind a worker download to the live worker credential, one-time run
+    /// credential, lease, run owner, and the exact digest/size in JobSpec.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_snapshot_download(
+        &self,
+        worker_credential: &str,
+        run_credential: &str,
+        run_id: Uuid,
+        lease_id: Uuid,
+        requested_digest: &str,
+    ) -> StoreResult<SnapshotDownload> {
+        cyc_protocol::validate_snapshot_digest(requested_digest)
+            .map_err(|_| StoreError::InvalidUpload)?;
+        let now = Utc::now();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        expire_leases(&transaction, now.timestamp())?;
+        authorize_run_tx(
+            &transaction,
+            worker_credential,
+            run_credential,
+            run_id,
+            lease_id,
+            now.timestamp(),
+        )?;
+        let stored_job = get_job_by_run_id(&transaction, run_id)?;
+        let expected_size = match &stored_job.job.source {
+            SourceSpec::Snapshot {
+                digest,
+                size_bytes: Some(size_bytes),
+            } if digest == requested_digest => *size_bytes,
+            _ => return Err(StoreError::RunUnauthorized),
+        };
+        let stored = get_snapshot(&transaction, requested_digest)?.ok_or(StoreError::NotFound)?;
+        if stored.metadata.size_bytes != expected_size {
+            return Err(StoreError::DigestMismatch);
+        }
+        let path = verify_snapshot_object(&self.snapshot_root, &stored)?;
+        let metadata = stored.metadata;
+        transaction.commit()?;
+        Ok(SnapshotDownload { metadata, path })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1655,22 +3238,7 @@ impl Store {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         expire_leases(&transaction, Utc::now().timestamp())?;
-        let rows = {
-            let mut statement = transaction.prepare(
-                r#"
-                SELECT job, run, version, cancel_requested, lease_id
-                FROM jobs ORDER BY updated_at DESC LIMIT ?1
-                "#,
-            )?;
-            let rows = statement
-                .query_map([limit.min(500) as i64], job_row)?
-                .collect::<Result<Vec<_>, _>>()?;
-            rows
-        };
-        let jobs = rows
-            .into_iter()
-            .map(decode_job_row)
-            .collect::<StoreResult<Vec<_>>>()?;
+        let jobs = list_jobs_tx(&transaction, limit)?;
         transaction.commit()?;
         Ok(jobs)
     }
@@ -1786,13 +3354,12 @@ impl Store {
             return Err(StoreError::CancellationPending);
         }
         let lease_id = stored.lease_id.ok_or(StoreError::InvalidTransition)?;
-        let renewed_at = now
-            .timestamp()
-            .saturating_add(as_i64(lease_duration_seconds(&stored.job)));
+        let renewed_at = now.timestamp().saturating_add(CLAIM_TTL_SECONDS);
         let changed = transaction.execute(
             r#"
             UPDATE leases SET expires_at = MAX(expires_at, ?1)
             WHERE id = ?2 AND run_id = ?3 AND released_at IS NULL AND expires_at > ?4
+              AND phase IN ('execution', 'legacy')
             "#,
             params![
                 renewed_at,
@@ -1831,44 +3398,136 @@ impl Store {
         let value = self.connection()?.query_row(
             r#"
             SELECT COUNT(*) FROM leases
-            WHERE node_id = ?1 AND released_at IS NULL AND expires_at > ?2
+            WHERE node_id = ?1 AND released_at IS NULL
+              AND (expires_at > ?2 OR phase = ?3)
             "#,
-            params![node_id.to_string(), now],
+            params![node_id.to_string(), now, LEASE_PHASE_CLEANUP_PENDING],
             |row| row.get::<_, i64>(0),
         )?;
         Ok(as_u64(value))
     }
 }
 
-fn scheduling_material_equal(left: &Node, right: &Node) -> bool {
-    let mut left = left.clone();
-    let mut right = right.clone();
-    left.last_seen_at = None;
-    right.last_seen_at = None;
-    left == right
+#[derive(Clone, Copy)]
+enum NodeWriteAuthority {
+    /// Controller/admin paths may replace all three state documents.
+    Controller,
+    /// Worker probes may create initial config, then only replace inventory and
+    /// telemetry on subsequent reports.
+    Worker,
+    /// Enrollment probes establish inventory and initial config but must not
+    /// count as evidence that the installed daemon is alive.
+    PairingProbe,
 }
 
-fn upsert_node_tx(transaction: &Transaction<'_>, node: &Node) -> StoreResult<()> {
-    let document = serde_json::to_string(node)?;
-    let existing = transaction
+fn load_node_component<T: DeserializeOwned>(
+    connection: &Connection,
+    table: &str,
+    node_id: Uuid,
+) -> StoreResult<Option<T>> {
+    debug_assert!(matches!(
+        table,
+        "node_configs" | "node_inventories" | "node_telemetry"
+    ));
+    let document = connection
         .query_row(
-            "SELECT document, revision FROM nodes WHERE id = ?1",
-            [node.id.to_string()],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            &format!("SELECT document FROM {table} WHERE node_id = ?1"),
+            [node_id.to_string()],
+            |row| row.get::<_, String>(0),
         )
         .optional()?;
-    let (current_revision, material_changed) = match existing {
-        Some((existing, revision)) => {
-            let existing: Node = serde_json::from_str(&existing)?;
-            (revision, !scheduling_material_equal(&existing, node))
-        }
-        None => (0, true),
+    document
+        .map(|document| serde_json::from_str(&document).map_err(StoreError::from))
+        .transpose()
+}
+
+fn upsert_node_tx(
+    transaction: &Transaction<'_>,
+    node: &Node,
+    authority: NodeWriteAuthority,
+) -> StoreResult<()> {
+    let received_at = if matches!(authority, NodeWriteAuthority::PairingProbe) {
+        DateTime::<Utc>::from_timestamp(0, 0).expect("Unix epoch is valid")
+    } else {
+        Utc::now()
     };
+    let incoming_config = NodeConfig::from_node(node);
+    let inventory = NodeInventory::from_node(node);
+    let mut telemetry = NodeTelemetry::from_node(node, received_at);
+    if matches!(authority, NodeWriteAuthority::PairingProbe) {
+        telemetry.status = cyc_protocol::NodeStatus::Offline;
+    }
+    incoming_config.validate()?;
+    inventory.validate()?;
+    telemetry.validate(&inventory)?;
+
+    let existing_config = load_node_component::<NodeConfig>(transaction, "node_configs", node.id)?;
+    let existing_config_revision = transaction
+        .query_row(
+            "SELECT revision FROM node_configs WHERE node_id = ?1",
+            [node.id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    let existing_inventory =
+        load_node_component::<NodeInventory>(transaction, "node_inventories", node.id)?;
+    let existing_inventory_revision = transaction
+        .query_row(
+            "SELECT revision FROM node_inventories WHERE node_id = ?1",
+            [node.id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    let config = match (authority, existing_config.as_ref()) {
+        (NodeWriteAuthority::Worker | NodeWriteAuthority::PairingProbe, Some(existing)) => {
+            existing.clone()
+        }
+        (
+            NodeWriteAuthority::Controller
+            | NodeWriteAuthority::Worker
+            | NodeWriteAuthority::PairingProbe,
+            None,
+        ) => incoming_config,
+        (NodeWriteAuthority::Controller, Some(_)) => incoming_config,
+    };
+    let material_changed = existing_config.as_ref() != Some(&config)
+        || existing_inventory.as_ref() != Some(&inventory);
+    let config_revision = if matches!(authority, NodeWriteAuthority::Controller)
+        && existing_config
+            .as_ref()
+            .is_some_and(|existing| existing != &config)
+    {
+        existing_config_revision.saturating_add(1)
+    } else {
+        existing_config_revision
+    };
+    let current_revision = transaction
+        .query_row(
+            "SELECT revision FROM nodes WHERE id = ?1",
+            [node.id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or_default();
     let next_revision = if material_changed {
         current_revision.saturating_add(1)
     } else {
         current_revision
     };
+    let view = NodeMergeView::merge(
+        node.id,
+        config.clone(),
+        inventory.clone(),
+        telemetry.clone(),
+        received_at,
+        received_at,
+        Duration::from_secs(u64::try_from(NODE_FRESHNESS_SECONDS).unwrap_or_default()),
+    )?;
+    let document = serde_json::to_string(&view.to_node()?)?;
+    let now = received_at.to_rfc3339();
+
     transaction.execute(
         r#"
         INSERT INTO nodes(id, document, updated_at, revision) VALUES (?1, ?2, ?3, ?4)
@@ -1877,11 +3536,83 @@ fn upsert_node_tx(transaction: &Transaction<'_>, node: &Node) -> StoreResult<()>
             updated_at=excluded.updated_at,
             revision=excluded.revision
         "#,
+        params![node.id.to_string(), document, now, next_revision],
+    )?;
+    if !matches!(
+        authority,
+        NodeWriteAuthority::Worker | NodeWriteAuthority::PairingProbe
+    ) || existing_config.is_none()
+    {
+        transaction.execute(
+            r#"
+            INSERT INTO node_configs(node_id, document, updated_at, revision) VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(node_id) DO UPDATE SET
+                document=excluded.document,
+                updated_at=excluded.updated_at,
+                revision=excluded.revision
+            "#,
+            params![
+                node.id.to_string(),
+                serde_json::to_string(&config)?,
+                now,
+                config_revision
+            ],
+        )?;
+    }
+    let inventory_document = serde_json::to_string(&inventory)?;
+    let inventory_revision = if existing_inventory
+        .as_ref()
+        .is_some_and(|existing| existing != &inventory)
+    {
+        existing_inventory_revision.saturating_add(1)
+    } else {
+        existing_inventory_revision
+    };
+    transaction.execute(
+        r#"
+        INSERT INTO node_inventories(
+            node_id, document, updated_at, revision, digest, observed_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        ON CONFLICT(node_id) DO UPDATE SET
+            document=excluded.document,
+            updated_at=excluded.updated_at,
+            revision=excluded.revision,
+            digest=excluded.digest,
+            observed_at=excluded.observed_at
+        "#,
         params![
             node.id.to_string(),
-            document,
-            Utc::now().to_rfc3339(),
-            next_revision
+            inventory_document,
+            now,
+            inventory_revision,
+            format!(
+                "sha256:{}",
+                bytes_sha256(serde_json::to_string(&inventory)?.as_bytes())
+            ),
+            telemetry.observed_at.to_rfc3339(),
+        ],
+    )?;
+    transaction.execute(
+        r#"
+        INSERT INTO node_telemetry(
+            node_id, document, received_at, boot_generation, boot_id, sequence, observed_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        ON CONFLICT(node_id) DO UPDATE SET
+            document=excluded.document,
+            received_at=excluded.received_at,
+            boot_generation=excluded.boot_generation,
+            boot_id=excluded.boot_id,
+            sequence=excluded.sequence,
+            observed_at=excluded.observed_at
+        "#,
+        params![
+            node.id.to_string(),
+            serde_json::to_string(&telemetry)?,
+            now,
+            as_i64(telemetry.boot_generation),
+            telemetry.boot_id.to_string(),
+            as_i64(telemetry.sequence),
+            telemetry.observed_at.to_rfc3339(),
         ],
     )?;
     if material_changed {
@@ -1890,8 +3621,173 @@ fn upsert_node_tx(transaction: &Transaction<'_>, node: &Node) -> StoreResult<()>
     Ok(())
 }
 
+fn upsert_legacy_probe_tx(transaction: &Transaction<'_>, node: &Node) -> StoreResult<()> {
+    let boot_id = transaction
+        .query_row(
+            "SELECT boot_id FROM node_telemetry WHERE node_id = ?1",
+            [node.id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if boot_id
+        .as_deref()
+        .map(Uuid::parse_str)
+        .transpose()?
+        .is_some_and(|boot_id| !boot_id.is_nil())
+    {
+        return Ok(());
+    }
+    upsert_node_tx(transaction, node, NodeWriteAuthority::Worker)
+}
+
 fn random_secret() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn valid_pairing_operation_key(value: &str) -> bool {
+    (1..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn validate_reserved_policy_labels(config: &NodeConfig) -> StoreResult<()> {
+    if let Some(value) = config.labels.get("cyc.policy.allowedJobKinds") {
+        let allowed = [
+            "build",
+            "test",
+            "lint",
+            "batch",
+            "gpu",
+            "container",
+            "shell",
+            // Transitional alias emitted by an older preview UI. It maps to
+            // JobKind::Shell; new clients must write `shell`.
+            "service",
+        ];
+        if !value.is_empty()
+            && value
+                .split(',')
+                .any(|kind| kind.is_empty() || !allowed.contains(&kind))
+        {
+            return Err(StoreError::InvalidNodeConfig);
+        }
+    }
+    if let Some(value) = config.labels.get("cyc.policy.resource") {
+        let value: serde_json::Value =
+            serde_json::from_str(value).map_err(|_| StoreError::InvalidNodeConfig)?;
+        let object = value.as_object().ok_or(StoreError::InvalidNodeConfig)?;
+        if object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "cpuLimitPercent" | "maximumParallelJobs" | "memoryLimitBytes"
+            )
+        }) || object.get("cpuLimitPercent").is_some_and(|value| {
+            !value.is_null() && value.as_u64().is_none_or(|value| value == 0 || value > 100)
+        }) || object.get("maximumParallelJobs").is_some_and(|value| {
+            !value.is_null()
+                && value
+                    .as_u64()
+                    .is_none_or(|value| value == 0 || value > 1_024)
+        }) || object
+            .get("memoryLimitBytes")
+            .is_some_and(|value| !value.is_null() && value.as_u64().is_none_or(|value| value == 0))
+        {
+            return Err(StoreError::InvalidNodeConfig);
+        }
+    }
+    if let Some(value) = config.labels.get("cyc.policy.battery") {
+        let value: serde_json::Value =
+            serde_json::from_str(value).map_err(|_| StoreError::InvalidNodeConfig)?;
+        let object = value.as_object().ok_or(StoreError::InvalidNodeConfig)?;
+        if object.len() != 1
+            || object
+                .get("allowOnBattery")
+                .and_then(|value| value.as_bool())
+                .is_none()
+        {
+            return Err(StoreError::InvalidNodeConfig);
+        }
+    }
+    Ok(())
+}
+
+fn effective_capacity_policy(config: &NodeConfig) -> StoreResult<cyc_protocol::CapacityPolicy> {
+    validate_reserved_policy_labels(config)?;
+    let mut capacity = config.capacity.clone();
+    if capacity.allowed_job_kinds.is_empty() {
+        if let Some(value) = config.labels.get("cyc.policy.allowedJobKinds") {
+            for kind in value.split(',').filter(|kind| !kind.is_empty()) {
+                capacity.allowed_job_kinds.insert(match kind {
+                    "shell" | "service" => JobKind::Shell,
+                    "build" => JobKind::Build,
+                    "test" => JobKind::Test,
+                    "lint" => JobKind::Lint,
+                    "container" => JobKind::Container,
+                    "gpu" => JobKind::Gpu,
+                    "batch" => JobKind::Batch,
+                    _ => return Err(StoreError::InvalidNodeConfig),
+                });
+            }
+        }
+    }
+    if let Some(value) = config.labels.get("cyc.policy.resource") {
+        let value: serde_json::Value =
+            serde_json::from_str(value).map_err(|_| StoreError::InvalidNodeConfig)?;
+        if capacity.max_cpu_percent.is_none() {
+            capacity.max_cpu_percent = value
+                .get("cpuLimitPercent")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u8::try_from(value).ok());
+        }
+        if capacity.max_concurrent_jobs == 1 {
+            capacity.max_concurrent_jobs = value
+                .get("maximumParallelJobs")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(capacity.max_concurrent_jobs);
+        }
+        if capacity.memory_limit_mib.is_none() {
+            capacity.memory_limit_mib = value
+                .get("memoryLimitBytes")
+                .and_then(serde_json::Value::as_u64)
+                .map(|bytes| bytes.saturating_add(1_048_575) / 1_048_576);
+        }
+    }
+    if !capacity.allow_on_battery {
+        if let Some(value) = config.labels.get("cyc.policy.battery") {
+            let value: serde_json::Value =
+                serde_json::from_str(value).map_err(|_| StoreError::InvalidNodeConfig)?;
+            capacity.allow_on_battery = value
+                .get("allowOnBattery")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+        }
+    }
+    capacity
+        .validate()
+        .map_err(|_| StoreError::InvalidNodeConfig)?;
+    Ok(capacity)
+}
+
+fn derive_pairing_code(
+    seed: &str,
+    operation_key: &str,
+    pairing_id: Uuid,
+    intended_node_id: Uuid,
+    created_at: i64,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"cyc-pairing-code-v1\0");
+    digest.update(seed.as_bytes());
+    digest.update(b"\0");
+    digest.update(operation_key.as_bytes());
+    digest.update(b"\0");
+    digest.update(pairing_id.as_bytes());
+    digest.update(intended_node_id.as_bytes());
+    digest.update(created_at.to_be_bytes());
+    let digest = digest.finalize();
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn secret_hash(secret: &str) -> String {
@@ -1920,7 +3816,8 @@ fn authenticate_worker_tx(
         .query_row(
             r#"
             SELECT node_id FROM worker_credentials
-            WHERE credential_hash = ?1 AND revoked_at IS NULL
+            WHERE credential_hash = ?1 AND activated_at IS NOT NULL
+              AND revoked_at IS NULL
             "#,
             [hash.clone()],
             |row| row.get::<_, String>(0),
@@ -1946,9 +3843,12 @@ fn authorize_run_tx(
     let claim_node = transaction
         .query_row(
             r#"
-            SELECT node_id FROM worker_claims
-            WHERE run_id = ?1 AND lease_id = ?2 AND credential_hash = ?3
-              AND revoked_at IS NULL AND expires_at > ?4
+            SELECT c.node_id FROM worker_claims c
+            JOIN leases l ON l.id = c.lease_id AND l.run_id = c.run_id
+            WHERE c.run_id = ?1 AND c.lease_id = ?2 AND c.credential_hash = ?3
+              AND c.revoked_at IS NULL AND c.expires_at > ?4
+              AND l.released_at IS NULL AND l.expires_at > ?4
+              AND l.phase IN ('execution', 'legacy')
             "#,
             params![
                 run_id.to_string(),
@@ -2075,7 +3975,7 @@ fn validate_managed_completion(
 fn validate_execution_source(
     source: &SourceSpec,
     final_state: JobState,
-    error: Option<&str>,
+    _error: Option<&str>,
     execution: &ExecutionEvidence,
 ) -> StoreResult<()> {
     let observed = &execution.source;
@@ -2112,19 +4012,28 @@ fn validate_execution_source(
             }
         }
         SourceSpec::Snapshot { digest, .. } => {
-            // Snapshot transfer is intentionally not part of the managed LAN
-            // preview. The only acceptable receipt proves that the worker
-            // rejected it before executing any step.
-            if final_state != JobState::Failed
-                || execution.termination.reason != TerminationReason::SourcePreparationFailed
-                || observed.kind != "snapshot"
+            if observed.kind != "snapshot"
                 || observed.repository != "snapshot"
                 || observed.requested_revision != *digest
-                || !observed.resolved_revision.is_empty()
-                || !observed.tree.is_empty()
                 || observed.git_version != "not-applicable"
-                || error.is_none_or(|message| !message.contains(digest))
             {
+                return Err(StoreError::InvalidRunEvidence);
+            }
+            let unresolved = observed.resolved_revision.is_empty() && observed.tree.is_empty();
+            if unresolved {
+                if final_state == JobState::Succeeded
+                    || !matches!(
+                        execution.termination.reason,
+                        TerminationReason::SourcePreparationFailed
+                            | TerminationReason::CancelRequested
+                            | TerminationReason::LeaseLost
+                            | TerminationReason::TimedOut
+                            | TerminationReason::TransportFailure
+                    )
+                {
+                    return Err(StoreError::InvalidRunEvidence);
+                }
+            } else if observed.resolved_revision != *digest || observed.tree != *digest {
                 return Err(StoreError::InvalidRunEvidence);
             }
         }
@@ -2309,6 +4218,193 @@ fn valid_artifact_name(name: &str) -> bool {
         && !name.split('/').any(|segment| segment == ".git")
 }
 
+fn get_snapshot(connection: &Connection, digest: &str) -> StoreResult<Option<StoredSnapshot>> {
+    let row = connection
+        .query_row(
+            r#"
+            SELECT size, api_version, archive_format, relative_path, created_at
+            FROM snapshots WHERE digest = ?1
+            "#,
+            [digest],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(|(size, api_version, format, relative_path, created_at)| {
+        let metadata = SnapshotMetadataV1 {
+            api_version,
+            format,
+            digest: digest.to_owned(),
+            size_bytes: as_u64(size),
+            created_at: timestamp(created_at)?,
+        };
+        metadata.validate().map_err(|_| StoreError::InvalidUpload)?;
+        Ok(StoredSnapshot {
+            metadata,
+            relative_path: PathBuf::from(relative_path),
+        })
+    })
+    .transpose()
+}
+
+fn generated_snapshot_relative_path(digest: &str) -> StoreResult<PathBuf> {
+    let hex = cyc_protocol::snapshot_digest_hex(digest).map_err(|_| StoreError::InvalidUpload)?;
+    Ok(PathBuf::from("sha256").join(format!("{hex}.tar.zst")))
+}
+
+fn metadata_is_reparse(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = metadata;
+        false
+    }
+}
+
+fn require_direct_directory(path: &Path) -> StoreResult<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || metadata_is_reparse(&metadata) {
+        return Err(StoreError::InvalidUpload);
+    }
+    Ok(())
+}
+
+fn prepare_snapshot_parent(root: &Path, relative: &Path) -> StoreResult<PathBuf> {
+    let path = safe_object_path(root, relative)?;
+    fs::create_dir_all(root)?;
+    require_direct_directory(root)?;
+    let parent = path.parent().ok_or(StoreError::InvalidUpload)?;
+    fs::create_dir_all(parent)?;
+    require_direct_directory(parent)?;
+    let canonical_root = fs::canonicalize(root)?;
+    let canonical_parent = fs::canonicalize(parent)?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        return Err(StoreError::InvalidUpload);
+    }
+    Ok(path)
+}
+
+fn verify_snapshot_object(root: &Path, stored: &StoredSnapshot) -> StoreResult<PathBuf> {
+    use std::io::Read;
+
+    let path = safe_object_path(root, &stored.relative_path)?;
+    require_direct_directory(root)?;
+    let parent = path.parent().ok_or(StoreError::InvalidUpload)?;
+    require_direct_directory(parent)?;
+    let canonical_root = fs::canonicalize(root)?;
+    let canonical_parent = fs::canonicalize(parent)?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        return Err(StoreError::InvalidUpload);
+    }
+    let file_metadata = fs::symlink_metadata(&path)?;
+    if !file_metadata.is_file()
+        || file_metadata.file_type().is_symlink()
+        || metadata_is_reparse(&file_metadata)
+        || file_metadata.len() != stored.metadata.size_bytes
+    {
+        return Err(StoreError::DigestMismatch);
+    }
+    let mut file = fs::File::open(&path)?;
+    let mut hasher = Sha256::new();
+    let mut observed = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let length = file.read(&mut buffer)?;
+        if length == 0 {
+            break;
+        }
+        observed = observed.saturating_add(u64::try_from(length).unwrap_or(u64::MAX));
+        if observed > stored.metadata.size_bytes {
+            return Err(StoreError::DigestMismatch);
+        }
+        hasher.update(&buffer[..length]);
+    }
+    let actual = format!(
+        "sha256:{}",
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    if observed != stored.metadata.size_bytes || actual != stored.metadata.digest {
+        return Err(StoreError::DigestMismatch);
+    }
+    Ok(path)
+}
+
+fn write_immutable_snapshot(
+    root: &Path,
+    relative: &Path,
+    bytes: &[u8],
+    expected_digest: &str,
+) -> StoreResult<()> {
+    use std::io::Write;
+
+    let path = prepare_snapshot_parent(root, relative)?;
+    if path.exists() {
+        let existing = fs::read(&path)?;
+        if u64::try_from(existing.len()).unwrap_or(u64::MAX) <= MAX_SNAPSHOT_ARCHIVE_BYTES
+            && format!("sha256:{}", bytes_sha256(&existing)) == expected_digest
+            && existing == bytes
+        {
+            return Ok(());
+        }
+        return Err(StoreError::UploadConflict);
+    }
+    let parent = path.parent().ok_or(StoreError::InvalidUpload)?;
+    let temporary = parent.join(format!(".{}.snapshot.tmp", Uuid::new_v4()));
+    let result = (|| -> StoreResult<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+
+        #[cfg(unix)]
+        {
+            fs::hard_link(&temporary, &path)?;
+            fs::File::open(parent)?.sync_all()?;
+            fs::remove_file(&temporary)?;
+            fs::File::open(parent)?.sync_all()?;
+        }
+        #[cfg(windows)]
+        {
+            // Windows rename is create-new for a destination that already
+            // exists, so it cannot silently replace an immutable object.
+            fs::rename(&temporary, &path)?;
+        }
+        #[cfg(not(any(unix, windows)))]
+        compile_error!("snapshot atomic installation requires Unix or Windows");
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+        if path.exists() {
+            let existing = fs::read(&path)?;
+            if format!("sha256:{}", bytes_sha256(&existing)) == expected_digest && existing == bytes
+            {
+                return Ok(());
+            }
+        }
+    }
+    result
+}
+
 fn generated_log_relative_path(
     job_id: Uuid,
     run_id: Uuid,
@@ -2464,14 +4560,74 @@ fn unique_queued_run(transaction: &Transaction<'_>, job_id: Uuid) -> StoreResult
     Err(StoreError::Conflict)
 }
 
-fn lease_duration_seconds(job: &JobSpec) -> u64 {
-    let execution_bound = job.timeout_seconds.unwrap_or_else(|| {
-        job.steps
-            .iter()
-            .map(|step| step.timeout_seconds.unwrap_or(DEFAULT_LEASE_SECONDS))
-            .fold(0_u64, u64::saturating_add)
-    });
-    execution_bound.saturating_add(LEASE_GRACE_SECONDS)
+fn effective_gpu_request(job: &JobSpec) -> Option<GpuResourceRequest> {
+    job.effective_resource_request().gpu.or_else(|| {
+        (job.kind == JobKind::Gpu).then_some(GpuResourceRequest {
+            device_id: None,
+            vendor: None,
+            vram_mib: 0,
+            exclusive: true,
+        })
+    })
+}
+
+fn select_gpu_reservation(
+    nodes: &[SchedulingNodeRecord],
+    node_id: Uuid,
+    request: Option<&GpuResourceRequest>,
+) -> StoreResult<Option<(String, GpuResourceRequest)>> {
+    let Some(request) = request else {
+        return Ok(None);
+    };
+    let scheduling = nodes
+        .iter()
+        .find(|record| record.scheduling.node.id == node_id)
+        .map(|record| &record.scheduling)
+        .ok_or(StoreError::PlanStale)?;
+    let selected = scheduling
+        .node
+        .resources
+        .gpus
+        .iter()
+        .enumerate()
+        .filter(|(index, gpu)| {
+            gpu.allocatable
+                && gpu.available_vram_mib >= request.vram_mib
+                && request.vendor.is_none_or(|vendor| vendor == gpu.vendor)
+                && request.device_id.as_deref().is_none_or(|requested| {
+                    scheduling
+                        .gpu_device_ids
+                        .get(*index)
+                        .and_then(Option::as_deref)
+                        == Some(requested)
+                })
+                && (!request.exclusive
+                    || scheduling
+                        .gpu_active_reservations
+                        .get(*index)
+                        .copied()
+                        .unwrap_or_default()
+                        == 0)
+        })
+        .max_by(|(left_index, left), (right_index, right)| {
+            left.available_vram_mib
+                .cmp(&right.available_vram_mib)
+                // A lower stable index wins a capacity tie.
+                .then_with(|| right_index.cmp(left_index))
+        });
+    let Some((index, _)) = selected else {
+        // Scheduling and reservation happen under the same IMMEDIATE
+        // transaction. Reaching this branch means stored state was invalid,
+        // not a recoverable race.
+        return Err(StoreError::InvalidTransition);
+    };
+    let device_id = scheduling
+        .gpu_device_ids
+        .get(index)
+        .cloned()
+        .flatten()
+        .ok_or(StoreError::InvalidTransition)?;
+    Ok(Some((device_id, request.clone())))
 }
 
 fn apply_run_evidence(run: &mut Run, evidence: RunEvidence) {
@@ -2492,6 +4648,143 @@ fn worker_state_conflict(stored: &StoredJob) -> StoreError {
     }
 }
 
+/// One-time, idempotent upgrade from the legacy mixed `nodes.document` model.
+/// The legacy row remains as a compatibility mirror/index, while all reads
+/// after migration are composed from the three authoritative documents.
+fn migrate_legacy_node_documents(connection: &Connection) -> StoreResult<()> {
+    let rows = {
+        let mut statement = connection.prepare("SELECT id, document, updated_at FROM nodes")?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    for (id, document, updated_at) in rows {
+        let node: Node = serde_json::from_str(&document)?;
+        if node.id.to_string() != id {
+            return Err(StoreError::NodeIdentityMismatch);
+        }
+        let received_at = DateTime::parse_from_rfc3339(&updated_at)
+            .map_err(|_| StoreError::Timestamp)?
+            .with_timezone(&Utc);
+        let config = NodeConfig::from_node(&node);
+        let inventory = NodeInventory::from_node(&node);
+        let telemetry = NodeTelemetry::from_node(&node, received_at);
+        connection.execute(
+            "INSERT OR IGNORE INTO node_configs(node_id, document, updated_at) VALUES (?1, ?2, ?3)",
+            params![id, serde_json::to_string(&config)?, updated_at],
+        )?;
+        connection.execute(
+            "INSERT OR IGNORE INTO node_inventories(node_id, document, updated_at) VALUES (?1, ?2, ?3)",
+            params![id, serde_json::to_string(&inventory)?, updated_at],
+        )?;
+        connection.execute(
+            "INSERT OR IGNORE INTO node_telemetry(node_id, document, received_at) VALUES (?1, ?2, ?3)",
+            params![id, serde_json::to_string(&telemetry)?, updated_at],
+        )?;
+    }
+    Ok(())
+}
+
+fn backfill_node_report_metadata(connection: &Connection) -> StoreResult<()> {
+    let rows = {
+        let mut statement = connection.prepare(
+            r#"
+            SELECT i.node_id, i.document, i.updated_at, i.digest, i.observed_at,
+                   t.document, t.received_at, t.boot_generation, t.boot_id, t.observed_at
+            FROM node_inventories i
+            JOIN node_telemetry t ON t.node_id = i.node_id
+            "#,
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    for (
+        node_id,
+        inventory_document,
+        inventory_updated_at,
+        inventory_digest,
+        inventory_observed_at,
+        telemetry_document,
+        telemetry_received_at,
+        boot_generation,
+        boot_id,
+        telemetry_observed_at,
+    ) in rows
+    {
+        let telemetry: NodeTelemetry = serde_json::from_str(&telemetry_document)?;
+        let missing_inventory_observed_at =
+            inventory_observed_at.is_empty() || inventory_observed_at.starts_with("1970-01-01");
+        if inventory_digest.is_empty() || missing_inventory_observed_at {
+            connection.execute(
+                r#"
+                UPDATE node_inventories SET digest = ?1, observed_at = ?2
+                WHERE node_id = ?3
+                "#,
+                params![
+                    if inventory_digest.is_empty() {
+                        format!("sha256:{}", bytes_sha256(inventory_document.as_bytes()))
+                    } else {
+                        inventory_digest
+                    },
+                    if missing_inventory_observed_at {
+                        telemetry.observed_at.to_rfc3339()
+                    } else {
+                        inventory_observed_at
+                    },
+                    node_id,
+                ],
+            )?;
+        }
+        if boot_id.is_empty()
+            || telemetry_observed_at.starts_with("1970-01-01")
+            || (boot_generation == 0 && telemetry.boot_generation > 0)
+        {
+            connection.execute(
+                r#"
+                UPDATE node_telemetry SET
+                    boot_generation = CASE WHEN boot_generation = 0 THEN ?1 ELSE boot_generation END,
+                    boot_id = COALESCE(NULLIF(boot_id, ''), ?2),
+                    observed_at = ?3
+                WHERE node_id = ?4
+                "#,
+                params![
+                    as_i64(telemetry.boot_generation),
+                    Uuid::nil().to_string(),
+                    telemetry.observed_at.to_rfc3339(),
+                    node_id
+                ],
+            )?;
+        }
+        // Parsing this also proves historical controller receive evidence is
+        // usable before a strict NodeReport becomes authoritative.
+        DateTime::parse_from_rfc3339(&telemetry_received_at).map_err(|_| StoreError::Timestamp)?;
+        DateTime::parse_from_rfc3339(&inventory_updated_at).map_err(|_| StoreError::Timestamp)?;
+    }
+    Ok(())
+}
+
 fn ensure_column(
     connection: &Connection,
     table: &str,
@@ -2510,11 +4803,401 @@ fn ensure_column(
     Ok(())
 }
 
-fn increment_meta(transaction: &Transaction<'_>, key: &str) -> StoreResult<()> {
-    transaction.execute(
-        "UPDATE controller_meta SET value = value + 1 WHERE key = ?1",
-        [key],
+/// Backfill pre-protocol terminal completions without pretending that their
+/// already-released reservation proves workspace removal.  A historical
+/// `removed` receipt is trusted; every other legacy early release remains
+/// visible as bounded failure evidence.
+/// Backfill only when one historical, durably-used plan proves the exact
+/// canonical job and selected node. Missing, malformed, or multiple plan rows
+/// remain explicit legacy NULLs; the migration never synthesizes authority.
+fn migrate_job_plan_bindings(connection: &mut Connection) -> StoreResult<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(
+        r#"
+        DROP TRIGGER IF EXISTS jobs_require_plan_binding_insert;
+        DROP TRIGGER IF EXISTS jobs_plan_binding_immutable;
+        "#,
     )?;
+    let legacy_rows = {
+        let mut statement = transaction.prepare(
+            r#"
+            SELECT job_id, job, run
+            FROM jobs
+            WHERE plan_binding IS NULL
+            ORDER BY created_at, run_id
+            "#,
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    for (stored_job_id, job_document, run_document) in legacy_rows {
+        let Ok(job_id) = Uuid::parse_str(&stored_job_id) else {
+            continue;
+        };
+        let Ok(job) = serde_json::from_str::<JobSpec>(&job_document) else {
+            continue;
+        };
+        let Ok(run) = serde_json::from_str::<Run>(&run_document) else {
+            continue;
+        };
+        if job.id != job_id
+            || run.job_id != job.id
+            || job.validate().is_err()
+            || normalize_job_spec(&job) != job
+        {
+            continue;
+        }
+
+        let plan_ids = {
+            let mut statement = transaction.prepare(
+                r#"
+                SELECT id FROM plans
+                WHERE job_id = ?1 AND used_at IS NOT NULL
+                ORDER BY id
+                LIMIT 2
+                "#,
+            )?;
+            let rows = statement
+                .query_map([job_id.to_string()], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        if plan_ids.len() != 1 {
+            continue;
+        }
+        let Ok(plan_id) = Uuid::parse_str(&plan_ids[0]) else {
+            continue;
+        };
+        let Ok(plan) = get_plan(&transaction, plan_id) else {
+            continue;
+        };
+        let Some(used_at) = plan.used_at else {
+            continue;
+        };
+        if used_at < plan.binding.created_at
+            || used_at >= plan.binding.expires_at
+            || plan.binding.validate(Some(&job), None).is_err()
+            || run.node_id != Some(plan.binding.decision.node_id)
+            || run
+                .placement
+                .as_ref()
+                .and_then(|placement| placement.selected_node_id)
+                != run.node_id
+        {
+            continue;
+        }
+
+        transaction.execute(
+            "UPDATE jobs SET plan_binding = ?1 WHERE job_id = ?2 AND plan_binding IS NULL",
+            params![serde_json::to_string(&plan.binding)?, job_id.to_string()],
+        )?;
+    }
+    // Old rows may remain NULL only when their historical evidence is absent
+    // or ambiguous. Trigger replacement shares this migration transaction, so
+    // a crash cannot expose a window where new unbound jobs can be inserted.
+    // The update guard permits a replacement only after the exact immutable
+    // attempt was appended; arbitrary binding mutation still fails closed.
+    transaction.execute_batch(
+        r#"
+        CREATE TRIGGER jobs_require_plan_binding_insert
+        BEFORE INSERT ON jobs
+        WHEN CASE
+            WHEN NEW.plan_binding IS NULL THEN 1
+            WHEN json_valid(NEW.plan_binding) = 0 OR json_valid(NEW.run) = 0 THEN 1
+            WHEN json_extract(NEW.plan_binding, '$.apiVersion')
+                    IS NOT 'cyc.dev/placement-plan-binding/v1' THEN 1
+            WHEN json_extract(NEW.plan_binding, '$.jobId') IS NOT NEW.job_id THEN 1
+            WHEN json_extract(NEW.plan_binding, '$.decision.nodeId')
+                    IS NOT json_extract(NEW.run, '$.nodeId') THEN 1
+            ELSE 0
+        END
+        BEGIN
+            SELECT RAISE(ABORT, 'a valid job-bound plan_binding is required for new jobs');
+        END;
+        CREATE TRIGGER jobs_plan_binding_immutable
+        BEFORE UPDATE OF plan_binding ON jobs
+        WHEN OLD.plan_binding IS NOT NEW.plan_binding AND CASE
+            WHEN NEW.plan_binding IS NULL THEN 1
+            WHEN json_valid(NEW.plan_binding) = 0 OR json_valid(NEW.run) = 0 THEN 1
+            WHEN json_extract(NEW.plan_binding, '$.apiVersion')
+                    IS NOT 'cyc.dev/placement-plan-binding/v1' THEN 1
+            WHEN json_extract(NEW.plan_binding, '$.jobId') IS NOT NEW.job_id THEN 1
+            WHEN json_extract(NEW.plan_binding, '$.decision.nodeId')
+                    IS NOT json_extract(NEW.run, '$.nodeId') THEN 1
+            WHEN NOT EXISTS (
+                SELECT 1 FROM job_placement_attempts a
+                WHERE a.run_id = NEW.run_id
+                  AND a.plan_binding IS NEW.plan_binding
+                  AND a.plan_id = json_extract(NEW.plan_binding, '$.planId')
+                  AND a.node_id = json_extract(NEW.plan_binding, '$.decision.nodeId')
+                  AND a.attempt = (
+                    SELECT MAX(latest.attempt) FROM job_placement_attempts latest
+                    WHERE latest.run_id = NEW.run_id
+                  )
+            ) THEN 1
+            ELSE 0
+        END
+        BEGIN
+            SELECT RAISE(ABORT, 'plan_binding replacement lacks an immutable placement attempt');
+        END;
+        "#,
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Seed the append-only placement-attempt ledger for databases created before
+/// dispatch reselection existed. Invalid or unbound legacy rows stay explicit
+/// rather than receiving synthesized authority.
+fn migrate_job_placement_attempts(connection: &mut Connection) -> StoreResult<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let rows = {
+        let mut statement = transaction.prepare(
+            r#"
+            SELECT run_id, job, plan_binding
+            FROM jobs
+            WHERE plan_binding IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM job_placement_attempts a
+                WHERE a.run_id = jobs.run_id
+              )
+            ORDER BY created_at, run_id
+            "#,
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    for (run_id, job_document, binding_document) in rows {
+        let Ok(run_id) = Uuid::parse_str(&run_id) else {
+            continue;
+        };
+        let Ok(job) = serde_json::from_str::<JobSpec>(&job_document) else {
+            continue;
+        };
+        let Ok(binding) = serde_json::from_str::<PlacementPlanBindingV1>(&binding_document) else {
+            continue;
+        };
+        if binding.validate(Some(&job), None).is_err() {
+            continue;
+        }
+        insert_placement_attempt_tx(&transaction, run_id, &binding, PLACEMENT_ATTEMPT_INITIAL)?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_cleanup_reservation_schema(connection: &mut Connection) -> StoreResult<()> {
+    type LegacyCleanupRow = (
+        String,
+        String,
+        String,
+        i64,
+        String,
+        String,
+        i64,
+        Option<i64>,
+        Option<String>,
+    );
+
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let rows = {
+        let mut statement = transaction.prepare(
+            r#"
+            SELECT c.run_id, j.job_id, j.lease_id, j.version, j.run,
+                   c.document_sha256, c.created_at, l.released_at, rc.document
+            FROM run_completions c
+            JOIN jobs j ON j.run_id = c.run_id
+            JOIN leases l ON l.id = j.lease_id
+            LEFT JOIN run_cleanups rc ON rc.run_id = c.run_id
+            WHERE NOT EXISTS(
+                SELECT 1 FROM run_cleanup_obligations o WHERE o.run_id = c.run_id
+            )
+            ORDER BY c.created_at, c.run_id
+            "#,
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            })?
+            .collect::<Result<Vec<LegacyCleanupRow>, _>>()?;
+        rows
+    };
+
+    let now = Utc::now().timestamp();
+    for row in rows {
+        let run: Run = serde_json::from_str(&row.4)?;
+        if !run.state.is_terminal() || run.id.to_string() != row.0 {
+            return Err(StoreError::InvalidRunEvidence);
+        }
+        let legacy_cleanup = row
+            .8
+            .as_deref()
+            .map(serde_json::from_str::<CleanupReceiptV1>)
+            .transpose()?;
+        let has_removed_receipt = legacy_cleanup.as_ref().is_some_and(|cleanup| {
+            cleanup.outcome == cyc_protocol::JobRootCleanupOutcomeV1::Removed
+        });
+        let deadline = row
+            .6
+            .saturating_add(CLEANUP_RESERVATION_TTL_SECONDS)
+            .max(now);
+        let (release_reason, failure_code, failure_observed_at) = if row.7.is_some() {
+            if has_removed_receipt {
+                (Some(CLEANUP_RELEASE_REMOVED), None, None)
+            } else {
+                (
+                    Some(CLEANUP_RELEASE_LEGACY),
+                    Some(CLEANUP_FAILURE_LEGACY),
+                    row.7,
+                )
+            }
+        } else {
+            (None, None, None)
+        };
+        transaction.execute(
+            r#"
+            INSERT INTO run_cleanup_obligations(
+                run_id, job_id, lease_id, state_version, final_state,
+                completion_sha256, terminal_acknowledged_at, cleanup_deadline_at,
+                reservation_released_at, release_reason, cleanup_failure_code,
+                failure_observed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            "#,
+            params![
+                row.0,
+                row.1,
+                row.2,
+                row.3,
+                job_state_token(run.state)?,
+                row.5,
+                row.6,
+                deadline,
+                row.7,
+                release_reason,
+                failure_code,
+                failure_observed_at,
+            ],
+        )?;
+        if row.7.is_none() {
+            transaction.execute(
+                r#"
+                UPDATE leases SET phase = ?1, expires_at = ?2
+                WHERE id = ?3 AND run_id = ?4 AND released_at IS NULL
+                "#,
+                params![LEASE_PHASE_CLEANUP_PENDING, deadline, row.2, row.0],
+            )?;
+        }
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Add the two-phase pairing columns atomically. Rows created by a controller
+/// that predates this migration were already usable credentials, so only those
+/// pre-existing rows are backfilled as activated/acknowledged. A normal startup
+/// must never promote a newly staged credential merely because its column is
+/// NULL after a crash.
+fn migrate_pairing_ack_schema(connection: &mut Connection) -> StoreResult<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let had_activated = table_has_column(&transaction, "worker_credentials", "activated_at")?;
+    let had_acknowledged = table_has_column(&transaction, "pairings", "acknowledged_at")?;
+
+    if !had_activated {
+        transaction
+            .execute_batch("ALTER TABLE worker_credentials ADD COLUMN activated_at INTEGER")?;
+    }
+    if !had_acknowledged {
+        transaction.execute_batch("ALTER TABLE pairings ADD COLUMN acknowledged_at INTEGER")?;
+    }
+
+    if !had_activated || !had_acknowledged {
+        transaction.execute(
+            r#"
+            UPDATE worker_credentials SET activated_at = created_at
+            WHERE activated_at IS NULL
+            "#,
+            [],
+        )?;
+        transaction.execute(
+            r#"
+            UPDATE pairings SET acknowledged_at = used_at
+            WHERE acknowledged_at IS NULL AND used_at IS NOT NULL
+              AND EXISTS(
+                  SELECT 1 FROM worker_credentials wc
+                  WHERE wc.pairing_id = pairings.id
+                    AND wc.activated_at IS NOT NULL
+                    AND wc.revoked_at IS NULL
+              )
+            "#,
+            [],
+        )?;
+    }
+
+    transaction.execute_batch(
+        r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS worker_credentials_one_active_node_idx
+        ON worker_credentials(node_id)
+        WHERE activated_at IS NOT NULL AND revoked_at IS NULL;
+        "#,
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn table_has_column(transaction: &Transaction<'_>, table: &str, column: &str) -> StoreResult<bool> {
+    let mut statement = transaction.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(columns.iter().any(|existing| existing == column))
+}
+
+fn increment_meta(transaction: &Transaction<'_>, key: &str) -> StoreResult<()> {
+    let changed = if key == "fleet_revision" {
+        transaction.execute(
+            "UPDATE controller_meta SET value = value + 1 WHERE key = ?1 AND value < ?2",
+            params![key, as_i64(MAX_SAFE_JSON_INTEGER)],
+        )?
+    } else {
+        transaction.execute(
+            "UPDATE controller_meta SET value = value + 1 WHERE key = ?1",
+            [key],
+        )?
+    };
+    if changed != 1 {
+        return if key == "fleet_revision" {
+            Err(StoreError::InvalidFleetRevision)
+        } else {
+            Err(StoreError::NotFound)
+        };
+    }
     Ok(())
 }
 
@@ -2526,30 +5209,41 @@ fn get_meta(transaction: &Transaction<'_>, key: &str) -> StoreResult<i64> {
     )?)
 }
 
-fn list_all_nodes(connection: &Connection) -> StoreResult<Vec<Node>> {
-    let mut statement =
-        connection.prepare("SELECT document FROM nodes ORDER BY updated_at DESC")?;
-    let documents = statement
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    documents
-        .into_iter()
-        .map(|document| serde_json::from_str(&document).map_err(StoreError::from))
-        .collect()
+fn node_view_from_documents(
+    id: String,
+    config: String,
+    inventory: String,
+    telemetry: String,
+    received_at: String,
+    now: DateTime<Utc>,
+) -> StoreResult<NodeMergeView> {
+    let received_at = DateTime::parse_from_rfc3339(&received_at)
+        .map_err(|_| StoreError::Timestamp)?
+        .with_timezone(&Utc);
+    NodeMergeView::merge(
+        Uuid::parse_str(&id)?,
+        serde_json::from_str(&config)?,
+        serde_json::from_str(&inventory)?,
+        serde_json::from_str(&telemetry)?,
+        received_at,
+        now,
+        Duration::from_secs(u64::try_from(NODE_FRESHNESS_SECONDS).unwrap_or_default()),
+    )
+    .map_err(StoreError::from)
 }
 
-fn fresh_available_nodes(
-    transaction: &Transaction<'_>,
+fn list_all_node_views(
+    connection: &Connection,
     now: DateTime<Utc>,
-) -> StoreResult<Vec<(Node, i64)>> {
-    let mut statement = transaction.prepare(
+) -> StoreResult<Vec<NodeMergeView>> {
+    let mut statement = connection.prepare(
         r#"
-        SELECT DISTINCT n.document, n.updated_at, n.revision
+        SELECT n.id, c.document, i.document, t.document, t.received_at
         FROM nodes n
-        JOIN worker_credentials wc ON wc.node_id = n.id AND wc.revoked_at IS NULL
-        JOIN pairings p ON p.id = wc.pairing_id
-        WHERE p.used_at IS NOT NULL AND p.revoked_at IS NULL
-        ORDER BY n.updated_at DESC
+        JOIN node_configs c ON c.node_id = n.id
+        JOIN node_inventories i ON i.node_id = n.id
+        JOIN node_telemetry t ON t.node_id = n.id
+        ORDER BY t.received_at DESC
         "#,
     )?;
     let rows = statement
@@ -2557,31 +5251,410 @@ fn fresh_available_nodes(
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|row| node_view_from_documents(row.0, row.1, row.2, row.3, row.4, now))
+        .collect()
+}
+
+fn list_jobs_tx(transaction: &Transaction<'_>, limit: usize) -> StoreResult<Vec<StoredJob>> {
+    let rows = {
+        let mut statement = transaction.prepare(
+            r#"
+            SELECT job, run, version, cancel_requested, lease_id, plan_binding
+            FROM jobs ORDER BY updated_at DESC LIMIT ?1
+            "#,
+        )?;
+        let rows = statement
+            .query_map([limit.min(500) as i64], job_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    rows.into_iter().map(decode_job_row).collect()
+}
+
+fn read_fleet_snapshot_tx(
+    transaction: &Transaction<'_>,
+    fleet_revision: u64,
+    observed_at: DateTime<Utc>,
+    recent_job_limit: usize,
+) -> StoreResult<FleetSnapshot> {
+    let nodes = list_all_node_views(transaction, observed_at)?
+        .into_iter()
+        .map(|view| view.to_node().map_err(StoreError::from))
+        .collect::<StoreResult<Vec<_>>>()?;
+    let node_views = list_fleet_node_views_tx(transaction, observed_at)?;
+    let recent_jobs = list_jobs_tx(transaction, recent_job_limit)?;
+    Ok(FleetSnapshot {
+        fleet_revision,
+        observed_at,
+        nodes,
+        node_views,
+        recent_jobs,
+    })
+}
+
+fn read_safe_fleet_revision(transaction: &Transaction<'_>) -> StoreResult<u64> {
+    u64::try_from(get_meta(transaction, "fleet_revision")?)
+        .ok()
+        .filter(|revision| *revision <= MAX_SAFE_JSON_INTEGER)
+        .ok_or(StoreError::InvalidFleetRevision)
+}
+
+fn parse_rfc3339(value: &str) -> StoreResult<DateTime<Utc>> {
+    Ok(DateTime::parse_from_rfc3339(value)
+        .map_err(|_| StoreError::Timestamp)?
+        .with_timezone(&Utc))
+}
+
+fn list_fleet_node_views_tx(
+    transaction: &Transaction<'_>,
+    now: DateTime<Utc>,
+) -> StoreResult<Vec<FleetNodeView>> {
+    type FleetRow = (
+        String,
+        String,
+        String,
+        i64,
+        String,
+        String,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+    );
+    let rows = {
+        let mut statement = transaction.prepare(
+            r#"
+            SELECT n.id,
+                   c.document, c.updated_at, c.revision,
+                   i.document, i.updated_at, i.revision, i.digest, i.observed_at,
+                   t.document, t.received_at, t.observed_at
+            FROM nodes n
+            JOIN node_configs c ON c.node_id = n.id
+            JOIN node_inventories i ON i.node_id = n.id
+            JOIN node_telemetry t ON t.node_id = n.id
+            ORDER BY t.received_at DESC, n.id
+            "#,
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                ))
+            })?
+            .collect::<Result<Vec<FleetRow>, _>>()?;
+        rows
+    };
+    let scheduling = fresh_available_nodes(transaction, now)?;
+    let reservations = list_fleet_reservations(transaction, now.timestamp())?;
+    let mut result = Vec::with_capacity(rows.len());
+    for row in rows {
+        let node_id = Uuid::parse_str(&row.0)?;
+        let config: NodeConfig = serde_json::from_str(&row.1)?;
+        let inventory: NodeInventory = serde_json::from_str(&row.4)?;
+        let telemetry: NodeTelemetry = serde_json::from_str(&row.9)?;
+        let received_at = parse_rfc3339(&row.10)?;
+        let merged = NodeMergeView::merge(
+            node_id,
+            config.clone(),
+            inventory.clone(),
+            telemetry.clone(),
+            received_at,
+            now,
+            Duration::from_secs(u64::try_from(NODE_FRESHNESS_SECONDS).unwrap_or_default()),
+        )?;
+        let node_reservations = reservations.get(&node_id).cloned().unwrap_or_default();
+        let reserved_slots = node_reservations.iter().fold(0_u32, |total, reservation| {
+            total.saturating_add(reservation.slots)
+        });
+        let capacity = effective_capacity_policy(&config)?;
+        let configured = capacity.max_concurrent_jobs;
+        let containment_max_safe = inventory.containment.max_safe_slots;
+        let effective = configured.min(containment_max_safe);
+        let effective_resources = scheduling
+            .iter()
+            .find(|record| record.scheduling.node.id == node_id)
+            .map(|record| record.scheduling.node.resources.clone())
+            .unwrap_or_else(|| {
+                merged
+                    .to_node()
+                    .map(|node| node.resources)
+                    .unwrap_or_default()
+            });
+        let mut availability_reasons = availability_reasons(&merged);
+        if configured > containment_max_safe {
+            availability_reasons.push(format!(
+                "configured slots {configured} clamped by containment maxSafeSlots {containment_max_safe}"
+            ));
+        }
+        if reserved_slots > 0 {
+            availability_reasons.push(format!("{reserved_slots} execution slots reserved"));
+        }
+        if matches!(telemetry.power_source, cyc_protocol::PowerSource::Battery)
+            && !capacity.allow_on_battery
+        {
+            availability_reasons.push("battery power is disallowed by policy".to_owned());
+        }
+        if capacity
+            .max_cpu_percent
+            .is_some_and(|maximum| telemetry.load.cpu_percent > maximum)
+        {
+            availability_reasons.push(format!(
+                "CPU {}% exceeds policy maximum {}%",
+                telemetry.load.cpu_percent,
+                capacity.max_cpu_percent.unwrap_or_default()
+            ));
+        }
+        if capacity
+            .max_cpu_ewma_percent
+            .is_some_and(|maximum| telemetry.cpu_ewma_percent > maximum)
+        {
+            availability_reasons.push(format!(
+                "CPU EWMA {}% exceeds policy maximum {}%",
+                telemetry.cpu_ewma_percent,
+                capacity.max_cpu_ewma_percent.unwrap_or_default()
+            ));
+        }
+        let memory_used_percent = if inventory.memory_mib == 0 {
+            100
+        } else {
+            u8::try_from(
+                inventory
+                    .memory_mib
+                    .saturating_sub(telemetry.available_memory_mib)
+                    .saturating_mul(100)
+                    .saturating_div(inventory.memory_mib)
+                    .min(100),
+            )
+            .unwrap_or(100)
+        };
+        if capacity
+            .max_memory_percent
+            .is_some_and(|maximum| memory_used_percent > maximum)
+        {
+            availability_reasons.push(format!(
+                "memory use {memory_used_percent}% exceeds policy maximum {}%",
+                capacity.max_memory_percent.unwrap_or_default()
+            ));
+        }
+        if telemetry.temperature_c.is_some()
+            && capacity.max_temperature_c.is_some()
+            && telemetry.temperature_c > capacity.max_temperature_c
+        {
+            availability_reasons.push(format!(
+                "temperature {} C exceeds policy maximum {} C",
+                telemetry.temperature_c.unwrap_or_default(),
+                capacity.max_temperature_c.unwrap_or_default()
+            ));
+        }
+        if reserved_slots >= effective {
+            availability_reasons.push("no effective execution slots remain".to_owned());
+        }
+        result.push(FleetNodeView {
+            node_id,
+            config: FleetDocument {
+                document: config,
+                revision: Some(row.3),
+                digest: None,
+                observed_at: parse_rfc3339(&row.2)?,
+                received_at: parse_rfc3339(&row.2)?,
+            },
+            inventory: FleetDocument {
+                document: inventory,
+                revision: Some(row.6),
+                digest: Some(row.7),
+                observed_at: parse_rfc3339(&row.8)?,
+                received_at: parse_rfc3339(&row.5)?,
+            },
+            telemetry: FleetDocument {
+                document: telemetry,
+                revision: None,
+                digest: None,
+                observed_at: parse_rfc3339(&row.11)?,
+                received_at,
+            },
+            availability: merged.availability,
+            availability_reasons,
+            effective_slots: FleetSlotView {
+                configured,
+                containment_max_safe,
+                effective,
+                reserved: reserved_slots,
+                available: effective.saturating_sub(reserved_slots),
+            },
+            effective_resources,
+            reservations: node_reservations,
+        });
+    }
+    Ok(result)
+}
+
+fn availability_reasons(view: &NodeMergeView) -> Vec<String> {
+    match view.availability {
+        cyc_protocol::NodeAvailability::Available => Vec::new(),
+        cyc_protocol::NodeAvailability::Degraded => {
+            vec!["worker reports degraded health".to_owned()]
+        }
+        cyc_protocol::NodeAvailability::Draining => {
+            vec!["controller or worker is draining new work".to_owned()]
+        }
+        cyc_protocol::NodeAvailability::Disabled => {
+            vec!["node is disabled by controller configuration".to_owned()]
+        }
+        cyc_protocol::NodeAvailability::Offline => {
+            vec!["worker reports offline".to_owned()]
+        }
+        cyc_protocol::NodeAvailability::Stale => vec![format!(
+            "last accepted telemetry is older than {NODE_FRESHNESS_SECONDS} seconds"
+        )],
+    }
+}
+
+fn list_fleet_reservations(
+    transaction: &Transaction<'_>,
+    now: i64,
+) -> StoreResult<BTreeMap<Uuid, Vec<FleetReservationView>>> {
+    let rows = {
+        let mut statement = transaction.prepare(
+            r#"
+            SELECT l.node_id, l.id, l.run_id, l.job_id, l.phase, l.slots,
+                   l.cpu_cores, l.memory_mib, l.disk_mib, l.expires_at,
+                   g.device_id, COALESCE(g.vram_mib, 0), COALESCE(g.exclusive, 0)
+            FROM leases l
+            LEFT JOIN lease_gpu_reservations g ON g.lease_id = l.id
+            WHERE l.released_at IS NULL
+              AND (l.expires_at > ?1 OR l.phase = ?2)
+            ORDER BY l.node_id, l.created_at, l.id
+            "#,
+        )?;
+        let rows = statement
+            .query_map(params![now, LEASE_PHASE_CLEANUP_PENDING], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, i64>(12)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let mut result = BTreeMap::<Uuid, Vec<FleetReservationView>>::new();
+    for row in rows {
+        result
+            .entry(Uuid::parse_str(&row.0)?)
+            .or_default()
+            .push(FleetReservationView {
+                lease_id: Uuid::parse_str(&row.1)?,
+                run_id: Uuid::parse_str(&row.2)?,
+                job_id: Uuid::parse_str(&row.3)?,
+                phase: row.4,
+                slots: u32::try_from(as_u64(row.5)).unwrap_or(u32::MAX),
+                cpu_cores: u32::try_from(as_u64(row.6)).unwrap_or(u32::MAX),
+                memory_mib: as_u64(row.7),
+                disk_mib: as_u64(row.8),
+                gpu_device_id: row.10,
+                gpu_vram_mib: as_u64(row.11),
+                gpu_exclusive: row.12 != 0,
+                expires_at: timestamp(row.9)?,
+            });
+    }
+    Ok(result)
+}
+
+struct SchedulingNodeRecord {
+    scheduling: SchedulingNode,
+    revision: i64,
+}
+
+fn fresh_available_nodes(
+    transaction: &Transaction<'_>,
+    now: DateTime<Utc>,
+) -> StoreResult<Vec<SchedulingNodeRecord>> {
+    let mut statement = transaction.prepare(
+        r#"
+        SELECT DISTINCT
+            n.id, c.document, i.document, t.document, t.received_at, n.revision
+        FROM nodes n
+        JOIN node_configs c ON c.node_id = n.id
+        JOIN node_inventories i ON i.node_id = n.id
+        JOIN node_telemetry t ON t.node_id = n.id
+        JOIN worker_credentials wc ON wc.node_id = n.id
+            AND wc.activated_at IS NOT NULL AND wc.revoked_at IS NULL
+        JOIN pairings p ON p.id = wc.pairing_id
+        WHERE p.used_at IS NOT NULL AND p.acknowledged_at IS NOT NULL
+          AND p.revoked_at IS NULL
+        ORDER BY t.received_at DESC
+        "#,
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
     let reservations = active_reservations(transaction, now.timestamp())?;
+    let gpu_reservations = active_gpu_reservations(transaction, now.timestamp())?;
     let mut nodes = Vec::new();
-    for (document, updated_at, revision) in rows {
-        let updated_at = DateTime::parse_from_rfc3339(&updated_at)
-            .map_err(|_| StoreError::Timestamp)?
-            .with_timezone(&Utc);
-        if now.signed_duration_since(updated_at).num_seconds() > NODE_FRESHNESS_SECONDS {
-            continue;
-        }
-        let mut node: Node = serde_json::from_str(&document)?;
+    for (id, config, inventory, telemetry, received_at, revision) in rows {
+        let view = node_view_from_documents(id, config, inventory, telemetry, received_at, now)?;
+        let mut node = view.to_node()?;
         if !matches!(&node.transport, NodeTransport::Managed { .. }) {
             continue;
         }
+        let capacity = effective_capacity_policy(&view.config)?;
+        if let Some(limit) = capacity.allocatable_cpu_cores {
+            node.resources.available_cpu_cores = node.resources.available_cpu_cores.min(limit);
+        }
+        if let Some(percent) = capacity.allocatable_cpu_percent {
+            let limit = u64::from(node.resources.logical_cpu_cores)
+                .saturating_mul(u64::from(percent))
+                / 100;
+            node.resources.available_cpu_cores = node
+                .resources
+                .available_cpu_cores
+                .min(u32::try_from(limit).unwrap_or(u32::MAX));
+        }
+        if let Some(limit) = capacity.memory_limit_mib {
+            node.resources.available_memory_mib = node.resources.available_memory_mib.min(limit);
+        }
+        let reserved = reservations.get(&node.id);
         if let Some(reserved) = reservations.get(&node.id) {
-            // Preview invariant: a managed node owns exactly one active slot.
-            // This keeps claim/resource accounting deterministic until the
-            // protocol grows explicit per-node concurrency declarations.
-            if reserved.count > 0 {
-                continue;
-            }
             node.resources.available_cpu_cores = node
                 .resources
                 .available_cpu_cores
@@ -2598,16 +5671,127 @@ fn fresh_available_nodes(
                 .load
                 .queue_depth
                 .saturating_add(u32::try_from(reserved.count).unwrap_or(u32::MAX));
-            if reserved.gpu_reservations > 0 {
-                for gpu in &mut node.resources.gpus {
+        }
+        let gpu_device_ids = view
+            .telemetry
+            .gpus
+            .iter()
+            .enumerate()
+            .map(|(index, telemetry)| {
+                view.inventory
+                    .gpus
+                    .get(index)
+                    .and_then(|inventory| inventory.stable_id.clone())
+                    .or_else(|| telemetry.stable_id.clone())
+                    .or_else(|| Some(format!("gpu-index-{index}")))
+            })
+            .collect::<Vec<_>>();
+        let mut detailed_gpu_reservations = 0_u64;
+        let mut gpu_active_reservations = vec![0_u32; node.resources.gpus.len()];
+        for (index, gpu) in node.resources.gpus.iter_mut().enumerate() {
+            let Some(device_id) = gpu_device_ids.get(index).and_then(Option::as_deref) else {
+                continue;
+            };
+            if let Some(reserved_gpu) = gpu_reservations.get(&(node.id, device_id.to_owned())) {
+                detailed_gpu_reservations =
+                    detailed_gpu_reservations.saturating_add(u64::from(reserved_gpu.count));
+                gpu_active_reservations[index] = reserved_gpu.count;
+                gpu.available_vram_mib =
+                    gpu.available_vram_mib.saturating_sub(reserved_gpu.vram_mib);
+                if reserved_gpu.exclusive {
                     gpu.allocatable = false;
                     gpu.available_vram_mib = 0;
                 }
             }
         }
-        nodes.push((node, revision));
+        if reserved.is_some_and(|reserved| reserved.gpu_reservations > detailed_gpu_reservations) {
+            // Legacy leases had no stable device binding. Conservatively make
+            // every device unavailable rather than risking overlap.
+            for gpu in &mut node.resources.gpus {
+                gpu.allocatable = false;
+                gpu.available_vram_mib = 0;
+            }
+        }
+        let memory_used_percent = if view.inventory.memory_mib == 0 {
+            100
+        } else {
+            let used = view
+                .inventory
+                .memory_mib
+                .saturating_sub(view.telemetry.available_memory_mib);
+            u8::try_from(
+                used.saturating_mul(100)
+                    .saturating_div(view.inventory.memory_mib)
+                    .min(100),
+            )
+            .unwrap_or(100)
+        };
+        nodes.push(SchedulingNodeRecord {
+            scheduling: SchedulingNode {
+                node,
+                allowed_job_kinds: capacity.allowed_job_kinds,
+                allow_on_battery: capacity.allow_on_battery,
+                on_battery: matches!(
+                    view.telemetry.power_source,
+                    cyc_protocol::PowerSource::Battery
+                ),
+                cpu_ewma_percent: view.telemetry.cpu_ewma_percent,
+                memory_used_percent,
+                temperature_c: view.telemetry.temperature_c,
+                max_cpu_percent: capacity.max_cpu_percent,
+                max_cpu_ewma_percent: capacity.max_cpu_ewma_percent,
+                max_memory_percent: capacity.max_memory_percent,
+                max_temperature_c: capacity.max_temperature_c,
+                configured_max_slots: capacity.max_concurrent_jobs,
+                containment_max_safe_slots: view.inventory.containment.max_safe_slots,
+                active_slots: u32::try_from(reserved.map_or(0, |reserved| reserved.slots))
+                    .unwrap_or(u32::MAX),
+                gpu_device_ids,
+                gpu_active_reservations,
+            },
+            revision,
+        });
     }
     Ok(nodes)
+}
+
+fn active_gpu_reservations(
+    transaction: &Transaction<'_>,
+    now: i64,
+) -> StoreResult<BTreeMap<(Uuid, String), GpuReservationTotals>> {
+    let mut statement = transaction.prepare(
+        r#"
+        SELECT l.node_id, g.device_id, SUM(g.vram_mib), MAX(g.exclusive), COUNT(*)
+        FROM lease_gpu_reservations g
+        JOIN leases l ON l.id = g.lease_id
+        WHERE l.released_at IS NULL
+          AND (l.expires_at > ?1 OR l.phase = ?2)
+        GROUP BY l.node_id, g.device_id
+        "#,
+    )?;
+    let rows = statement
+        .query_map(params![now, LEASE_PHASE_CLEANUP_PENDING], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                (Uuid::parse_str(&row.0)?, row.1),
+                GpuReservationTotals {
+                    vram_mib: as_u64(row.2),
+                    exclusive: row.3 != 0,
+                    count: u32::try_from(as_u64(row.4)).unwrap_or(u32::MAX),
+                },
+            ))
+        })
+        .collect()
 }
 
 fn active_reservations(
@@ -2616,15 +5800,16 @@ fn active_reservations(
 ) -> StoreResult<BTreeMap<Uuid, ReservationTotals>> {
     let mut statement = transaction.prepare(
         r#"
-        SELECT node_id, SUM(cpu_cores), SUM(memory_mib), SUM(disk_mib),
+        SELECT node_id, SUM(slots), SUM(cpu_cores), SUM(memory_mib), SUM(disk_mib),
                SUM(gpu_reserved), COUNT(*)
         FROM leases
-        WHERE released_at IS NULL AND expires_at > ?1
+        WHERE released_at IS NULL
+          AND (expires_at > ?1 OR phase = ?2)
         GROUP BY node_id
         "#,
     )?;
     let rows = statement
-        .query_map([now], |row| {
+        .query_map(params![now, LEASE_PHASE_CLEANUP_PENDING], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
@@ -2632,6 +5817,7 @@ fn active_reservations(
                 row.get::<_, i64>(3)?,
                 row.get::<_, i64>(4)?,
                 row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2640,11 +5826,12 @@ fn active_reservations(
             Ok((
                 Uuid::parse_str(&row.0)?,
                 ReservationTotals {
-                    cpu_cores: as_u64(row.1),
-                    memory_mib: as_u64(row.2),
-                    disk_mib: as_u64(row.3),
-                    gpu_reservations: as_u64(row.4),
-                    count: as_u64(row.5),
+                    slots: as_u64(row.1),
+                    cpu_cores: as_u64(row.2),
+                    memory_mib: as_u64(row.3),
+                    disk_mib: as_u64(row.4),
+                    gpu_reservations: as_u64(row.5),
+                    count: as_u64(row.6),
                 },
             ))
         })
@@ -2652,34 +5839,52 @@ fn active_reservations(
 }
 
 fn expire_leases(transaction: &Transaction<'_>, now: i64) -> StoreResult<u64> {
+    let mut count = reap_expired_cleanup_reservations_tx(transaction, now)?;
     let expired = {
         let mut statement = transaction.prepare(
             r#"
-            SELECT id, run_id FROM leases
-            WHERE released_at IS NULL AND expires_at <= ?1
+            SELECT id, run_id, phase FROM leases
+            WHERE released_at IS NULL AND expires_at <= ?1 AND phase != ?2
             ORDER BY expires_at, id
             "#,
         )?;
         let rows = statement
-            .query_map([now], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            .query_map(params![now, LEASE_PHASE_CLEANUP_PENDING], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         rows
     };
 
-    let mut count = 0_u64;
-    for (lease_id, run_id) in expired {
+    for (lease_id, run_id, phase) in expired {
         let lease_id = Uuid::parse_str(&lease_id)?;
         let run_id = Uuid::parse_str(&run_id)?;
         match get_job_by_run_id(transaction, run_id) {
+            Ok(mut stored)
+                if phase == LEASE_PHASE_DISPATCH && stored.run.state == JobState::Queued =>
+            {
+                // Dispatch never began, so no worker owns execution. Clear the
+                // stale active target before the same transaction attempts a
+                // fresh, auditable placement. Execution leases take the
+                // terminal branch below and are never migrated.
+                stored.run.node_id = None;
+                stored.run.placement = None;
+                update_job_cas(transaction, &mut stored)?;
+            }
             Ok(mut stored) if !stored.run.state.is_terminal() => {
+                // Execution and historical legacy leases are never migrated.
+                // Their expiry is terminal because work may have started.
                 stored
                     .run
                     .transition(JobState::Failed)
                     .map_err(|_| StoreError::InvalidTransition)?;
                 stored.run.exit_code = None;
-                stored.run.error = Some("worker lease expired before completion".to_owned());
+                stored.run.error =
+                    Some("worker execution lease expired before completion".to_owned());
                 stored
                     .run
                     .validate()
@@ -2696,7 +5901,361 @@ fn expire_leases(transaction: &Transaction<'_>, now: i64) -> StoreResult<u64> {
         release_lease(transaction, Some(lease_id), now)?;
         count = count.saturating_add(1);
     }
+    redispatch_queued_jobs(transaction, now, &Scheduler::default())?;
     Ok(count)
+}
+
+fn reap_expired_cleanup_reservations_tx(
+    transaction: &Transaction<'_>,
+    now: i64,
+) -> StoreResult<u64> {
+    let run_ids = {
+        let mut statement = transaction.prepare(
+            r#"
+            SELECT run_id FROM run_cleanup_obligations
+            WHERE reservation_released_at IS NULL AND cleanup_deadline_at <= ?1
+            ORDER BY cleanup_deadline_at, run_id
+            "#,
+        )?;
+        let rows = statement
+            .query_map([now], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    let mut reaped = 0_u64;
+    for run_id in run_ids {
+        let run_id = Uuid::parse_str(&run_id)?;
+        let obligation = get_cleanup_obligation_tx(transaction, run_id)?
+            .ok_or(StoreError::InvalidRunEvidence)?;
+        let stored = get_job_by_run_id(transaction, run_id)?;
+        let completion =
+            get_completion_tx(transaction, run_id)?.ok_or(StoreError::InvalidRunEvidence)?;
+        let lease_binding = transaction
+            .query_row(
+                "SELECT run_id, job_id, phase FROM leases WHERE id = ?1 AND released_at IS NULL",
+                [obligation.lease_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let proven_terminal = stored.run.state.is_terminal()
+            && stored.job.id == obligation.job_id
+            && stored.run.id == obligation.run_id
+            && stored.lease_id == Some(obligation.lease_id)
+            && stored.version == obligation.state_version
+            && stored.run.state == obligation.final_state
+            && completion.sha256 == obligation.completion_sha256
+            && completion.created_at == obligation.terminal_acknowledged_at
+            && lease_binding.as_ref().is_some_and(|binding| {
+                binding.0 == obligation.run_id.to_string()
+                    && binding.1 == obligation.job_id.to_string()
+                    && binding.2 == LEASE_PHASE_CLEANUP_PENDING
+            });
+        if !proven_terminal {
+            // Never free capacity on inference. A corrupt/mismatched binding
+            // remains held for operator investigation rather than being
+            // mislabeled as successful cleanup.
+            transaction.execute(
+                r#"
+                UPDATE run_cleanup_obligations SET
+                    cleanup_failure_code = COALESCE(cleanup_failure_code, ?1),
+                    failure_observed_at = COALESCE(failure_observed_at, ?2)
+                WHERE run_id = ?3 AND reservation_released_at IS NULL
+                "#,
+                params![CLEANUP_FAILURE_DEADLINE, now, run_id.to_string()],
+            )?;
+            continue;
+        }
+        let changed = transaction.execute(
+            r#"
+            UPDATE run_cleanup_obligations SET
+                reservation_released_at = ?1,
+                release_reason = ?2,
+                cleanup_failure_code = ?3,
+                failure_observed_at = ?1
+            WHERE run_id = ?4 AND lease_id = ?5
+              AND reservation_released_at IS NULL
+              AND cleanup_deadline_at <= ?1
+            "#,
+            params![
+                now,
+                CLEANUP_RELEASE_DEADLINE,
+                CLEANUP_FAILURE_DEADLINE,
+                obligation.run_id.to_string(),
+                obligation.lease_id.to_string(),
+            ],
+        )?;
+        if changed != 1 {
+            continue;
+        }
+        release_lease(transaction, Some(obligation.lease_id), now)?;
+        reaped = reaped.saturating_add(1);
+    }
+    Ok(reaped)
+}
+
+fn redispatch_queued_jobs(
+    transaction: &Transaction<'_>,
+    now: i64,
+    scheduler: &Scheduler,
+) -> StoreResult<()> {
+    let mut reactivated_reservation = false;
+    let rows = {
+        let mut statement = transaction.prepare(
+            r#"
+            SELECT j.job, j.run, j.version, j.cancel_requested, j.lease_id,
+                   j.plan_binding
+            FROM jobs j
+            LEFT JOIN leases l ON l.id = j.lease_id
+            WHERE j.cancel_requested = 0
+              AND (
+                l.id IS NULL OR l.released_at IS NOT NULL OR l.expires_at <= ?1
+              )
+            ORDER BY j.created_at, j.run_id
+            "#,
+        )?;
+        let rows = statement
+            .query_map([now], job_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    for row in rows {
+        let mut stored = decode_job_row(row)?;
+        if stored.run.state != JobState::Queued {
+            continue;
+        }
+        let Some(lease_id) = stored.lease_id else {
+            // Truly pre-lease historical jobs retain their old behavior.
+            continue;
+        };
+        let observed_at = timestamp(now)?;
+        let nodes = fresh_available_nodes(transaction, observed_at)?;
+        let contexts = nodes
+            .iter()
+            .map(|record| record.scheduling.clone())
+            .collect::<Vec<_>>();
+        let decision = match scheduler.schedule_contexts_at(&stored.job, &contexts, observed_at) {
+            Ok(decision) => decision,
+            Err(ScheduleError::NoEligibleNodes { explanation }) => {
+                if stored.run.node_id.is_some()
+                    || stored.run.placement.as_ref() != Some(&explanation)
+                {
+                    stored.run.node_id = None;
+                    stored.run.placement = Some(explanation);
+                    update_job_cas(transaction, &mut stored)?;
+                }
+                continue;
+            }
+            Err(error) => return Err(StoreError::Schedule(error)),
+        };
+        let node_revision = nodes
+            .iter()
+            .find(|record| record.scheduling.node.id == decision.node_id)
+            .map(|record| record.revision)
+            .ok_or(StoreError::PlanStale)?;
+        let replacement_binding = new_plan_binding(
+            &stored.job,
+            canonical_job_digest(&stored.job)?,
+            decision.clone(),
+            observed_at,
+            get_meta(transaction, "fleet_revision")?,
+            node_revision,
+            get_meta(transaction, "policy_revision")?,
+        )?;
+        insert_plan_tx(transaction, &replacement_binding, Some(observed_at))?;
+        insert_placement_attempt_tx(
+            transaction,
+            stored.run.id,
+            &replacement_binding,
+            PLACEMENT_ATTEMPT_DISPATCH_EXPIRED,
+        )?;
+        let resources = stored.job.effective_resource_request();
+        let gpu_request = effective_gpu_request(&stored.job);
+        let gpu_reservation =
+            select_gpu_reservation(&nodes, decision.node_id, gpu_request.as_ref())?;
+        let changed = transaction.execute(
+            r#"
+            UPDATE leases SET
+                node_id = ?1, cpu_cores = ?2, memory_mib = ?3, disk_mib = ?4,
+                gpu_reserved = ?5, slots = ?6, phase = ?7,
+                expires_at = ?8, released_at = NULL
+            WHERE id = ?9 AND run_id = ?10
+              AND (released_at IS NOT NULL OR expires_at <= ?11)
+            "#,
+            params![
+                decision.node_id.to_string(),
+                i64::from(resources.cpu_cores),
+                as_i64(resources.memory_mib),
+                as_i64(resources.disk_mib),
+                i64::from(gpu_request.is_some()),
+                i64::from(resources.slots),
+                LEASE_PHASE_DISPATCH,
+                now.saturating_add(DISPATCH_TTL_SECONDS),
+                lease_id.to_string(),
+                stored.run.id.to_string(),
+                now,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidTransition);
+        }
+        transaction.execute(
+            "DELETE FROM lease_gpu_reservations WHERE lease_id = ?1",
+            [lease_id.to_string()],
+        )?;
+        if let Some((device_id, request)) = gpu_reservation {
+            transaction.execute(
+                r#"
+                INSERT INTO lease_gpu_reservations(lease_id, device_id, vram_mib, exclusive)
+                VALUES (?1, ?2, ?3, ?4)
+                "#,
+                params![
+                    lease_id.to_string(),
+                    device_id,
+                    as_i64(request.vram_mib),
+                    i64::from(request.exclusive),
+                ],
+            )?;
+        }
+        stored.run.node_id = Some(decision.node_id);
+        stored.run.placement = Some(decision.explanation);
+        stored.plan_binding = Some(replacement_binding);
+        update_job_cas(transaction, &mut stored)?;
+        reactivated_reservation = true;
+    }
+    if reactivated_reservation {
+        // A released dispatch consumes capacity again as soon as its lease is
+        // rearmed. Keep every reactivation in this pass under one fleet
+        // revision change so cached snapshots and pre-recovery plans cannot
+        // mistake the new reservation for the state they originally observed.
+        increment_meta(transaction, "fleet_revision")?;
+    }
+    Ok(())
+}
+
+fn new_plan_binding(
+    job: &JobSpec,
+    job_digest: String,
+    decision: PlacementDecision,
+    created_at: DateTime<Utc>,
+    fleet_revision: i64,
+    node_revision: i64,
+    policy_revision: i64,
+) -> StoreResult<PlacementPlanBindingV1> {
+    let binding = PlacementPlanBindingV1 {
+        api_version: PLACEMENT_PLAN_BINDING_API_VERSION.to_owned(),
+        plan_id: Uuid::new_v4(),
+        job_id: job.id,
+        job_digest,
+        created_at,
+        expires_at: created_at + chrono::Duration::seconds(PLAN_TTL_SECONDS),
+        fleet_revision,
+        node_revision,
+        policy_revision,
+        decision: PlacementPlanDecisionV1 {
+            node_id: decision.node_id,
+            score: decision.score,
+            explanation: decision.explanation,
+        },
+    };
+    binding
+        .validate(Some(job), Some(created_at))
+        .map_err(|_| StoreError::InvalidPlanBinding)?;
+    Ok(binding)
+}
+
+fn insert_placement_attempt_tx(
+    transaction: &Transaction<'_>,
+    run_id: Uuid,
+    binding: &PlacementPlanBindingV1,
+    reason: &str,
+) -> StoreResult<u64> {
+    if !matches!(
+        reason,
+        PLACEMENT_ATTEMPT_INITIAL | PLACEMENT_ATTEMPT_DISPATCH_EXPIRED
+    ) {
+        return Err(StoreError::InvalidPlanBinding);
+    }
+    binding
+        .validate(None, None)
+        .map_err(|_| StoreError::InvalidPlanBinding)?;
+    let stored_job_id = transaction
+        .query_row(
+            "SELECT job_id FROM jobs WHERE run_id = ?1",
+            [run_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or(StoreError::NotFound)?;
+    if Uuid::parse_str(&stored_job_id)? != binding.job_id {
+        return Err(StoreError::InvalidPlanBinding);
+    }
+    let attempt = transaction.query_row(
+        r#"
+        SELECT COALESCE(MAX(attempt), 0) + 1
+        FROM job_placement_attempts WHERE run_id = ?1
+        "#,
+        [run_id.to_string()],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let attempt = u64::try_from(attempt).map_err(|_| StoreError::InvalidPlanBinding)?;
+    let changed = transaction.execute(
+        r#"
+        INSERT INTO job_placement_attempts(
+            run_id, attempt, plan_id, node_id, plan_binding, reason, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "#,
+        params![
+            run_id.to_string(),
+            as_i64(attempt),
+            binding.plan_id.to_string(),
+            binding.decision.node_id.to_string(),
+            serde_json::to_string(binding)?,
+            reason,
+            binding.created_at.timestamp(),
+        ],
+    )?;
+    if changed != 1 {
+        return Err(StoreError::InvalidPlanBinding);
+    }
+    Ok(attempt)
+}
+
+fn insert_plan_tx(
+    transaction: &Transaction<'_>,
+    binding: &PlacementPlanBindingV1,
+    used_at: Option<DateTime<Utc>>,
+) -> StoreResult<()> {
+    binding
+        .validate(None, None)
+        .map_err(|_| StoreError::InvalidPlanBinding)?;
+    transaction.execute(
+        r#"
+        INSERT INTO plans(
+            id, job_id, decision, created_at, job_digest, expires_at,
+            fleet_revision, node_revision, policy_revision, used_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "#,
+        params![
+            binding.plan_id.to_string(),
+            binding.job_id.to_string(),
+            serde_json::to_string(&binding.decision)?,
+            binding.created_at.timestamp(),
+            binding.job_digest,
+            binding.expires_at.timestamp(),
+            binding.fleet_revision,
+            binding.node_revision,
+            binding.policy_revision,
+            used_at.map(|value| value.timestamp()),
+        ],
+    )?;
+    Ok(())
 }
 
 fn get_plan(connection: &Connection, plan_id: Uuid) -> StoreResult<StoredPlan> {
@@ -2724,8 +6283,9 @@ fn get_plan(connection: &Connection, plan_id: Uuid) -> StoreResult<StoredPlan> {
         )
         .optional()?
         .ok_or(StoreError::NotFound)?;
-    Ok(StoredPlan {
-        id: plan_id,
+    let binding = PlacementPlanBindingV1 {
+        api_version: PLACEMENT_PLAN_BINDING_API_VERSION.to_owned(),
+        plan_id,
         job_id: Uuid::parse_str(&row.0)?,
         job_digest: row.1,
         decision: serde_json::from_str(&row.2)?,
@@ -2734,11 +6294,137 @@ fn get_plan(connection: &Connection, plan_id: Uuid) -> StoreResult<StoredPlan> {
         fleet_revision: row.5,
         node_revision: row.6,
         policy_revision: row.7,
+    };
+    binding
+        .validate(None, None)
+        .map_err(|_| StoreError::InvalidPlanBinding)?;
+    Ok(StoredPlan {
+        binding,
         used_at: row.8.map(timestamp).transpose()?,
     })
 }
 
-type JobDatabaseRow = (String, String, i64, i64, Option<String>);
+fn get_completion_tx(
+    connection: &Connection,
+    run_id: Uuid,
+) -> StoreResult<Option<StoredCompletion>> {
+    connection
+        .query_row(
+            r#"
+            SELECT document, document_sha256, created_at
+            FROM run_completions WHERE run_id = ?1
+            "#,
+            [run_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()?
+        .map(|(document, sha256, created_at)| {
+            Ok(StoredCompletion {
+                completion: serde_json::from_str(&document)?,
+                sha256,
+                created_at: timestamp(created_at)?,
+            })
+        })
+        .transpose()
+}
+
+fn get_cleanup_tx(connection: &Connection, run_id: Uuid) -> StoreResult<Option<StoredCleanup>> {
+    connection
+        .query_row(
+            r#"
+            SELECT document, received_at FROM run_cleanups WHERE run_id = ?1
+            "#,
+            [run_id.to_string()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?
+        .map(|(document, received_at)| {
+            Ok(StoredCleanup {
+                receipt: serde_json::from_str(&document)?,
+                received_at: timestamp(received_at)?,
+            })
+        })
+        .transpose()
+}
+
+fn get_cleanup_obligation_tx(
+    connection: &Connection,
+    run_id: Uuid,
+) -> StoreResult<Option<StoredCleanupObligation>> {
+    type ObligationRow = (
+        String,
+        String,
+        i64,
+        String,
+        String,
+        i64,
+        i64,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    );
+    connection
+        .query_row(
+            r#"
+            SELECT job_id, lease_id, state_version, final_state,
+                   completion_sha256, terminal_acknowledged_at,
+                   cleanup_deadline_at, reservation_released_at,
+                   release_reason, cleanup_failure_code, failure_observed_at
+            FROM run_cleanup_obligations WHERE run_id = ?1
+            "#,
+            [run_id.to_string()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                ))
+            },
+        )
+        .optional()?
+        .map(|row: ObligationRow| {
+            let failure_observed_at = row.10.map(timestamp).transpose()?;
+            let cleanup_failure = match (row.9.as_deref(), failure_observed_at) {
+                (Some(code), Some(observed_at)) => Some(CleanupFailureV1 {
+                    code: cleanup_failure_code(code)?,
+                    observed_at,
+                }),
+                (None, None) => None,
+                _ => return Err(StoreError::InvalidRunEvidence),
+            };
+            Ok(StoredCleanupObligation {
+                job_id: Uuid::parse_str(&row.0)?,
+                run_id,
+                lease_id: Uuid::parse_str(&row.1)?,
+                state_version: as_u64(row.2),
+                final_state: parse_job_state_token(&row.3)?,
+                completion_sha256: row.4,
+                terminal_acknowledged_at: timestamp(row.5)?,
+                cleanup_deadline_at: timestamp(row.6)?,
+                reservation_released_at: row.7.map(timestamp).transpose()?,
+                release_reason: row.8.as_deref().map(cleanup_release_reason).transpose()?,
+                cleanup_failure,
+            })
+        })
+        .transpose()
+}
+
+type JobDatabaseRow = (String, String, i64, i64, Option<String>, Option<String>);
 
 fn job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobDatabaseRow> {
     Ok((
@@ -2747,13 +6433,36 @@ fn job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobDatabaseRow> {
         row.get(2)?,
         row.get(3)?,
         row.get(4)?,
+        row.get(5)?,
     ))
 }
 
 fn decode_job_row(row: JobDatabaseRow) -> StoreResult<StoredJob> {
+    let job: JobSpec = serde_json::from_str(&row.0)?;
+    let run: Run = serde_json::from_str(&row.1)?;
+    if run.job_id != job.id {
+        return Err(StoreError::InvalidPlanBinding);
+    }
+    let plan_binding = row
+        .5
+        .map(|document| {
+            let binding: PlacementPlanBindingV1 = serde_json::from_str(&document)?;
+            binding
+                .validate(Some(&job), None)
+                .map_err(|_| StoreError::InvalidPlanBinding)?;
+            if run.node_id.is_some() && run.node_id != Some(binding.decision.node_id) {
+                return Err(StoreError::InvalidPlanBinding);
+            }
+            if run.node_id.is_none() && run.state != JobState::Queued {
+                return Err(StoreError::InvalidPlanBinding);
+            }
+            Ok(binding)
+        })
+        .transpose()?;
     Ok(StoredJob {
-        job: serde_json::from_str(&row.0)?,
-        run: serde_json::from_str(&row.1)?,
+        job,
+        run,
+        plan_binding,
         version: as_u64(row.2),
         cancel_requested: row.3 != 0,
         lease_id: row.4.map(|value| Uuid::parse_str(&value)).transpose()?,
@@ -2764,7 +6473,7 @@ fn get_job_by_job_id(connection: &Connection, job_id: Uuid) -> StoreResult<Store
     let row = connection
         .query_row(
             r#"
-            SELECT job, run, version, cancel_requested, lease_id
+            SELECT job, run, version, cancel_requested, lease_id, plan_binding
             FROM jobs WHERE job_id = ?1
             "#,
             [job_id.to_string()],
@@ -2779,7 +6488,7 @@ fn get_job_by_run_id(connection: &Connection, run_id: Uuid) -> StoreResult<Store
     let row = connection
         .query_row(
             r#"
-            SELECT job, run, version, cancel_requested, lease_id
+            SELECT job, run, version, cancel_requested, lease_id, plan_binding
             FROM jobs WHERE run_id = ?1
             "#,
             [run_id.to_string()],
@@ -2803,14 +6512,20 @@ fn update_job_cas(transaction: &Transaction<'_>, stored: &mut StoredJob) -> Stor
     let next_version = previous_version.saturating_add(1);
     let changed = transaction.execute(
         r#"
-        UPDATE jobs SET run = ?1, cancel_requested = ?2, version = ?3, updated_at = ?4
-        WHERE run_id = ?5 AND version = ?6
+        UPDATE jobs SET run = ?1, cancel_requested = ?2, version = ?3,
+                        updated_at = ?4, plan_binding = ?5
+        WHERE run_id = ?6 AND version = ?7
         "#,
         params![
             serde_json::to_string(&stored.run)?,
             i64::from(stored.cancel_requested),
             as_i64(next_version),
             Utc::now().to_rfc3339(),
+            stored
+                .plan_binding
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
             stored.run.id.to_string(),
             as_i64(previous_version),
         ],
@@ -2833,18 +6548,84 @@ fn update_job_cas(transaction: &Transaction<'_>, stored: &mut StoredJob) -> Stor
     Ok(())
 }
 
+fn release_cleanup_reservation_tx(
+    transaction: &Transaction<'_>,
+    run_id: Uuid,
+    lease_id: Uuid,
+    now: i64,
+) -> StoreResult<()> {
+    let current =
+        get_cleanup_obligation_tx(transaction, run_id)?.ok_or(StoreError::InvalidCleanupReceipt)?;
+    if current.lease_id != lease_id {
+        return Err(StoreError::InvalidCleanupReceipt);
+    }
+    if current.reservation_released_at.is_none() {
+        let changed = transaction.execute(
+            r#"
+            UPDATE run_cleanup_obligations SET
+                reservation_released_at = ?1, release_reason = ?2
+            WHERE run_id = ?3 AND lease_id = ?4
+              AND reservation_released_at IS NULL
+            "#,
+            params![
+                now,
+                CLEANUP_RELEASE_REMOVED,
+                run_id.to_string(),
+                lease_id.to_string(),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidCleanupReceipt);
+        }
+    }
+    release_lease(transaction, Some(lease_id), now)?;
+    Ok(())
+}
+
 fn release_lease(
     transaction: &Transaction<'_>,
     lease_id: Option<Uuid>,
     now: i64,
-) -> StoreResult<()> {
+) -> StoreResult<bool> {
     if let Some(lease_id) = lease_id {
-        transaction.execute(
+        let changed = transaction.execute(
             "UPDATE leases SET released_at = ?1 WHERE id = ?2 AND released_at IS NULL",
             params![now, lease_id.to_string()],
         )?;
+        if changed > 0 {
+            increment_meta(transaction, "fleet_revision")?;
+            return Ok(true);
+        }
     }
-    Ok(())
+    Ok(false)
+}
+
+fn job_state_token(state: JobState) -> StoreResult<String> {
+    serde_json::to_value(state)?
+        .as_str()
+        .map(str::to_owned)
+        .ok_or(StoreError::InvalidRunEvidence)
+}
+
+fn parse_job_state_token(value: &str) -> StoreResult<JobState> {
+    serde_json::from_value(serde_json::Value::String(value.to_owned())).map_err(StoreError::from)
+}
+
+fn cleanup_release_reason(value: &str) -> StoreResult<CleanupReservationReleaseReasonV1> {
+    match value {
+        CLEANUP_RELEASE_REMOVED => Ok(CleanupReservationReleaseReasonV1::RemovedReceipt),
+        CLEANUP_RELEASE_DEADLINE => Ok(CleanupReservationReleaseReasonV1::DeadlineRecovery),
+        CLEANUP_RELEASE_LEGACY => Ok(CleanupReservationReleaseReasonV1::LegacyMigration),
+        _ => Err(StoreError::InvalidRunEvidence),
+    }
+}
+
+fn cleanup_failure_code(value: &str) -> StoreResult<CleanupFailureCodeV1> {
+    match value {
+        CLEANUP_FAILURE_DEADLINE => Ok(CleanupFailureCodeV1::RemovedReceiptDeadlineExceeded),
+        CLEANUP_FAILURE_LEGACY => Ok(CleanupFailureCodeV1::LegacyReleaseWithoutCleanupEvidence),
+        _ => Err(StoreError::InvalidRunEvidence),
+    }
 }
 
 fn timestamp(value: i64) -> StoreResult<DateTime<Utc>> {
@@ -2862,13 +6643,14 @@ fn as_u64(value: i64) -> u64 {
 #[cfg(test)]
 mod tests {
     use cyc_protocol::worker::{
-        ArtifactMetadata, ExecutionEvidence, ExecutionSourceEvidence,
+        ArtifactMetadata, ExecutionEvidence, ExecutionSourceEvidence, NodeReportRequest,
         RunEvidence as WorkerRunEvidence, RunStreamsEvidence, StepExecutionEvidence,
-        StreamEvidence, TerminationEvidence, TerminationReason,
+        StreamEvidence, TerminationEvidence, TerminationReason, WORKER_API_VERSION,
     };
     use cyc_protocol::{
-        Architecture, CredentialRef, GpuDevice, GpuRequirement, GpuVendor, JobKind, JobStep,
-        NodeResources, NodeStatus, NodeTransport, OperatingSystem, SourceSpec,
+        Architecture, Capability, CredentialRef, GpuDevice, GpuRequirement, GpuVendor, JobKind,
+        JobRootCleanupOutcomeV1, JobStep, NodeResources, NodeStatus, NodeTransport,
+        OperatingSystem, SourceSpec, TerminalCompletionAckV1, CLEANUP_API_VERSION,
     };
 
     use super::*;
@@ -2919,15 +6701,77 @@ mod tests {
         )
     }
 
-    fn pair_worker(store: &Store, worker: &Node) -> PairedWorker {
-        let pairing = store.create_pairing().unwrap();
-        let paired = store.consume_pairing(&pairing.code, worker).unwrap();
+    fn snapshot_job(digest: String, size_bytes: u64) -> JobSpec {
+        JobSpec::new(
+            JobKind::Test,
+            SourceSpec::Snapshot {
+                digest,
+                size_bytes: Some(size_bytes),
+            },
+            vec![JobStep::new("check", "echo snapshot")],
+        )
+    }
+
+    struct TestPairedWorker {
+        pairing_id: Uuid,
+        credential: String,
+    }
+
+    fn pair_worker(store: &Store, worker: &Node) -> TestPairedWorker {
+        let pairing = store.create_pairing_for(Some(worker.id)).unwrap();
+        let credential = random_secret();
+        let digest = secret_hash(&credential);
+        let paired = store
+            .consume_pairing(
+                &pairing.code,
+                pairing.id,
+                pairing.intended_node_id,
+                &digest,
+                worker,
+            )
+            .unwrap();
         assert_eq!(paired.node_id, worker.id);
-        assert!(matches!(
-            store.consume_pairing(&pairing.code, worker),
-            Err(StoreError::PairingUnavailable)
-        ));
-        paired
+        let replay = store
+            .consume_pairing(
+                &pairing.code,
+                pairing.id,
+                pairing.intended_node_id,
+                &digest,
+                worker,
+            )
+            .unwrap();
+        assert!(replay.replayed);
+        store
+            .acknowledge_pairing(&credential, pairing.id, worker.id, &digest)
+            .unwrap();
+        assert!(store.claim_job(&credential, worker).unwrap().is_none());
+        TestPairedWorker {
+            pairing_id: paired.pairing_id,
+            credential,
+        }
+    }
+
+    fn node_report(worker: &Node, boot_id: Uuid, sequence: u64) -> NodeReportRequest {
+        node_report_generation(worker, 0, boot_id, sequence)
+    }
+
+    fn node_report_generation(
+        worker: &Node,
+        boot_generation: u64,
+        boot_id: Uuid,
+        sequence: u64,
+    ) -> NodeReportRequest {
+        let observed_at = Utc::now();
+        let mut telemetry = NodeTelemetry::from_node(worker, observed_at);
+        telemetry.status = NodeStatus::Online;
+        telemetry.boot_generation = boot_generation;
+        telemetry.boot_id = boot_id;
+        telemetry.sequence = sequence;
+        NodeReportRequest {
+            api_version: WORKER_API_VERSION.to_owned(),
+            inventory: Some(NodeInventory::from_node(worker)),
+            telemetry,
+        }
     }
 
     fn empty_stream() -> StreamEvidence {
@@ -2936,6 +6780,137 @@ mod tests {
             sha256: bytes_sha256(&[]),
             truncated: false,
             chunk_count: 0,
+        }
+    }
+
+    fn complete_empty_managed_run(
+        store: &Store,
+        worker: &Node,
+        paired: &TestPairedWorker,
+    ) -> (WorkerClaim, StoredJob, TerminalCompletionAckV1) {
+        complete_empty_managed_run_as(store, worker, paired, JobState::Succeeded)
+    }
+
+    fn complete_empty_managed_run_as(
+        store: &Store,
+        worker: &Node,
+        paired: &TestPairedWorker,
+        final_state: JobState,
+    ) -> (WorkerClaim, StoredJob, TerminalCompletionAckV1) {
+        assert!(final_state.is_terminal());
+        store
+            .submit_job(&job(), None, &Scheduler::default())
+            .unwrap();
+        let claim = store
+            .claim_job(&paired.credential, worker)
+            .unwrap()
+            .unwrap();
+        let running = store
+            .worker_transition(
+                &paired.credential,
+                &claim.run_credential,
+                claim.stored.run.id,
+                claim.lease_id,
+                claim.stored.version,
+                JobState::Running,
+            )
+            .unwrap();
+        let started_at = running.run.started_at.unwrap();
+        let finished_at = Utc::now();
+        let (exit_code, error, termination_reason, steps) = match final_state {
+            JobState::Succeeded => (
+                Some(0),
+                None,
+                TerminationReason::Exited,
+                vec![StepExecutionEvidence {
+                    index: 0,
+                    name: "build".to_owned(),
+                    shell: Shell::Powershell,
+                    started_at,
+                    finished_at,
+                    exit_code: Some(0),
+                    termination: TerminationReason::Exited,
+                }],
+            ),
+            JobState::Failed => (
+                Some(1),
+                Some("fixture execution failed".to_owned()),
+                TerminationReason::ExecutionFailed,
+                vec![StepExecutionEvidence {
+                    index: 0,
+                    name: "build".to_owned(),
+                    shell: Shell::Powershell,
+                    started_at,
+                    finished_at,
+                    exit_code: Some(1),
+                    termination: TerminationReason::ExecutionFailed,
+                }],
+            ),
+            JobState::Cancelled => (None, None, TerminationReason::CancelRequested, Vec::new()),
+            _ => unreachable!("terminal state asserted above"),
+        };
+        let completion = RunCompletion {
+            run_id: running.run.id,
+            lease_id: claim.lease_id,
+            expected_version: running.version,
+            final_state,
+            evidence: WorkerRunEvidence {
+                started_at: Some(started_at),
+                finished_at: Some(finished_at),
+                exit_code,
+                error,
+                artifact_ids: Vec::new(),
+            },
+            execution: ExecutionEvidence {
+                source: ExecutionSourceEvidence {
+                    kind: "git".to_owned(),
+                    repository: "https://example.invalid/repository.git".to_owned(),
+                    requested_revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                    resolved_revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                    tree: "abcdef0123456789abcdef0123456789abcdef01".to_owned(),
+                    git_version: "git version 2.45.0".to_owned(),
+                },
+                steps,
+                streams: RunStreamsEvidence {
+                    stdout: empty_stream(),
+                    stderr: empty_stream(),
+                },
+                termination: TerminationEvidence {
+                    reason: termination_reason,
+                    process_tree_terminated: true,
+                    forced_kill: false,
+                    root_exit_code: exit_code,
+                    signal: None,
+                    observed_at: finished_at,
+                },
+            },
+            artifacts: Vec::new(),
+        };
+        let completed = store
+            .worker_complete_managed(&paired.credential, &claim.run_credential, &completion)
+            .unwrap();
+        let stored_completion = store.get_completion(completed.run.id).unwrap();
+        let terminal_ack = TerminalCompletionAckV1 {
+            run_id: completed.run.id,
+            lease_id: claim.lease_id,
+            completion_sha256: stored_completion.sha256,
+            state_version: completed.version,
+            final_state: completed.run.state,
+            acknowledged_at: stored_completion.created_at,
+        };
+        (claim, completed, terminal_ack)
+    }
+
+    fn removed_cleanup_receipt(ack: TerminalCompletionAckV1) -> CleanupReceiptV1 {
+        CleanupReceiptV1 {
+            api_version: CLEANUP_API_VERSION.to_owned(),
+            run_id: ack.run_id,
+            lease_id: ack.lease_id,
+            relative_root: format!("jobs/{}", ack.run_id),
+            outcome: JobRootCleanupOutcomeV1::Removed,
+            job_root_deleted: true,
+            observed_at: Utc::now().max(ack.acknowledged_at),
+            terminal_ack: ack,
         }
     }
 
@@ -2953,6 +6928,126 @@ mod tests {
             canonical_job_digest(&first).unwrap(),
             canonical_job_digest(&same).unwrap()
         );
+    }
+
+    #[test]
+    fn snapshot_objects_are_immutable_bounded_and_run_bound() {
+        let store = Store::in_memory().unwrap();
+        let archive = b"raw tar.zst fixture bytes";
+        let digest = format!("sha256:{}", bytes_sha256(archive));
+        let size = archive.len() as u64;
+        let metadata = store.put_snapshot(&digest, size, archive).unwrap();
+        assert_eq!(metadata.digest, digest);
+        assert_eq!(metadata.size_bytes, size);
+        assert_eq!(
+            store.put_snapshot(&digest, size, archive).unwrap(),
+            metadata
+        );
+        assert!(matches!(
+            store.put_snapshot(&format!("sha256:{}", "f".repeat(64)), size, archive),
+            Err(StoreError::DigestMismatch)
+        ));
+        assert!(matches!(
+            store.put_snapshot(&digest, size + 1, archive),
+            Err(StoreError::InvalidUpload)
+        ));
+
+        let worker = node();
+        let paired = pair_worker(&store, &worker);
+        store
+            .submit_job(
+                &snapshot_job(digest.clone(), size),
+                None,
+                &Scheduler::default(),
+            )
+            .unwrap();
+        let claim = store
+            .claim_job(&paired.credential, &worker)
+            .unwrap()
+            .unwrap();
+        let download = store
+            .authorize_snapshot_download(
+                &paired.credential,
+                &claim.run_credential,
+                claim.stored.run.id,
+                claim.lease_id,
+                &digest,
+            )
+            .unwrap();
+        assert_eq!(download.metadata, metadata);
+        assert_eq!(fs::read(download.path).unwrap(), archive);
+
+        let wrong_digest = format!("sha256:{}", "e".repeat(64));
+        assert!(matches!(
+            store.authorize_snapshot_download(
+                &paired.credential,
+                &claim.run_credential,
+                claim.stored.run.id,
+                claim.lease_id,
+                &wrong_digest,
+            ),
+            Err(StoreError::RunUnauthorized)
+        ));
+
+        let mut other = node();
+        other.id = Uuid::new_v4();
+        other.name = "other-worker".to_owned();
+        let other_paired = pair_worker(&store, &other);
+        assert!(matches!(
+            store.authorize_snapshot_download(
+                &other_paired.credential,
+                &claim.run_credential,
+                claim.stored.run.id,
+                claim.lease_id,
+                &digest,
+            ),
+            Err(StoreError::RunUnauthorized)
+        ));
+    }
+
+    #[test]
+    fn snapshot_success_evidence_binds_requested_resolved_and_tree_digest() {
+        let digest = format!("sha256:{}", "c".repeat(64));
+        let source = SourceSpec::Snapshot {
+            digest: digest.clone(),
+            size_bytes: Some(42),
+        };
+        let mut execution = ExecutionEvidence {
+            source: ExecutionSourceEvidence {
+                kind: "snapshot".to_owned(),
+                repository: "snapshot".to_owned(),
+                requested_revision: digest.clone(),
+                resolved_revision: digest.clone(),
+                tree: digest.clone(),
+                git_version: "not-applicable".to_owned(),
+            },
+            steps: Vec::new(),
+            streams: RunStreamsEvidence {
+                stdout: empty_stream(),
+                stderr: empty_stream(),
+            },
+            termination: TerminationEvidence {
+                reason: TerminationReason::Exited,
+                process_tree_terminated: true,
+                forced_kill: false,
+                root_exit_code: Some(0),
+                signal: None,
+                observed_at: Utc::now(),
+            },
+        };
+        validate_execution_source(&source, JobState::Succeeded, None, &execution).unwrap();
+        execution.source.resolved_revision.clear();
+        execution.source.tree.clear();
+        assert!(matches!(
+            validate_execution_source(&source, JobState::Succeeded, None, &execution),
+            Err(StoreError::InvalidRunEvidence)
+        ));
+        execution.source.resolved_revision = digest;
+        execution.source.tree = format!("sha256:{}", "d".repeat(64));
+        assert!(matches!(
+            validate_execution_source(&source, JobState::Failed, Some("step failed"), &execution),
+            Err(StoreError::InvalidRunEvidence)
+        ));
     }
 
     #[test]
@@ -2984,44 +7079,144 @@ mod tests {
         let scheduler = Scheduler::default();
         let job = job();
         let plan = store.create_plan(&job, &scheduler).unwrap();
-        assert_eq!(plan.job_digest, canonical_job_digest(&job).unwrap());
-        assert!(plan.expires_at > plan.created_at);
+        assert_eq!(plan.binding.job_digest, canonical_job_digest(&job).unwrap());
+        assert!(plan.binding.expires_at > plan.binding.created_at);
 
         let mut changed = job.clone();
         changed.steps[0].script.push_str(" --release");
         assert!(matches!(
-            store.submit_job(&changed, Some(plan.id), &scheduler),
+            store.submit_job(&changed, Some(plan.binding.plan_id), &scheduler),
             Err(StoreError::PlanDigestMismatch)
         ));
 
         let mut explicit_defaults = job.clone();
         explicit_defaults.requirements.min_cpu_cores = Some(1);
         let submitted = store
-            .submit_job(&explicit_defaults, Some(plan.id), &scheduler)
+            .submit_job(&explicit_defaults, Some(plan.binding.plan_id), &scheduler)
             .unwrap();
         assert_eq!(submitted.version, 0);
         assert_eq!(submitted.job.requirements.min_cpu_cores, Some(1));
         assert!(matches!(
-            store.submit_job(&job, Some(plan.id), &scheduler),
+            store.submit_job(&job, Some(plan.binding.plan_id), &scheduler),
             Err(StoreError::Conflict)
         ));
     }
 
     #[test]
-    fn node_revision_invalidates_a_plan() {
+    fn config_or_inventory_revision_invalidates_a_plan() {
         let store = Store::in_memory().unwrap();
         let worker = node();
         let mut changed = worker.clone();
-        changed.load.cpu_percent = 1;
+        changed.capabilities.insert(Capability::new("tool.changed"));
         let _paired = pair_worker(&store, &changed);
         let scheduler = Scheduler::default();
         let job = job();
         let plan = store.create_plan(&job, &scheduler).unwrap();
         store.upsert_node(&worker).unwrap();
         assert!(matches!(
-            store.submit_job(&job, Some(plan.id), &scheduler),
+            store.submit_job(&job, Some(plan.binding.plan_id), &scheduler),
             Err(StoreError::PlanStale)
         ));
+    }
+
+    #[test]
+    fn telemetry_refresh_keeps_revisions_and_same_node_plan_valid() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let paired = pair_worker(&store, &worker);
+        let scheduler = Scheduler::default();
+        let job = job();
+        let plan = store.create_plan(&job, &scheduler).unwrap();
+        let original_binding = plan.binding.clone();
+        let revisions_before = store
+            .connection()
+            .unwrap()
+            .query_row(
+                r#"
+                SELECT n.revision,
+                       (SELECT value FROM controller_meta WHERE key = 'fleet_revision')
+                FROM nodes n WHERE n.id = ?1
+                "#,
+                [worker.id.to_string()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap();
+
+        let mut refreshed = worker.clone();
+        refreshed.resources.available_cpu_cores = 1;
+        refreshed.resources.available_memory_mib = 4_096;
+        refreshed.load.cpu_percent = 99;
+        assert!(store
+            .claim_job(&paired.credential, &refreshed)
+            .unwrap()
+            .is_none());
+        let revisions_after = store
+            .connection()
+            .unwrap()
+            .query_row(
+                r#"
+                SELECT n.revision,
+                       (SELECT value FROM controller_meta WHERE key = 'fleet_revision')
+                FROM nodes n WHERE n.id = ?1
+                "#,
+                [worker.id.to_string()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(revisions_after, revisions_before);
+
+        let submitted = store
+            .submit_job(&job, Some(plan.binding.plan_id), &scheduler)
+            .unwrap();
+        assert_eq!(submitted.run.node_id, Some(worker.id));
+        assert_eq!(submitted.plan_binding.as_ref(), Some(&original_binding));
+        assert_ne!(
+            submitted.run.placement.as_ref(),
+            Some(&original_binding.decision.explanation)
+        );
+        assert!(submitted
+            .run
+            .placement
+            .as_ref()
+            .unwrap()
+            .candidates
+            .iter()
+            .find(|candidate| candidate.node_id == worker.id)
+            .unwrap()
+            .score_components
+            .iter()
+            .any(|component| component.key == "cpu_headroom" && component.value == 2));
+    }
+
+    #[test]
+    fn submit_rechecks_latest_telemetry_and_rejects_changed_selection() {
+        let store = Store::in_memory().unwrap();
+        let mut preferred = node();
+        preferred.priority = 1_000;
+        let preferred_pair = pair_worker(&store, &preferred);
+        let mut fallback = node();
+        fallback.id = Uuid::new_v4();
+        fallback.name = "fallback".to_owned();
+        fallback.priority = 0;
+        let _fallback_pair = pair_worker(&store, &fallback);
+        let scheduler = Scheduler::default();
+        let job = job();
+        let plan = store.create_plan(&job, &scheduler).unwrap();
+        assert_eq!(plan.binding.decision.node_id, preferred.id);
+
+        let mut saturated = preferred.clone();
+        saturated.resources.available_cpu_cores = 0;
+        saturated.load.cpu_percent = 100;
+        assert!(store
+            .claim_job(&preferred_pair.credential, &saturated)
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            store.submit_job(&job, Some(plan.binding.plan_id), &scheduler),
+            Err(StoreError::PlanStale)
+        ));
+        let refreshed = store.create_plan(&job, &scheduler).unwrap();
+        assert_eq!(refreshed.binding.decision.node_id, fallback.id);
     }
 
     #[test]
@@ -3036,8 +7231,389 @@ mod tests {
         worker.last_seen_at = Some(Utc::now() + chrono::Duration::seconds(1));
         store.upsert_node(&worker).unwrap();
         store.touch_node(worker.id).unwrap();
-        let submitted = store.submit_job(&job, Some(plan.id), &scheduler).unwrap();
+        let submitted = store
+            .submit_job(&job, Some(plan.binding.plan_id), &scheduler)
+            .unwrap();
         assert_eq!(submitted.run.node_id, Some(worker.id));
+    }
+
+    fn persistent_bound_job(label: &str) -> (PathBuf, PathBuf, Store, StoredJob) {
+        let directory = test_directory(label);
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("controller.db");
+        let store = Store::open(&database).unwrap();
+        let worker = node();
+        let _paired = pair_worker(&store, &worker);
+        let submitted = store
+            .submit_job(&job(), None, &Scheduler::default())
+            .unwrap();
+        (directory, database, store, submitted)
+    }
+
+    fn expose_legacy_null_binding(store: &Store, job_id: Uuid) {
+        let connection = store.connection().unwrap();
+        connection
+            .execute_batch("DROP TRIGGER IF EXISTS jobs_plan_binding_immutable;")
+            .unwrap();
+        assert_eq!(
+            connection
+                .execute(
+                    "UPDATE jobs SET plan_binding = NULL WHERE job_id = ?1",
+                    [job_id.to_string()],
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn controller_authored_binding_survives_restart_get_and_list() {
+        let (directory, database, store, submitted) = persistent_bound_job("plan-binding-restart");
+        let expected = submitted.plan_binding.clone().unwrap();
+        assert_eq!(
+            store
+                .connection()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM plans WHERE id = ?1 AND used_at IS NOT NULL",
+                    [expected.plan_id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        drop(store);
+
+        let reopened = Store::open(&database).unwrap();
+        assert_eq!(
+            reopened
+                .get_job_by_job_id(submitted.job.id)
+                .unwrap()
+                .plan_binding,
+            Some(expected.clone())
+        );
+        assert_eq!(
+            reopened.list_jobs(10).unwrap()[0].plan_binding,
+            Some(expected)
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn migration_backfills_only_one_validated_used_plan() {
+        let (directory, database, store, submitted) =
+            persistent_bound_job("plan-binding-migrate-exact");
+        let expected = submitted.plan_binding.clone().unwrap();
+        expose_legacy_null_binding(&store, submitted.job.id);
+        drop(store);
+
+        let reopened = Store::open(&database).unwrap();
+        assert_eq!(
+            reopened
+                .get_job_by_job_id(submitted.job.id)
+                .unwrap()
+                .plan_binding,
+            Some(expected)
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn migration_leaves_ambiguous_or_missing_evidence_explicitly_legacy() {
+        for (label, ambiguous) in [
+            ("plan-binding-migrate-ambiguous", true),
+            ("plan-binding-migrate-none", false),
+        ] {
+            let (directory, database, store, submitted) = persistent_bound_job(label);
+            let binding = submitted.plan_binding.as_ref().unwrap();
+            {
+                let connection = store.connection().unwrap();
+                if ambiguous {
+                    connection
+                        .execute(
+                            r#"
+                            INSERT INTO plans(
+                                id, job_id, decision, created_at, job_digest, expires_at,
+                                fleet_revision, node_revision, policy_revision, used_at
+                            )
+                            SELECT ?1, job_id, decision, created_at, job_digest, expires_at,
+                                   fleet_revision, node_revision, policy_revision, used_at
+                            FROM plans WHERE id = ?2
+                            "#,
+                            params![Uuid::new_v4().to_string(), binding.plan_id.to_string()],
+                        )
+                        .unwrap();
+                } else {
+                    connection
+                        .execute(
+                            "DELETE FROM plans WHERE job_id = ?1",
+                            [submitted.job.id.to_string()],
+                        )
+                        .unwrap();
+                }
+            }
+            expose_legacy_null_binding(&store, submitted.job.id);
+            drop(store);
+
+            let reopened = Store::open(&database).unwrap();
+            assert_eq!(
+                reopened
+                    .get_job_by_job_id(submitted.job.id)
+                    .unwrap()
+                    .plan_binding,
+                None
+            );
+            drop(reopened);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn plan_use_job_and_lease_commit_or_rollback_together() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let _paired = pair_worker(&store, &worker);
+        let scheduler = Scheduler::default();
+        let first_job = job();
+        let plan = store.create_plan(&first_job, &scheduler).unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute_batch(
+                r#"
+                CREATE TRIGGER abort_plan_use BEFORE UPDATE OF used_at ON plans
+                WHEN NEW.used_at IS NOT NULL
+                BEGIN SELECT RAISE(ABORT, 'injected plan-use crash'); END;
+                "#,
+            )
+            .unwrap();
+        assert!(matches!(
+            store.submit_job(&first_job, Some(plan.binding.plan_id), &scheduler),
+            Err(StoreError::Database(_))
+        ));
+        let connection = store.connection().unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM leases", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT used_at FROM plans WHERE id = ?1",
+                    [plan.binding.plan_id.to_string()],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .unwrap(),
+            None
+        );
+        connection
+            .execute_batch(
+                r#"
+                DROP TRIGGER abort_plan_use;
+                CREATE TRIGGER abort_job_insert BEFORE INSERT ON jobs
+                BEGIN SELECT RAISE(ABORT, 'injected job crash'); END;
+                "#,
+            )
+            .unwrap();
+        let plans_before = connection
+            .query_row("SELECT COUNT(*) FROM plans", [], |row| row.get::<_, i64>(0))
+            .unwrap();
+        drop(connection);
+        let mut second_job = job();
+        second_job.id = Uuid::new_v4();
+        assert!(matches!(
+            store.submit_job(&second_job, None, &scheduler),
+            Err(StoreError::Database(_))
+        ));
+        let connection = store.connection().unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM plans", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            plans_before
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM leases", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn immutable_binding_and_decode_reject_database_tampering() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let _paired = pair_worker(&store, &worker);
+        let submitted = store
+            .submit_job(&job(), None, &Scheduler::default())
+            .unwrap();
+        let mut tampered = submitted.plan_binding.clone().unwrap();
+        tampered.decision.node_id = Uuid::new_v4();
+        assert!(matches!(
+            store.connection().unwrap().execute(
+                "UPDATE jobs SET plan_binding = ?1 WHERE job_id = ?2",
+                params![
+                    serde_json::to_string(&tampered).unwrap(),
+                    submitted.job.id.to_string()
+                ],
+            ),
+            Err(rusqlite::Error::SqliteFailure(_, _))
+        ));
+        let connection = store.connection().unwrap();
+        connection
+            .execute_batch("DROP TRIGGER jobs_plan_binding_immutable;")
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE jobs SET plan_binding = ?1 WHERE job_id = ?2",
+                params![
+                    serde_json::to_string(&tampered).unwrap(),
+                    submitted.job.id.to_string()
+                ],
+            )
+            .unwrap();
+        drop(connection);
+        assert!(matches!(
+            store.get_job_by_job_id(submitted.job.id),
+            Err(StoreError::InvalidPlanBinding)
+        ));
+    }
+
+    #[test]
+    fn insert_trigger_rejects_null_malformed_and_mismatched_plan_bindings() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let _paired = pair_worker(&store, &worker);
+        let submitted = store
+            .submit_job(&job(), None, &Scheduler::default())
+            .unwrap();
+        let valid_but_bound_to_existing_job =
+            serde_json::to_string(submitted.plan_binding.as_ref().unwrap()).unwrap();
+        let connection = store.connection().unwrap();
+
+        for plan_binding in [
+            None,
+            Some("not-json"),
+            Some("{}"),
+            Some(valid_but_bound_to_existing_job.as_str()),
+        ] {
+            let inserted = connection.execute(
+                r#"
+                INSERT INTO jobs(
+                    run_id, job_id, job, run, created_at, updated_at,
+                    version, cancel_requested, lease_id, plan_binding
+                )
+                SELECT ?1, ?2, job, run, created_at, updated_at,
+                       version, cancel_requested, NULL, ?3
+                FROM jobs WHERE job_id = ?4
+                "#,
+                params![
+                    Uuid::new_v4().to_string(),
+                    Uuid::new_v4().to_string(),
+                    plan_binding,
+                    submitted.job.id.to_string(),
+                ],
+            );
+            assert!(matches!(
+                inserted,
+                Err(rusqlite::Error::SqliteFailure(_, _))
+            ));
+        }
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn fleet_snapshot_pins_revision_nodes_views_and_jobs_across_concurrent_write() {
+        let directory = test_directory("fleet-snapshot");
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("controller.db");
+        let reader = Store::open(&database).unwrap();
+        let first = node();
+        let _paired = pair_worker(&reader, &first);
+        let writer = Store::open(&database).unwrap();
+
+        let mut connection = reader.connection().unwrap();
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .unwrap();
+        // This first read establishes the WAL snapshot before another
+        // controller connection commits a second node.
+        let pinned_revision = read_safe_fleet_revision(&transaction).unwrap();
+        let mut second = node();
+        second.id = Uuid::new_v4();
+        second.name = "concurrent-writer".to_owned();
+        writer.upsert_node(&second).unwrap();
+        writer
+            .submit_job(&job(), None, &Scheduler::default())
+            .unwrap();
+
+        let observed_at = Utc::now();
+        let snapshot =
+            read_fleet_snapshot_tx(&transaction, pinned_revision, observed_at, 20).unwrap();
+        assert_eq!(snapshot.fleet_revision, pinned_revision);
+        assert_eq!(snapshot.nodes.len(), 1);
+        assert_eq!(snapshot.node_views.len(), 1);
+        assert_eq!(snapshot.nodes[0].id, snapshot.node_views[0].node_id);
+        assert!(snapshot.recent_jobs.is_empty());
+        assert!(snapshot
+            .node_views
+            .iter()
+            .all(|view| view.config.received_at <= snapshot.observed_at
+                && view.inventory.received_at <= snapshot.observed_at
+                && view.telemetry.received_at <= snapshot.observed_at));
+        transaction.commit().unwrap();
+        drop(connection);
+
+        let latest = reader.fleet_snapshot(20).unwrap();
+        assert!(latest.fleet_revision > snapshot.fleet_revision);
+        assert_eq!(latest.nodes.len(), 2);
+        assert_eq!(latest.node_views.len(), 2);
+        assert_eq!(latest.recent_jobs.len(), 1);
+        assert!(latest.observed_at >= snapshot.observed_at);
+        drop(writer);
+        drop(reader);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn fleet_snapshot_rejects_non_javascript_safe_revision() {
+        let store = Store::in_memory().unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE controller_meta SET value = ?1 WHERE key = 'fleet_revision'",
+                [as_i64(MAX_SAFE_JSON_INTEGER.saturating_add(1))],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.fleet_snapshot(20),
+            Err(StoreError::InvalidFleetRevision)
+        ));
     }
 
     #[test]
@@ -3208,30 +7784,16 @@ mod tests {
     }
 
     #[test]
-    fn lease_duration_uses_overall_or_sequential_step_upper_bound() {
-        let mut job = job();
-        job.steps = vec![
-            JobStep {
-                timeout_seconds: Some(60),
-                ..JobStep::new("one", "one")
-            },
-            JobStep {
-                timeout_seconds: Some(90),
-                ..JobStep::new("two", "two")
-            },
-        ];
-        assert_eq!(lease_duration_seconds(&job), 150 + LEASE_GRACE_SECONDS);
-        job.timeout_seconds = Some(120);
-        assert_eq!(lease_duration_seconds(&job), 120 + LEASE_GRACE_SECONDS);
-    }
-
-    #[test]
     fn lease_renewal_does_not_change_job_version() {
         let store = Store::in_memory().unwrap();
         let worker = node();
-        let _paired = pair_worker(&store, &worker);
-        let submitted = store
+        let paired = pair_worker(&store, &worker);
+        store
             .submit_job(&job(), None, &Scheduler::default())
+            .unwrap();
+        let claim = store
+            .claim_job(&paired.credential, &worker)
+            .unwrap()
             .unwrap();
         store
             .connection()
@@ -3240,20 +7802,23 @@ mod tests {
                 "UPDATE leases SET expires_at = ?1 WHERE id = ?2",
                 params![
                     Utc::now().timestamp().saturating_add(60),
-                    submitted.lease_id.unwrap().to_string()
+                    claim.lease_id.to_string()
                 ],
             )
             .unwrap();
-        let renewed = store.renew_lease(submitted.run.id).unwrap();
+        let renewed = store.renew_lease(claim.stored.run.id).unwrap();
         assert!(renewed.expires_at > Utc::now() + chrono::Duration::seconds(60));
         assert_eq!(
-            store.get_job_by_run_id(submitted.run.id).unwrap().version,
-            submitted.version
+            store
+                .get_job_by_run_id(claim.stored.run.id)
+                .unwrap()
+                .version,
+            claim.stored.version
         );
     }
 
     #[test]
-    fn expired_lease_atomically_fails_run_and_releases_capacity() {
+    fn expired_dispatch_requeues_and_reselects_without_failing_the_run() {
         let store = Store::in_memory().unwrap();
         let worker = node();
         let _paired = pair_worker(&store, &worker);
@@ -3273,20 +7838,278 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.reap_expired_leases().unwrap(), 1);
-        let expired = store.get_job_by_run_id(submitted.run.id).unwrap();
-        assert_eq!(expired.run.state, JobState::Failed);
-        assert!(expired
-            .run
-            .error
-            .as_deref()
+        let redispatched = store.get_job_by_run_id(submitted.run.id).unwrap();
+        assert_eq!(redispatched.run.state, JobState::Queued);
+        assert_eq!(redispatched.run.node_id, Some(worker.id));
+        assert_eq!(redispatched.lease_id, submitted.lease_id);
+        assert!(redispatched.version >= submitted.version + 2);
+        let (phase, expires_at) = store
+            .connection()
             .unwrap()
-            .contains("lease expired"));
-        assert_eq!(expired.version, submitted.version + 1);
-        assert_eq!(store.active_lease_count(worker.id).unwrap(), 0);
+            .query_row(
+                "SELECT phase, expires_at FROM leases WHERE id = ?1",
+                [submitted.lease_id.unwrap().to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(phase, LEASE_PHASE_DISPATCH);
+        assert!(expires_at > Utc::now().timestamp());
+        assert_eq!(store.active_lease_count(worker.id).unwrap(), 1);
+    }
 
-        let mut next = job();
-        next.id = Uuid::new_v4();
-        assert!(store.submit_job(&next, None, &Scheduler::default()).is_ok());
+    #[test]
+    fn expired_unclaimed_dispatch_reselects_available_node_and_preserves_attempt_history() {
+        let store = Store::in_memory().unwrap();
+        let mut selected = node();
+        selected.priority = 1_000;
+        let _selected_pair = pair_worker(&store, &selected);
+        let mut fallback = node();
+        fallback.id = Uuid::new_v4();
+        fallback.name = "fallback".to_owned();
+        fallback.priority = 0;
+        let _fallback_pair = pair_worker(&store, &fallback);
+        let submitted = store
+            .submit_job(&job(), None, &Scheduler::default())
+            .unwrap();
+        let original_binding = submitted.plan_binding.clone().unwrap();
+        assert_eq!(original_binding.decision.node_id, selected.id);
+
+        selected.status = cyc_protocol::NodeStatus::Offline;
+        store.upsert_node(&selected).unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE leases SET expires_at = ?1 WHERE id = ?2",
+                params![
+                    Utc::now().timestamp().saturating_sub(1),
+                    submitted.lease_id.unwrap().to_string()
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(store.reap_expired_leases().unwrap(), 1);
+        let queued = store.get_job_by_run_id(submitted.run.id).unwrap();
+        assert_eq!(queued.run.state, JobState::Queued);
+        assert_eq!(queued.run.node_id, Some(fallback.id));
+        let replacement_binding = queued.plan_binding.unwrap();
+        assert_eq!(replacement_binding.decision.node_id, fallback.id);
+        assert_ne!(replacement_binding.plan_id, original_binding.plan_id);
+        assert_eq!(store.active_lease_count(selected.id).unwrap(), 0);
+        assert_eq!(store.active_lease_count(fallback.id).unwrap(), 1);
+        let connection = store.connection().unwrap();
+        let mut statement = connection
+            .prepare(
+                r#"
+                SELECT attempt, plan_id, node_id, reason
+                FROM job_placement_attempts WHERE run_id = ?1 ORDER BY attempt
+                "#,
+            )
+            .unwrap();
+        let attempts = statement
+            .query_map([submitted.run.id.to_string()], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].0, 1);
+        assert_eq!(attempts[0].1, original_binding.plan_id.to_string());
+        assert_eq!(attempts[0].2, selected.id.to_string());
+        assert_eq!(attempts[0].3, PLACEMENT_ATTEMPT_INITIAL);
+        assert_eq!(attempts[1].0, 2);
+        assert_eq!(attempts[1].1, replacement_binding.plan_id.to_string());
+        assert_eq!(attempts[1].2, fallback.id.to_string());
+        assert_eq!(attempts[1].3, PLACEMENT_ATTEMPT_DISPATCH_EXPIRED);
+    }
+
+    #[test]
+    fn expired_unclaimed_dispatch_uses_current_scores_instead_of_original_binding() {
+        let store = Store::in_memory().unwrap();
+        let mut selected = node();
+        selected.priority = 1_000;
+        let _selected_pair = pair_worker(&store, &selected);
+        let mut higher_later = node();
+        higher_later.id = Uuid::new_v4();
+        higher_later.name = "higher-later".to_owned();
+        higher_later.priority = 0;
+        let _higher_pair = pair_worker(&store, &higher_later);
+        let submitted = store
+            .submit_job(&job(), None, &Scheduler::default())
+            .unwrap();
+        let original_binding = submitted.plan_binding.clone().unwrap();
+        assert_eq!(original_binding.decision.node_id, selected.id);
+
+        higher_later.priority = 2_000;
+        store.upsert_node(&higher_later).unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE leases SET expires_at = ?1 WHERE id = ?2",
+                params![
+                    Utc::now().timestamp().saturating_sub(1),
+                    submitted.lease_id.unwrap().to_string()
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(store.reap_expired_leases().unwrap(), 1);
+        let rearmed = store.get_job_by_run_id(submitted.run.id).unwrap();
+        assert_eq!(rearmed.run.node_id, Some(higher_later.id));
+        assert_eq!(
+            rearmed.plan_binding.as_ref().unwrap().decision.node_id,
+            higher_later.id
+        );
+        assert_ne!(
+            rearmed.plan_binding.as_ref().unwrap().plan_id,
+            original_binding.plan_id
+        );
+        assert_eq!(store.active_lease_count(selected.id).unwrap(), 0);
+        assert_eq!(store.active_lease_count(higher_later.id).unwrap(), 1);
+    }
+
+    #[test]
+    fn dispatch_reselection_advances_fleet_revision_and_stales_old_plan() {
+        let store = Store::in_memory().unwrap();
+        let mut selected = node();
+        selected.priority = 1_000;
+        let _selected_pair = pair_worker(&store, &selected);
+        let mut fallback = node();
+        fallback.id = Uuid::new_v4();
+        fallback.name = "fallback".to_owned();
+        fallback.priority = 0;
+        let _fallback_pair = pair_worker(&store, &fallback);
+
+        let submitted = store
+            .submit_job(&job(), None, &Scheduler::default())
+            .unwrap();
+        assert_eq!(submitted.run.node_id, Some(selected.id));
+        selected.status = cyc_protocol::NodeStatus::Offline;
+        store.upsert_node(&selected).unwrap();
+
+        // Pin an unrelated manual plan immediately before the expired
+        // dispatch is moved. The reservation release/reselection must advance
+        // fleet authority and invalidate this pre-recovery view.
+        let mut waiting_job = job();
+        waiting_job.placement_policy = cyc_protocol::PlacementPolicy::Manual;
+        waiting_job.preferred_node_id = Some(fallback.id);
+        let waiting_plan = store
+            .create_plan(&waiting_job, &Scheduler::default())
+            .unwrap();
+        assert_eq!(waiting_plan.binding.decision.node_id, fallback.id);
+        let revision_before = store.fleet_snapshot(20).unwrap().fleet_revision;
+        assert_eq!(waiting_plan.binding.fleet_revision, as_i64(revision_before));
+
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE leases SET expires_at = ?1 WHERE id = ?2",
+                params![
+                    Utc::now().timestamp().saturating_sub(1),
+                    submitted.lease_id.unwrap().to_string()
+                ],
+            )
+            .unwrap();
+        assert_eq!(store.reap_expired_leases().unwrap(), 1);
+
+        let revision_after = store.fleet_snapshot(20).unwrap().fleet_revision;
+        assert!(revision_after > revision_before);
+        assert_eq!(store.active_lease_count(selected.id).unwrap(), 0);
+        assert_eq!(store.active_lease_count(fallback.id).unwrap(), 1);
+        let rearmed = store.get_job_by_run_id(submitted.run.id).unwrap();
+        assert_eq!(rearmed.run.node_id, Some(fallback.id));
+        assert_ne!(rearmed.plan_binding, submitted.plan_binding);
+        assert!(matches!(
+            store.submit_job(
+                &waiting_job,
+                Some(waiting_plan.binding.plan_id),
+                &Scheduler::default()
+            ),
+            Err(StoreError::PlanStale)
+        ));
+    }
+
+    #[test]
+    fn worker_claim_requires_the_binding_selected_node() {
+        let store = Store::in_memory().unwrap();
+        let mut selected = node();
+        selected.priority = 1_000;
+        let _selected_pair = pair_worker(&store, &selected);
+        let mut other = node();
+        other.id = Uuid::new_v4();
+        other.name = "other".to_owned();
+        other.priority = 0;
+        let other_pair = pair_worker(&store, &other);
+        let submitted = store
+            .submit_job(&job(), None, &Scheduler::default())
+            .unwrap();
+        assert_eq!(
+            submitted.plan_binding.as_ref().unwrap().decision.node_id,
+            selected.id
+        );
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE leases SET node_id = ?1 WHERE id = ?2",
+                params![
+                    other.id.to_string(),
+                    submitted.lease_id.unwrap().to_string()
+                ],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.claim_job(&other_pair.credential, &other),
+            Err(StoreError::InvalidPlanBinding)
+        ));
+    }
+
+    #[test]
+    fn claim_cas_promotes_same_dispatch_lease_to_execution_ttl() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let paired = pair_worker(&store, &worker);
+        let submitted = store
+            .submit_job(&job(), None, &Scheduler::default())
+            .unwrap();
+        let lease_id = submitted.lease_id.unwrap();
+        let (dispatch_phase, dispatch_expiry) = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT phase, expires_at FROM leases WHERE id = ?1",
+                [lease_id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(dispatch_phase, LEASE_PHASE_DISPATCH);
+        assert!(dispatch_expiry <= Utc::now().timestamp() + DISPATCH_TTL_SECONDS);
+
+        let claim = store
+            .claim_job(&paired.credential, &worker)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.lease_id, lease_id);
+        let (execution_phase, execution_expiry) = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT phase, expires_at FROM leases WHERE id = ?1",
+                [lease_id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(execution_phase, LEASE_PHASE_EXECUTION);
+        assert!(execution_expiry > dispatch_expiry);
+        assert!(execution_expiry <= Utc::now().timestamp() + CLAIM_TTL_SECONDS);
     }
 
     #[test]
@@ -3381,8 +8204,1188 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_claim_is_single_winner_and_run_secret_isolated() {
+    fn enrollment_probe_is_stale_until_the_daemon_claims() {
         let store = Store::in_memory().unwrap();
+        let worker = node();
+        let pairing = store.create_pairing_for(Some(worker.id)).unwrap();
+        let credential = random_secret();
+        let digest = secret_hash(&credential);
+        store
+            .consume_pairing(
+                &pairing.code,
+                pairing.id,
+                pairing.intended_node_id,
+                &digest,
+                &worker,
+            )
+            .unwrap();
+        store
+            .acknowledge_pairing(&credential, pairing.id, worker.id, &digest)
+            .unwrap();
+
+        let paired_view = store.list_node_views().unwrap().remove(0);
+        assert_eq!(paired_view.received_at.timestamp(), 0);
+        assert_eq!(
+            paired_view.telemetry.status,
+            cyc_protocol::NodeStatus::Offline
+        );
+        assert_eq!(
+            paired_view.availability,
+            cyc_protocol::NodeAvailability::Stale
+        );
+
+        assert!(store.claim_job(&credential, &worker).unwrap().is_none());
+        let daemon_view = store.list_node_views().unwrap().remove(0);
+        assert!(daemon_view.received_at > Utc::now() - chrono::Duration::seconds(5));
+        assert_eq!(
+            daemon_view.telemetry.status,
+            cyc_protocol::NodeStatus::Online
+        );
+        assert_eq!(
+            daemon_view.availability,
+            cyc_protocol::NodeAvailability::Available
+        );
+    }
+
+    #[test]
+    fn node_report_is_identity_bound_and_monotonic_across_boots() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let paired = pair_worker(&store, &worker);
+        let first_boot = Uuid::new_v4();
+        let first = node_report(&worker, first_boot, 1);
+        let accepted = store
+            .record_node_report(&paired.credential, &first)
+            .unwrap();
+        assert!(accepted.accepted);
+        assert_eq!(accepted.node_id, worker.id);
+        let first_received_at = accepted.received_at;
+        let first_digest = accepted.inventory_digest.clone();
+        let first_revision = accepted.inventory_revision;
+        let first_inventory_times = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT updated_at, observed_at FROM node_inventories WHERE node_id = ?1",
+                [worker.id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+
+        let mut replay = first.clone();
+        replay.telemetry.load.cpu_percent = 99;
+        replay.telemetry.observed_at += chrono::Duration::seconds(30);
+        let replayed = store
+            .record_node_report(&paired.credential, &replay)
+            .unwrap();
+        assert!(!replayed.accepted);
+        assert_eq!(replayed.received_at, first_received_at);
+        let persisted = store.list_node_views().unwrap().remove(0);
+        assert_ne!(persisted.telemetry.load.cpu_percent, 99);
+        assert_eq!(persisted.received_at, first_received_at);
+
+        let mut second = first.clone();
+        second.inventory = None;
+        second.telemetry.sequence = 2;
+        second.telemetry.observed_at += chrono::Duration::seconds(1);
+        let second = store
+            .record_node_report(&paired.credential, &second)
+            .unwrap();
+        assert!(second.accepted);
+        assert_eq!(second.inventory_revision, first_revision);
+        assert_eq!(second.inventory_digest, first_digest);
+        let second_inventory_times = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT updated_at, observed_at FROM node_inventories WHERE node_id = ?1",
+                [worker.id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(second_inventory_times, first_inventory_times);
+
+        let mut changed_inventory = node_report(&worker, first_boot, 3);
+        changed_inventory.inventory.as_mut().unwrap().cpu_model = "new model".to_owned();
+        let changed = store
+            .record_node_report(&paired.credential, &changed_inventory)
+            .unwrap();
+        assert!(changed.accepted);
+        assert_eq!(changed.inventory_revision, first_revision + 1);
+        assert_ne!(changed.inventory_digest, first_digest);
+
+        let second_boot = Uuid::new_v4();
+        let rebooted = node_report(&worker, second_boot, 1);
+        let rebooted = store
+            .record_node_report(&paired.credential, &rebooted)
+            .unwrap();
+        assert!(rebooted.accepted);
+        assert_eq!(rebooted.telemetry_boot_id, second_boot);
+        assert_eq!(rebooted.telemetry_sequence, 1);
+
+        let mut retired_boot = node_report(&worker, first_boot, 4);
+        retired_boot.telemetry.load.cpu_percent = 99;
+        let retired_boot = store
+            .record_node_report(&paired.credential, &retired_boot)
+            .unwrap();
+        assert!(!retired_boot.accepted);
+        assert_eq!(retired_boot.telemetry_boot_id, second_boot);
+        assert_eq!(retired_boot.telemetry_sequence, 1);
+        assert_eq!(retired_boot.received_at, rebooted.received_at);
+        assert_ne!(
+            store
+                .list_node_views()
+                .unwrap()
+                .remove(0)
+                .telemetry
+                .load
+                .cpu_percent,
+            99
+        );
+    }
+
+    #[test]
+    fn retired_node_report_boots_remain_rejected_after_restart() {
+        let directory = test_directory("retired-report-boot");
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("controller.db");
+        let store = Store::open(&database).unwrap();
+        let worker = node();
+        let paired = pair_worker(&store, &worker);
+        let first_boot = Uuid::new_v4();
+        let second_boot = Uuid::new_v4();
+        store
+            .record_node_report(&paired.credential, &node_report(&worker, first_boot, 1))
+            .unwrap();
+        let current = store
+            .record_node_report(&paired.credential, &node_report(&worker, second_boot, 1))
+            .unwrap();
+        drop(store);
+
+        let reopened = Store::open(&database).unwrap();
+        let mut late = node_report(&worker, first_boot, 2);
+        late.telemetry.load.cpu_percent = 99;
+        let rejected = reopened
+            .record_node_report(&paired.credential, &late)
+            .unwrap();
+        assert!(!rejected.accepted);
+        assert_eq!(rejected.telemetry_boot_id, second_boot);
+        assert_eq!(rejected.telemetry_sequence, 1);
+        assert_eq!(rejected.received_at, current.received_at);
+        assert_ne!(
+            reopened
+                .list_node_views()
+                .unwrap()
+                .remove(0)
+                .telemetry
+                .load
+                .cpu_percent,
+            99
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn persisted_boot_generation_rejects_delayed_unseen_and_same_generation_boots() {
+        let directory = test_directory("ordered-report-generation");
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("controller.db");
+        let store = Store::open(&database).unwrap();
+        let worker = node();
+        let paired = pair_worker(&store, &worker);
+        let first_boot = Uuid::new_v4();
+        let second_boot = Uuid::new_v4();
+        assert!(
+            store
+                .record_node_report(
+                    &paired.credential,
+                    &node_report_generation(&worker, 41, first_boot, 1),
+                )
+                .unwrap()
+                .accepted
+        );
+        let current = store
+            .record_node_report(
+                &paired.credential,
+                &node_report_generation(&worker, 42, second_boot, 1),
+            )
+            .unwrap();
+        assert!(current.accepted);
+        assert_eq!(current.telemetry_boot_generation, 42);
+        drop(store);
+
+        let reopened = Store::open(&database).unwrap();
+        // This boot id was never observed. Generation ordering, rather than a
+        // retired-UUID lookup, is what rejects delayed daemon A after daemon B.
+        let delayed_unseen = reopened
+            .record_node_report(
+                &paired.credential,
+                &node_report_generation(&worker, 41, Uuid::new_v4(), 99),
+            )
+            .unwrap();
+        assert!(!delayed_unseen.accepted);
+        assert_eq!(delayed_unseen.telemetry_boot_generation, 42);
+        assert_eq!(delayed_unseen.telemetry_boot_id, second_boot);
+
+        let same_generation_other_boot = reopened
+            .record_node_report(
+                &paired.credential,
+                &node_report_generation(&worker, 42, Uuid::new_v4(), 2),
+            )
+            .unwrap();
+        assert!(!same_generation_other_boot.accepted);
+        let same_sequence = reopened
+            .record_node_report(
+                &paired.credential,
+                &node_report_generation(&worker, 42, second_boot, 1),
+            )
+            .unwrap();
+        assert!(!same_sequence.accepted);
+        let legacy_after_modern = reopened
+            .record_node_report(
+                &paired.credential,
+                &node_report(&worker, Uuid::new_v4(), 100),
+            )
+            .unwrap();
+        assert!(!legacy_after_modern.accepted);
+
+        let third_boot = Uuid::new_v4();
+        let advanced = reopened
+            .record_node_report(
+                &paired.credential,
+                &node_report_generation(&worker, 43, third_boot, 1),
+            )
+            .unwrap();
+        assert!(advanced.accepted);
+        assert_eq!(advanced.telemetry_boot_generation, 43);
+        assert_eq!(advanced.telemetry_boot_id, third_boot);
+        let stored_generation: i64 = reopened
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT boot_generation FROM node_telemetry WHERE node_id = ?1",
+                [worker.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_generation, 43);
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn run_heartbeat_never_refreshes_node_report_freshness() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let paired = pair_worker(&store, &worker);
+        let report = node_report(&worker, Uuid::new_v4(), 1);
+        let accepted = store
+            .record_node_report(&paired.credential, &report)
+            .unwrap();
+        store
+            .submit_job(&job(), None, &Scheduler::default())
+            .unwrap();
+        let claim = store
+            .claim_job(&paired.credential, &worker)
+            .unwrap()
+            .unwrap();
+        store
+            .worker_heartbeat(
+                &paired.credential,
+                &claim.run_credential,
+                claim.stored.run.id,
+                claim.lease_id,
+                claim.stored.version,
+                JobState::Preparing,
+            )
+            .unwrap();
+        let received_at = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT received_at FROM node_telemetry WHERE node_id = ?1",
+                [worker.id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(parse_rfc3339(&received_at).unwrap(), accepted.received_at);
+    }
+
+    #[test]
+    fn typed_policy_rejection_is_explainable_and_fleet_view_is_additive() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let paired = pair_worker(&store, &worker);
+        store
+            .record_node_report(&paired.credential, &node_report(&worker, Uuid::new_v4(), 1))
+            .unwrap();
+        let initial = store.get_node_config(worker.id).unwrap();
+        let mut config = initial.config;
+        config.capacity.allowed_job_kinds = BTreeSet::from([JobKind::Test]);
+        config.capacity.max_concurrent_jobs = 8;
+        store
+            .update_node_config(worker.id, initial.revision, &config)
+            .unwrap();
+        let error = store
+            .create_plan(&job(), &Scheduler::default())
+            .expect_err("build is denied by typed policy");
+        let StoreError::Schedule(ScheduleError::NoEligibleNodes { explanation }) = error else {
+            panic!("unexpected scheduling result");
+        };
+        assert!(explanation.candidates[0]
+            .rejection_reasons
+            .iter()
+            .any(|reason| reason.code == cyc_protocol::RejectionCode::PolicyJobKindDenied));
+
+        let view = store.list_fleet_node_views().unwrap().remove(0);
+        assert_eq!(view.node_id, worker.id);
+        assert_eq!(view.effective_slots.configured, 8);
+        assert_eq!(view.effective_slots.containment_max_safe, 1);
+        assert_eq!(view.effective_slots.effective, 1);
+        assert!(!view.inventory.digest.as_deref().unwrap().is_empty());
+        assert!(view
+            .availability_reasons
+            .iter()
+            .any(|reason| reason.contains("clamped")));
+    }
+
+    #[test]
+    fn node_config_cas_persists_policy_and_worker_probe_cannot_overwrite_it() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let paired = pair_worker(&store, &worker);
+        let initial = store.get_node_config(worker.id).unwrap();
+        assert_eq!(initial.revision, 0);
+
+        let mut desired = initial.config;
+        desired.name = "operator-node".to_owned();
+        desired.priority = 777;
+        desired.labels.insert(
+            "cyc.policy.allowedJobKinds".to_owned(),
+            "build,test".to_owned(),
+        );
+        desired.labels.insert(
+            "cyc.policy.resource".to_owned(),
+            r#"{"cpuLimitPercent":80,"maximumParallelJobs":2,"memoryLimitBytes":null}"#.to_owned(),
+        );
+        desired.labels.insert(
+            "cyc.policy.battery".to_owned(),
+            r#"{"allowOnBattery":false}"#.to_owned(),
+        );
+        let updated = store.update_node_config(worker.id, 0, &desired).unwrap();
+        assert_eq!(updated.revision, 1);
+        assert!(matches!(
+            store.update_node_config(worker.id, 0, &desired),
+            Err(StoreError::NodeConfigVersionConflict {
+                current_revision: 1
+            })
+        ));
+
+        let mut daemon_probe = worker;
+        daemon_probe.name = "worker-hostname".to_owned();
+        daemon_probe.priority = -999;
+        daemon_probe.labels.clear();
+        assert!(store
+            .claim_job(&paired.credential, &daemon_probe)
+            .unwrap()
+            .is_none());
+        let stored = store.get_node_config(daemon_probe.id).unwrap();
+        assert_eq!(stored.revision, 1);
+        assert_eq!(stored.config, desired);
+    }
+
+    #[test]
+    fn pairing_idempotency_survives_restart_without_storing_plaintext_code() {
+        let directory = test_directory("pairing-idempotency");
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("controller.db");
+        let intended = Uuid::new_v4();
+        let operation = "desktop-add-computer:00000000-0000-4000-8000-000000000001";
+
+        let first = Store::open(&database).unwrap();
+        let issued = first
+            .create_pairing_idempotent(
+                operation,
+                Some(intended),
+                "https://192.0.2.10:47832",
+                "-----BEGIN CERTIFICATE-----\nfixture-one\n-----END CERTIFICATE-----\n",
+            )
+            .unwrap();
+        assert!(!issued.replayed);
+        let pairing_id = issued.pairing.id;
+        let pairing_code = issued.pairing.code.clone();
+        let created_at = issued.pairing.created_at;
+        drop(issued);
+        drop(first);
+
+        let reopened = Store::open(&database).unwrap();
+        let replay = reopened
+            .create_pairing_idempotent(
+                operation,
+                Some(intended),
+                "https://listener-changed.invalid:47832",
+                "-----BEGIN CERTIFICATE-----\nfixture-two\n-----END CERTIFICATE-----\n",
+            )
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.pairing.id, pairing_id);
+        assert_eq!(replay.pairing.intended_node_id, intended);
+        assert_eq!(replay.pairing.created_at, created_at);
+        assert_eq!(replay.pairing.code, pairing_code);
+        assert_eq!(replay.worker_url, "https://192.0.2.10:47832");
+        assert!(replay.certificate_pem.contains("fixture-one"));
+
+        let persisted = reopened
+            .connection()
+            .unwrap()
+            .query_row(
+                r#"
+                SELECT p.code_hash || ':' || o.operation_key || ':' ||
+                       o.worker_url || ':' || o.certificate_pem
+                FROM pairings p JOIN pairing_operations o ON o.pairing_id = p.id
+                WHERE p.id = ?1
+                "#,
+                [pairing_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert!(!persisted.contains(&pairing_code));
+        assert!(matches!(
+            reopened.create_pairing_idempotent(
+                operation,
+                Some(Uuid::new_v4()),
+                "https://192.0.2.10:47832",
+                "certificate"
+            ),
+            Err(StoreError::PairingIdempotencyMismatch)
+        ));
+
+        reopened.revoke_pairing(pairing_id).unwrap();
+        assert!(matches!(
+            reopened.create_pairing_idempotent(
+                operation,
+                Some(intended),
+                "https://192.0.2.10:47832",
+                "certificate"
+            ),
+            Err(StoreError::PairingIdempotencyFinalized {
+                phase: PairingPhaseV1::Revoked
+            })
+        ));
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn worker_probe_updates_inventory_and_telemetry_but_not_config() {
+        let store = Store::in_memory().unwrap();
+        let mut configured = node();
+        configured.name = "operator-name".to_owned();
+        configured.enabled = false;
+        configured.priority = 777;
+        configured
+            .labels
+            .insert("pool".to_owned(), "operator-owned".to_owned());
+        let paired = pair_worker(&store, &configured);
+
+        let mut probe = configured.clone();
+        probe.name = "worker-hostname".to_owned();
+        probe.enabled = true;
+        probe.priority = -100;
+        probe.labels.clear();
+        probe.resources.memory_mib = 32_768;
+        probe.resources.available_memory_mib = 20_000;
+        probe.load.cpu_percent = 73;
+        assert!(store
+            .claim_job(&paired.credential, &probe)
+            .unwrap()
+            .is_none());
+
+        let view = store.list_node_views().unwrap().remove(0);
+        assert_eq!(view.config.name, "operator-name");
+        assert!(!view.config.enabled);
+        assert_eq!(view.config.priority, 777);
+        assert_eq!(view.config.labels["pool"], "operator-owned");
+        assert_eq!(view.inventory.memory_mib, 32_768);
+        assert_eq!(view.telemetry.available_memory_mib, 20_000);
+        assert_eq!(view.telemetry.load.cpu_percent, 73);
+    }
+
+    #[test]
+    fn controller_received_at_not_worker_clock_decides_freshness() {
+        let store = Store::in_memory().unwrap();
+        let mut worker = node();
+        worker.last_seen_at = Some(Utc::now() - chrono::Duration::days(365));
+        let _paired = pair_worker(&store, &worker);
+        let view = store.list_node_views().unwrap().remove(0);
+        assert_eq!(view.telemetry.observed_at, worker.last_seen_at.unwrap());
+        assert!(view.received_at > Utc::now() - chrono::Duration::seconds(5));
+        assert!(store.create_plan(&job(), &Scheduler::default()).is_ok());
+
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE node_telemetry SET received_at = ?1 WHERE node_id = ?2",
+                params![
+                    (Utc::now() - chrono::Duration::seconds(NODE_FRESHNESS_SECONDS + 1))
+                        .to_rfc3339(),
+                    worker.id.to_string()
+                ],
+            )
+            .unwrap();
+        let mut next = job();
+        next.id = Uuid::new_v4();
+        assert!(matches!(
+            store.create_plan(&next, &Scheduler::default()),
+            Err(StoreError::Schedule(ScheduleError::NoEligibleNodes { .. }))
+        ));
+    }
+
+    #[test]
+    fn legacy_node_document_is_migrated_to_split_state() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE nodes (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    document TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 0
+                );
+                "#,
+            )
+            .unwrap();
+        let mut legacy = node();
+        legacy.name = "legacy-name".to_owned();
+        legacy.priority = 321;
+        legacy.cached_sources.insert("git:legacy".to_owned());
+        legacy.last_seen_at = Some(Utc::now() - chrono::Duration::minutes(10));
+        let received_at = Utc::now() - chrono::Duration::seconds(10);
+        connection
+            .execute(
+                "INSERT INTO nodes(id, document, updated_at, revision) VALUES (?1, ?2, ?3, 7)",
+                params![
+                    legacy.id.to_string(),
+                    serde_json::to_string(&legacy).unwrap(),
+                    received_at.to_rfc3339()
+                ],
+            )
+            .unwrap();
+
+        let store = Store::from_connection(
+            connection,
+            std::env::temp_dir().join(format!("cyc-migration-{}", Uuid::new_v4())),
+        )
+        .unwrap();
+        let counts = store
+            .connection()
+            .unwrap()
+            .query_row(
+                r#"
+                SELECT
+                    (SELECT COUNT(*) FROM node_configs),
+                    (SELECT COUNT(*) FROM node_inventories),
+                    (SELECT COUNT(*) FROM node_telemetry)
+                "#,
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(counts, (1, 1, 1));
+        let view = store.list_node_views().unwrap().remove(0);
+        assert_eq!(view.config.name, "legacy-name");
+        assert_eq!(view.config.priority, 321);
+        assert_eq!(view.telemetry.cached_sources, legacy.cached_sources);
+        assert_eq!(view.telemetry.observed_at, legacy.last_seen_at.unwrap());
+        assert_eq!(view.received_at, received_at);
+        let revision = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT revision FROM nodes WHERE id = ?1",
+                [legacy.id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(revision, 7);
+    }
+
+    #[test]
+    fn legacy_pairing_credentials_are_backfilled_as_acknowledged_and_active() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE nodes (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    document TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE pairings (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    code_hash TEXT UNIQUE NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    used_at INTEGER,
+                    revoked_at INTEGER,
+                    node_id TEXT,
+                    intended_node_id TEXT
+                );
+                CREATE TABLE worker_credentials (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    pairing_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    credential_hash TEXT UNIQUE NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    last_used_at INTEGER,
+                    revoked_at INTEGER,
+                    FOREIGN KEY(pairing_id) REFERENCES pairings(id)
+                );
+                "#,
+            )
+            .unwrap();
+        let worker = node();
+        let pairing_id = Uuid::new_v4();
+        let credential = random_secret();
+        let digest = secret_hash(&credential);
+        let now = Utc::now();
+        connection
+            .execute(
+                "INSERT INTO nodes(id, document, updated_at) VALUES (?1, ?2, ?3)",
+                params![
+                    worker.id.to_string(),
+                    serde_json::to_string(&worker).unwrap(),
+                    now.to_rfc3339(),
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                r#"
+                INSERT INTO pairings(
+                    id, code_hash, created_at, expires_at, used_at, revoked_at,
+                    node_id, intended_node_id
+                ) VALUES (?1, ?2, ?3, ?4, ?3, NULL, ?5, ?5)
+                "#,
+                params![
+                    pairing_id.to_string(),
+                    secret_hash("legacy-one-time-code"),
+                    now.timestamp(),
+                    (now + chrono::Duration::minutes(10)).timestamp(),
+                    worker.id.to_string(),
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                r#"
+                INSERT INTO worker_credentials(
+                    id, pairing_id, node_id, credential_hash, created_at,
+                    last_used_at, revoked_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL)
+                "#,
+                params![
+                    Uuid::new_v4().to_string(),
+                    pairing_id.to_string(),
+                    worker.id.to_string(),
+                    digest,
+                    now.timestamp(),
+                ],
+            )
+            .unwrap();
+
+        let store = Store::from_connection(
+            connection,
+            std::env::temp_dir().join(format!("cyc-pairing-migration-{}", Uuid::new_v4())),
+        )
+        .unwrap();
+        assert_eq!(store.authenticate_worker(&credential).unwrap(), worker.id);
+        let status = store.get_pairing_status(pairing_id).unwrap();
+        assert_eq!(status.phase, PairingPhaseV1::Ready);
+        assert_eq!(status.acknowledged_at, status.consumed_at);
+        let timestamps = store
+            .connection()
+            .unwrap()
+            .query_row(
+                r#"
+                SELECT wc.created_at, wc.activated_at, p.used_at, p.acknowledged_at
+                FROM worker_credentials wc
+                JOIN pairings p ON p.id = wc.pairing_id
+                WHERE wc.pairing_id = ?1
+                "#,
+                [pairing_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(timestamps.0, timestamps.1);
+        assert_eq!(timestamps.2, timestamps.3);
+    }
+
+    #[test]
+    fn lease_phase_migration_backfills_only_active_claims_as_execution() {
+        let directory = test_directory("lease-phase-migration");
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("controller.db");
+        let store = Store::open(&database).unwrap();
+        let worker = node();
+        let paired = pair_worker(&store, &worker);
+        store
+            .submit_job(&job(), None, &Scheduler::default())
+            .unwrap();
+        let claim = store
+            .claim_job(&paired.credential, &worker)
+            .unwrap()
+            .unwrap();
+        let legacy_id = Uuid::new_v4();
+        store
+            .connection()
+            .unwrap()
+            .execute_batch(&format!(
+                r#"
+                UPDATE leases SET phase = 'legacy' WHERE id = '{}';
+                INSERT INTO leases(
+                    id, run_id, job_id, node_id, cpu_cores, memory_mib, disk_mib,
+                    gpu_reserved, slots, phase, created_at, expires_at, released_at
+                ) VALUES(
+                    '{legacy_id}', '{}', '{}', '{}', 1, 0, 0,
+                    0, 1, 'legacy', {}, {}, NULL
+                );
+                "#,
+                claim.lease_id,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                worker.id,
+                Utc::now().timestamp(),
+                Utc::now().timestamp() + 300,
+            ))
+            .unwrap();
+        drop(store);
+
+        let reopened = Store::open(&database).unwrap();
+        let claimed_phase = reopened
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT phase FROM leases WHERE id = ?1",
+                [claim.lease_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let untouched_legacy = reopened
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT phase FROM leases WHERE id = ?1",
+                [legacy_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(claimed_phase, LEASE_PHASE_EXECUTION);
+        assert_eq!(untouched_legacy, LEASE_PHASE_LEGACY);
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cleanup_migration_marks_legacy_early_release_without_faking_receipt() {
+        let directory = test_directory("cleanup-legacy-migration");
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("controller.db");
+        let store = Store::open(&database).unwrap();
+        let worker = node();
+        let paired = pair_worker(&store, &worker);
+        let (_claim, completed, _ack) = complete_empty_managed_run(&store, &worker, &paired);
+        let released_at = Utc::now().timestamp();
+        store
+            .connection()
+            .unwrap()
+            .execute_batch(&format!(
+                r#"
+                DELETE FROM run_cleanup_obligations WHERE run_id = '{}';
+                UPDATE leases SET released_at = {released_at}, phase = 'execution'
+                WHERE id = '{}';
+                "#,
+                completed.run.id,
+                completed.lease_id.unwrap()
+            ))
+            .unwrap();
+        drop(store);
+
+        let reopened = Store::open(&database).unwrap();
+        let snapshot = reopened.get_cleanup_snapshot(completed.job.id).unwrap();
+        assert!(snapshot.cleanup.is_none());
+        let obligation = snapshot.obligation.unwrap();
+        assert_eq!(
+            obligation.release_reason,
+            Some(CleanupReservationReleaseReasonV1::LegacyMigration)
+        );
+        assert_eq!(
+            obligation.cleanup_failure.unwrap().code,
+            CleanupFailureCodeV1::LegacyReleaseWithoutCleanupEvidence
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn repairing_a_node_preserves_identity_preferences_and_rotates_credentials() {
+        let store = Store::in_memory().unwrap();
+        let mut first_probe = node();
+        first_probe.name = "operator-name".to_owned();
+        first_probe.priority = 900;
+        first_probe
+            .labels
+            .insert("pool".to_owned(), "primary".to_owned());
+        first_probe
+            .cached_sources
+            .insert("git:stale-source".to_owned());
+        let first_pairing = store.create_pairing_for(Some(first_probe.id)).unwrap();
+        let first_credential = random_secret();
+        let first_digest = secret_hash(&first_credential);
+        let first = store
+            .consume_pairing(
+                &first_pairing.code,
+                first_pairing.id,
+                first_pairing.intended_node_id,
+                &first_digest,
+                &first_probe,
+            )
+            .unwrap();
+        assert_eq!(
+            store.get_pairing_status(first_pairing.id).unwrap().phase,
+            PairingPhaseV1::Consumed
+        );
+        assert!(matches!(
+            store.authenticate_worker(&first_credential),
+            Err(StoreError::WorkerUnauthorized)
+        ));
+        store
+            .acknowledge_pairing(
+                &first_credential,
+                first_pairing.id,
+                first_probe.id,
+                &first_digest,
+            )
+            .unwrap();
+        assert_eq!(
+            store.get_pairing_status(first_pairing.id).unwrap().phase,
+            PairingPhaseV1::Ready
+        );
+
+        let second_pairing = store.create_pairing_for(Some(first_probe.id)).unwrap();
+        let mut repaired_probe = node();
+        repaired_probe.id = first_probe.id;
+        repaired_probe.name = "hostname-after-reinstall".to_owned();
+        repaired_probe.resources.available_memory_mib = 8_192;
+        repaired_probe
+            .cached_sources
+            .insert("git:fresh-source".to_owned());
+        let second_credential = random_secret();
+        let second_digest = secret_hash(&second_credential);
+        let second = store
+            .consume_pairing(
+                &second_pairing.code,
+                second_pairing.id,
+                second_pairing.intended_node_id,
+                &second_digest,
+                &repaired_probe,
+            )
+            .unwrap();
+
+        assert_eq!(first.node_id, second.node_id);
+        assert_eq!(second.node_id, first_probe.id);
+        // Consuming a repair must not create an outage: the old credential is
+        // the sole active identity until the staged replacement is ACKed.
+        assert_eq!(
+            store.authenticate_worker(&first_credential).unwrap(),
+            first_probe.id
+        );
+        assert!(matches!(
+            store.authenticate_worker(&second_credential),
+            Err(StoreError::WorkerUnauthorized)
+        ));
+        assert_eq!(
+            store.get_pairing_status(second_pairing.id).unwrap().phase,
+            PairingPhaseV1::Consumed
+        );
+        store
+            .acknowledge_pairing(
+                &second_credential,
+                second_pairing.id,
+                first_probe.id,
+                &second_digest,
+            )
+            .unwrap();
+        assert!(matches!(
+            store.authenticate_worker(&first_credential),
+            Err(StoreError::WorkerUnauthorized)
+        ));
+        assert_eq!(
+            store.authenticate_worker(&second_credential).unwrap(),
+            first_probe.id
+        );
+        let nodes = store.list_nodes().unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "operator-name");
+        assert_eq!(nodes[0].priority, 900);
+        assert_eq!(nodes[0].labels["pool"], "primary");
+        assert_eq!(nodes[0].resources.available_memory_mib, 8_192);
+        assert_eq!(
+            nodes[0].cached_sources,
+            BTreeSet::from(["git:fresh-source".to_owned()])
+        );
+        assert_eq!(
+            store.get_pairing_status(first_pairing.id).unwrap().phase,
+            PairingPhaseV1::Consumed
+        );
+        assert_eq!(
+            store.get_pairing_status(second_pairing.id).unwrap().phase,
+            PairingPhaseV1::Ready
+        );
+
+        let clear_pairing = store.create_pairing_for(Some(first_probe.id)).unwrap();
+        let mut clear_probe = node();
+        clear_probe.id = first_probe.id;
+        let clear_credential = random_secret();
+        let clear_digest = secret_hash(&clear_credential);
+        let cleared = store
+            .consume_pairing(
+                &clear_pairing.code,
+                clear_pairing.id,
+                clear_pairing.intended_node_id,
+                &clear_digest,
+                &clear_probe,
+            )
+            .unwrap();
+        assert_eq!(cleared.node_id, first_probe.id);
+        store
+            .acknowledge_pairing(
+                &clear_credential,
+                clear_pairing.id,
+                first_probe.id,
+                &clear_digest,
+            )
+            .unwrap();
+        assert!(store.list_nodes().unwrap()[0].cached_sources.is_empty());
+    }
+
+    #[test]
+    fn pairing_consume_response_and_ack_loss_retries_converge_exactly_once() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let pairing = store.create_pairing_for(Some(worker.id)).unwrap();
+        let credential = random_secret();
+        let digest = secret_hash(&credential);
+
+        // The first transaction commits, but the caller may lose its response.
+        let first = store
+            .consume_pairing(
+                &pairing.code,
+                pairing.id,
+                pairing.intended_node_id,
+                &digest,
+                &worker,
+            )
+            .unwrap();
+        assert!(!first.replayed);
+        assert_eq!(
+            store.get_pairing_status(pairing.id).unwrap().phase,
+            PairingPhaseV1::Consumed
+        );
+        assert!(matches!(
+            store.authenticate_worker(&credential),
+            Err(StoreError::WorkerUnauthorized)
+        ));
+
+        let replay = store
+            .consume_pairing(
+                &pairing.code,
+                pairing.id,
+                pairing.intended_node_id,
+                &digest,
+                &worker,
+            )
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.pairing_id, first.pairing_id);
+        assert_eq!(replay.node_id, first.node_id);
+        assert_eq!(replay.credential_sha256, first.credential_sha256);
+        assert_eq!(replay.consumed_at, first.consumed_at);
+        let rows: i64 = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM worker_credentials WHERE pairing_id = ?1",
+                [pairing.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+
+        // ACK can commit while its response is lost. Replaying it is stable.
+        let first_ack = store
+            .acknowledge_pairing(&credential, pairing.id, worker.id, &digest)
+            .unwrap();
+        let replayed_ack = store
+            .acknowledge_pairing(&credential, pairing.id, worker.id, &digest)
+            .unwrap();
+        assert_eq!(replayed_ack, first_ack);
+        assert_eq!(
+            store.get_pairing_status(pairing.id).unwrap().phase,
+            PairingPhaseV1::Ready
+        );
+        assert_eq!(store.authenticate_worker(&credential).unwrap(), worker.id);
+        let active: i64 = store
+            .connection()
+            .unwrap()
+            .query_row(
+                r#"
+                SELECT COUNT(*) FROM worker_credentials
+                WHERE node_id = ?1 AND activated_at IS NOT NULL AND revoked_at IS NULL
+                "#,
+                [worker.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active, 1);
+    }
+
+    #[test]
+    fn pairing_retry_rejects_wrong_hash_node_and_expired_code() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let pairing = store.create_pairing_for(Some(worker.id)).unwrap();
+        let credential = random_secret();
+        let digest = secret_hash(&credential);
+        store
+            .consume_pairing(
+                &pairing.code,
+                pairing.id,
+                pairing.intended_node_id,
+                &digest,
+                &worker,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.consume_pairing(
+                &pairing.code,
+                pairing.id,
+                pairing.intended_node_id,
+                &"f".repeat(64),
+                &worker,
+            ),
+            Err(StoreError::PairingBindingMismatch)
+        ));
+        let mut other_node = worker.clone();
+        other_node.id = Uuid::new_v4();
+        assert!(matches!(
+            store.consume_pairing(
+                &pairing.code,
+                pairing.id,
+                other_node.id,
+                &digest,
+                &other_node,
+            ),
+            Err(StoreError::PairingBindingMismatch)
+        ));
+        assert!(matches!(
+            store.acknowledge_pairing(&credential, pairing.id, worker.id, &"f".repeat(64),),
+            Err(StoreError::PairingAcknowledgementUnavailable)
+        ));
+        assert!(matches!(
+            store.acknowledge_pairing(&credential, pairing.id, other_node.id, &digest),
+            Err(StoreError::PairingAcknowledgementUnavailable)
+        ));
+
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE pairings SET expires_at = ?1 WHERE id = ?2",
+                params![
+                    (Utc::now() - chrono::Duration::seconds(1)).timestamp(),
+                    pairing.id.to_string()
+                ],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.consume_pairing(
+                &pairing.code,
+                pairing.id,
+                pairing.intended_node_id,
+                &digest,
+                &worker,
+            ),
+            Err(StoreError::PairingUnavailable)
+        ));
+        assert!(matches!(
+            store.preauthorize_pairing(&pairing.code),
+            Err(StoreError::PairingUnavailable)
+        ));
+        // Expiry closes the one-time code but must not strand a worker that
+        // already committed the matching local config and now needs to ACK.
+        store
+            .acknowledge_pairing(&credential, pairing.id, worker.id, &digest)
+            .unwrap();
+        assert_eq!(
+            store.get_pairing_status(pairing.id).unwrap().phase,
+            PairingPhaseV1::Ready
+        );
+    }
+
+    #[test]
+    fn pairing_status_distinguishes_pending_expired_and_revoked() {
+        let store = Store::in_memory().unwrap();
+        let pending = store.create_pairing().unwrap();
+        assert_eq!(
+            store.get_pairing_status(pending.id).unwrap().phase,
+            PairingPhaseV1::Pending
+        );
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE pairings SET expires_at = ?1 WHERE id = ?2",
+                params![
+                    (Utc::now() - chrono::Duration::seconds(1)).timestamp(),
+                    pending.id.to_string()
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            store.get_pairing_status(pending.id).unwrap().phase,
+            PairingPhaseV1::Expired
+        );
+        store.revoke_pairing(pending.id).unwrap();
+        assert_eq!(
+            store.get_pairing_status(pending.id).unwrap().phase,
+            PairingPhaseV1::Revoked
+        );
+    }
+
+    #[test]
+    fn concurrent_dual_connection_claim_is_single_winner_and_run_secret_isolated() {
+        let directory = test_directory("concurrent-claim");
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("controller.db");
+        let store = Store::open(&database).unwrap();
         let worker = node();
         let paired = pair_worker(&store, &worker);
         store
@@ -3391,7 +9394,7 @@ mod tests {
         let barrier = Arc::new(std::sync::Barrier::new(3));
         let mut handles = Vec::new();
         for _ in 0..2 {
-            let store = store.clone();
+            let store = Store::open(&database).unwrap();
             let worker = worker.clone();
             let credential = paired.credential.clone();
             let barrier = barrier.clone();
@@ -3422,6 +9425,43 @@ mod tests {
             ),
             Err(StoreError::RunUnauthorized)
         ));
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn concurrent_dual_connection_submit_reservation_has_one_winner() {
+        let directory = test_directory("concurrent-submit");
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("controller.db");
+        let primary = Store::open(&database).unwrap();
+        let worker = node();
+        let _paired = pair_worker(&primary, &worker);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let store = Store::open(&database).unwrap();
+            let barrier = barrier.clone();
+            let mut target = job();
+            target.id = Uuid::new_v4();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                store.submit_job(&target, None, &Scheduler::default())
+            }));
+        }
+        barrier.wait();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(primary.active_lease_count(worker.id).unwrap(), 1);
+        assert!(results.iter().any(|result| matches!(
+            result,
+            Err(StoreError::Schedule(ScheduleError::NoEligibleNodes { .. }))
+        )));
+        drop(primary);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -3752,7 +9792,19 @@ mod tests {
             .worker_complete_managed(&paired.credential, &claim.run_credential, &completion)
             .unwrap();
         assert_eq!(completed.run.state, JobState::Succeeded);
-        assert_eq!(store.active_lease_count(worker.id).unwrap(), 0);
+        // Terminal evidence is durable, but capacity remains reserved until
+        // the exact post-ACK `removed` cleanup receipt (or deadline recovery).
+        assert_eq!(store.active_lease_count(worker.id).unwrap(), 1);
+        let obligation = store
+            .get_cleanup_snapshot(running.run.id)
+            .unwrap()
+            .obligation
+            .unwrap();
+        assert_eq!(obligation.job_id, completed.job.id);
+        assert_eq!(obligation.run_id, completed.run.id);
+        assert_eq!(obligation.lease_id, claim.lease_id);
+        assert_eq!(obligation.state_version, completed.version);
+        assert!(obligation.reservation_released_at.is_none());
         let receipt = store.get_completion(running.run.id).unwrap();
         assert_eq!(receipt.completion, completion);
         assert_eq!(
@@ -3784,6 +9836,312 @@ mod tests {
             ),
             Err(StoreError::WorkerStateConflict { .. })
         ));
+    }
+
+    #[test]
+    fn removed_cleanup_is_exact_atomic_idempotent_and_releases_capacity() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let paired = pair_worker(&store, &worker);
+        let (claim, completed, ack) = complete_empty_managed_run(&store, &worker, &paired);
+        assert_eq!(store.active_lease_count(worker.id).unwrap(), 1);
+
+        let mut wrong = removed_cleanup_receipt(ack.clone());
+        wrong.terminal_ack.state_version = wrong.terminal_ack.state_version.saturating_add(1);
+        assert!(matches!(
+            store.record_cleanup(&paired.credential, &claim.run_credential, &wrong),
+            Err(StoreError::InvalidCleanupReceipt)
+        ));
+        assert!(store.get_cleanup(completed.run.id).unwrap().is_none());
+        assert_eq!(store.active_lease_count(worker.id).unwrap(), 1);
+
+        // Inject a failure after the receipt INSERT but before lease release.
+        // SQLite must roll the whole IMMEDIATE transaction back.
+        store
+            .connection()
+            .unwrap()
+            .execute_batch(&format!(
+                r#"
+                CREATE TRIGGER fail_cleanup_release
+                BEFORE UPDATE OF released_at ON leases
+                WHEN OLD.id = '{}' AND NEW.released_at IS NOT NULL
+                BEGIN
+                    SELECT RAISE(ABORT, 'injected cleanup release crash');
+                END;
+                "#,
+                claim.lease_id
+            ))
+            .unwrap();
+        let receipt = removed_cleanup_receipt(ack);
+        assert!(matches!(
+            store.record_cleanup(&paired.credential, &claim.run_credential, &receipt),
+            Err(StoreError::Database(_))
+        ));
+        assert!(store.get_cleanup(completed.run.id).unwrap().is_none());
+        assert_eq!(store.active_lease_count(worker.id).unwrap(), 1);
+        store
+            .connection()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_cleanup_release")
+            .unwrap();
+
+        let first = store
+            .record_cleanup(&paired.credential, &claim.run_credential, &receipt)
+            .unwrap();
+        let duplicate = store
+            .record_cleanup(&paired.credential, &claim.run_credential, &receipt)
+            .unwrap();
+        assert_eq!(first.receipt, duplicate.receipt);
+        assert_eq!(store.active_lease_count(worker.id).unwrap(), 0);
+        let snapshot = store.get_cleanup_snapshot(completed.job.id).unwrap();
+        let obligation = snapshot.obligation.unwrap();
+        assert_eq!(
+            obligation.release_reason,
+            Some(CleanupReservationReleaseReasonV1::RemovedReceipt)
+        );
+        assert!(obligation.reservation_released_at.is_some());
+        assert!(obligation.cleanup_failure.is_none());
+        let cleanup_rows: i64 = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM run_cleanups WHERE run_id = ?1",
+                [completed.run.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cleanup_rows, 1);
+
+        let mut next = job();
+        next.id = Uuid::new_v4();
+        assert!(store.submit_job(&next, None, &Scheduler::default()).is_ok());
+    }
+
+    #[test]
+    fn failed_and_cancelled_terminal_reports_also_hold_until_removed() {
+        for final_state in [JobState::Failed, JobState::Cancelled] {
+            let store = Store::in_memory().unwrap();
+            let worker = node();
+            let paired = pair_worker(&store, &worker);
+            let (claim, completed, ack) =
+                complete_empty_managed_run_as(&store, &worker, &paired, final_state);
+            assert_eq!(completed.run.state, final_state);
+            assert_eq!(store.active_lease_count(worker.id).unwrap(), 1);
+            let obligation = store
+                .get_cleanup_snapshot(completed.run.id)
+                .unwrap()
+                .obligation
+                .unwrap();
+            assert_eq!(obligation.final_state, final_state);
+            assert!(obligation.reservation_released_at.is_none());
+
+            let receipt = removed_cleanup_receipt(ack);
+            store
+                .record_cleanup(&paired.credential, &claim.run_credential, &receipt)
+                .unwrap();
+            assert_eq!(store.active_lease_count(worker.id).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn not_created_receipt_keeps_capacity_until_deadline_recovery() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let paired = pair_worker(&store, &worker);
+        let (claim, completed, ack) = complete_empty_managed_run(&store, &worker, &paired);
+        let mut receipt = removed_cleanup_receipt(ack);
+        receipt.outcome = JobRootCleanupOutcomeV1::NotCreated;
+        receipt.job_root_deleted = false;
+        store
+            .record_cleanup(&paired.credential, &claim.run_credential, &receipt)
+            .unwrap();
+        assert_eq!(store.active_lease_count(worker.id).unwrap(), 1);
+
+        let mut conflicting_removed = receipt.clone();
+        conflicting_removed.outcome = JobRootCleanupOutcomeV1::Removed;
+        conflicting_removed.job_root_deleted = true;
+        assert!(matches!(
+            store.record_cleanup(
+                &paired.credential,
+                &claim.run_credential,
+                &conflicting_removed,
+            ),
+            Err(StoreError::CleanupConflict)
+        ));
+        assert_eq!(store.active_lease_count(worker.id).unwrap(), 1);
+
+        let past = Utc::now().timestamp().saturating_sub(1);
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                r#"
+                UPDATE run_cleanup_obligations SET cleanup_deadline_at = ?1
+                WHERE run_id = ?2
+                "#,
+                params![past, completed.run.id.to_string()],
+            )
+            .unwrap();
+        assert_eq!(store.reap_expired_leases().unwrap(), 1);
+        assert_eq!(store.active_lease_count(worker.id).unwrap(), 0);
+        let obligation = store
+            .get_cleanup_snapshot(completed.run.id)
+            .unwrap()
+            .obligation
+            .unwrap();
+        assert_eq!(
+            obligation.release_reason,
+            Some(CleanupReservationReleaseReasonV1::DeadlineRecovery)
+        );
+        assert_eq!(
+            obligation.cleanup_failure.unwrap().code,
+            CleanupFailureCodeV1::RemovedReceiptDeadlineExceeded
+        );
+    }
+
+    #[test]
+    fn cleanup_deadline_recovery_survives_restart_without_faking_removed() {
+        let directory = test_directory("cleanup-deadline-restart");
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("controller.db");
+        let store = Store::open(&database).unwrap();
+        let worker = node();
+        let paired = pair_worker(&store, &worker);
+        let (_claim, completed, _ack) = complete_empty_managed_run(&store, &worker, &paired);
+        let past = Utc::now().timestamp().saturating_sub(1);
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE run_cleanup_obligations SET cleanup_deadline_at = ?1 WHERE run_id = ?2",
+                params![past, completed.run.id.to_string()],
+            )
+            .unwrap();
+        drop(store);
+
+        let reopened = Store::open(&database).unwrap();
+        assert_eq!(reopened.reap_expired_leases().unwrap(), 1);
+        assert_eq!(reopened.active_lease_count(worker.id).unwrap(), 0);
+        let snapshot = reopened.get_cleanup_snapshot(completed.job.id).unwrap();
+        assert!(snapshot.cleanup.is_none());
+        let obligation = snapshot.obligation.unwrap();
+        assert_eq!(
+            obligation.release_reason,
+            Some(CleanupReservationReleaseReasonV1::DeadlineRecovery)
+        );
+        assert!(obligation.reservation_released_at.is_some());
+        assert_eq!(
+            obligation.cleanup_failure.unwrap().code,
+            CleanupFailureCodeV1::RemovedReceiptDeadlineExceeded
+        );
+        let mut next = job();
+        next.id = Uuid::new_v4();
+        assert!(reopened
+            .submit_job(&next, None, &Scheduler::default())
+            .is_ok());
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cleanup_job_binding_mismatch_never_releases_capacity() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let paired = pair_worker(&store, &worker);
+        let (claim, completed, ack) = complete_empty_managed_run(&store, &worker, &paired);
+        let past = Utc::now().timestamp().saturating_sub(1);
+        store
+            .connection()
+            .unwrap()
+            .execute_batch(&format!(
+                r#"
+                UPDATE run_cleanup_obligations
+                SET job_id = '{}', cleanup_deadline_at = {past}
+                WHERE run_id = '{}';
+                UPDATE leases SET expires_at = {past}
+                WHERE id = '{}';
+                "#,
+                Uuid::new_v4(),
+                completed.run.id,
+                completed.lease_id.unwrap(),
+            ))
+            .unwrap();
+        let receipt = removed_cleanup_receipt(ack);
+        assert!(matches!(
+            store.record_cleanup(&paired.credential, &claim.run_credential, &receipt),
+            Err(StoreError::InvalidCleanupReceipt)
+        ));
+        assert_eq!(store.reap_expired_leases().unwrap(), 0);
+        assert_eq!(store.active_lease_count(worker.id).unwrap(), 1);
+        assert!(store.get_cleanup(completed.run.id).unwrap().is_none());
+        let obligation = store
+            .get_cleanup_snapshot(completed.run.id)
+            .unwrap()
+            .obligation
+            .unwrap();
+        assert!(obligation.release_reason.is_none());
+        assert!(obligation.reservation_released_at.is_none());
+        assert_eq!(
+            obligation.cleanup_failure.unwrap().code,
+            CleanupFailureCodeV1::RemovedReceiptDeadlineExceeded
+        );
+        let mut next = job();
+        next.id = Uuid::new_v4();
+        assert!(matches!(
+            store.submit_job(&next, None, &Scheduler::default()),
+            Err(StoreError::Schedule(ScheduleError::NoEligibleNodes { .. }))
+        ));
+    }
+
+    #[test]
+    fn concurrent_duplicate_removed_receipts_converge_to_one_release() {
+        let directory = test_directory("cleanup-concurrent");
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("controller.db");
+        let primary = Store::open(&database).unwrap();
+        let worker = node();
+        let paired = pair_worker(&primary, &worker);
+        let (claim, completed, ack) = complete_empty_managed_run(&primary, &worker, &paired);
+        let receipt = removed_cleanup_receipt(ack);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let store = Store::open(&database).unwrap();
+            let barrier = barrier.clone();
+            let receipt = receipt.clone();
+            let worker_credential = paired.credential.clone();
+            let run_credential = claim.run_credential.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                store.record_cleanup(&worker_credential, &run_credential, &receipt)
+            }));
+        }
+        barrier.wait();
+        for result in handles.into_iter().map(|handle| handle.join().unwrap()) {
+            assert!(result.is_ok(), "duplicate cleanup failed: {result:?}");
+        }
+        assert_eq!(primary.active_lease_count(worker.id).unwrap(), 0);
+        let rows: i64 = primary
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM run_cleanups WHERE run_id = ?1",
+                [completed.run.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+        let obligation = primary
+            .get_cleanup_snapshot(completed.run.id)
+            .unwrap()
+            .obligation
+            .unwrap();
+        assert_eq!(
+            obligation.release_reason,
+            Some(CleanupReservationReleaseReasonV1::RemovedReceipt)
+        );
+        drop(primary);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

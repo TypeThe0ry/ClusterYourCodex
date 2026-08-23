@@ -5,6 +5,7 @@
 //! the complete explanation on both success and failure.
 
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -17,9 +18,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-/// Three missed 30-second heartbeats is a conservative default for local
-/// worker discovery without leaving vanished workers eligible indefinitely.
-pub const DEFAULT_NODE_FRESHNESS_TTL: Duration = Duration::from_secs(90);
+/// Workers report every five seconds. Three missed reports is the default
+/// scheduling grace; a vanished worker therefore leaves the eligible set in
+/// roughly fifteen seconds instead of remaining selectable for ninety.
+pub const DEFAULT_NODE_FRESHNESS_TTL: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +86,60 @@ pub struct Scheduler {
     node_freshness_ttl: Duration,
 }
 
+/// Controller-derived policy and runtime facts which do not belong in the
+/// legacy [`Node`] compatibility document.  The old `schedule(Node)` API is
+/// retained, while the controller uses this context-aware API so policy is a
+/// hard placement constraint rather than a UI-only label.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SchedulingNode {
+    pub node: Node,
+    /// Empty means all job kinds are allowed.
+    pub allowed_job_kinds: BTreeSet<JobKind>,
+    pub allow_on_battery: bool,
+    pub on_battery: bool,
+    pub cpu_ewma_percent: u8,
+    pub memory_used_percent: u8,
+    pub temperature_c: Option<i16>,
+    pub max_cpu_percent: Option<u8>,
+    pub max_cpu_ewma_percent: Option<u8>,
+    pub max_memory_percent: Option<u8>,
+    pub max_temperature_c: Option<i16>,
+    pub configured_max_slots: u32,
+    pub containment_max_safe_slots: u32,
+    pub active_slots: u32,
+    /// Stable device ids aligned by index with `node.resources.gpus`.
+    pub gpu_device_ids: Vec<Option<String>>,
+    pub gpu_active_reservations: Vec<u32>,
+}
+
+impl SchedulingNode {
+    pub fn legacy(node: Node) -> Self {
+        Self {
+            node,
+            allowed_job_kinds: BTreeSet::new(),
+            allow_on_battery: true,
+            on_battery: false,
+            cpu_ewma_percent: 0,
+            memory_used_percent: 0,
+            temperature_c: None,
+            max_cpu_percent: None,
+            max_cpu_ewma_percent: None,
+            max_memory_percent: None,
+            max_temperature_c: None,
+            configured_max_slots: 1,
+            containment_max_safe_slots: 1,
+            active_slots: 0,
+            gpu_device_ids: Vec::new(),
+            gpu_active_reservations: Vec::new(),
+        }
+    }
+
+    pub fn effective_slots(&self) -> u32 {
+        self.configured_max_slots
+            .min(self.containment_max_safe_slots)
+    }
+}
+
 impl Scheduler {
     pub fn new(balanced_weights: SchedulerWeights, performance_weights: SchedulerWeights) -> Self {
         Self {
@@ -116,6 +172,32 @@ impl Scheduler {
         &self,
         job: &JobSpec,
         nodes: &[Node],
+        observed_at: DateTime<Utc>,
+    ) -> Result<PlacementDecision, ScheduleError> {
+        job.validate()?;
+
+        let contextual = nodes
+            .iter()
+            .cloned()
+            .map(SchedulingNode::legacy)
+            .collect::<Vec<_>>();
+        self.schedule_contexts_at(job, &contextual, observed_at)
+    }
+
+    pub fn schedule_contexts(
+        &self,
+        job: &JobSpec,
+        nodes: &[SchedulingNode],
+    ) -> Result<PlacementDecision, ScheduleError> {
+        self.schedule_contexts_at(job, nodes, Utc::now())
+    }
+
+    /// Context-aware deterministic scheduling used by the controller. Policy,
+    /// power, thermal, load and containment limits are rejected before score.
+    pub fn schedule_contexts_at(
+        &self,
+        job: &JobSpec,
+        nodes: &[SchedulingNode],
         observed_at: DateTime<Utc>,
     ) -> Result<PlacementDecision, ScheduleError> {
         job.validate()?;
@@ -209,12 +291,13 @@ fn compare_candidates(
 
 fn evaluate_node(
     job: &JobSpec,
-    node: &Node,
+    scheduling_node: &SchedulingNode,
     weights: &SchedulerWeights,
     observed_at: &DateTime<Utc>,
     freshness_ttl: Duration,
 ) -> PlacementCandidateExplain {
-    let rejection_reasons = hard_rejections(job, node, observed_at, freshness_ttl);
+    let node = &scheduling_node.node;
+    let rejection_reasons = hard_rejections(job, scheduling_node, observed_at, freshness_ttl);
     if !rejection_reasons.is_empty() {
         return PlacementCandidateExplain {
             node_id: node.id,
@@ -242,10 +325,11 @@ fn evaluate_node(
 
 fn hard_rejections(
     job: &JobSpec,
-    node: &Node,
+    scheduling_node: &SchedulingNode,
     observed_at: &DateTime<Utc>,
     freshness_ttl: Duration,
 ) -> Vec<PlacementRejection> {
+    let node = &scheduling_node.node;
     let mut reasons = Vec::new();
     if !node.enabled {
         reject(&mut reasons, RejectionCode::Disabled, "node is disabled");
@@ -281,6 +365,117 @@ fn hard_rejections(
                 );
             }
         }
+    }
+
+    if !scheduling_node.allowed_job_kinds.is_empty()
+        && !scheduling_node.allowed_job_kinds.contains(&job.kind)
+    {
+        reject(
+            &mut reasons,
+            RejectionCode::PolicyJobKindDenied,
+            format!("node policy does not allow {:?} jobs", job.kind),
+        );
+    }
+    if scheduling_node.on_battery && !scheduling_node.allow_on_battery {
+        reject(
+            &mut reasons,
+            RejectionCode::BatteryDisallowed,
+            "node is on battery and policy requires AC power",
+        );
+    }
+    if scheduling_node
+        .max_cpu_percent
+        .is_some_and(|maximum| node.load.cpu_percent > maximum)
+    {
+        reject(
+            &mut reasons,
+            RejectionCode::CpuLimitExceeded,
+            format!(
+                "observed CPU {}% exceeds policy maximum {}%",
+                node.load.cpu_percent,
+                scheduling_node.max_cpu_percent.unwrap_or_default()
+            ),
+        );
+    }
+    if scheduling_node
+        .max_cpu_ewma_percent
+        .is_some_and(|maximum| scheduling_node.cpu_ewma_percent > maximum)
+    {
+        reject(
+            &mut reasons,
+            RejectionCode::CpuEwmaLimitExceeded,
+            format!(
+                "CPU EWMA {}% exceeds policy maximum {}%",
+                scheduling_node.cpu_ewma_percent,
+                scheduling_node.max_cpu_ewma_percent.unwrap_or_default()
+            ),
+        );
+    }
+    if scheduling_node
+        .max_memory_percent
+        .is_some_and(|maximum| scheduling_node.memory_used_percent > maximum)
+    {
+        reject(
+            &mut reasons,
+            RejectionCode::MemoryLimitExceeded,
+            format!(
+                "memory use {}% exceeds policy maximum {}%",
+                scheduling_node.memory_used_percent,
+                scheduling_node.max_memory_percent.unwrap_or_default()
+            ),
+        );
+    }
+    if scheduling_node.temperature_c.is_some()
+        && scheduling_node.max_temperature_c.is_some()
+        && scheduling_node.temperature_c > scheduling_node.max_temperature_c
+    {
+        reject(
+            &mut reasons,
+            RejectionCode::TemperatureLimitExceeded,
+            format!(
+                "temperature {} C exceeds policy maximum {} C",
+                scheduling_node.temperature_c.unwrap_or_default(),
+                scheduling_node.max_temperature_c.unwrap_or_default()
+            ),
+        );
+    }
+    let effective_slots = scheduling_node.effective_slots();
+    if effective_slots == 0 {
+        reject(
+            &mut reasons,
+            RejectionCode::ContainmentLimitReached,
+            "worker containment reports zero safe execution slots",
+        );
+    } else if scheduling_node
+        .active_slots
+        .saturating_add(job.effective_resource_request().slots)
+        > effective_slots
+    {
+        let (code, detail) = if scheduling_node.containment_max_safe_slots
+            < scheduling_node.configured_max_slots
+        {
+            (
+                RejectionCode::ContainmentLimitReached,
+                format!(
+                    "{} active plus {} requested slots exceed containment maximum {} (configured {})",
+                    scheduling_node.active_slots,
+                    job.effective_resource_request().slots,
+                    scheduling_node.containment_max_safe_slots,
+                    scheduling_node.configured_max_slots
+                ),
+            )
+        } else {
+            (
+                RejectionCode::SlotLimitReached,
+                format!(
+                    "{} active plus {} requested slots exceed configured maximum {}",
+                    scheduling_node.active_slots,
+                    job.effective_resource_request().slots,
+                    scheduling_node.configured_max_slots
+                ),
+            )
+        };
+        reject(&mut reasons, code, detail);
     }
 
     if job.placement_policy == PlacementPolicy::Manual {
@@ -325,48 +520,132 @@ fn hard_rejections(
             format!("missing capability `{capability}`"),
         );
     }
-    if let Some(required) = requirements.min_cpu_cores {
-        if node.resources.available_cpu_cores < required {
-            reject(
-                &mut reasons,
-                RejectionCode::InsufficientCpu,
-                format!(
-                    "requires {required} available CPU cores, node has {}",
-                    node.resources.available_cpu_cores
-                ),
-            );
-        }
+    // Every job consumes at least one logical core even when the legacy
+    // request omitted minCpuCores. In particular, 100% external CPU load may
+    // legitimately report zero available cores and must be a hard rejection.
+    let resource_request = job.effective_resource_request();
+    let required_cpu = resource_request.cpu_cores;
+    if node.resources.available_cpu_cores < required_cpu || node.load.cpu_percent >= 100 {
+        reject(
+            &mut reasons,
+            RejectionCode::InsufficientCpu,
+            format!(
+                "requires {required_cpu} available CPU cores, node has {} at {}% utilization",
+                node.resources.available_cpu_cores, node.load.cpu_percent
+            ),
+        );
     }
-    if let Some(required) = requirements.min_memory_mib {
-        if node.resources.available_memory_mib < required {
-            reject(
-                &mut reasons,
-                RejectionCode::InsufficientMemory,
-                format!(
-                    "requires {required} MiB available memory, node has {} MiB",
-                    node.resources.available_memory_mib
-                ),
-            );
-        }
+    let required_memory = resource_request.memory_mib;
+    if node.resources.available_memory_mib < required_memory {
+        reject(
+            &mut reasons,
+            RejectionCode::InsufficientMemory,
+            format!(
+                "requires {required_memory} MiB available memory, node has {} MiB",
+                node.resources.available_memory_mib
+            ),
+        );
     }
-    if let Some(required) = requirements.min_disk_mib {
-        if node.resources.available_disk_mib < required {
-            reject(
-                &mut reasons,
-                RejectionCode::InsufficientDisk,
-                format!(
-                    "requires {required} MiB available disk, node has {} MiB",
-                    node.resources.available_disk_mib
-                ),
-            );
-        }
+    let required_disk = resource_request.disk_mib;
+    if node.resources.available_disk_mib < required_disk {
+        reject(
+            &mut reasons,
+            RejectionCode::InsufficientDisk,
+            format!(
+                "requires {required_disk} MiB available disk, node has {} MiB",
+                node.resources.available_disk_mib
+            ),
+        );
     }
 
     let implicit_gpu = (job.kind == JobKind::Gpu).then(GpuRequirement::default);
-    if let Some(requirement) = requirements.gpu.as_ref().or(implicit_gpu.as_ref()) {
+    if let Some(request) = resource_request.gpu.as_ref() {
+        gpu_resource_rejections(scheduling_node, request, &mut reasons);
+    } else if let Some(requirement) = requirements.gpu.as_ref().or(implicit_gpu.as_ref()) {
         gpu_rejections(node, requirement, &mut reasons);
     }
     reasons
+}
+
+fn gpu_resource_rejections(
+    scheduling_node: &SchedulingNode,
+    request: &cyc_protocol::GpuResourceRequest,
+    reasons: &mut Vec<PlacementRejection>,
+) {
+    let node = &scheduling_node.node;
+    if node.resources.gpus.is_empty() {
+        reject(reasons, RejectionCode::GpuRequired, "node has no GPU");
+        return;
+    }
+    let mut any_vendor_or_device = false;
+    let mut any_allocatable = false;
+    let mut best_vram = 0_u64;
+    for (index, gpu) in node.resources.gpus.iter().enumerate() {
+        let stable_id = scheduling_node
+            .gpu_device_ids
+            .get(index)
+            .and_then(Option::as_deref);
+        if request.vendor.is_some_and(|vendor| gpu.vendor != vendor)
+            || request
+                .device_id
+                .as_deref()
+                .is_some_and(|device_id| stable_id != Some(device_id))
+        {
+            continue;
+        }
+        any_vendor_or_device = true;
+        if !gpu.allocatable {
+            continue;
+        }
+        if request.exclusive
+            && scheduling_node
+                .gpu_active_reservations
+                .get(index)
+                .copied()
+                .unwrap_or_default()
+                > 0
+        {
+            continue;
+        }
+        any_allocatable = true;
+        best_vram = best_vram.max(gpu.available_vram_mib);
+        if gpu.available_vram_mib >= request.vram_mib {
+            return;
+        }
+    }
+    if !any_vendor_or_device {
+        reject(
+            reasons,
+            if request.device_id.is_some() {
+                RejectionCode::GpuUnavailable
+            } else {
+                RejectionCode::GpuVendorMismatch
+            },
+            request.device_id.as_ref().map_or_else(
+                || format!("node has no {:?} GPU", request.vendor),
+                |device_id| format!("node has no GPU device `{device_id}`"),
+            ),
+        );
+    } else if !any_allocatable {
+        reject(
+            reasons,
+            if request.exclusive {
+                RejectionCode::ExclusiveGpuUnavailable
+            } else {
+                RejectionCode::GpuUnavailable
+            },
+            "matching GPU is not allocatable",
+        );
+    } else {
+        reject(
+            reasons,
+            RejectionCode::InsufficientVram,
+            format!(
+                "requires {} MiB available VRAM, best matching GPU has {best_vram} MiB",
+                request.vram_mib
+            ),
+        );
+    }
 }
 
 fn gpu_rejections(
@@ -500,18 +779,24 @@ fn score_components(job: &JobSpec, node: &Node, weights: &SchedulerWeights) -> V
         ),
     ];
 
-    if job.kind == JobKind::Gpu || job.requirements.gpu.is_some() {
-        let available_vram = node
-            .resources
-            .gpus
-            .iter()
-            .filter(|gpu| {
+    let resource_request = job.effective_resource_request();
+    if job.kind == JobKind::Gpu || job.requirements.gpu.is_some() || resource_request.gpu.is_some()
+    {
+        let requested_vendor = resource_request
+            .gpu
+            .as_ref()
+            .and_then(|request| request.vendor)
+            .or_else(|| {
                 job.requirements
                     .gpu
                     .as_ref()
                     .and_then(|requirement| requirement.vendor)
-                    .is_none_or(|vendor| gpu.vendor == vendor)
-            })
+            });
+        let available_vram = node
+            .resources
+            .gpus
+            .iter()
+            .filter(|gpu| requested_vendor.is_none_or(|vendor| gpu.vendor == vendor))
             .map(|gpu| gpu.available_vram_mib)
             .max()
             .unwrap_or_default();
@@ -800,5 +1085,70 @@ mod tests {
             error.explanation().expect("explanation").candidates[0].rejection_reasons[0].code,
             RejectionCode::ManualNodeRequired
         );
+    }
+
+    #[test]
+    fn saturated_external_cpu_is_a_hard_rejection_even_for_legacy_jobs() {
+        let mut worker = node(1, "saturated", 16, 32_768);
+        // A historical probe could incorrectly leave a positive core count at
+        // 100% external utilization. The scheduler still fails closed.
+        worker.resources.available_cpu_cores = 8;
+        worker.load.cpu_percent = 100;
+        let error = select_node(&job(), &[worker]).expect_err("CPU saturation must reject");
+        assert!(error.explanation().unwrap().candidates[0]
+            .rejection_reasons
+            .iter()
+            .any(|reason| reason.code == RejectionCode::InsufficientCpu));
+    }
+
+    #[test]
+    fn context_policy_is_enforced_before_scoring() {
+        let worker = node(1, "policy", 16, 32_768);
+        let mut context = SchedulingNode::legacy(worker);
+        context.allowed_job_kinds.insert(JobKind::Test);
+        context.allow_on_battery = false;
+        context.on_battery = true;
+        context.max_cpu_percent = Some(50);
+        context.node.load.cpu_percent = 75;
+        context.max_cpu_ewma_percent = Some(60);
+        context.cpu_ewma_percent = 80;
+        context.max_memory_percent = Some(70);
+        context.memory_used_percent = 90;
+        context.max_temperature_c = Some(80);
+        context.temperature_c = Some(95);
+        let error = Scheduler::default()
+            .schedule_contexts(&job(), &[context])
+            .expect_err("typed policy must reject");
+        let codes = error.explanation().unwrap().candidates[0]
+            .rejection_reasons
+            .iter()
+            .map(|reason| reason.code)
+            .collect::<BTreeSet<_>>();
+        assert!(codes.contains(&RejectionCode::PolicyJobKindDenied));
+        assert!(codes.contains(&RejectionCode::BatteryDisallowed));
+        assert!(codes.contains(&RejectionCode::CpuLimitExceeded));
+        assert!(codes.contains(&RejectionCode::CpuEwmaLimitExceeded));
+        assert!(codes.contains(&RejectionCode::MemoryLimitExceeded));
+        assert!(codes.contains(&RejectionCode::TemperatureLimitExceeded));
+    }
+
+    #[test]
+    fn requested_slots_are_clamped_by_containment() {
+        let worker = node(1, "one-safe-slot", 16, 32_768);
+        let mut context = SchedulingNode::legacy(worker);
+        context.configured_max_slots = 8;
+        context.containment_max_safe_slots = 1;
+        let mut target_job = job();
+        target_job.resource_request = Some(cyc_protocol::ResourceRequest {
+            slots: 2,
+            ..cyc_protocol::ResourceRequest::default()
+        });
+        let error = Scheduler::default()
+            .schedule_contexts(&target_job, &[context])
+            .expect_err("one-slot containment cannot admit a two-slot request");
+        assert!(error.explanation().unwrap().candidates[0]
+            .rejection_reasons
+            .iter()
+            .any(|reason| reason.code == RejectionCode::ContainmentLimitReached));
     }
 }

@@ -22,7 +22,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+      # Worker process-lifecycle fixtures intentionally touch process-global
+      # state, so run native tests on one test thread for deterministic CI.
+      - run: cargo test --workspace --locked -- --test-threads=1
 
   web:
     name: Desktop, Windows host, and Codex bridge
@@ -42,10 +44,15 @@ jobs:
       - run: pnpm -r test
       - run: pnpm -r build
       - run: pnpm --filter @clusteryourcodex/desktop native:check
-      - run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -- --test-threads=1
       - run: cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
       - name: Validate Windows install lifecycle
         shell: powershell
         run: >-
           powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
           -File .\packaging\windows\Test-WindowsPackaging.ps1
+      - name: Validate managed worker kits
+        shell: powershell
+        run: >-
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+          -File .\packaging\worker-kits\Test-WorkerKits.ps1

@@ -7,6 +7,7 @@ param(
     [Parameter(Mandatory = $true)][string]$McpDeployRoot,
     [Parameter(Mandatory = $true)][string]$NodeExecutable,
     [Parameter(Mandatory = $true)][string]$NodeLicense,
+    [string]$WorkerKitsRoot,
     [Parameter(Mandatory = $true)][string]$OutputRoot
 )
 
@@ -28,6 +29,146 @@ function Copy-RequiredFile {
     }
     [void](New-Item -ItemType Directory -Path (Split-Path -Parent $Destination) -Force)
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
+}
+
+function Test-ReparsePoint {
+    param([Parameter(Mandatory = $true)][System.IO.FileSystemInfo]$Item)
+    return (($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+}
+
+function Copy-ValidatedWorkerKits {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceRoot,
+        [Parameter(Mandatory = $true)][string]$DestinationRoot
+    )
+
+    $sourceRootPath = Resolve-FullPath $SourceRoot
+    if (-not (Test-Path -LiteralPath $sourceRootPath -PathType Container)) {
+        throw "WorkerKitsRoot does not exist: $sourceRootPath"
+    }
+    $sourceRootItem = Get-Item -LiteralPath $sourceRootPath -Force
+    if (Test-ReparsePoint $sourceRootItem) {
+        throw 'WorkerKitsRoot must not be a reparse point.'
+    }
+    foreach ($item in Get-ChildItem -LiteralPath $sourceRootPath -Recurse -Force) {
+        if (Test-ReparsePoint $item) {
+            throw "WorkerKitsRoot contains a reparse point: $($item.FullName)"
+        }
+    }
+
+    $expectedTargets = @('windows-x86_64', 'linux-x86_64', 'linux-aarch64')
+    $records = New-Object System.Collections.Generic.List[object]
+    $seenTargets = @{}
+    $manifests = @(Get-ChildItem -LiteralPath $sourceRootPath -File -Recurse -Filter 'worker-kit.json' -Force)
+    foreach ($manifestFile in $manifests) {
+        $kitRoot = $manifestFile.Directory.FullName
+        $manifest = Get-Content -LiteralPath $manifestFile.FullName -Raw | ConvertFrom-Json
+        if ([string]$manifest.schemaVersion -cne 'cyc.dev/worker-kit/v1') {
+            throw "Unsupported worker-kit manifest schema: $($manifestFile.FullName)"
+        }
+        $target = [string]$manifest.target
+        if ($expectedTargets -cnotcontains $target) {
+            throw "Unsupported worker-kit target '$target'."
+        }
+        if ($seenTargets.ContainsKey($target)) {
+            throw "Duplicate worker-kit target '$target'."
+        }
+
+        $binaryName = if ($target -eq 'windows-x86_64') { 'cyc-worker.exe' } else { 'cyc-worker' }
+        $installerName = if ($target -eq 'windows-x86_64') { 'Install-Worker.ps1' } else { 'install-worker.sh' }
+        $expectedFiles = @($binaryName, $installerName, 'worker-kit.json', 'worker-kit.sig', 'SHA256SUMS')
+        $actualItems = @(Get-ChildItem -LiteralPath $kitRoot -Force)
+        if (@($actualItems | Where-Object { $_.PSIsContainer }).Count -ne 0) {
+            throw "Worker kit '$target' must not contain directories."
+        }
+        $actualNames = @($actualItems | ForEach-Object { $_.Name })
+        if ($actualNames.Count -ne $expectedFiles.Count) {
+            throw "Worker kit '$target' must contain exactly five files."
+        }
+        foreach ($expectedFile in $expectedFiles) {
+            if ($actualNames -cnotcontains $expectedFile) {
+                throw "Worker kit '$target' is missing $expectedFile."
+            }
+        }
+
+        $checksumPath = Join-Path $kitRoot 'SHA256SUMS'
+        $checksumLines = @(Get-Content -LiteralPath $checksumPath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($checksumLines.Count -ne 4) {
+            throw "Worker kit '$target' must declare exactly four checksums."
+        }
+        $checksums = @{}
+        foreach ($line in $checksumLines) {
+            if ($line -cnotmatch '^(?<hash>[0-9a-f]{64})  (?<name>[^/\\]+)$') {
+                throw "Malformed checksum in worker kit '$target'."
+            }
+            $fileName = [string]$Matches.name
+            if (@($binaryName, $installerName, 'worker-kit.json', 'worker-kit.sig') -cnotcontains $fileName -or
+                $checksums.ContainsKey($fileName)) {
+                throw "Unexpected or duplicate checksum entry '$fileName' in worker kit '$target'."
+            }
+            $checksums[$fileName] = [string]$Matches.hash
+        }
+        foreach ($fileName in @($binaryName, $installerName, 'worker-kit.json', 'worker-kit.sig')) {
+            if (-not $checksums.ContainsKey($fileName)) {
+                throw "Worker kit '$target' has no checksum for $fileName."
+            }
+            $actualHash = (Get-FileHash -LiteralPath (Join-Path $kitRoot $fileName) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -cne $checksums[$fileName]) {
+                throw "Worker kit '$target' failed SHA-256 validation for $fileName."
+            }
+        }
+
+        $signaturePath = Join-Path $kitRoot 'worker-kit.sig'
+        $signature = Get-Content -LiteralPath $signaturePath -Raw | ConvertFrom-Json
+        if (@($signature.PSObject.Properties).Count -ne 6 -or
+            [string]$signature.schemaVersion -cne 'cyc.dev/worker-kit-signature/v1' -or
+            [string]$signature.algorithm -cne 'Ed25519' -or
+            [string]$signature.keyId -cne 'cyc-release-2026-01' -or
+            [string]$signature.signedObject -cne 'worker-kit.json' -or
+            [string]$signature.manifestSha256 -cne $checksums['worker-kit.json'] -or
+            [string]$signature.signature -cnotmatch '^[A-Za-z0-9+/]{86}==$') {
+            throw "Worker kit '$target' publisher signature envelope is invalid."
+        }
+
+        $manifestEntries = @($manifest.files)
+        if ($manifestEntries.Count -ne 2) {
+            throw "Worker kit '$target' manifest must describe exactly two payload files."
+        }
+        foreach ($fileName in @($binaryName, $installerName)) {
+            $entry = @($manifestEntries | Where-Object { [string]$_.path -ceq $fileName })
+            if ($entry.Count -ne 1) {
+                throw "Worker kit '$target' manifest has an invalid entry for $fileName."
+            }
+            $item = Get-Item -LiteralPath (Join-Path $kitRoot $fileName) -Force
+            if ([long]$entry[0].sizeBytes -ne [long]$item.Length -or
+                [string]$entry[0].sha256 -cne [string]$checksums[$fileName]) {
+                throw "Worker kit '$target' manifest metadata mismatch for $fileName."
+            }
+        }
+
+        $destination = Join-Path $DestinationRoot $target
+        if (Test-Path -LiteralPath $destination) {
+            throw "Worker-kit destination already exists: $destination"
+        }
+        [void](New-Item -ItemType Directory -Path $destination -Force)
+        foreach ($fileName in $expectedFiles) {
+            Copy-RequiredFile -Source (Join-Path $kitRoot $fileName) -Destination (Join-Path $destination $fileName)
+        }
+        $seenTargets[$target] = $true
+        [void]$records.Add([ordered]@{
+            target = $target
+            version = [string]$manifest.version
+            manifestSha256 = [string]$checksums['worker-kit.json']
+            workerSha256 = [string]$checksums[$binaryName]
+        })
+    }
+
+    foreach ($target in $expectedTargets) {
+        if (-not $seenTargets.ContainsKey($target)) {
+            throw "WorkerKitsRoot is missing required target '$target'."
+        }
+    }
+    return @($records | Sort-Object target)
 }
 
 $repo = Resolve-FullPath $RepositoryRoot
@@ -70,8 +211,29 @@ Copy-RequiredFile `
     -Source (Join-Path $PSScriptRoot 'Install-ClusterYourCodex.cmd') `
     -Destination (Join-Path $output 'Install-ClusterYourCodex.cmd')
 Copy-RequiredFile `
+    -Source (Join-Path $PSScriptRoot 'Invoke-ClusterYourCodexLifecycle.ps1') `
+    -Destination (Join-Path $output 'Invoke-ClusterYourCodexLifecycle.ps1')
+Copy-RequiredFile `
+    -Source (Join-Path $PSScriptRoot 'Invoke-ClusterYourCodexFirewall.ps1') `
+    -Destination (Join-Path $output 'Invoke-ClusterYourCodexFirewall.ps1')
+Copy-RequiredFile `
     -Source (Join-Path $PSScriptRoot 'README.md') `
     -Destination (Join-Path $output 'README.md')
+Copy-RequiredFile `
+    -Source (Join-Path $PSScriptRoot 'bootstrap.ps1') `
+    -Destination (Join-Path $payload 'installer\bootstrap.ps1')
+Copy-RequiredFile `
+    -Source (Join-Path $PSScriptRoot 'Uninstall-ClusterYourCodex.ps1') `
+    -Destination (Join-Path $payload 'installer\Uninstall-ClusterYourCodex.ps1')
+Copy-RequiredFile `
+    -Source (Join-Path $PSScriptRoot 'Invoke-ClusterYourCodexLifecycle.ps1') `
+    -Destination (Join-Path $payload 'installer\Invoke-ClusterYourCodexLifecycle.ps1')
+Copy-RequiredFile `
+    -Source (Join-Path $PSScriptRoot 'Invoke-ClusterYourCodexFirewall.ps1') `
+    -Destination (Join-Path $payload 'installer\Invoke-ClusterYourCodexFirewall.ps1')
+Copy-RequiredFile `
+    -Source (Join-Path $PSScriptRoot 'cluster-agents-block.md') `
+    -Destination (Join-Path $payload 'integrations\codex\cluster-agents-block.md')
 Copy-RequiredFile `
     -Source (Join-Path $repo 'LICENSE') `
     -Destination (Join-Path $output 'LICENSE')
@@ -116,6 +278,13 @@ Copy-RequiredFile `
     -Source $nodeLicensePath `
     -Destination (Join-Path $pluginTarget 'mcp\runtime\LICENSE.node.txt')
 
+$workerKitRecords = @()
+if (-not [string]::IsNullOrWhiteSpace($WorkerKitsRoot)) {
+    $workerKitRecords = @(Copy-ValidatedWorkerKits `
+        -SourceRoot $WorkerKitsRoot `
+        -DestinationRoot (Join-Path $payload 'worker-kits'))
+}
+
 $files = @(Get-ChildItem -LiteralPath $output -File -Recurse -Force | Sort-Object FullName)
 $records = @($files | ForEach-Object {
     $relative = $_.FullName.Substring($output.Length + 1).Replace('\', '/')
@@ -130,6 +299,7 @@ $manifest = [ordered]@{
     createdAtUtc = [DateTime]::UtcNow.ToString('o')
     architecture = 'x86_64-pc-windows-msvc'
     nodeVersion = $nodeVersion.Trim()
+    workerKits = $workerKitRecords
     files = $records
 }
 $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $output 'preview-manifest.json') -Encoding UTF8

@@ -1,0 +1,737 @@
+#requires -Version 5.1
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$windowsInstaller = Join-Path $PSScriptRoot 'windows\Install-Worker.ps1'
+$linuxInstaller = Join-Path $PSScriptRoot 'linux\install-worker.sh'
+$builder = Join-Path $PSScriptRoot 'New-WorkerKit.ps1'
+foreach ($scriptPath in @($windowsInstaller, $builder)) {
+    $tokens = $null
+    $errors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -ne 0) {
+        throw "PowerShell parse failed for $scriptPath`: $($errors[0].Message)"
+    }
+}
+
+$gitBash = 'C:\Program Files\Git\bin\bash.exe'
+$bashPath = if (Test-Path -LiteralPath $gitBash -PathType Leaf) {
+    $gitBash
+} else {
+    $candidate = Get-Command bash -ErrorAction SilentlyContinue
+    if ($candidate -and $candidate.Source -notlike '*\Windows\System32\bash.exe') { $candidate.Source } else { $null }
+}
+if ($bashPath) {
+    & $bashPath -n $linuxInstaller
+    if ($LASTEXITCODE -ne 0) { throw 'Linux worker installer failed bash -n.' }
+}
+
+$temporary = Join-Path ([System.IO.Path]::GetTempPath()) ('cyc-worker-kit-test-' + [Guid]::NewGuid().ToString('N'))
+$previousSigningKeyPath = [string]$env:CYC_WORKER_KIT_SIGNING_KEY_PATH
+$previousSigningKeyId = [string]$env:CYC_WORKER_KIT_SIGNING_KEY_ID
+$previousTrustedPublicKeyPath = [string]$env:CYC_WORKER_KIT_TRUSTED_PUBLIC_KEY_PATH
+try {
+    [void](New-Item -ItemType Directory -Path $temporary)
+    $opensslCommand = Get-Command openssl -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $openssl = if ($opensslCommand) { [string]$opensslCommand.Source } elseif (Test-Path -LiteralPath 'C:\Program Files\Git\usr\bin\openssl.exe') { 'C:\Program Files\Git\usr\bin\openssl.exe' } else { throw 'OpenSSL fixture tool is unavailable.' }
+    $fixturePrivate = Join-Path $temporary 'fixture-ed25519-private.pem'
+    $fixturePublicDer = Join-Path $temporary 'fixture-ed25519-public.der'
+    $fixturePublicPem = Join-Path $temporary 'fixture-ed25519-public.pem'
+    $fixturePublicRaw = Join-Path $temporary 'fixture-ed25519-public.b64'
+    & $openssl genpkey -algorithm ED25519 -out $fixturePrivate
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to generate the test-only Ed25519 fixture key.' }
+    & $openssl pkey -in $fixturePrivate -pubout -outform DER -out $fixturePublicDer
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to derive the test-only Ed25519 fixture public key.' }
+    & $openssl pkey -in $fixturePrivate -pubout -out $fixturePublicPem
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to export the test-only Ed25519 fixture public key.' }
+    $publicDer = [System.IO.File]::ReadAllBytes($fixturePublicDer)
+    if ($publicDer.Length -ne 44) { throw 'Unexpected Ed25519 fixture public-key encoding.' }
+    [System.IO.File]::WriteAllText(
+        $fixturePublicRaw,
+        [Convert]::ToBase64String([byte[]]$publicDer[12..43]) + "`n",
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+    $env:CYC_WORKER_KIT_SIGNING_KEY_PATH = $fixturePrivate
+    $env:CYC_WORKER_KIT_SIGNING_KEY_ID = 'cyc-release-2026-01'
+    $env:CYC_WORKER_KIT_TRUSTED_PUBLIC_KEY_PATH = $fixturePublicRaw
+    $fakeWorker = Join-Path $temporary 'fake-worker.bin'
+    [System.IO.File]::WriteAllBytes($fakeWorker, [byte[]](0..255))
+    $windowsOutput = Join-Path $temporary 'windows'
+    $result = & $builder -Target windows-x86_64 -WorkerExecutable $fakeWorker -OutputDirectory $windowsOutput -Version '0.1.0-test.1' | ConvertFrom-Json
+    if ($result.schemaVersion -ne 'cyc.dev/worker-kit-build/v1') { throw 'Unexpected builder result schema.' }
+    $manifest = Get-Content -LiteralPath (Join-Path $windowsOutput 'worker-kit.json') -Raw | ConvertFrom-Json
+    if ($manifest.schemaVersion -ne 'cyc.dev/worker-kit/v1' -or $manifest.os -ne 'windows') { throw 'Windows manifest is invalid.' }
+    $actual = (Get-FileHash -LiteralPath (Join-Path $windowsOutput 'cyc-worker.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($manifest.files[0].sha256 -ne $actual) { throw 'Windows worker digest mismatch.' }
+    $signatureEnvelope = Get-Content -LiteralPath (Join-Path $windowsOutput 'worker-kit.sig') -Raw | ConvertFrom-Json
+    if ($signatureEnvelope.schemaVersion -ne 'cyc.dev/worker-kit-signature/v1' -or
+        $signatureEnvelope.algorithm -ne 'Ed25519' -or
+        $signatureEnvelope.keyId -ne 'cyc-release-2026-01' -or
+        $signatureEnvelope.signedObject -ne 'worker-kit.json') {
+        throw 'Worker-kit publisher signature envelope is invalid.'
+    }
+    $rawSignature = Join-Path $temporary 'worker-kit-signature.raw'
+    [System.IO.File]::WriteAllBytes($rawSignature, [Convert]::FromBase64String([string]$signatureEnvelope.signature))
+    & $openssl pkeyutl -verify -rawin -pubin -inkey $fixturePublicPem `
+        -in (Join-Path $windowsOutput 'worker-kit.json') -sigfile $rawSignature
+    if ($LASTEXITCODE -ne 0) { throw 'Worker-kit publisher signature did not verify.' }
+    $sumNames = @(Get-Content -LiteralPath (Join-Path $windowsOutput 'SHA256SUMS') |
+        ForEach-Object { ($_ -split '  ', 2)[1] })
+    if (($sumNames -join ',') -cne 'cyc-worker.exe,Install-Worker.ps1,worker-kit.json,worker-kit.sig') {
+        throw 'Worker-kit checksums do not bind the exact signed file set.'
+    }
+    $savedSigningKey = [string]$env:CYC_WORKER_KIT_SIGNING_KEY_PATH
+    try {
+        $env:CYC_WORKER_KIT_SIGNING_KEY_PATH = ''
+        $missingKeyRejected = $false
+        try {
+            $null = & $builder -Target windows-x86_64 -WorkerExecutable $fakeWorker `
+                -OutputDirectory (Join-Path $temporary 'missing-signing-key') `
+                -SigningKeyId 'cyc-release-2026-01' -TrustedPublicKeyPath $fixturePublicRaw
+        } catch {
+            $missingKeyRejected = $true
+        }
+        if (-not $missingKeyRejected) { throw 'Builder emitted an unsigned worker kit.' }
+    } finally {
+        $env:CYC_WORKER_KIT_SIGNING_KEY_PATH = $savedSigningKey
+    }
+    $foreignPrivate = Join-Path $temporary 'foreign-ed25519-private.pem'
+    & $openssl genpkey -algorithm ED25519 -out $foreignPrivate
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to generate the foreign publisher fixture.' }
+    $foreignKeyRejected = $false
+    try {
+        $null = & $builder -Target windows-x86_64 -WorkerExecutable $fakeWorker `
+            -OutputDirectory (Join-Path $temporary 'foreign-signing-key') `
+            -SigningKeyPath $foreignPrivate -SigningKeyId 'cyc-release-2026-01' `
+            -TrustedPublicKeyPath $fixturePublicRaw
+    } catch {
+        $foreignKeyRejected = $true
+    }
+    if (-not $foreignKeyRejected) { throw 'Builder accepted a non-pinned publisher key.' }
+    $nonEmptyRejected = $false
+    try {
+        $null = & $builder -Target windows-x86_64 -WorkerExecutable $fakeWorker -OutputDirectory $windowsOutput -Version '0.1.0-test.1'
+    } catch {
+        $nonEmptyRejected = $true
+    }
+    if (-not $nonEmptyRejected) { throw 'Builder accepted a non-empty output directory.' }
+
+    $windowsSmokeKit = Join-Path $temporary 'windows-smoke-kit'
+    $windowsFixtureBinary = Join-Path $env:SystemRoot 'System32\where.exe'
+    $null = & $builder `
+        -Target windows-x86_64 `
+        -WorkerExecutable $windowsFixtureBinary `
+        -OutputDirectory $windowsSmokeKit `
+        -Version '0.1.0-test.1'
+    $windowsSmokeInstall = Join-Path $temporary 'windows-smoke-install'
+    $windowsSmokeData = Join-Path $temporary 'windows-smoke-data'
+    $windowsSmokeWorkspace = Join-Path $temporary 'windows-smoke-workspace'
+    $windowsSmokeInstaller = Join-Path $windowsSmokeKit 'Install-Worker.ps1'
+    function Get-ScheduledTask { return $null }
+    function Stop-ScheduledTask {}
+    function Unregister-ScheduledTask {}
+    try {
+        $preinstallReceipt = . $windowsSmokeInstaller `
+            -Action Install `
+            -BundleRoot $windowsSmokeKit `
+            -InstallRoot $windowsSmokeInstall `
+            -DataRoot $windowsSmokeData `
+            -WorkspaceRoot $windowsSmokeWorkspace `
+            -Scope User `
+            -AllowOnBattery `
+            -Confirm:$false | ConvertFrom-Json
+        if (-not $preinstallReceipt.succeeded -or $preinstallReceipt.paired) {
+            throw 'Windows preinstall did not stop at the unpaired service-disabled boundary.'
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $windowsSmokeInstall 'cyc-worker.exe') -PathType Leaf) -or
+            (Test-Path -LiteralPath (Join-Path $windowsSmokeData 'config.json'))) {
+            throw 'Windows preinstall file state is invalid.'
+        }
+        $preinstallManifest = Get-Content -LiteralPath (Join-Path $windowsSmokeData 'install-manifest.json') -Raw | ConvertFrom-Json
+        if ($preinstallManifest.paired -or $preinstallManifest.serviceEnabled) {
+            throw 'Windows preinstall manifest incorrectly reports a paired service.'
+        }
+        if ($preinstallManifest.scope -ne 'user' -or -not $preinstallManifest.allowOnBattery) {
+            throw 'Windows preinstall did not persist the selected service/battery policy.'
+        }
+    } finally {
+        Remove-Item Function:\Get-ScheduledTask -Force
+        Remove-Item Function:\Stop-ScheduledTask -Force
+        Remove-Item Function:\Unregister-ScheduledTask -Force
+    }
+
+    function New-FakeWindowsWorker {
+        param(
+            [Parameter(Mandatory = $true)][string]$OutputPath,
+            [Parameter(Mandatory = $true)][string]$Version
+        )
+        $compiler = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+        if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'The Windows x64 C# compiler fixture is unavailable.' }
+        $sourcePath = [System.IO.Path]::ChangeExtension($OutputPath, '.cs')
+        $source = @'
+using System;
+using System.IO;
+using System.Text;
+using System.Threading;
+
+internal static class Program
+{
+    private const string Version = "__VERSION__";
+
+    private static string Value(string[] args, string name)
+    {
+        for (int i = 0; i + 1 < args.Length; i++)
+            if (String.Equals(args[i], name, StringComparison.Ordinal)) return args[i + 1];
+        return null;
+    }
+
+    private static string CredentialFromConfig(string path)
+    {
+        string text = File.ReadAllText(path, Encoding.UTF8);
+        const string marker = "\"credentialFile\":\"";
+        int start = text.IndexOf(marker, StringComparison.Ordinal);
+        if (start < 0) return null;
+        start += marker.Length;
+        int end = text.IndexOf('"', start);
+        if (end < 0) return null;
+        return text.Substring(start, end - start).Replace("\\\\", "\\");
+    }
+
+    private static string JsonEscape(string value)
+    {
+        return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
+    }
+
+    private static int Main(string[] args)
+    {
+        if (args.Length == 0) return 2;
+        if (args[0] == "pair")
+        {
+            string config = Value(args, "--config");
+            string enrollment = Value(args, "--enrollment-file");
+            string workspace = Value(args, "--workspace-root");
+            bool repair = Array.IndexOf(args, "--repair") >= 0;
+            if (String.IsNullOrEmpty(config) || String.IsNullOrEmpty(enrollment) ||
+                String.IsNullOrEmpty(workspace) || !File.Exists(enrollment)) return 3;
+            bool existed = File.Exists(config);
+            if (existed != repair) return 4;
+            string previous = existed ? CredentialFromConfig(config) : null;
+            string credential = Path.Combine(Path.GetDirectoryName(config), "config." + Guid.NewGuid().ToString("N") + ".credential");
+            File.WriteAllText(credential, "WINDOWS_SECRET_DO_NOT_LOG\n", new UTF8Encoding(false));
+            string json = "{\"paired\":true,\"worker\":\"" + Version + "\",\"repair\":" +
+                (repair ? "true" : "false") + ",\"workspaceRoot\":\"" + JsonEscape(workspace) +
+                "\",\"credentialFile\":\"" + JsonEscape(credential) + "\"}\n";
+            File.WriteAllText(config, json, new UTF8Encoding(false));
+            if (!String.IsNullOrEmpty(previous) && !String.Equals(previous, credential, StringComparison.OrdinalIgnoreCase))
+                File.Delete(previous);
+            return 0;
+        }
+        if (args[0] == "status")
+        {
+            string config = Value(args, "--config");
+            if (String.IsNullOrEmpty(config) || !File.Exists(config)) return 5;
+            string credential = CredentialFromConfig(config);
+            return !String.IsNullOrEmpty(credential) && File.Exists(credential) ? 0 : 6;
+        }
+        if (args[0] == "run")
+        {
+            Thread.Sleep(60000);
+            return 0;
+        }
+        return 2;
+    }
+}
+'@.Replace('__VERSION__', $Version)
+        [System.IO.File]::WriteAllText($sourcePath, $source, (New-Object System.Text.UTF8Encoding($false)))
+        & $compiler /nologo /target:exe /platform:x64 ("/out:$OutputPath") $sourcePath
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $OutputPath -PathType Leaf)) {
+            throw 'Failed to compile the Windows transactional worker fixture.'
+        }
+    }
+
+    $windowsOldWorker = Join-Path $temporary 'fake-windows-worker-old.exe'
+    $windowsUpgradeWorker = Join-Path $temporary 'fake-windows-worker-upgrade.exe'
+    New-FakeWindowsWorker -OutputPath $windowsOldWorker -Version 'old'
+    New-FakeWindowsWorker -OutputPath $windowsUpgradeWorker -Version 'upgrade'
+    $windowsOldKit = Join-Path $temporary 'windows-transaction-old'
+    $windowsUpgradeKit = Join-Path $temporary 'windows-transaction-upgrade'
+    $null = & $builder -Target windows-x86_64 -WorkerExecutable $windowsOldWorker -OutputDirectory $windowsOldKit -Version '0.1.0-test.1'
+    $null = & $builder -Target windows-x86_64 -WorkerExecutable $windowsUpgradeWorker -OutputDirectory $windowsUpgradeKit -Version '0.1.0-test.2'
+    $windowsOldInstaller = Join-Path $windowsOldKit 'Install-Worker.ps1'
+    $windowsUpgradeInstaller = Join-Path $windowsUpgradeKit 'Install-Worker.ps1'
+
+    $windowsTransactionInstall = Join-Path $temporary 'windows-transaction-install'
+    $windowsTransactionData = Join-Path $temporary 'windows-transaction-data'
+    $windowsTransactionWorkspace = Join-Path $temporary 'windows-transaction-workspace'
+    $script:FakeTaskExists = $false
+    $script:FakeTaskRunning = $false
+    $script:FakeTaskXml = $null
+    $script:FakeTaskGeneration = 0
+    function Get-ScheduledTask {
+        param($TaskName, $ErrorAction)
+        if (-not $script:FakeTaskExists) { return $null }
+        return [PSCustomObject]@{ State = if ($script:FakeTaskRunning) { 'Running' } else { 'Ready' } }
+    }
+    function Export-ScheduledTask { param($TaskName) return $script:FakeTaskXml }
+    function Stop-ScheduledTask { param($TaskName, $ErrorAction) $script:FakeTaskRunning = $false }
+    function Unregister-ScheduledTask { param($TaskName, [switch]$Confirm) $script:FakeTaskExists = $false; $script:FakeTaskRunning = $false }
+    function Start-ScheduledTask { param($TaskName) if (-not $script:FakeTaskExists) { throw 'Fake task is absent.' }; $script:FakeTaskRunning = $true }
+    function Get-ScheduledTaskInfo { param($TaskName, $ErrorAction) return [PSCustomObject]@{ LastTaskResult = 0 } }
+    function New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDirectory) return [PSCustomObject]@{} }
+    function New-ScheduledTaskTrigger { param([switch]$AtStartup, [switch]$AtLogOn, $User) return [PSCustomObject]@{} }
+    function New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) return [PSCustomObject]@{} }
+    function New-ScheduledTaskSettingsSet {
+        param($MultipleInstances, $StartWhenAvailable, $RestartCount, $RestartInterval, $ExecutionTimeLimit, $AllowStartIfOnBatteries, $DontStopIfGoingOnBatteries)
+        return [PSCustomObject]@{}
+    }
+    function Register-ScheduledTask {
+        param($TaskName, $Xml, $Action, $Trigger, $Principal, $Settings, $Description, [switch]$Force)
+        $script:FakeTaskExists = $true
+        $script:FakeTaskRunning = $false
+        if ($PSBoundParameters.ContainsKey('Xml')) {
+            $script:FakeTaskXml = [string]$Xml
+        } else {
+            $script:FakeTaskGeneration++
+            $script:FakeTaskXml = "<Task generation=`"$($script:FakeTaskGeneration)`" />"
+        }
+        return [PSCustomObject]@{}
+    }
+    try {
+        $null = . $windowsOldInstaller `
+            -Action Install `
+            -BundleRoot $windowsOldKit `
+            -InstallRoot $windowsTransactionInstall `
+            -DataRoot $windowsTransactionData `
+            -WorkspaceRoot $windowsTransactionWorkspace `
+            -Scope User `
+            -Confirm:$false
+        $initialEnrollment = Join-Path $temporary 'windows-initial-enrollment.json'
+        [System.IO.File]::WriteAllText($initialEnrollment, "WINDOWS_ENROLLMENT_SECRET_DO_NOT_LOG`n", (New-Object System.Text.UTF8Encoding($false)))
+        $initialReceipt = . $windowsOldInstaller `
+            -Action Repair `
+            -BundleRoot $windowsOldKit `
+            -InstallRoot $windowsTransactionInstall `
+            -DataRoot $windowsTransactionData `
+            -WorkspaceRoot $windowsTransactionWorkspace `
+            -EnrollmentFile $initialEnrollment `
+            -Scope User `
+            -Confirm:$false | ConvertFrom-Json
+        if (-not $initialReceipt.paired -or -not $initialReceipt.serviceEnabled -or -not $script:FakeTaskRunning) {
+            throw 'Windows transactional fixture did not reach the Ready state.'
+        }
+
+        $installedWorker = Join-Path $windowsTransactionInstall 'cyc-worker.exe'
+        $installedConfig = Join-Path $windowsTransactionData 'config.json'
+        $installedManifest = Join-Path $windowsTransactionData 'install-manifest.json'
+        $baselineCredentialPath = (Get-Content -LiteralPath $installedConfig -Raw | ConvertFrom-Json).credentialFile
+        $baseline = [ordered]@{
+            worker = (Get-FileHash -LiteralPath $installedWorker -Algorithm SHA256).Hash
+            config = (Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash
+            credential = (Get-FileHash -LiteralPath $baselineCredentialPath -Algorithm SHA256).Hash
+            manifest = (Get-FileHash -LiteralPath $installedManifest -Algorithm SHA256).Hash
+            taskXml = $script:FakeTaskXml
+        }
+
+        foreach ($injection in @('AfterPair', 'AfterServiceRegistration', 'BeforeManifestWrite')) {
+            $arguments = @{
+                Action = 'Repair'
+                BundleRoot = $windowsUpgradeKit
+                InstallRoot = $windowsTransactionInstall
+                DataRoot = $windowsTransactionData
+                WorkspaceRoot = $windowsTransactionWorkspace
+                Scope = 'User'
+                FailureInjection = $injection
+                Confirm = $false
+            }
+            if ($injection -eq 'AfterPair') {
+                $repairEnrollment = Join-Path $temporary 'windows-repair-enrollment.json'
+                [System.IO.File]::WriteAllText($repairEnrollment, "WINDOWS_ENROLLMENT_SECRET_DO_NOT_LOG`n", (New-Object System.Text.UTF8Encoding($false)))
+                $arguments.EnrollmentFile = $repairEnrollment
+            }
+            $failed = $false
+            $failureText = ''
+            try {
+                $failureText = (. $windowsUpgradeInstaller @arguments 2>&1 | Out-String)
+            } catch {
+                $failed = $true
+                $failureText += $_.Exception.Message
+            }
+            if (-not $failed) { throw "Windows failure injection did not fail at $injection." }
+            if ($failureText -match 'WINDOWS_.*SECRET_DO_NOT_LOG') { throw 'Windows repair failure leaked secret material.' }
+            if ((Get-FileHash -LiteralPath $installedWorker -Algorithm SHA256).Hash -ne $baseline.worker -or
+                (Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash -ne $baseline.config -or
+                (Get-FileHash -LiteralPath $baselineCredentialPath -Algorithm SHA256).Hash -ne $baseline.credential -or
+                (Get-FileHash -LiteralPath $installedManifest -Algorithm SHA256).Hash -ne $baseline.manifest) {
+                throw "Windows repair did not restore old bytes at $injection."
+            }
+            & $installedWorker status --config $installedConfig | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Windows restored worker was not usable at $injection." }
+            if (@(Get-ChildItem -LiteralPath $windowsTransactionData -Filter 'config.*.credential' -File).Count -ne 1 -or
+                -not $script:FakeTaskExists -or -not $script:FakeTaskRunning -or $script:FakeTaskXml -ne $baseline.taskXml -or
+                (Test-Path -LiteralPath (Join-Path $windowsTransactionData '.repair-transaction'))) {
+                throw "Windows repair did not restore old identity/service state at $injection."
+            }
+        }
+
+        $routineConfig = (Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash
+        $routineCredential = (Get-FileHash -LiteralPath $baselineCredentialPath -Algorithm SHA256).Hash
+        $routineReceipt = . $windowsUpgradeInstaller `
+            -Action Repair `
+            -BundleRoot $windowsUpgradeKit `
+            -InstallRoot $windowsTransactionInstall `
+            -DataRoot $windowsTransactionData `
+            -WorkspaceRoot $windowsTransactionWorkspace `
+            -Scope User `
+            -Confirm:$false | ConvertFrom-Json
+        if (-not $routineReceipt.paired -or -not $routineReceipt.serviceEnabled -or -not $script:FakeTaskRunning -or
+            (Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash -ne $routineConfig -or
+            (Get-FileHash -LiteralPath $baselineCredentialPath -Algorithm SHA256).Hash -ne $routineCredential -or
+            (Get-FileHash -LiteralPath $installedWorker -Algorithm SHA256).Hash -eq $baseline.worker) {
+            throw 'Windows Ready-node routine repair did not preserve identity while swapping the worker.'
+        }
+    } finally {
+        foreach ($functionName in @(
+            'Get-ScheduledTask', 'Export-ScheduledTask', 'Stop-ScheduledTask', 'Unregister-ScheduledTask',
+            'Start-ScheduledTask', 'Get-ScheduledTaskInfo', 'New-ScheduledTaskAction',
+            'New-ScheduledTaskTrigger', 'New-ScheduledTaskPrincipal', 'New-ScheduledTaskSettingsSet',
+            'Register-ScheduledTask'
+        )) {
+            Remove-Item -LiteralPath ("Function:\" + $functionName) -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $linuxOutput = Join-Path $temporary 'linux'
+    $null = & $builder -Target linux-aarch64 -WorkerExecutable $fakeWorker -OutputDirectory $linuxOutput -Version '0.1.0-test.1'
+    $linuxManifest = Get-Content -LiteralPath (Join-Path $linuxOutput 'worker-kit.json') -Raw | ConvertFrom-Json
+    if ($linuxManifest.os -ne 'linux' -or $linuxManifest.architecture -ne 'aarch64') { throw 'Linux manifest is invalid.' }
+
+    if ($bashPath) {
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        $goodWorker = Join-Path $temporary 'fake-linux-worker'
+        $upgradeWorker = Join-Path $temporary 'fake-linux-worker-upgrade'
+        $badWorker = Join-Path $temporary 'fake-linux-worker-bad'
+        [System.IO.File]::WriteAllText($goodWorker, @'
+#!/usr/bin/env bash
+set -euo pipefail
+command_name="${1:-}"
+shift || true
+case "$command_name" in
+  pair)
+    config=''
+    workspace=''
+    repair=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --config) config="$2"; shift 2 ;;
+        --enrollment-file) test -s "$2"; shift 2 ;;
+        --workspace-root) workspace="$2"; shift 2 ;;
+        --repair) repair=1; shift ;;
+        *) exit 2 ;;
+      esac
+    done
+    [[ "$workspace" == /* ]] || exit 3
+    if [[ -e "$config" ]]; then
+      [[ "$repair" -eq 1 ]] || exit 4
+      old_credential="$(sed -n 's/.*"credentialFile":"\([^"]*\)".*/\1/p' "$config")"
+      [[ -n "$old_credential" ]] || exit 6
+    else
+      [[ "$repair" -eq 0 ]] || exit 5
+      old_credential=''
+    fi
+    credential="${config%.json}.$$.credential"
+    printf '%s\n' 'LINUX_SECRET_DO_NOT_LOG' >"$credential"
+    chmod 0600 "$credential"
+    printf '{"paired":true,"worker":"good","workspaceRoot":"%s","repair":%s,"credentialFile":"%s"}\n' "$workspace" "$([[ "$repair" -eq 1 ]] && printf true || printf false)" "$credential" >"$config"
+    if [[ -n "$old_credential" && "$old_credential" != "$credential" ]]; then rm -f -- "$old_credential"; fi
+    ;;
+  status|run) exit 0 ;;
+  *) exit 2 ;;
+esac
+'@.TrimStart(), $utf8NoBom)
+        [System.IO.File]::WriteAllText($upgradeWorker, ((Get-Content -LiteralPath $goodWorker -Raw) + "`n# upgraded worker fixture`n"), $utf8NoBom)
+        [System.IO.File]::WriteAllText($badWorker, @'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  pair) exit 0 ;;
+  status) exit 42 ;;
+  run) exit 0 ;;
+  *) exit 2 ;;
+esac
+'@.TrimStart(), $utf8NoBom)
+        $goodKit = Join-Path $temporary 'linux-smoke-good'
+        $upgradeKit = Join-Path $temporary 'linux-smoke-upgrade'
+        $badKit = Join-Path $temporary 'linux-smoke-bad'
+        $null = & $builder -Target linux-x86_64 -WorkerExecutable $goodWorker -OutputDirectory $goodKit -Version '0.1.0-test.1'
+        $null = & $builder -Target linux-x86_64 -WorkerExecutable $upgradeWorker -OutputDirectory $upgradeKit -Version '0.1.0-test.2'
+        $null = & $builder -Target linux-x86_64 -WorkerExecutable $badWorker -OutputDirectory $badKit -Version '0.1.0-test.2'
+        $smoke = Join-Path $temporary 'linux-smoke.sh'
+        [System.IO.File]::WriteAllText($smoke, @'
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cygpath -u "$1")"
+export HOME="$root/home"
+export XDG_DATA_HOME="$root/xdg-data"
+export XDG_CONFIG_HOME="$root/xdg-config"
+export CYC_FAKE_SYSTEMD_ROOT="$root/fake-systemd"
+mkdir -p "$HOME" "$root/fake-bin" "$root/fake-root-bin" "$CYC_FAKE_SYSTEMD_ROOT"
+: >"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log"
+: >"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log"
+cat >"$root/fake-bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log"
+if [[ "${1:-}" == --user ]]; then shift; fi
+command_name="${1:-}"
+shift || true
+case "$command_name" in
+  show-environment)
+    [[ "${CYC_FAKE_USER_SYSTEMD_MODE:-ready}" != no-bus ]]
+    ;;
+  daemon-reload) ;;
+  is-enabled) test -f "$CYC_FAKE_SYSTEMD_ROOT/service-enabled" ;;
+  is-active) test -f "$CYC_FAKE_SYSTEMD_ROOT/service-active" ;;
+  enable)
+    : >"$CYC_FAKE_SYSTEMD_ROOT/service-enabled"
+    if [[ "${1:-}" == --now ]]; then : >"$CYC_FAKE_SYSTEMD_ROOT/service-active"; fi
+    ;;
+  disable)
+    rm -f -- "$CYC_FAKE_SYSTEMD_ROOT/service-enabled"
+    if [[ "${1:-}" == --now ]]; then rm -f -- "$CYC_FAKE_SYSTEMD_ROOT/service-active"; fi
+    ;;
+  start) : >"$CYC_FAKE_SYSTEMD_ROOT/service-active" ;;
+  stop) rm -f -- "$CYC_FAKE_SYSTEMD_ROOT/service-active" ;;
+  *) exit 2 ;;
+esac
+EOF
+cat >"$root/fake-bin/loginctl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log"
+case "${1:-}" in
+  show-user)
+    if [[ -f "$CYC_FAKE_SYSTEMD_ROOT/linger-enabled" ]]; then printf 'yes\n'; else printf 'no\n'; fi
+    ;;
+  enable-linger)
+    [[ "${CYC_FAKE_USER_SYSTEMD_MODE:-ready}" != no-linger ]] || exit 1
+    : >"$CYC_FAKE_SYSTEMD_ROOT/linger-enabled"
+    ;;
+  disable-linger)
+    rm -f -- "$CYC_FAKE_SYSTEMD_ROOT/linger-enabled"
+    ;;
+  *) exit 2 ;;
+esac
+EOF
+cat >"$root/fake-root-bin/id" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  -u) printf '0\n' ;;
+  -un) printf 'root\n' ;;
+  *) exit 2 ;;
+esac
+EOF
+cat >"$root/fake-bin/install" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+directory=0
+mode=''
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -d) directory=1; shift ;;
+    -m) mode="$2"; shift 2 ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+if [[ "$directory" -eq 1 ]]; then
+  mkdir -p -- "$@"
+else
+  source="$1"
+  destination="$2"
+  cp -- "$source" "$destination"
+  if [[ "$mode" == 0700 || "$mode" == 0755 ]]; then chmod +x "$destination" || true; fi
+fi
+EOF
+chmod +x "$root/fake-bin/systemctl"
+chmod +x "$root/fake-bin/loginctl"
+chmod +x "$root/fake-bin/install"
+chmod +x "$root/fake-root-bin/id"
+export PATH="$root/fake-bin:$PATH"
+good="$root/linux-smoke-good"
+upgrade="$root/linux-smoke-upgrade"
+bad="$root/linux-smoke-bad"
+chmod +x "$good/cyc-worker" "$good/install-worker.sh" "$upgrade/cyc-worker" "$upgrade/install-worker.sh" "$bad/cyc-worker" "$bad/install-worker.sh"
+
+# Root + auto resolves to system scope without probing or modifying a user
+# manager. This is an unpaired preinstall, so it must not touch systemd.
+root_login_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log")"
+root_systemctl_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log")"
+root_receipt="$(PATH="$root/fake-root-bin:$PATH" "$good/install-worker.sh" install \
+  --bundle-root "$good" \
+  --install-root "$root/root-auto-install" \
+  --data-root "$root/root-auto-data" \
+  --workspace-root "$root/root-auto-workspace")"
+printf '%s' "$root_receipt" | grep -q '"scope":"system"'
+printf '%s' "$root_receipt" | grep -q '"serviceEnabled":false'
+root_login_lines_after="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log")"
+root_systemctl_lines_after="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log")"
+test "$root_login_lines_before" = "$root_login_lines_after"
+test "$root_systemctl_lines_before" = "$root_systemctl_lines_after"
+
+preinstall="$("$good/install-worker.sh" install --bundle-root "$good")"
+printf '%s' "$preinstall" | grep -q '"paired":false'
+worker="$HOME/.local/lib/clusteryourcodex-worker/cyc-worker"
+data="$XDG_DATA_HOME/clusteryourcodex/worker"
+test -x "$worker"
+test ! -e "$data/config.json"
+test ! -e "$XDG_CONFIG_HOME/systemd/user/clusteryourcodex-worker.service"
+printf '{"enrollment":"one-time"}\n' >"$root/enrollment.json"
+activation="$("$good/install-worker.sh" repair --bundle-root "$good" --enrollment "$root/enrollment.json" --pair-only)"
+printf '%s' "$activation" | grep -q '"paired":true'
+printf '%s' "$activation" | grep -q '"serviceEnabled":false'
+test -x "$worker"
+test -s "$data/config.json"
+grep -q '"repair":false' "$data/config.json"
+test ! -e "$root/enrollment.json"
+test ! -e "$XDG_CONFIG_HOME/systemd/user/clusteryourcodex-worker.service"
+printf '{"enrollment":"rotation"}\n' >"$root/enrollment-rotation.json"
+rotation="$("$good/install-worker.sh" repair --bundle-root "$good" --enrollment "$root/enrollment-rotation.json" --pair-only)"
+printf '%s' "$rotation" | grep -q '"paired":true'
+grep -q '"repair":true' "$data/config.json"
+test ! -e "$root/enrollment-rotation.json"
+
+# A non-root auto/user activation must fail before worker/config/manifest
+# mutation when linger exists or can be enabled but the user bus is absent.
+worker_before_user_failure="$(sha256sum "$worker" | awk '{print $1}')"
+config_before_user_failure="$(sha256sum "$data/config.json" | awk '{print $1}')"
+manifest_before_user_failure="$(sha256sum "$data/install-manifest.json" | awk '{print $1}')"
+set +e
+CYC_FAKE_USER_SYSTEMD_MODE=no-bus "$good/install-worker.sh" repair --bundle-root "$good" \
+  >"$root/user-systemd-failure.stdout" 2>"$root/user-systemd-failure.stderr"
+user_systemd_exit=$?
+set -e
+test "$user_systemd_exit" -eq 78
+grep -q 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE' "$root/user-systemd-failure.stderr"
+grep -q -- '--scope system' "$root/user-systemd-failure.stderr"
+test "$(sha256sum "$worker" | awk '{print $1}')" = "$worker_before_user_failure"
+test "$(sha256sum "$data/config.json" | awk '{print $1}')" = "$config_before_user_failure"
+test "$(sha256sum "$data/install-manifest.json" | awk '{print $1}')" = "$manifest_before_user_failure"
+test ! -e "$XDG_CONFIG_HOME/systemd/user/clusteryourcodex-worker.service"
+test ! -e "$CYC_FAKE_SYSTEMD_ROOT/linger-enabled"
+
+enabled="$("$good/install-worker.sh" repair --bundle-root "$good")"
+printf '%s' "$enabled" | grep -q '"serviceEnabled":true'
+unit="$XDG_CONFIG_HOME/systemd/user/clusteryourcodex-worker.service"
+test -s "$unit"
+test -f "$CYC_FAKE_SYSTEMD_ROOT/linger-enabled"
+test -f "$CYC_FAKE_SYSTEMD_ROOT/service-enabled"
+test -f "$CYC_FAKE_SYSTEMD_ROOT/service-active"
+grep -q -- '--user show-environment' "$CYC_FAKE_SYSTEMD_ROOT/systemctl.log"
+
+# Ready-node repair is one transaction. A normal repair does not rotate the
+# credential; injected failures after pair, service registration, and before
+# manifest commit must restore every old byte and the active/enabled state.
+baseline_worker="$(sha256sum "$worker" | awk '{print $1}')"
+baseline_config="$(sha256sum "$data/config.json" | awk '{print $1}')"
+baseline_manifest="$(sha256sum "$data/install-manifest.json" | awk '{print $1}')"
+baseline_unit="$(sha256sum "$unit" | awk '{print $1}')"
+baseline_credential_path="$(sed -n 's/.*"credentialFile":"\([^"]*\)".*/\1/p' "$data/config.json")"
+test -f "$baseline_credential_path"
+baseline_credential="$(sha256sum "$baseline_credential_path" | awk '{print $1}')"
+
+for injection in after-pair after-service-registration before-manifest-write; do
+  enrollment_args=()
+  if [[ "$injection" == after-pair ]]; then
+    printf '%s\n' 'LINUX_ENROLLMENT_SECRET_DO_NOT_LOG' >"$root/enrollment-$injection.json"
+    enrollment_args=(--enrollment "$root/enrollment-$injection.json")
+  fi
+  set +e
+  "$upgrade/install-worker.sh" repair --bundle-root "$upgrade" \
+    "${enrollment_args[@]}" --failure-injection "$injection" \
+    >"$root/$injection.stdout" 2>"$root/$injection.stderr"
+  injection_exit=$?
+  set -e
+  test "$injection_exit" -ne 0
+  ! grep -q 'LINUX_.*SECRET_DO_NOT_LOG' "$root/$injection.stdout" "$root/$injection.stderr"
+  test "$(sha256sum "$worker" | awk '{print $1}')" = "$baseline_worker"
+  test "$(sha256sum "$data/config.json" | awk '{print $1}')" = "$baseline_config"
+  test "$(sha256sum "$data/install-manifest.json" | awk '{print $1}')" = "$baseline_manifest"
+  test "$(sha256sum "$unit" | awk '{print $1}')" = "$baseline_unit"
+  test "$(sha256sum "$baseline_credential_path" | awk '{print $1}')" = "$baseline_credential"
+  "$worker" status --config "$data/config.json" >/dev/null
+  test "$(find "$data" -maxdepth 1 -type f -name 'config.*.credential' | wc -l)" -eq 1
+  test -f "$CYC_FAKE_SYSTEMD_ROOT/service-enabled"
+  test -f "$CYC_FAKE_SYSTEMD_ROOT/service-active"
+  test ! -e "$data/.repair-transaction"
+done
+
+# Routine Ready -> Repair keeps the existing identity and credential while it
+# atomically swaps the binary/unit and returns a paired, running receipt.
+routine_config_before="$(sha256sum "$data/config.json" | awk '{print $1}')"
+routine_credential_before="$(sha256sum "$baseline_credential_path" | awk '{print $1}')"
+routine="$($upgrade/install-worker.sh repair --bundle-root "$upgrade")"
+printf '%s' "$routine" | grep -q '"paired":true'
+printf '%s' "$routine" | grep -q '"serviceEnabled":true'
+test "$(sha256sum "$data/config.json" | awk '{print $1}')" = "$routine_config_before"
+test "$(sha256sum "$baseline_credential_path" | awk '{print $1}')" = "$routine_credential_before"
+test "$(sha256sum "$worker" | awk '{print $1}')" != "$baseline_worker"
+test -f "$CYC_FAKE_SYSTEMD_ROOT/service-enabled"
+test -f "$CYC_FAKE_SYSTEMD_ROOT/service-active"
+
+before="$(sha256sum "$worker" | awk '{print $1}')"
+if "$bad/install-worker.sh" repair --bundle-root "$bad" >/dev/null 2>&1; then
+  printf 'Expected bad-worker repair to fail.\n' >&2
+  exit 1
+fi
+after="$(sha256sum "$worker" | awk '{print $1}')"
+test "$before" = "$after"
+"$good/install-worker.sh" repair --bundle-root "$good" >/dev/null
+"$good/install-worker.sh" uninstall --bundle-root "$good" >/dev/null
+test ! -e "$worker"
+test -s "$data/config.json"
+"$good/install-worker.sh" install --bundle-root "$good" >/dev/null
+"$good/install-worker.sh" uninstall --bundle-root "$good" --purge-data >/dev/null
+test ! -e "$data"
+'@.TrimStart(), $utf8NoBom)
+        & $bashPath $smoke $temporary
+        if ($LASTEXITCODE -ne 0) { throw 'Linux worker lifecycle smoke test failed.' }
+    }
+
+    foreach ($content in @(
+        (Get-Content -LiteralPath $windowsInstaller -Raw),
+        (Get-Content -LiteralPath $linuxInstaller -Raw)
+    )) {
+        if ($content -match '(?i)sshpass|plink\s+-pw|password-bearing|pairingCode') {
+            throw 'Worker lifecycle script contains a forbidden credential transport surface.'
+        }
+    }
+    $windowsSource = Get-Content -LiteralPath $windowsInstaller -Raw
+    foreach ($requiredPattern in @('SHA256SUMS', 'Get-WorkerTaskSnapshot', 'Restore-WorkerTask', 'New-WorkerTransaction', 'Restore-WorkerTransaction', 'TransactionSchema', 'AfterPair', 'AfterServiceRegistration', 'BeforeManifestWrite', 'Assert-DefaultDataPurgeTarget', 'Resolve-ServiceScope', 'Wait-WorkerTaskRunning', 'ServiceAccount', '--workspace-root', '--repair', 'configExistedBeforePair')) {
+        if ($windowsSource -notmatch [regex]::Escape($requiredPattern)) {
+            throw "Windows worker installer is missing rollback/integrity guard: $requiredPattern"
+        }
+    }
+    $linuxSource = Get-Content -LiteralPath $linuxInstaller -Raw
+    foreach ($requiredPattern in @('sha256sum --check --strict', 'reject_link_chain', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'after-pair', 'after-service-registration', 'before-manifest-write', 'remove_service', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair')) {
+        if ($linuxSource -notmatch [regex]::Escape($requiredPattern)) {
+            throw "Linux worker installer is missing rollback/integrity guard: $requiredPattern"
+        }
+    }
+    Write-Output 'worker-kit packaging tests passed'
+} finally {
+    $env:CYC_WORKER_KIT_SIGNING_KEY_PATH = $previousSigningKeyPath
+    $env:CYC_WORKER_KIT_SIGNING_KEY_ID = $previousSigningKeyId
+    $env:CYC_WORKER_KIT_TRUSTED_PUBLIC_KEY_PATH = $previousTrustedPublicKeyPath
+    if (Test-Path -LiteralPath $temporary) {
+        $resolved = [System.IO.Path]::GetFullPath($temporary)
+        $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
+        if (-not $resolved.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Refusing to clean a worker-kit test path outside the temp root.'
+        }
+        Remove-Item -LiteralPath $resolved -Recurse -Force
+    }
+}

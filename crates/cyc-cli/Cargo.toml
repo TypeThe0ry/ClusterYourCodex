@@ -15,9 +15,22 @@ anyhow.workspace = true
 clap = { workspace = true, features = ["env"] }
 cyc-protocol = { path = "../cyc-protocol" }
 reqwest.workspace = true
+rcgen = "0.13.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2.2"
 serde_json.workspace = true
+sha2.workspace = true
+tar = "0.4"
+time = "=0.3.36"
 tokio.workspace = true
 uuid.workspace = true
+walkdir = "2.5"
+x509-parser = { version = "0.17", features = ["verify"] }
+zeroize.workspace = true
+zstd = "0.13"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 clap.workspace = true

@@ -28,6 +28,33 @@ export interface ClusterYourCodexDesktopBridge {
    * token file.
    */
   controllerRequest: (request: ControllerRequestEnvelope) => Promise<ControllerResponseEnvelope>;
+  /** Read the native, CLI-backed Codex integration state. Accepts no renderer input. */
+  integrationStatus: () => Promise<unknown>;
+  /** Install or repair only the bundled ClusterYourCodex plugin. Accepts no path or command. */
+  installOrRepairIntegration: () => Promise<unknown>;
+  /** Launch an isolated installed-MCP executor and perform a fixed controller round trip. */
+  integrationSelfTest: () => Promise<unknown>;
+  /** Prove an active Codex runtime plus a separate isolated installed-MCP end-to-end executor. */
+  fullRunCheck: () => Promise<unknown>;
+  /** Poll the latest native Full Run snapshot without waiting for the operation lock. */
+  fullRunCheckStatus: () => Promise<unknown>;
+  /** Create one durable password-SSH provisioning record. */
+  provisioningStart: (request: unknown) => Promise<unknown>;
+  /** Recover every durable provisioning record after a desktop restart. */
+  provisioningList: () => Promise<unknown>;
+  /** Read one durable provisioning record by UUID. */
+  provisioningGet: (request: { id: string }) => Promise<unknown>;
+  /** Approve exactly the host key fingerprint previously observed by the native driver. */
+  provisioningApproveHostKey: (request: { id: string; revision: number; fingerprint: string }) => Promise<unknown>;
+  /** Continue a checkpoint, optionally supplying a new transient SSH password. */
+  provisioningContinue: (request: unknown) => Promise<unknown>;
+  provisioningResume: (request: unknown) => Promise<unknown>;
+  provisioningRetry: (request: unknown) => Promise<unknown>;
+  provisioningRepair: (request: unknown) => Promise<unknown>;
+  provisioningRollback: (request: unknown) => Promise<unknown>;
+  provisioningRemove: (request: unknown) => Promise<unknown>;
+  /** Delete only the remembered SSH bootstrap credential. */
+  provisioningForgetSshPassword: (request: { id: string; revision: number }) => Promise<unknown>;
 }
 
 declare global {
