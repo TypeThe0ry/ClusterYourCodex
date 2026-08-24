@@ -781,6 +781,37 @@ jobs:
           $preview = Join-Path $env:RUNNER_TEMP "ClusterYourCodex-$safeRef-windows-x64-self-contained-preview"
           & .\packaging\windows\Test-FreshDeployment.ps1 -PackageRoot $preview
           if ($LASTEXITCODE -ne 0) { throw 'fresh deployment lifecycle smoke failed' }
+      - name: Run silent Setup lifecycle smoke in disposable runner
+        shell: pwsh
+        env:
+          CYC_DISPOSABLE_WINDOWS: "1"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $safeRef = [string]$env:CYC_REF_NAME -replace '[^0-9A-Za-z._-]', '-'
+          if ([string]::IsNullOrWhiteSpace($safeRef)) { $safeRef = 'build' }
+          $preview = Join-Path $env:RUNNER_TEMP "ClusterYourCodex-$safeRef-windows-x64-self-contained-preview"
+          $setup = Join-Path $PWD 'release-assets\ClusterYourCodex-Setup.exe'
+          $work = Join-Path $env:RUNNER_TEMP 'ClusterYourCodex-setup-silent-smoke'
+          $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          & $windowsPowerShell `
+            -NoLogo `
+            -NoProfile `
+            -NonInteractive `
+            -ExecutionPolicy Bypass `
+            -File .\packaging\windows\Test-SetupSilent.ps1 `
+            -SetupPath $setup `
+            -PackageRoot $preview `
+            -WorkRoot $work `
+            -DisposableEnvironment `
+            -KeepWorkRoot
+          if ($LASTEXITCODE -ne 0) { throw 'silent Setup lifecycle smoke failed' }
+      - name: Upload silent Setup diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClusterYourCodex-windows-setup-silent-diagnostics
+          path: ${{ runner.temp }}\ClusterYourCodex-setup-silent-smoke\**
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         with:
           name: ClusterYourCodex-windows-x64-self-contained-preview

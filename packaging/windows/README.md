@@ -190,3 +190,28 @@ and verifies the scheduled-task state is restored. The smoke intentionally
 disables the managed listener/firewall and Codex external integration so it
 does not change shared network or Codex state. Use `-KeepWorkRoot` to retain
 bounded logs for troubleshooting.
+
+The release workflow also runs the real NSIS `Setup.exe /S` path on its
+disposable `windows-latest` runner. That complementary test exercises the
+default per-user install roots, controller Scheduled Task, managed-worker
+listener, firewall rule, Apps & Features registration, Repair, and the
+installed uninstaller. It verifies that silent mode launches no GUI and that
+tasks, firewall state, ports, registration, and per-user paths return to their
+clean pre-test state. Both the explicit switch and disposable-runner sentinel
+are required:
+
+```powershell
+$env:CYC_DISPOSABLE_WINDOWS = '1'
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File .\packaging\windows\Test-SetupSilent.ps1 `
+  -SetupPath C:\path\to\ClusterYourCodex-Setup.exe `
+  -PackageRoot C:\path\to\ClusterYourCodex-preview `
+  -DisposableEnvironment `
+  -KeepWorkRoot
+```
+
+Do not run that test on an account with an existing ClusterYourCodex install.
+It deliberately fails its preflight unless product tasks, firewall rules,
+ports, uninstall registration, install root, and data root are all absent.
+The product uninstaller preserves user data by design; deletion of that newly
+created data root is a separate, tightly bounded test-harness cleanup step.

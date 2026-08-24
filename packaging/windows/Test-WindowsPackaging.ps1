@@ -1664,6 +1664,8 @@ exit /b !ERRORLEVEL!
     Assert-True ($nsis -match 'File /r "\$\{CYC_PACKAGE_ROOT\}\\\*\.\*"') 'Setup.exe embeds the complete self-contained package'
     Assert-True ($nsis -match 'Invoke-ClusterYourCodexLifecycle\.ps1[\s\S]+-PackageManifest ') 'Setup.exe invokes the coordinator and manifest validation gate'
     Assert-True ($nsis -match 'SetErrorLevel \$0') 'Setup.exe preserves bootstrap failure status'
+    Assert-True ($nsis -match 'MessageBox[\s\S]+/SD IDOK') 'silent Setup failure never blocks on an interactive message box'
+    Assert-True ($nsis -match 'IfSilent silent_complete[\s\S]+Exec[\s\S]+silent_complete:') 'silent Setup success never launches the GUI'
     Assert-True ($nsis -notmatch '(?i)Bearer|authorization|--token\s') 'Setup.exe has no raw secret channel'
     $setupBuilder = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'New-SetupExecutable.ps1') -Raw
     Assert-True ($setupBuilder -match 'Assert-CycPackageManifest') 'Setup builder validates the staged payload before embedding it'
@@ -1676,9 +1678,20 @@ exit /b !ERRORLEVEL!
     $freshDeploymentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-FreshDeployment.ps1') -Raw
     Assert-True (-not $freshDeploymentSource.Contains("'-Confirm:`$false'")) 'fresh deployment smoke never serializes a false SwitchParameter through powershell.exe -File'
     Assert-True ($freshDeploymentSource -match "'-NoLogo', '-NoProfile', '-NonInteractive'") 'fresh deployment smoke launches a clean non-interactive Windows PowerShell child'
+    $setupSilentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-SetupSilent.ps1') -Raw
+    Assert-True ($setupSilentSource -match 'CYC_DISPOSABLE_WINDOWS') 'silent Setup smoke requires an explicit disposable-environment sentinel'
+    Assert-True ($setupSilentSource -match '\[string\]\$PackageRoot') 'silent Setup smoke binds Repair to the matching staged package'
+    Assert-True ($setupSilentSource -match "ArgumentList\s+@?\('?'/S") 'silent Setup smoke executes the real case-sensitive NSIS /S path'
+    Assert-True ($setupSilentSource -match 'does not launch the GUI') 'silent Setup smoke rejects an unexpected GUI launch'
+    Assert-True ($setupSilentSource -match 'Action.+Repair|''Repair''') 'silent Setup smoke exercises Repair after installation'
+    Assert-True ($setupSilentSource -match 'installed uninstaller|Uninstall-ClusterYourCodex\.ps1') 'silent Setup smoke invokes the installed uninstaller'
+    Assert-True ($setupSilentSource -match 'restores the pre-test Scheduled Task state') 'silent Setup smoke verifies Scheduled Task restoration'
+    Assert-True ($setupSilentSource -match 'restores the pre-test firewall state') 'silent Setup smoke verifies firewall restoration'
     $releaseWorkflow = Get-Content -LiteralPath (Join-Path $repoRoot '.github\workflows\release.yml') -Raw
     Assert-True ($releaseWorkflow -match 'NSIS installation completed but makensis\.exe was not found') 'release workflow validates its explicit NSIS compiler path'
     Assert-True ($releaseWorkflow -match 'New-SetupExecutable\.ps1[\s\S]+-MakeNsisPath \$makeNsis') 'release workflow passes the resolved NSIS compiler into Setup.exe staging'
+    Assert-True ($releaseWorkflow -match 'CYC_DISPOSABLE_WINDOWS:[\s\S]+Test-SetupSilent\.ps1[\s\S]+-PackageRoot \$preview[\s\S]+-DisposableEnvironment') 'release workflow runs silent Setup only inside the disposable Windows runner'
+    Assert-True ($releaseWorkflow -match 'Upload silent Setup diagnostics[\s\S]+if: always\(\)') 'release workflow retains silent Setup diagnostics on success and failure'
 
     [System.IO.File]::AppendAllText((Join-Path $workerKits 'artifact-linux-x86_64\cyc-worker'), 'tampered')
     $tamperedPreview = Join-Path $testRoot 'tampered-preview'

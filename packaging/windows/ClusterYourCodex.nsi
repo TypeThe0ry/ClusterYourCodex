@@ -40,10 +40,12 @@ Section "Install"
   ${If} $0 != 0
     DetailPrint "ClusterYourCodex bootstrap failed with exit code $0."
     SetErrorLevel $0
-    MessageBox MB_OK|MB_ICONSTOP "ClusterYourCodex installation failed (exit $0). Existing installation state was rolled back."
+    MessageBox MB_OK|MB_ICONSTOP "ClusterYourCodex installation failed (exit $0). Existing installation state was rolled back." /SD IDOK
     Quit
   ${EndIf}
 
   DetailPrint "ClusterYourCodex installation completed."
+  IfSilent silent_complete
   Exec '"$WINDIR\explorer.exe" "$INSTDIR\ClusterYourCodex.exe"'
+silent_complete:
 SectionEnd
