@@ -3247,7 +3247,9 @@ mod tests {
             &job,
             Arc::new(AtomicU8::new(CANCEL_NONE)),
             Arc::new(crate::process::DiscardLogSink),
-            30,
+            // Hosted Windows runners may spend well over thirty seconds
+            // starting their first PowerShell process.
+            180,
             Arc::new(LogBudget::new(1024 * 1024)),
         )
         .await;
