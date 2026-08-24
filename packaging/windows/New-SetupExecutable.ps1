@@ -31,8 +31,19 @@ function Resolve-MakeNsis {
         }
         return $candidate
     }
-    $command = Get-Command makensis.exe -CommandType Application -ErrorAction SilentlyContinue
-    if ($command) { return [string]$command.Source }
+    $commands = @(Get-Command makensis.exe -CommandType Application -All -ErrorAction SilentlyContinue)
+    foreach ($command in $commands) {
+        # PowerShell 5.1 exposes Source while PowerShell 7 may expose Path;
+        # validate both because either property can be empty on tool-cache shims.
+        $commandPath = [string]$command.Path
+        if ([string]::IsNullOrWhiteSpace($commandPath)) {
+            $commandPath = [string]$command.Source
+        }
+        if (-not [string]::IsNullOrWhiteSpace($commandPath) -and
+            (Test-Path -LiteralPath $commandPath -PathType Leaf)) {
+            return (Resolve-SetupPath $commandPath)
+        }
+    }
     $candidateRoots = @(
         [string]${env:ProgramFiles(x86)},
         [string]$env:ProgramFiles
