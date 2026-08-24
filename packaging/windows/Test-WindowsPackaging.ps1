@@ -1499,6 +1499,43 @@ exit /b !ERRORLEVEL!
     $firewallScript = Join-Path $PSScriptRoot 'Invoke-ClusterYourCodexFirewall.ps1'
     . $lifecycleScript -Action Install -BundleRoot $payload -PackageRoot $preview -PackageManifest (Join-Path $preview 'preview-manifest.json')
     . $firewallScript -RequestPath 'C:\fixture\request.json' -ExpectedRequestSha256 ('0' * 64) -ExpectedHelperSha256 ('0' * 64)
+    $diagnosticRoot = Join-Path $testRoot 'setup-lifecycle-diagnostic'
+    [void](New-Item -ItemType Directory -Path $diagnosticRoot -Force)
+    $diagnosticPath = Join-Path $diagnosticRoot 'lifecycle.json'
+    $oldDiagnosticEnvironment = [string]$env:CYC_SETUP_DIAGNOSTIC_LOG
+    try {
+        $env:CYC_SETUP_DIAGNOSTIC_LOG = $diagnosticPath
+        $diagnosticFailure = try { throw 'cyc-structured-diagnostic-marker' } catch { $_ }
+        Write-CycLifecycleDiagnostic -Status failed -Result $null -Failure $diagnosticFailure
+        $failedDiagnostic = Get-Content -LiteralPath $diagnosticPath -Raw | ConvertFrom-Json
+        Assert-True ([string]$failedDiagnostic.schemaVersion -ceq 'cyc.dev/setup-lifecycle-diagnostic/v1') 'lifecycle writes the versioned structured failure diagnostic'
+        Assert-True ([string]$failedDiagnostic.status -ceq 'failed') 'lifecycle failure diagnostic records failed status'
+        Assert-True ([string]$failedDiagnostic.lastStage -ceq 'entry') 'lifecycle failure diagnostic retains the last completed coordinator stage'
+        Assert-True ([string]$failedDiagnostic.error.message -ceq 'cyc-structured-diagnostic-marker') 'lifecycle failure diagnostic retains the root message'
+
+        Write-CycLifecycleDiagnostic `
+            -Status succeeded `
+            -Result ([PSCustomObject]@{ action = 'Install'; status = 'installed'; resumed = $false; firewallVerified = $true; coreSucceeded = $true }) `
+            -Failure $null
+        $successDiagnostic = Get-Content -LiteralPath $diagnosticPath -Raw | ConvertFrom-Json
+        Assert-True ([string]$successDiagnostic.status -ceq 'succeeded') 'lifecycle atomically replaces the diagnostic after success'
+        Assert-True ([bool]$successDiagnostic.result.coreSucceeded) 'lifecycle success diagnostic retains core verification'
+    } finally {
+        if ([string]::IsNullOrEmpty($oldDiagnosticEnvironment)) {
+            Remove-Item Env:CYC_SETUP_DIAGNOSTIC_LOG -ErrorAction SilentlyContinue
+        } else {
+            $env:CYC_SETUP_DIAGNOSTIC_LOG = $oldDiagnosticEnvironment
+        }
+    }
+    $bootstrapFailure = $null
+    try {
+        [void](Invoke-CycBootstrapProcess -Arguments @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+            "[Console]::Error.WriteLine('cyc-bootstrap-diagnostic-marker'); exit 37"
+        ))
+    } catch { $bootstrapFailure = $_ }
+    Assert-True ($bootstrapFailure -and $bootstrapFailure.Exception.Message -match 'core lifecycle failed with exit code 37') 'lifecycle reports the native bootstrap exit code'
+    Assert-True ($bootstrapFailure.Exception.Message -match 'cyc-bootstrap-diagnostic-marker') 'lifecycle retains bounded bootstrap stderr in the root failure'
     $binding = Get-CycInitiatorBinding
     $typedCoordinatorPlan = Get-CycValidatedInstallPlan `
         -BootstrapFile $bootstrap `
@@ -1681,6 +1718,10 @@ exit /b !ERRORLEVEL!
     Assert-True ($lifecycleSource -match 'Start-CycFirewallOnlyElevation') 'only the narrow firewall helper crosses UAC'
     Assert-True ($lifecycleSource -match 'CycMaxInstallManifestBytes\s*=\s*16MB') 'lifecycle coordinator accepts the bounded self-contained install manifest size'
     Assert-True ($desktopIntegrationSource -match 'MAX_INSTALL_MANIFEST:\s*u64\s*=\s*16\s*\*\s*1024\s*\*\s*1024') 'desktop integration accepts the same bounded self-contained install manifest size'
+    Assert-True ($lifecycleSource -match 'CYC_SETUP_DIAGNOSTIC_LOG') 'lifecycle writes a harness-bound structured Setup diagnostic'
+    Assert-True ($lifecycleSource -match 'cyc\.dev/setup-lifecycle-diagnostic/v1') 'lifecycle diagnostic has a versioned schema'
+    Assert-True ($lifecycleSource -match 'lastStage\s*=\s*\$script:CycLifecycleDiagnosticStage') 'lifecycle diagnostic identifies the last coordinator stage reached'
+    Assert-True ($lifecycleSource -match '\$systemPowerShell\s+@Arguments\s+2>\s*\$stderrPath') 'lifecycle preserves bounded bootstrap stderr without Windows PowerShell NativeCommandError promotion'
     Assert-True ($lifecycleSource -match 'InitiatingSid[\s\S]+InitiatingProfile[\s\S]+InitiatingLocalAppData') 'core calls retain the initiating SID/profile binding'
     Assert-True ($uninstallerSource -notmatch '(?i)-Verb\s+RunAs|-Elevated') 'uninstaller stays in initiating HKCU/profile context'
     Assert-True ($uninstallerSource -match 'Invoke-ClusterYourCodexLifecycle\.ps1') 'uninstaller delegates only the firewall sub-step to the coordinator'
@@ -1715,6 +1756,10 @@ exit /b !ERRORLEVEL!
     Assert-True ($freshDeploymentSource -match 'fresh deployment runner starts without pre-existing product tasks') 'fresh deployment smoke fails closed around pre-existing product tasks'
     $setupSilentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-SetupSilent.ps1') -Raw
     Assert-True ($setupSilentSource -match 'MaximumInstallManifestBytes\s*=\s*16MB') 'silent Setup smoke accepts the bounded self-contained install manifest size'
+    Assert-True ($setupSilentSource -notmatch '(?<!@)\(Get-SetupSilent(?:TaskSnapshot|FirewallSnapshot|Listeners|ProductProcesses)\)\.Count') 'silent Setup smoke array-wraps zero-or-one item function output before Count'
+    Assert-True ($setupSilentSource -match 'EnvironmentVariables[\s\S]+CYC_SETUP_DIAGNOSTIC_LOG') 'silent Setup smoke injects the structured lifecycle diagnostic path into Setup.exe'
+    Assert-True ($setupSilentSource -match 'primaryFailure\s*=\s*if\s*\(\$primaryFailure\)') 'silent Setup cleanup receipt preserves the primary failure independently of cleanup'
+    Assert-True ($setupSilentSource.IndexOf('if ($primaryFailure) { throw $primaryFailure }', [StringComparison]::Ordinal) -lt $setupSilentSource.IndexOf('if ($cleanupFailures.Count -gt 0)', [StringComparison]::Ordinal)) 'silent Setup preserves the primary lifecycle exception ahead of secondary cleanup failures'
     Assert-True ($setupSilentSource -match 'CYC_DISPOSABLE_WINDOWS') 'silent Setup smoke requires an explicit disposable-environment sentinel'
     Assert-True ($setupSilentSource -match '\[string\]\$PackageRoot') 'silent Setup smoke binds Repair to the matching staged package'
     Assert-True ($setupSilentSource -match "ArgumentList\s+@?\('?'/S") 'silent Setup smoke executes the real case-sensitive NSIS /S path'
@@ -1724,6 +1769,7 @@ exit /b !ERRORLEVEL!
     Assert-True ($setupSilentSource -match 'restores the pre-test Scheduled Task state') 'silent Setup smoke verifies Scheduled Task restoration'
     Assert-True ($setupSilentSource -match 'restores the pre-test firewall state') 'silent Setup smoke verifies firewall restoration'
     $releaseWorkflow = Get-Content -LiteralPath (Join-Path $repoRoot '.github\workflows\release.yml') -Raw
+    Assert-True (([regex]::Matches($releaseWorkflow, 'name:\s*Test full Rust workspace')).Count -eq 2) 'release runs the native workspace suite in the platform matrix and self-contained Windows job without a redundant integration-bundle copy'
     Assert-True ($releaseWorkflow -match 'NSIS installation completed but makensis\.exe was not found') 'release workflow validates its explicit NSIS compiler path'
     Assert-True ($releaseWorkflow -match 'New-SetupExecutable\.ps1[\s\S]+-MakeNsisPath \$makeNsis') 'release workflow passes the resolved NSIS compiler into Setup.exe staging'
     Assert-True ($releaseWorkflow -match 'CYC_DISPOSABLE_WINDOWS:[\s\S]+Test-SetupSilent\.ps1[\s\S]+-PackageRoot \$preview[\s\S]+-DisposableEnvironment') 'release workflow runs silent Setup only inside the disposable Windows runner'

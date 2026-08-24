@@ -148,7 +148,8 @@ function Invoke-SetupSilentBoundedProcess {
         [Parameter(Mandatory = $true)][string]$LogRoot,
         [Parameter(Mandatory = $true)][string]$Label,
         [ValidateRange(1, 2400)][int]$TimeoutSeconds = 120,
-        [string]$WorkingDirectory
+        [string]$WorkingDirectory,
+        [hashtable]$EnvironmentVariables = @{}
     )
     $resolvedExecutable = Resolve-SetupSilentPath $FilePath
     if (-not (Test-Path -LiteralPath $resolvedExecutable -PathType Leaf)) {
@@ -175,6 +176,15 @@ function Invoke-SetupSilentBoundedProcess {
         $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
+        foreach ($entry in $EnvironmentVariables.GetEnumerator()) {
+            $name = [string]$entry.Key
+            $value = [string]$entry.Value
+            if ([string]::IsNullOrWhiteSpace($name) -or $name -match '[=\x00-\x1f\x7f]') {
+                throw "$Label contains an invalid environment-variable name."
+            }
+            if ($value -match '[\x00]') { throw "$Label contains an invalid environment-variable value." }
+            $startInfo.EnvironmentVariables[$name] = $value
+        }
 
         $process = New-Object System.Diagnostics.Process
         $process.StartInfo = $startInfo
@@ -310,7 +320,7 @@ function Wait-SetupSilentPortsReleased {
     param([int]$TimeoutSeconds = 30)
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
-        if ((Get-SetupSilentListeners).Count -eq 0) { return }
+        if (@(Get-SetupSilentListeners).Count -eq 0) { return }
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
     $remaining = @(Get-SetupSilentListeners | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)/$($_.OwningProcess)" })
@@ -571,6 +581,7 @@ $setup = Resolve-SetupSilentPath $SetupPath
 $package = Resolve-SetupSilentPath $PackageRoot
 $work = Resolve-SetupSilentPath $WorkRoot
 $logRoot = Join-Path $work 'logs'
+$lifecycleDiagnosticPath = Join-Path $logRoot 'setup-lifecycle.json'
 $localAppData = Resolve-SetupSilentPath $env:LOCALAPPDATA
 $profile = Resolve-SetupSilentPath $env:USERPROFILE
 $installRoot = Resolve-SetupSilentPath (Join-Path $localAppData 'Programs\ClusterYourCodex')
@@ -655,7 +666,13 @@ try {
         -LogRoot $logRoot `
         -Label 'setup-silent' `
         -TimeoutSeconds $LifecycleTimeoutSeconds `
-        -WorkingDirectory (Split-Path -Parent $setup)))
+        -WorkingDirectory (Split-Path -Parent $setup) `
+        -EnvironmentVariables @{ CYC_SETUP_DIAGNOSTIC_LOG = $lifecycleDiagnosticPath }))
+
+    $setupLifecycleDiagnostic = Read-SetupSilentJson -Path $lifecycleDiagnosticPath -MaximumBytes 1MB
+    Assert-SetupSilent ([string]$setupLifecycleDiagnostic.schemaVersion -ceq 'cyc.dev/setup-lifecycle-diagnostic/v1') 'Setup lifecycle diagnostic schema is current'
+    Assert-SetupSilent ([string]$setupLifecycleDiagnostic.status -ceq 'succeeded') 'Setup lifecycle reports success independently of the NSIS exit code'
+    Assert-SetupSilent ([string]$setupLifecycleDiagnostic.requestedAction -ceq 'Install') 'Setup lifecycle diagnostic binds the Install action'
 
     # NSIS uses Exec for the interactive success launch. Give that asynchronous
     # branch a deterministic window so this assertion catches regressions.
@@ -751,8 +768,8 @@ try {
 
     Assert-SetupSilent (-not (Test-Path -LiteralPath $installRoot)) 'installed uninstaller removes the install root'
     Assert-SetupSilent (-not (Test-Path -LiteralPath $script:UninstallRegistryPath)) 'installed uninstaller removes Apps & Features registration'
-    Assert-SetupSilent ((Get-SetupSilentProductProcesses).Count -eq 0) 'installed uninstaller stops product processes'
-    Assert-SetupSilent ((Get-SetupSilentListeners).Count -eq 0) 'installed uninstaller releases product ports'
+    Assert-SetupSilent (@(Get-SetupSilentProductProcesses).Count -eq 0) 'installed uninstaller stops product processes'
+    Assert-SetupSilent (@(Get-SetupSilentListeners).Count -eq 0) 'installed uninstaller releases product ports'
     $taskAfterProductUninstall = @(Get-SetupSilentTaskSnapshot)
     $firewallAfterProductUninstall = @(Get-SetupSilentFirewallSnapshot)
     Assert-SetupSilent (($taskBefore | ConvertTo-Json -Depth 6 -Compress) -ceq ($taskAfterProductUninstall | ConvertTo-Json -Depth 6 -Compress)) 'installed uninstaller restores the pre-test Scheduled Task state'
@@ -852,13 +869,13 @@ try {
             [void]$cleanupFailures.Add($_.Exception.Message)
         }
         try {
-            Assert-SetupSilent ((Get-SetupSilentTaskSnapshot).Count -eq $taskBefore.Count) 'cleanup restores the pre-test Scheduled Task count'
-            Assert-SetupSilent ((Get-SetupSilentFirewallSnapshot).Count -eq $firewallBefore.Count) 'cleanup restores the pre-test firewall count'
+            Assert-SetupSilent (@(Get-SetupSilentTaskSnapshot).Count -eq $taskBefore.Count) 'cleanup restores the pre-test Scheduled Task count'
+            Assert-SetupSilent (@(Get-SetupSilentFirewallSnapshot).Count -eq $firewallBefore.Count) 'cleanup restores the pre-test firewall count'
             Assert-SetupSilent (-not (Test-Path -LiteralPath $script:UninstallRegistryPath)) 'cleanup leaves no uninstall registration'
             Assert-SetupSilent (-not (Test-Path -LiteralPath $installRoot)) 'cleanup leaves no install root'
             Assert-SetupSilent (-not (Test-Path -LiteralPath $dataRoot)) 'cleanup leaves no data root'
-            Assert-SetupSilent ((Get-SetupSilentListeners).Count -eq $listenersBefore.Count) 'cleanup restores the pre-test listener count'
-            Assert-SetupSilent ((Get-SetupSilentProductProcesses).Count -eq $processesBefore.Count) 'cleanup restores the pre-test process count'
+            Assert-SetupSilent (@(Get-SetupSilentListeners).Count -eq $listenersBefore.Count) 'cleanup restores the pre-test listener count'
+            Assert-SetupSilent (@(Get-SetupSilentProductProcesses).Count -eq $processesBefore.Count) 'cleanup restores the pre-test process count'
         } catch {
             [void]$cleanupFailures.Add("final cleanup verification failed: $($_.Exception.Message)")
         }
@@ -870,6 +887,15 @@ try {
         productUninstallCompleted = $formalUninstallCompleted
         boundedProcessTerminationUncertain = $script:BoundedProcessTerminationUncertain
         failures = @($cleanupFailures)
+        primaryFailure = if ($primaryFailure) {
+            [ordered]@{
+                message = [string]$primaryFailure.Exception.Message
+                exceptionType = [string]$primaryFailure.Exception.GetType().FullName
+                fullyQualifiedErrorId = [string]$primaryFailure.FullyQualifiedErrorId
+                scriptStackTrace = [string]$primaryFailure.ScriptStackTrace
+                positionMessage = [string]$primaryFailure.InvocationInfo.PositionMessage
+            }
+        } else { $null }
         verifiedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
     }
     try {
@@ -881,11 +907,10 @@ try {
     }
 }
 
-if ($cleanupFailures.Count -gt 0) {
-    $primaryMessage = if ($primaryFailure) { " Primary failure: $($primaryFailure.Exception.Message)" } else { '' }
-    throw "silent Setup cleanup was incomplete: $($cleanupFailures -join ' | ').$primaryMessage"
-}
 if ($primaryFailure) { throw $primaryFailure }
+if ($cleanupFailures.Count -gt 0) {
+    throw "silent Setup cleanup was incomplete: $($cleanupFailures -join ' | ')."
+}
 if (-not $result) { throw 'silent Setup smoke produced no result.' }
 
 $result | ConvertTo-Json -Depth 8

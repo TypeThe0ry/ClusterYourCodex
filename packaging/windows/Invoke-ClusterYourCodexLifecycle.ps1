@@ -30,6 +30,12 @@ $script:CycFirewallExchangeDirectory = 'ClusterYourCodex-Firewall'
 $script:CycBootstrapName = 'bootstrap.ps1'
 $script:CycFirewallHelperName = 'Invoke-ClusterYourCodexFirewall.ps1'
 $script:CycMaxInstallManifestBytes = 16MB
+$script:CycLifecycleDiagnosticStage = 'entry'
+
+function Set-CycLifecycleDiagnosticStage {
+    param([Parameter(Mandatory = $true)][ValidatePattern('^[a-z][a-z0-9-]{0,63}$')][string]$Stage)
+    $script:CycLifecycleDiagnosticStage = $Stage
+}
 
 function Resolve-CycLifecyclePath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -50,6 +56,105 @@ function Assert-CycLifecycleSafeString {
         $Value.Contains('"') -or $Value.Contains("`r") -or $Value.Contains("`n") -or
         $Value -match '[\x00-\x1f\x7f]') {
         throw "$Label contains unsupported characters."
+    }
+}
+
+function ConvertTo-CycLifecycleDiagnosticText {
+    param(
+        [AllowNull()]$Value,
+        [ValidateRange(1, 32768)][int]$MaximumCharacters = 16384
+    )
+    if ($null -eq $Value) { return $null }
+    $text = [string]$Value
+    if ($text.Length -le $MaximumCharacters) { return $text }
+    return $text.Substring($text.Length - $MaximumCharacters)
+}
+
+function Write-CycLifecycleDiagnostic {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('succeeded', 'failed')][string]$Status,
+        [AllowNull()]$Result,
+        [AllowNull()][System.Management.Automation.ErrorRecord]$Failure
+    )
+
+    $requestedPath = [string]$env:CYC_SETUP_DIAGNOSTIC_LOG
+    if ([string]::IsNullOrWhiteSpace($requestedPath) -or $requestedPath.Length -gt 4096 -or
+        $requestedPath.Contains('"') -or $requestedPath.Contains("`r") -or $requestedPath.Contains("`n") -or
+        $requestedPath -match '[\x00-\x1f\x7f]') {
+        return
+    }
+
+    $temporaryPath = $null
+    $backupPath = $null
+    try {
+        $destination = [System.IO.Path]::GetFullPath($requestedPath)
+        $directory = [System.IO.Path]::GetDirectoryName($destination)
+        if ([string]::IsNullOrWhiteSpace($directory) -or
+            -not (Test-Path -LiteralPath $directory -PathType Container)) {
+            return
+        }
+        $directoryItem = Get-Item -LiteralPath $directory -Force
+        if (($directoryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return }
+        if (Test-Path -LiteralPath $destination) {
+            $destinationItem = Get-Item -LiteralPath $destination -Force
+            if ($destinationItem.PSIsContainer -or
+                ($destinationItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                return
+            }
+        }
+
+        $errorRecord = if ($Failure) {
+            [ordered]@{
+                message = ConvertTo-CycLifecycleDiagnosticText $Failure.Exception.Message
+                exceptionType = ConvertTo-CycLifecycleDiagnosticText $Failure.Exception.GetType().FullName 1024
+                fullyQualifiedErrorId = ConvertTo-CycLifecycleDiagnosticText $Failure.FullyQualifiedErrorId 4096
+                scriptStackTrace = ConvertTo-CycLifecycleDiagnosticText $Failure.ScriptStackTrace
+                positionMessage = ConvertTo-CycLifecycleDiagnosticText $Failure.InvocationInfo.PositionMessage
+            }
+        } else { $null }
+        $resultRecord = if ($Result) {
+            [ordered]@{
+                action = ConvertTo-CycLifecycleDiagnosticText $Result.action 128
+                status = ConvertTo-CycLifecycleDiagnosticText $Result.status 128
+                resumed = [bool]$Result.resumed
+                firewallVerified = [bool]$Result.firewallVerified
+                coreSucceeded = if ($Result.PSObject.Properties['coreSucceeded']) { [bool]$Result.coreSucceeded } else { $null }
+            }
+        } else { $null }
+        $record = [ordered]@{
+            schemaVersion = 'cyc.dev/setup-lifecycle-diagnostic/v1'
+            status = $Status
+            requestedAction = $Action
+            lastStage = $script:CycLifecycleDiagnosticStage
+            result = $resultRecord
+            error = $errorRecord
+            recordedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        }
+        $json = $record | ConvertTo-Json -Depth 8
+        $temporaryPath = Join-Path $directory ('.cyc-setup-lifecycle-' + $PID + '-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+        [System.IO.File]::WriteAllText($temporaryPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+        if (Test-Path -LiteralPath $destination -PathType Leaf) {
+            # Windows PowerShell and PowerShell 7 bind a null backup argument
+            # differently. A real same-directory backup keeps Replace atomic
+            # on both runtimes; it is removed immediately after the swap.
+            $backupPath = Join-Path $directory ('.cyc-setup-lifecycle-' + $PID + '-' + [Guid]::NewGuid().ToString('N') + '.bak')
+            [System.IO.File]::Replace($temporaryPath, $destination, $backupPath)
+            $temporaryPath = $null
+            [System.IO.File]::Delete($backupPath)
+            $backupPath = $null
+        } else {
+            [System.IO.File]::Move($temporaryPath, $destination)
+            $temporaryPath = $null
+        }
+    } catch {
+        # Diagnostics are best-effort and must never replace the lifecycle result.
+    } finally {
+        if ($temporaryPath -and (Test-Path -LiteralPath $temporaryPath -PathType Leaf)) {
+            try { [System.IO.File]::Delete($temporaryPath) } catch { }
+        }
+        if ($backupPath -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
+            try { [System.IO.File]::Delete($backupPath) } catch { }
+        }
     }
 }
 
@@ -366,9 +471,41 @@ function Get-CycBootstrapArguments {
 function Invoke-CycBootstrapProcess {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
     $systemPowerShell = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
-    $output = @(& $systemPowerShell @Arguments)
-    if ($LASTEXITCODE -ne 0) { throw "ClusterYourCodex core lifecycle failed with exit code $LASTEXITCODE." }
-    return $output
+    $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ('.cyc-bootstrap-stderr-' + $PID + '-' + [Guid]::NewGuid().ToString('N') + '.log')
+    try {
+        # Windows PowerShell 5.1 promotes a native stderr record to a
+        # terminating NativeCommandError when the caller uses Stop. Redirect
+        # the native stream to an exact private temp file so we can preserve
+        # the real exit code and bounded diagnostic without changing argv.
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $stdout = @(& $systemPowerShell @Arguments 2> $stderrPath)
+            $exitCode = [int]$LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+            @([System.IO.File]::ReadAllLines($stderrPath))
+        } else { @() }
+        $output = @($stdout) + @($stderr)
+        if ($exitCode -ne 0) {
+            $tail = [string]::Join(' | ', @(
+                $output |
+                    ForEach-Object { ([string]$_).Trim() } |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                    Select-Object -Last 20
+            ))
+            if ($tail.Length -gt 16384) { $tail = $tail.Substring($tail.Length - 16384) }
+            $detail = if ([string]::IsNullOrWhiteSpace($tail)) { '' } else { " Detail: $tail" }
+            throw "ClusterYourCodex core lifecycle failed with exit code $exitCode.$detail"
+        }
+        return $output
+    } finally {
+        if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+            try { [System.IO.File]::Delete($stderrPath) } catch { }
+        }
+    }
 }
 
 function Get-CycValidatedInstallPlan {
@@ -497,6 +634,7 @@ function Invoke-CycCommitFirewallReceipt {
 }
 
 function Invoke-ClusterYourCodexLifecycle {
+    Set-CycLifecycleDiagnosticStage -Stage 'binding'
     $binding = Get-CycInitiatorBinding
     $roots = Assert-CycDefaultPerUserRoots `
         -Binding $binding `
@@ -518,6 +656,7 @@ function Invoke-ClusterYourCodexLifecycle {
         Assert-CycLifecycleSafeString -Value $path -Label 'Lifecycle path'
     }
 
+    Set-CycLifecycleDiagnosticStage -Stage 'state-preparing'
     [void](New-CycPrivateDirectory -Path $roots.dataRoot -InitiatorSid $binding.sid)
     $installerState = New-CycPrivateDirectory `
         -Path (Join-Path $roots.dataRoot '.installer') `
@@ -572,8 +711,10 @@ function Invoke-ClusterYourCodexLifecycle {
         -Receipt $oldReceipt `
         -Manifest $oldManifest `
         -RequestedAction $Action
+    Set-CycLifecycleDiagnosticStage -Stage 'state-evaluated'
     if ($resumeDecision -eq 'Reject') { throw 'Existing firewall lifecycle journal does not belong to this user/action.' }
     if ($resumeDecision -eq 'Commit') {
+        Set-CycLifecycleDiagnosticStage -Stage 'resume-commit'
         $oldBinding = [PSCustomObject]@{
             sid = [string]$oldJournal.initiatorSid
             profile = [string]$oldJournal.initiatorProfile
@@ -589,6 +730,7 @@ function Invoke-ClusterYourCodexLifecycle {
         $oldJournal.phase = 'complete'
         $oldJournal.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
         Write-CycLifecycleAtomicJson -Path $journalPath -Value $oldJournal
+        Set-CycLifecycleDiagnosticStage -Stage 'complete'
         return [PSCustomObject]@{ action = $Action; status = 'unchanged'; resumed = $true; firewallVerified = $true }
     }
     if ($resumeDecision -eq 'Complete') {
@@ -597,6 +739,7 @@ function Invoke-ClusterYourCodexLifecycle {
             profile = [string]$oldJournal.initiatorProfile
             localAppData = [string]$oldJournal.initiatorLocalAppData
         }))
+        Set-CycLifecycleDiagnosticStage -Stage 'complete'
         return [PSCustomObject]@{ action = $Action; status = 'unchanged'; resumed = $true; firewallVerified = $true }
     }
     if ($oldJournal -and $resumeDecision -in @('Restart', 'Resume') -and
@@ -620,6 +763,7 @@ function Invoke-ClusterYourCodexLifecycle {
     $port = 47832
     $packageDigest = ('0' * 64)
     if ($Action -in @('Install', 'Repair')) {
+        Set-CycLifecycleDiagnosticStage -Stage 'plan-validating'
         if (-not (Test-Path -LiteralPath $BundleRoot -PathType Container)) { throw 'BundleRoot is missing.' }
         if (-not (Test-Path -LiteralPath $PackageManifest -PathType Leaf)) { throw 'Package manifest is missing.' }
         $packageDigest = Get-CycLifecycleSha256 -Path $PackageManifest
@@ -638,8 +782,10 @@ function Invoke-ClusterYourCodexLifecycle {
         if ($controllerRecord.Count -ne 1) { throw 'Install plan has no unique controller executable.' }
         $programSha = [string]$controllerRecord[0].sha256
         $port = [int]$plan.managedWorker.listenPort
+        Set-CycLifecycleDiagnosticStage -Stage 'plan-validated'
     } else {
         if (-not $oldManifest) {
+            Set-CycLifecycleDiagnosticStage -Stage 'complete'
             return [PSCustomObject]@{ action = 'Uninstall'; status = 'unchanged'; resumed = $false; firewallVerified = $true }
         }
         if ($oldManifest.PSObject.Properties['initiator']) {
@@ -656,6 +802,7 @@ function Invoke-ClusterYourCodexLifecycle {
         $packageDigest = Get-CycLifecycleSha256 -Path $manifestPath
     }
 
+    Set-CycLifecycleDiagnosticStage -Stage 'exchange-preparing'
     $exchange = New-CycFirewallExchange `
         -Binding $binding `
         -TransactionId $transactionId `
@@ -693,18 +840,22 @@ function Invoke-ClusterYourCodexLifecycle {
         updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
     }
     Write-CycLifecycleAtomicJson -Path $journalPath -Value $journal
+    Set-CycLifecycleDiagnosticStage -Stage 'exchange-prepared'
 
     $helperProcess = $null
     $coreSucceeded = $false
     try {
+        Set-CycLifecycleDiagnosticStage -Stage 'elevation-starting'
         $helperProcess = Start-CycFirewallOnlyElevation `
             -HelperPath $exchange.helper `
             -RequestPath $exchange.request `
             -RequestHash $requestHash `
             -HelperHash $helperHash
+        Set-CycLifecycleDiagnosticStage -Stage 'elevation-started'
         if (-not (Wait-CycLifecycleFile -Path (Join-Path $exchange.root 'ready.signal') -Deadline $deadline -Process $helperProcess)) {
             throw 'Elevated firewall helper did not reach the prepared state.'
         }
+        Set-CycLifecycleDiagnosticStage -Stage 'helper-ready'
         Write-CycLifecycleSignal -Path (Join-Path $exchange.root 'apply.signal')
         if (-not (Wait-CycLifecycleFile -Path (Join-Path $exchange.root 'applied.signal') -Deadline $deadline -Process $helperProcess)) {
             throw 'Elevated firewall helper did not apply and verify its bounded mutation.'
@@ -712,6 +863,7 @@ function Invoke-ClusterYourCodexLifecycle {
         $journal.phase = 'firewallApplied'
         $journal.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
         Write-CycLifecycleAtomicJson -Path $journalPath -Value $journal
+        Set-CycLifecycleDiagnosticStage -Stage 'firewall-applied'
 
         [void](Assert-CycInitiatorStillCurrent -Binding $binding)
         $coreArgs = Get-CycBootstrapArguments `
@@ -721,8 +873,10 @@ function Invoke-ClusterYourCodexLifecycle {
             -Roots $roots `
             -TransactionId $transactionId `
             -RequestSha256 $requestHash
+        Set-CycLifecycleDiagnosticStage -Stage 'core-applying'
         [void](Invoke-CycBootstrapProcess -Arguments $coreArgs)
         $coreSucceeded = $true
+        Set-CycLifecycleDiagnosticStage -Stage 'core-applied'
         $journal.phase = 'coreApplied'
         $journal.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
         Write-CycLifecycleAtomicJson -Path $journalPath -Value $journal
@@ -744,6 +898,7 @@ function Invoke-ClusterYourCodexLifecycle {
     if ([string]$receipt.result -cne 'verified') {
         throw 'Firewall mutation was not durably verified; lifecycle remains retryable.'
     }
+    Set-CycLifecycleDiagnosticStage -Stage 'receipt-verified'
     Copy-Item -LiteralPath $exchange.response -Destination $privateReceiptPath -Force
     if ((Get-CycLifecycleSha256 -Path $privateReceiptPath) -cne (Get-CycLifecycleSha256 -Path $exchange.response)) {
         throw 'Durable firewall receipt copy failed integrity verification.'
@@ -759,6 +914,7 @@ function Invoke-ClusterYourCodexLifecycle {
     $journal.phase = 'complete'
     $journal.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
     Write-CycLifecycleAtomicJson -Path $journalPath -Value $journal
+    Set-CycLifecycleDiagnosticStage -Stage 'complete'
 
     if ($Action -eq 'Install' -and -not $NoLaunch) {
         $gui = Join-Path $roots.installRoot 'ClusterYourCodex.exe'
@@ -778,10 +934,13 @@ function Invoke-ClusterYourCodexLifecycle {
 if ($MyInvocation.InvocationName -ne '.') {
     try {
         $result = Invoke-ClusterYourCodexLifecycle
+        Write-CycLifecycleDiagnostic -Status succeeded -Result $result -Failure $null
         if (-not $Quiet) { $result }
         exit 0
     } catch {
-        [Console]::Error.WriteLine(([string]$_.Exception.Message).Replace("`r", ' ').Replace("`n", ' '))
+        $failure = $_
+        Write-CycLifecycleDiagnostic -Status failed -Result $null -Failure $failure
+        [Console]::Error.WriteLine(([string]$failure.Exception.Message).Replace("`r", ' ').Replace("`n", ' '))
         exit 1
     }
 }
