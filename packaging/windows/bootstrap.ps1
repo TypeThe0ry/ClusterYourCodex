@@ -1270,7 +1270,7 @@ function Test-CycManifestOwnsAgentsReceipt {
 }
 
 function Rollback-CycAgentsInstallTransaction {
-    param([Parameter(Mandatory = $true)]$Transaction)
+    param($Transaction)
     if (-not $Transaction -or $Transaction.disabled) { return }
     $journalPath = [string]$Transaction.journalPath
     $journal = Read-CycAgentsJournal -Path $journalPath
@@ -1643,7 +1643,7 @@ function Start-CycAgentsRemovalTransaction {
 }
 
 function Apply-CycAgentsRemovalTransaction {
-    param([Parameter(Mandatory = $true)]$Transaction)
+    param($Transaction)
     if (-not $Transaction -or $Transaction.disabled) { return }
     $journal = Read-CycAgentsJournal -Path $Transaction.journalPath
     if ([string]$journal.operation -cne 'Uninstall' -or [string]$journal.phase -cne 'prepared') {
@@ -1676,7 +1676,7 @@ function Find-CycAgentsRollbackInsertionIndex {
 }
 
 function Rollback-CycAgentsRemovalTransaction {
-    param([Parameter(Mandatory = $true)]$Transaction)
+    param($Transaction)
     if (-not $Transaction -or $Transaction.disabled) { return }
     $journalPath = [string]$Transaction.journalPath
     $journal = Read-CycAgentsJournal -Path $journalPath
@@ -1742,7 +1742,7 @@ function Rollback-CycAgentsRemovalTransaction {
 }
 
 function Complete-CycAgentsRemovalTransaction {
-    param([Parameter(Mandatory = $true)]$Transaction)
+    param($Transaction)
     if (-not $Transaction -or $Transaction.disabled) { return }
     $journal = Read-CycAgentsJournal -Path $Transaction.journalPath
     Set-CycAgentsJournalPhase -JournalPath $Transaction.journalPath -Journal $journal -Phase committed
