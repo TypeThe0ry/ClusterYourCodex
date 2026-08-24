@@ -35,7 +35,7 @@ const AGENTS_INTEGRATION_SCHEMA: &str = "cyc.dev/agents-managed-block/v1";
 const AGENTS_BEGIN_MARKER: &str = "<!-- CLUSTERYOURCODEX-MANAGED:BEGIN -->";
 const AGENTS_END_MARKER: &str = "<!-- CLUSTERYOURCODEX-MANAGED:END -->";
 const MAX_CODEX_ONLY_RECEIPT: usize = 4096;
-const MAX_INSTALL_MANIFEST: u64 = 2 * 1024 * 1024;
+const MAX_INSTALL_MANIFEST: u64 = 16 * 1024 * 1024;
 const ACTIVE_RECEIPT_TTL: chrono::Duration = chrono::Duration::seconds(90);
 const ACTIVE_CONTROLLER_VERIFICATION_TTL: chrono::Duration = chrono::Duration::seconds(15);
 const ACTIVE_RECEIPT_CLOCK_SKEW: chrono::Duration = chrono::Duration::seconds(30);
@@ -953,7 +953,7 @@ fn load_verified_install(
     }
     let manifest_metadata =
         std::fs::metadata(&manifest_path).map_err(|_| IntegrationError::AgentsIntegrationFailed)?;
-    if manifest_metadata.len() < 2 || manifest_metadata.len() > MAX_INSTALL_MANIFEST {
+    if !install_manifest_size_is_supported(manifest_metadata.len()) {
         return Err(IntegrationError::AgentsIntegrationFailed);
     }
     let mut manifest_file = open_read_locked(&manifest_path)?;
@@ -965,6 +965,10 @@ fn load_verified_install(
         return Err(IntegrationError::AgentsIntegrationFailed);
     }
     validate_install_manifest(&manifest_bytes, &install_root, &data_root)
+}
+
+fn install_manifest_size_is_supported(length: u64) -> bool {
+    (2..=MAX_INSTALL_MANIFEST).contains(&length)
 }
 
 fn installed_bootstrap(
@@ -3358,6 +3362,18 @@ mod tests {
             "codexPayloadCatalogSha256": payload_digest,
             "files": receipts,
         })
+    }
+
+    #[test]
+    fn install_manifest_size_gate_matches_the_self_contained_package_capacity() {
+        assert!(!install_manifest_size_is_supported(0));
+        assert!(!install_manifest_size_is_supported(1));
+        assert!(install_manifest_size_is_supported(2));
+        assert!(install_manifest_size_is_supported(2 * 1024 * 1024 + 1));
+        assert!(install_manifest_size_is_supported(MAX_INSTALL_MANIFEST));
+        assert!(!install_manifest_size_is_supported(
+            MAX_INSTALL_MANIFEST + 1
+        ));
     }
 
     #[test]

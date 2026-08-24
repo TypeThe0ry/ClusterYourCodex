@@ -1676,9 +1676,11 @@ exit /b !ERRORLEVEL!
     $lifecycleSource = Get-Content -LiteralPath $lifecycleScript -Raw
     $firewallSource = Get-Content -LiteralPath $firewallScript -Raw
     $uninstallerSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Uninstall-ClusterYourCodex.ps1') -Raw
+    $desktopIntegrationSource = Get-Content -LiteralPath (Join-Path $repoRoot 'apps\desktop\src-tauri\src\integration.rs') -Raw
     Assert-True (([regex]::Matches($lifecycleSource, '(?i)-Verb\s+RunAs')).Count -eq 1) 'coordinator contains exactly one firewall-only elevation site'
     Assert-True ($lifecycleSource -match 'Start-CycFirewallOnlyElevation') 'only the narrow firewall helper crosses UAC'
     Assert-True ($lifecycleSource -match 'CycMaxInstallManifestBytes\s*=\s*16MB') 'lifecycle coordinator accepts the bounded self-contained install manifest size'
+    Assert-True ($desktopIntegrationSource -match 'MAX_INSTALL_MANIFEST:\s*u64\s*=\s*16\s*\*\s*1024\s*\*\s*1024') 'desktop integration accepts the same bounded self-contained install manifest size'
     Assert-True ($lifecycleSource -match 'InitiatingSid[\s\S]+InitiatingProfile[\s\S]+InitiatingLocalAppData') 'core calls retain the initiating SID/profile binding'
     Assert-True ($uninstallerSource -notmatch '(?i)-Verb\s+RunAs|-Elevated') 'uninstaller stays in initiating HKCU/profile context'
     Assert-True ($uninstallerSource -match 'Invoke-ClusterYourCodexLifecycle\.ps1') 'uninstaller delegates only the firewall sub-step to the coordinator'
