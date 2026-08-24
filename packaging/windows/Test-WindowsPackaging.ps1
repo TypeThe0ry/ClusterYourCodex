@@ -1,6 +1,8 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param()
+param(
+    [string]$IdentityCliPath
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -256,6 +258,8 @@ try {
     Assert-True ($source -notmatch '(?i)CYC_CONTROLLER_TOKEN=') 'no token environment injection'
     Assert-True ($source -notmatch '(?i)--token\s') 'no raw token command argument'
     Assert-True ($source -match 'AreAccessRulesProtected') 'ACL inheritance is verified'
+    Assert-True ($source -match "S-1-5-32-544[\s\S]+ReadAndExecute") 'install ACL grants BUILTIN Administrators only the read/execute access needed by over-the-shoulder elevation'
+    Assert-True ($source -match 'Set-PrivateDirectoryAcl -Path \$Plan\.installRoot -AllowAdministratorsReadAndExecute[\s\S]+Set-PrivateDirectoryAcl -Path \$Plan\.dataRoot') 'only the install tree, never private data/TLS state, receives the administrator read contract'
     Assert-True ($source -match 'Assert-SafePurgeTarget') 'recursive purge is guarded'
     Assert-True ($source -match 'Stop-CycRuntime') 'owned runtime is stopped before replacement'
     Assert-True ($source -match 'Restore-FileRollbackSnapshot') 'failed replacement has file rollback'
@@ -352,9 +356,25 @@ try {
     }
     Write-InstallManifest `
         -Plan $plan `
+        -Action Install `
         -CodexResult $fakeIntegrationResult `
         -AgentsResult $agentsInstalled
-    $agentsReceipt = Get-Content -LiteralPath $agentsReceiptPath -Raw | ConvertFrom-Json
+    $agentsReceipt = Read-InstallManifest -ManifestPath $agentsReceiptPath
+    Assert-True ([string]$agentsReceipt.coreCommit.state -ceq 'pending') 'install manifest remains provisional until runtime and AGENTS readiness finish'
+    [void](Complete-CycInstallCoreCommit -Plan $plan -Action Install)
+    $agentsReceipt = Read-InstallManifest -ManifestPath $agentsReceiptPath
+    Assert-True ([string]$agentsReceipt.coreCommit.state -ceq 'committed') 'final install core marker is published explicitly'
+    Assert-True ([string]$agentsReceipt.coreCommit.committedAtUtc -match '^\d{4}-\d{2}-\d{2}T') 'final install core marker records a durable commit timestamp'
+    $coreCommitFunctionMatch = [regex]::Match(
+        $source,
+        'function Complete-CycInstallCoreCommit[\s\S]+?(?=function Set-CycObjectPropertyValue)'
+    )
+    Assert-True $coreCommitFunctionMatch.Success 'core commit function is available for commit-boundary regression checks'
+    $coreCommitFunctionSource = [string]$coreCommitFunctionMatch.Value
+    $coreCommitWriteIndex = $coreCommitFunctionSource.LastIndexOf('Write-DurableAtomicJson', [StringComparison]::Ordinal)
+    Assert-True ($coreCommitWriteIndex -ge 0) 'core commit uses the durable atomic writer as its commit point'
+    $coreCommitPostWrite = $coreCommitFunctionSource.Substring($coreCommitWriteIndex)
+    Assert-True ($coreCommitPostWrite -notmatch 'Read-InstallManifest') 'core commit performs no fallible manifest reopen after the durable atomic commit point'
     Assert-True ($agentsReceipt.agentsIntegration.previousFileSha256 -eq $agentsInstalled.previousFileSha256) 'install manifest records previous AGENTS.md state'
     Assert-True ($agentsReceipt.agentsIntegration.blockSha256 -eq $agentsInstalled.blockSha256) 'install manifest records the installed managed-block digest'
     Assert-True $agentsReceipt.codexIntegration.pluginVerified 'install manifest records the verified active-plugin receipt'
@@ -669,6 +689,29 @@ try {
     Set-PrivateDirectoryAcl -Path $aclRoot
     Assert-PrivatePathAcl -Path $aclFile
 
+    $installAclRoot = Join-Path $testRoot 'install-acl-smoke'
+    $installAclController = Join-Path $installAclRoot 'cyc-controller.exe'
+    [void](New-Item -ItemType Directory -Path $installAclRoot -Force)
+    [System.IO.File]::WriteAllText($installAclController, 'fixture-controller')
+    Set-PrivateDirectoryAcl -Path $installAclRoot -AllowAdministratorsReadAndExecute
+    foreach ($installAclPath in @($installAclRoot, $installAclController)) {
+        Assert-PrivatePathAcl -Path $installAclPath -AllowAdministratorsReadAndExecute
+    }
+    $controllerAcl = Get-FileSystemAclPortable -Item (Get-Item -LiteralPath $installAclController -Force)
+    $administratorsRules = @($controllerAcl.GetAccessRules(
+        $true,
+        $true,
+        [System.Security.Principal.SecurityIdentifier]
+    ) | Where-Object { $_.IdentityReference.Value -eq 'S-1-5-32-544' })
+    Assert-True ($administratorsRules.Count -eq 1) 'installed controller grants exactly one BUILTIN Administrators ACE for over-the-shoulder firewall verification'
+    $expectedAdministratorReadRights = [System.Security.AccessControl.FileSystemRights]::ReadAndExecute -bor
+        [System.Security.AccessControl.FileSystemRights]::Synchronize
+    Assert-True ($administratorsRules[0].FileSystemRights -eq $expectedAdministratorReadRights) 'over-the-shoulder administrator receives exact ReadAndExecute plus normalized Synchronize rights only'
+    Assert-True ((Get-FileHash -LiteralPath $installAclController -Algorithm SHA256).Hash -match '^[0-9A-F]{64}$') 'controller remains hash-readable under the install-root ACL contract'
+    $privateAclRejectedInstallAcl = $false
+    try { Assert-PrivatePathAcl -Path $installAclController } catch { $privateAclRejectedInstallAcl = $true }
+    Assert-True $privateAclRejectedInstallAcl 'data/TLS private ACL verification does not silently accept the install-root Administrators ACE'
+
     $fakeIdentityCli = Join-Path $testRoot 'fake-identity.ps1'
     @'
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Remaining)
@@ -684,16 +727,34 @@ if ($Remaining[1] -eq 'init') {
     [System.IO.File]::WriteAllText($certificate, 'fixture-certificate')
     [System.IO.File]::WriteAllText($key, 'fixture-private-key')
     [ordered]@{
-        certificatePath = $certificate
-        privateKeyPath = $key
+        apiVersion = 'cyc.dev/identity/v1'
+        certificate = '\\?\' + $certificate
+        privateKey = '\\?\' + $key
         sha256Fingerprint = ('a' * 64)
-        sans = @('192.0.2.10')
+        subjectAltNames = @('192.0.2.10')
+        notBefore = '2026-01-01T00:00:00Z'
+        notAfter = '2036-01-01T00:00:00Z'
+        valid = $true
     } | ConvertTo-Json -Compress
     exit 0
 }
 if ($Remaining[1] -eq 'verify') {
-    [ordered]@{ sha256Fingerprint = ('a' * 64); sans = @('192.0.2.10') } |
-        ConvertTo-Json -Compress
+    $certificateIndex = [Array]::IndexOf($Remaining, '--certificate')
+    $privateKeyIndex = [Array]::IndexOf($Remaining, '--private-key')
+    $hostIndex = [Array]::IndexOf($Remaining, '--host')
+    if ($certificateIndex -lt 0 -or $certificateIndex + 1 -ge $Remaining.Count -or
+        $privateKeyIndex -lt 0 -or $privateKeyIndex + 1 -ge $Remaining.Count -or
+        $hostIndex -lt 0 -or $hostIndex + 1 -ge $Remaining.Count) { exit 5 }
+    [ordered]@{
+        apiVersion = 'cyc.dev/identity/v1'
+        certificate = '\\?\' + [System.IO.Path]::GetFullPath($Remaining[$certificateIndex + 1])
+        privateKey = '\\?\' + [System.IO.Path]::GetFullPath($Remaining[$privateKeyIndex + 1])
+        sha256Fingerprint = ('a' * 64)
+        subjectAltNames = @($Remaining[$hostIndex + 1])
+        notBefore = '2026-01-01T00:00:00Z'
+        notAfter = '2036-01-01T00:00:00Z'
+        valid = $true
+    } | ConvertTo-Json -Compress
     exit 0
 }
 exit 4
@@ -701,6 +762,7 @@ exit 4
     $plan.managedWorker.identityCli = $fakeIdentityCli
     $identityFirst = Ensure-CycTlsIdentity -Plan $plan
     Assert-True $identityFirst.created 'fresh install creates one controller TLS identity'
+    Assert-True ([string]$identityFirst.fingerprint -ceq ('a' * 64)) 'fresh install accepts the real identity CLI v1 metadata contract'
     Assert-True ((Test-Path -LiteralPath $plan.managedWorker.certificatePath -PathType Leaf) -and
         (Test-Path -LiteralPath $plan.managedWorker.privateKeyPath -PathType Leaf)) 'TLS identity creates both files'
     $identitySecond = Ensure-CycTlsIdentity -Plan $plan
@@ -712,6 +774,74 @@ exit 4
     }
     Assert-True $partialIdentityRejected 'repair rejects an incomplete TLS identity without rotation'
     Assert-True (Test-Path -LiteralPath $plan.managedWorker.certificatePath -PathType Leaf) 'incomplete identity failure preserves the remaining certificate for diagnosis'
+
+    Assert-ThrowsLike `
+        -Action {
+            [void](Assert-CycIdentityMetadata `
+                -Metadata ([PSCustomObject]@{
+                    certificatePath = 'C:\legacy.crt.pem'
+                    privateKeyPath = 'C:\legacy.key.pem'
+                    sha256Fingerprint = ('b' * 64)
+                }) `
+                -ExpectedCertificatePath 'C:\legacy.crt.pem' `
+                -ExpectedPrivateKeyPath 'C:\legacy.key.pem' `
+                -ExpectedHost '192.0.2.10' `
+                -Operation init)
+        } `
+        -Pattern 'incomplete metadata' `
+        -Message 'bootstrap rejects the obsolete mock-only identity metadata contract'
+
+    $normalizedHostMetadata = [PSCustomObject]@{
+        apiVersion = 'cyc.dev/identity/v1'
+        certificate = '\\?\' + [System.IO.Path]::GetFullPath($plan.managedWorker.certificatePath)
+        privateKey = '\\?\' + [System.IO.Path]::GetFullPath($plan.managedWorker.privateKeyPath)
+        sha256Fingerprint = ('c' * 64)
+        subjectAltNames = [object[]]@('::1')
+        notBefore = '2026-01-01T00:00:00Z'
+        notAfter = '2036-01-01T00:00:00Z'
+        valid = $true
+    }
+    Assert-True ((Assert-CycIdentityMetadata `
+        -Metadata $normalizedHostMetadata `
+        -ExpectedCertificatePath $plan.managedWorker.certificatePath `
+        -ExpectedPrivateKeyPath $plan.managedWorker.privateKeyPath `
+        -ExpectedHost '0:0:0:0:0:0:0:1' `
+        -Operation verify) -ceq ('c' * 64)) 'identity SAN comparison accepts equivalent expanded and compressed IPv6 forms'
+    $normalizedHostMetadata.subjectAltNames = [object[]]@('example.com')
+    Assert-True ((Assert-CycIdentityMetadata `
+        -Metadata $normalizedHostMetadata `
+        -ExpectedCertificatePath $plan.managedWorker.certificatePath `
+        -ExpectedPrivateKeyPath $plan.managedWorker.privateKeyPath `
+        -ExpectedHost 'EXAMPLE.COM.' `
+        -Operation verify) -ceq ('c' * 64)) 'identity SAN comparison accepts DNS case and trailing-dot normalization'
+
+    if (-not [string]::IsNullOrWhiteSpace($IdentityCliPath)) {
+        $resolvedIdentityCli = [string](Resolve-Path -LiteralPath $IdentityCliPath -ErrorAction Stop).ProviderPath
+        Assert-True ([System.IO.Path]::GetFileName($resolvedIdentityCli) -ieq 'cyc.exe') 'production identity contract test uses cyc.exe'
+        $realIdentityRoot = Join-Path $testRoot 'real-identity'
+        $realIdentityTls = Join-Path $realIdentityRoot 'tls'
+        $realIdentityPlan = [PSCustomObject]@{
+            dataRoot = $realIdentityRoot
+            managedWorker = [PSCustomObject]@{
+                enabled = $true
+                tlsDirectory = $realIdentityTls
+                certificatePath = Join-Path $realIdentityTls 'controller.crt.pem'
+                privateKeyPath = Join-Path $realIdentityTls 'controller.key.pem'
+                identityCli = $resolvedIdentityCli
+                publicHost = '127.0.0.1'
+            }
+        }
+        $realIdentityFirst = Ensure-CycTlsIdentity -Plan $realIdentityPlan
+        Assert-True $realIdentityFirst.created 'production cyc.exe creates a controller TLS identity through bootstrap'
+        Assert-True ([string]$realIdentityFirst.fingerprint -cmatch '^[0-9a-f]{64}$') 'production cyc.exe metadata is accepted by bootstrap'
+        $realCertificateHash = (Get-FileHash -LiteralPath $realIdentityPlan.managedWorker.certificatePath -Algorithm SHA256).Hash
+        $realPrivateKeyHash = (Get-FileHash -LiteralPath $realIdentityPlan.managedWorker.privateKeyPath -Algorithm SHA256).Hash
+        $realIdentitySecond = Ensure-CycTlsIdentity -Plan $realIdentityPlan
+        Assert-True (-not $realIdentitySecond.created) 'production cyc.exe repair verifies instead of rotating the identity'
+        Assert-True ([string]$realIdentitySecond.fingerprint -ceq [string]$realIdentityFirst.fingerprint) 'production identity fingerprint is stable across repair'
+        Assert-True ((Get-FileHash -LiteralPath $realIdentityPlan.managedWorker.certificatePath -Algorithm SHA256).Hash -ceq $realCertificateHash) 'production identity certificate is byte-stable across repair'
+        Assert-True ((Get-FileHash -LiteralPath $realIdentityPlan.managedWorker.privateKeyPath -Algorithm SHA256).Hash -ceq $realPrivateKeyHash) 'production identity private key is byte-stable across repair'
+    }
 
     $registrationRoot = 'HKCU:\Software\ClusterYourCodexPackagingTests'
     $registrationPath = Join-Path $registrationRoot ([Guid]::NewGuid().ToString('N'))
@@ -881,6 +1011,7 @@ exit 4
         -Reason 'deferred-gui-integration'
     Write-InstallManifest `
         -Plan $codexOnlyPlan `
+        -Action Install `
         -CodexResult $codexOnlyInitialResult `
         -AgentsResult $codexOnlyDisabledAgents
 
@@ -1487,6 +1618,25 @@ exit /b !ERRORLEVEL!
     Assert-True (Test-Path -LiteralPath ($setupOutput + '.sha256') -PathType Leaf) 'setup builder writes its SHA-256 sidecar'
     Assert-True ($setupResult.Count -eq 1 -and [string]$setupResult[0].setupPath -eq $setupOutput) 'setup builder returns the generated setup path'
 
+    $previewManifestBeforeOverlapChecks = (Get-FileHash -LiteralPath (Join-Path $preview 'preview-manifest.json') -Algorithm SHA256).Hash
+    foreach ($overlappingOutput in @(
+        (Join-Path $preview 'nested-output\ClusterYourCodex-Setup.exe'),
+        $testRoot
+    )) {
+        Assert-ThrowsLike `
+            -Action {
+                & (Join-Path $PSScriptRoot 'New-SetupExecutable.ps1') `
+                    -PackageRoot $preview `
+                    -OutputPath $overlappingOutput `
+                    -MakeNsisPath $fakeMakeNsis `
+                    -Force | Out-Null
+            } `
+            -Pattern 'must be outside' `
+            -Message 'setup builder rejects output/package overlap in either direction before staging or deletion'
+    }
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $preview 'nested-output'))) 'rejected in-package setup output creates no package entry'
+    Assert-True ((Get-FileHash -LiteralPath (Join-Path $preview 'preview-manifest.json') -Algorithm SHA256).Hash -ceq $previewManifestBeforeOverlapChecks) 'overlap rejection leaves the package manifest untouched'
+
     $tamperedPackage = Join-Path $testRoot 'tampered-package'
     Copy-Item -LiteralPath $preview -Destination $tamperedPackage -Recurse
     [System.IO.File]::AppendAllText((Join-Path $tamperedPackage 'payload\ClusterYourCodex.exe'), 'tampered')
@@ -1626,6 +1776,35 @@ exit /b !ERRORLEVEL!
         -ProfileResolver $profileResolver `
         -ExchangeBaseResolver $exchangeResolver)
 
+    $expiredRequest = Convert-CycPackagingJson ($validRequest | ConvertTo-Json -Depth 6)
+    $expiredRequest.createdAtUtc = [DateTimeOffset]::UtcNow.AddMinutes(-20).ToString('o')
+    $expiredRequest.deadlineUtc = [DateTimeOffset]::UtcNow.AddMinutes(-10).ToString('o')
+    $expiredRequest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $requestPath -Encoding UTF8
+    $expiredRequestObject = Convert-CycPackagingJson (Get-Content -LiteralPath $requestPath -Raw)
+    $expiredRequestHash = (Get-FileHash -LiteralPath $requestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ThrowsLike -Pattern 'expired' -Message 'normal elevation rejects an expired firewall request' -Action {
+        [void](Assert-CycFirewallRequestBinding `
+            -Request $expiredRequestObject `
+            -RequestFile $requestPath `
+            -ExpectedRequestHash $expiredRequestHash `
+            -ObservedHelperHash $helperHash `
+            -ExpectedHelperHash $helperHash `
+            -ProfileResolver $profileResolver `
+            -ExchangeBaseResolver $exchangeResolver)
+    }
+    [void](Assert-CycFirewallRequestBinding `
+        -Request $expiredRequestObject `
+        -RequestFile $requestPath `
+        -ExpectedRequestHash $expiredRequestHash `
+        -ObservedHelperHash $helperHash `
+        -ExpectedHelperHash $helperHash `
+        -ProfileResolver $profileResolver `
+        -ExchangeBaseResolver $exchangeResolver `
+        -AllowExpiredRecovery)
+    $validRequest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $requestPath -Encoding UTF8
+    $requestObject = Convert-CycPackagingJson (Get-Content -LiteralPath $requestPath -Raw)
+    $requestHash = (Get-FileHash -LiteralPath $requestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
     Add-Content -LiteralPath $requestPath -Value 'tamper'
     Assert-ThrowsLike -Pattern 'changed' -Message 'helper rejects request tamper after coordinator approval' -Action {
         [void](Assert-CycFirewallRequestBinding `
@@ -1699,29 +1878,1305 @@ exit /b !ERRORLEVEL!
     Assert-ThrowsLike -Pattern 'replay' -Message 'transaction replay with a different request is rejected' -Action {
         [void](Assert-CycFirewallReplayBinding -State $state -TransactionId $transactionId -RequestSha256 ('e' * 64))
     }
+    Assert-True ((Get-CycFirewallBoundRecoveryAction -State $null -Action Rollback -JournalPhase prepared) -eq 'RollbackWithoutState') 'recovery can close a prepared transaction that never created helper state'
+    $state | Add-Member -NotePropertyName phase -NotePropertyValue 'prepared'
+    Assert-True ((Get-CycFirewallBoundRecoveryAction -State $state -Action Rollback -JournalPhase prepared) -eq 'Rollback') 'recovery can restore a prepared persisted transaction'
+    Assert-ThrowsLike -Pattern 'incompatible helper state' -Message 'recovery cannot finalize a transaction that was never applied' -Action {
+        [void](Get-CycFirewallBoundRecoveryAction -State $state -Action Finalize -JournalPhase coreApplied)
+    }
+    $state.phase = 'applied'
+    Assert-True ((Get-CycFirewallBoundRecoveryAction -State $state -Action Finalize -JournalPhase coreApplied) -eq 'Finalize') 'recovery can finalize only an applied persisted transaction'
+    $state.phase = 'rolledBack'
+    Assert-True ((Get-CycFirewallBoundRecoveryAction -State $state -Action Finalize -JournalPhase coreApplied) -eq 'ReapplyThenFinalize') 'core-applied recovery re-establishes an exact request after helper timeout rollback'
+    $state.phase = 'applying'
+    Assert-True ((Get-CycFirewallBoundRecoveryAction -State $state -Action Finalize -JournalPhase coreApplied) -eq 'ReapplyThenFinalize') 'core-applied recovery can resume after crashing during exact reapply'
+    $state.phase = 'rollbackFailed'
+    Assert-True ((Get-CycFirewallBoundRecoveryAction -State $state -Action Finalize -JournalPhase coreApplied) -eq 'ReapplyThenFinalize') 'core-applied recovery can converge an exact desired state after rollback failure without a receipt'
+    Assert-True ((Get-CycFirewallBoundRecoveryAction -State $state -Action Rollback -JournalPhase prepared) -eq 'Rollback') 'prepared recovery retries an exact snapshot restore after rollback failure'
+    Assert-True ((Get-CycFirewallBoundRecoveryAction -State $state -Action Rollback -JournalPhase firewallApplied) -eq 'Rollback') 'firewall-applied recovery retries an exact snapshot restore after rollback failure'
+    $state.phase = 'applying'
+    Assert-True ((Get-CycFirewallBoundRecoveryAction -State $state -Action Rollback -JournalPhase firewallApplied) -eq 'Rollback') 'firewall-applied recovery resumes an interrupted snapshot restore'
+    $state.phase = 'verified'
+    Assert-True ((Get-CycFirewallBoundRecoveryAction -State $state -Action Finalize -JournalPhase coreApplied) -eq 'Finalize') 'core-applied recovery only verifies an already committed helper state'
+    $state.phase = 'applied'
+    Assert-ThrowsLike -Pattern 'requires persisted helper state' -Message 'recovery cannot finalize without persisted helper state' -Action {
+        [void](Get-CycFirewallBoundRecoveryAction -State $null -Action Finalize -JournalPhase coreApplied)
+    }
+    Assert-ThrowsLike -Pattern 'requires persisted helper state' -Message 'firewall-applied rollback fails closed when its original snapshot is missing' -Action {
+        [void](Get-CycFirewallBoundRecoveryAction -State $null -Action Rollback -JournalPhase firewallApplied)
+    }
+    Assert-ThrowsLike -Pattern 'must be supplied together' -Message 'recovery rejects CLI action and phase without exact journal evidence' -Action {
+        [void](Assert-CycFirewallRecoveryArguments `
+            -Action Rollback `
+            -JournalPhase prepared `
+            -JournalPath '' `
+            -ExpectedJournalSha256 '')
+    }
+    Assert-ThrowsLike -Pattern 'if and only if' -Message 'recovery finalize is valid exactly for coreApplied' -Action {
+        [void](Assert-CycFirewallRecoveryArguments `
+            -Action Finalize `
+            -JournalPhase prepared `
+            -JournalPath 'C:\fixture\firewall-lifecycle.json' `
+            -ExpectedJournalSha256 ('a' * 64))
+    }
     Assert-True ((Get-CycFirewallHelperRecoveryAction -FinalizeSignal:$false -RollbackSignal:$false -Expired:$true) -eq 'Rollback') 'helper timeout selects rollback after install failure or coordinator crash'
     Assert-True ((Get-CycFirewallHelperRecoveryAction -FinalizeSignal:$true -RollbackSignal:$false -Expired:$false) -eq 'Finalize') 'helper finalizes only on explicit coordinator commit'
+    $replacementDigestFixture = ('b' * 64)
+    $replacementReceiptFixture = [PSCustomObject]@{ result = 'rollbackFailed' }
+    Assert-True ((Get-CycLifecycleResponseReplacementWaitDigest `
+                -Receipt $replacementReceiptFixture `
+                -Sha256BeforeRead $replacementDigestFixture `
+                -Sha256AfterRead $replacementDigestFixture `
+                -ExpectedResult verified) -ceq $replacementDigestFixture) 'Finalize waits for replacement of a stable old rollbackFailed response'
+    Assert-True ((Get-CycLifecycleResponseReplacementWaitDigest `
+                -Receipt $replacementReceiptFixture `
+                -Sha256BeforeRead $replacementDigestFixture `
+                -Sha256AfterRead $replacementDigestFixture `
+                -ExpectedResult rolledBack) -ceq $replacementDigestFixture) 'Rollback waits for replacement of a stable old rollbackFailed response'
+    $replacementReceiptFixture.result = 'rolledBack'
+    Assert-True ($null -eq (Get-CycLifecycleResponseReplacementWaitDigest `
+                -Receipt $replacementReceiptFixture `
+                -Sha256BeforeRead $replacementDigestFixture `
+                -Sha256AfterRead $replacementDigestFixture `
+                -ExpectedResult rolledBack)) 'Rollback immediately consumes an already-matching rolledBack response after private-publication crash'
+    Assert-True ((Get-CycLifecycleResponseReplacementWaitDigest `
+                -Receipt $replacementReceiptFixture `
+                -Sha256BeforeRead $replacementDigestFixture `
+                -Sha256AfterRead $replacementDigestFixture `
+                -ExpectedResult verified) -ceq $replacementDigestFixture) 'Finalize waits for a stale rolledBack response to become verified'
+    Assert-True ($null -eq (Get-CycLifecycleResponseReplacementWaitDigest `
+                -Receipt $replacementReceiptFixture `
+                -Sha256BeforeRead $replacementDigestFixture `
+                -Sha256AfterRead ('c' * 64) `
+                -ExpectedResult verified)) 'response sampling race never waits on a digest that was not stable across parsing'
+    $waitReplacementFixture = Join-Path $testRoot 'wait-replacement-receipt.json'
+    '{"result":"rollbackFailed"}' | Set-Content -LiteralPath $waitReplacementFixture -Encoding UTF8
+    $waitReplacementDigest = (Get-FileHash -LiteralPath $waitReplacementFixture -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-True (-not (Wait-CycLifecycleFile `
+                -Path $waitReplacementFixture `
+                -Deadline ([DateTimeOffset]::UtcNow) `
+                -PreviousSha256 $waitReplacementDigest)) 'recovery wait does not accept an already-existing rollbackFailed receipt before replacement'
+    Assert-ThrowsLike -Pattern 'digest is invalid' -Message 'replacement wait rejects malformed prior receipt digests' -Action {
+        [void](Wait-CycLifecycleFile `
+            -Path $waitReplacementFixture `
+            -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(1)) `
+            -PreviousSha256 'not-a-digest')
+    }
+    '{"result":"verified"}' | Set-Content -LiteralPath $waitReplacementFixture -Encoding UTF8
+    Assert-True (Wait-CycLifecycleFile `
+            -Path $waitReplacementFixture `
+            -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(1)) `
+            -PreviousSha256 $waitReplacementDigest) 'recovery wait observes atomic receipt replacement rather than stale filename existence'
 
-    $resumeJournal = [PSCustomObject]@{
+    $recoveryFixtureRoot = Join-Path $testRoot 'recovery-helper-fixture'
+    [void](New-Item -ItemType Directory -Path $recoveryFixtureRoot -Force)
+    $recoveryFixtureHelper = Join-Path $recoveryFixtureRoot 'Invoke-ClusterYourCodexFirewall.ps1'
+    $recoveryFixtureRequest = Join-Path $recoveryFixtureRoot 'request.json'
+    $recoveryFixtureJournalPath = Join-Path $recoveryFixtureRoot 'journal.json'
+    Copy-Item -LiteralPath $firewallScript -Destination $recoveryFixtureHelper -Force
+    $recoveryFixtureTransaction = [Guid]::NewGuid().ToString('N')
+    $recoveryFixturePackageHash = ('6' * 64)
+    $recoveryFixtureProgramHash = ('7' * 64)
+    $recoveryFixtureInstallRoot = Join-Path ([string]$binding.localAppData) 'Programs\ClusterYourCodex'
+    $recoveryFixtureDataRoot = Join-Path ([string]$binding.localAppData) 'ClusterYourCodex'
+    $recoveryFixtureRequestObject = [PSCustomObject][ordered]@{
+        schemaVersion = 'cyc.dev/windows-firewall-request/v1'
+        transactionId = $recoveryFixtureTransaction
+        requestNonce = ('5' * 64)
+        action = 'Apply'
+        createdAtUtc = [DateTimeOffset]::UtcNow.AddMinutes(-2).ToString('o')
+        deadlineUtc = [DateTimeOffset]::UtcNow.AddMinutes(10).ToString('o')
+        initiatorSid = [string]$binding.sid
+        initiatorProfile = [string]$binding.profile
+        initiatorLocalAppData = [string]$binding.localAppData
+        installRoot = $recoveryFixtureInstallRoot
+        program = Join-Path $recoveryFixtureInstallRoot 'cyc-controller.exe'
+        programSha256 = $recoveryFixtureProgramHash
+        port = 47832
+        ruleName = 'ClusterYourCodex.ManagedWorker.' + ([string]$binding.sid).Replace('-', '_')
+        displayName = 'ClusterYourCodex Managed Worker'
+        group = 'ClusterYourCodex'
+        ruleDescription = 'ClusterYourCodex owned managed-worker TLS listener'
+        remoteAddress = 'LocalSubnet'
+        exchangeRoot = $recoveryFixtureRoot
+        packageManifestSha256 = $recoveryFixturePackageHash
+        packageExecutable = $lifecycleScript
+        helperAuthenticodeRequired = $false
+    }
+    Write-CycLifecycleAtomicJson -Path $recoveryFixtureRequest -Value $recoveryFixtureRequestObject
+    $recoveryFixtureJournal = [PSCustomObject][ordered]@{
         schemaVersion = 'cyc.dev/windows-external-lifecycle/v1'
+        transactionId = $recoveryFixtureTransaction
         action = 'Install'
-        transactionId = $transactionId
-        requestSha256 = $requestHash
-        phase = 'coreApplied'
+        phase = 'prepared'
+        initiatorSid = [string]$binding.sid
+        initiatorProfile = [string]$binding.profile
+        initiatorLocalAppData = [string]$binding.localAppData
+        installRoot = $recoveryFixtureInstallRoot
+        dataRoot = $recoveryFixtureDataRoot
+        exchangeRoot = $recoveryFixtureRoot
+        requestPath = $recoveryFixtureRequest
+        requestSha256 = (Get-FileHash -LiteralPath $recoveryFixtureRequest -Algorithm SHA256).Hash.ToLowerInvariant()
+        helperSha256 = (Get-FileHash -LiteralPath $recoveryFixtureHelper -Algorithm SHA256).Hash.ToLowerInvariant()
+        privateReceiptPath = Join-Path $recoveryFixtureRoot ($recoveryFixtureTransaction + '.receipt.json')
+        packageManifestSha256 = $recoveryFixturePackageHash
+        updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
     }
-    $resumeReceipt = [PSCustomObject]@{
-        transactionId = $transactionId
-        requestSha256 = $requestHash
-        result = 'verified'
+    Write-CycLifecycleAtomicJson -Path $recoveryFixtureJournalPath -Value $recoveryFixtureJournal
+    $recoveryLaunchMarker = Join-Path $recoveryFixtureRoot 'launch.marker'
+    $fakeRecoveryStarter = {
+        param(
+            $helperPath, $boundRequestPath, $boundRequestHash, $boundHelperHash,
+            $boundAuthenticode, $boundRecoveryAction, $boundJournalPhase,
+            $boundJournalPath, $boundJournalHash
+        )
+        [System.IO.File]::WriteAllText(
+            $recoveryLaunchMarker,
+            ([string]::Join('|', @(
+                $helperPath, $boundRequestPath, $boundRequestHash, $boundHelperHash,
+                $boundAuthenticode, $boundRecoveryAction, $boundJournalPhase,
+                $boundJournalPath, $boundJournalHash
+            ))),
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+        return [PSCustomObject]@{ fixture = $true }
+    }.GetNewClosure()
+    $recoveryLaunch = Start-CycFirewallRecoveryElevationIfNeeded `
+        -Journal $recoveryFixtureJournal `
+        -JournalPath $recoveryFixtureJournalPath `
+        -Request $recoveryFixtureRequestObject `
+        -RecoveryAction Rollback `
+        -ElevationStarter $fakeRecoveryStarter
+    Assert-True ([bool]$recoveryLaunch.started) 'a missing recovery helper lock relaunches the exact bound helper'
+    Assert-True ((Get-Content -LiteralPath $recoveryLaunchMarker -Raw) -match '\|False\|Rollback\|prepared\|.+\|[0-9a-f]{64}$') 'recovery relaunch receives the exact journal-bound rollback action and digest'
+    Remove-Item -LiteralPath $recoveryLaunchMarker -Force
+    $recoveryLockStream = New-Object System.IO.FileStream(
+        (Join-Path $recoveryFixtureRoot 'helper.lock'),
+        [System.IO.FileMode]::OpenOrCreate,
+        [System.IO.FileAccess]::ReadWrite,
+        [System.IO.FileShare]::None
+    )
+    try {
+        $recoveryFixtureJournal.phase = 'coreApplied'
+        $recoveryFixtureJournal.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        Write-CycLifecycleAtomicJson -Path $recoveryFixtureJournalPath -Value $recoveryFixtureJournal
+        $activeRecovery = Start-CycFirewallRecoveryElevationIfNeeded `
+            -Journal $recoveryFixtureJournal `
+            -JournalPath $recoveryFixtureJournalPath `
+            -Request $recoveryFixtureRequestObject `
+            -RecoveryAction Finalize `
+            -ElevationStarter $fakeRecoveryStarter
+        Assert-True (-not [bool]$activeRecovery.started) 'an existing helper lock prevents duplicate recovery elevation'
+        Assert-True (-not (Test-Path -LiteralPath $recoveryLaunchMarker)) 'an active helper consumes the recovery signal without launching a duplicate helper'
+    } finally {
+        $recoveryLockStream.Dispose()
     }
-    $pendingManifest = [PSCustomObject]@{
-        managedWorker = [PSCustomObject]@{
-            firewall = [PSCustomObject]@{ transactionId = $transactionId; state = 'pending' }
+    $recoveryFixtureJournal.phase = 'prepared'
+    $recoveryFixtureJournal.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+    Write-CycLifecycleAtomicJson -Path $recoveryFixtureJournalPath -Value $recoveryFixtureJournal
+    Add-Content -LiteralPath $recoveryFixtureHelper -Value '# tamper'
+    Assert-ThrowsLike -Pattern 'helper changed' -Message 'recovery rejects a copied helper whose digest no longer matches the journal' -Action {
+        [void](Start-CycFirewallRecoveryElevationIfNeeded `
+            -Journal $recoveryFixtureJournal `
+            -JournalPath $recoveryFixtureJournalPath `
+            -Request $recoveryFixtureRequestObject `
+            -RecoveryAction Rollback `
+            -ElevationStarter $fakeRecoveryStarter)
+    }
+
+    $publicRecoveryTransaction = [Guid]::NewGuid().ToString('N')
+    $publicRecoveryLocalAppData = Join-Path $testRoot 'recovery-user-localappdata'
+    $publicRecoveryDataRoot = Join-Path $publicRecoveryLocalAppData 'ClusterYourCodex'
+    $publicRecoveryInstallerRoot = Join-Path $publicRecoveryDataRoot '.installer'
+    $publicRecoveryReceiptRoot = Join-Path $publicRecoveryInstallerRoot 'firewall-receipts'
+    [void](New-Item -ItemType Directory -Path $publicRecoveryReceiptRoot -Force)
+    $publicRecoveryExchange = Join-Path `
+        (Join-Path `
+            (Join-Path ([Environment]::GetFolderPath('CommonDocuments')) 'ClusterYourCodex-Firewall') `
+            ([string]$binding.sid).Replace('-', '_')) `
+        $publicRecoveryTransaction
+    $publicRecoveryJournalPath = Join-Path $publicRecoveryExchange 'recovery-journal.json'
+    try {
+        [void](New-Item -ItemType Directory -Path $publicRecoveryExchange -Force)
+        $publicRecoveryHelper = Join-Path $publicRecoveryExchange 'Invoke-ClusterYourCodexFirewall.ps1'
+        $publicRecoveryRequestPath = Join-Path $publicRecoveryExchange 'request.json'
+        Copy-Item -LiteralPath $firewallScript -Destination $publicRecoveryHelper -Force
+        $publicRecoveryRequest = [ordered]@{
+            schemaVersion = 'cyc.dev/windows-firewall-request/v1'
+            transactionId = $publicRecoveryTransaction
+            requestNonce = ('7' * 64)
+            action = 'Apply'
+            createdAtUtc = [DateTimeOffset]::UtcNow.AddMinutes(-20).ToString('o')
+            deadlineUtc = [DateTimeOffset]::UtcNow.AddMinutes(-10).ToString('o')
+            initiatorSid = [string]$binding.sid
+            initiatorProfile = [string]$binding.profile
+            initiatorLocalAppData = $publicRecoveryLocalAppData
+            installRoot = Join-Path $publicRecoveryLocalAppData 'Programs\ClusterYourCodex'
+            program = Join-Path $publicRecoveryLocalAppData 'Programs\ClusterYourCodex\cyc-controller.exe'
+            programSha256 = ('8' * 64)
+            port = 47832
+            ruleName = 'ClusterYourCodex.ManagedWorker.' + ([string]$binding.sid).Replace('-', '_')
+            displayName = 'ClusterYourCodex Managed Worker'
+            group = 'ClusterYourCodex'
+            ruleDescription = 'ClusterYourCodex owned managed-worker TLS listener'
+            remoteAddress = 'LocalSubnet'
+            exchangeRoot = $publicRecoveryExchange
+            packageManifestSha256 = ('9' * 64)
+            packageExecutable = $lifecycleScript
+            helperAuthenticodeRequired = $false
+        }
+        $publicRecoveryRequest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $publicRecoveryRequestPath -Encoding UTF8
+        $publicRecoveryRequestHash = (Get-FileHash -LiteralPath $publicRecoveryRequestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $publicRecoveryHelperHash = (Get-FileHash -LiteralPath $publicRecoveryHelper -Algorithm SHA256).Hash.ToLowerInvariant()
+        $publicRecoveryJournal = [ordered]@{
+            schemaVersion = 'cyc.dev/windows-external-lifecycle/v1'
+            transactionId = $publicRecoveryTransaction
+            action = 'Install'
+            phase = 'prepared'
+            initiatorSid = [string]$binding.sid
+            initiatorProfile = [string]$binding.profile
+            initiatorLocalAppData = $publicRecoveryLocalAppData
+            installRoot = [string]$publicRecoveryRequest.installRoot
+            dataRoot = $publicRecoveryDataRoot
+            exchangeRoot = $publicRecoveryExchange
+            requestPath = $publicRecoveryRequestPath
+            requestSha256 = $publicRecoveryRequestHash
+            helperSha256 = $publicRecoveryHelperHash
+            privateReceiptPath = Join-Path $publicRecoveryReceiptRoot ($publicRecoveryTransaction + '.json')
+            packageManifestSha256 = [string]$publicRecoveryRequest.packageManifestSha256
+            updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        }
+        $writePublicRecoveryJournal = {
+            param([string]$Phase)
+            $publicRecoveryJournal.phase = $Phase
+            $publicRecoveryJournal.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+            Write-CycFirewallAtomicJson -Path $publicRecoveryJournalPath -Value $publicRecoveryJournal
+            return (Get-FileHash -LiteralPath $publicRecoveryJournalPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        }.GetNewClosure()
+        $publicRecoveryJournalHash = & $writePublicRecoveryJournal prepared
+        $script:RecoveryRollbackObserved = $false
+        $script:RecoveryFinalizeObserved = $false
+        $script:RecoveryReapplyActions = @()
+        function Test-CycFirewallAdministrator { return $true }
+        function Get-CycFirewallOriginalSnapshot { param($Request) return [ordered]@{ existed = $false } }
+        function Set-CycExactFirewallDesiredState {
+            param($Request)
+            $script:RecoveryReapplyActions += [string]$Request.action
+        }
+        function Restore-CycExactFirewallSnapshot {
+            param($Request, $Snapshot)
+            $script:RecoveryRollbackObserved = $true
+        }
+        function Test-CycFirewallDesiredState {
+            param($Request, [switch]$Final)
+            if ($Final) { $script:RecoveryFinalizeObserved = $true }
+            return $true
+        }
+        $rollbackRecoveryResult = Invoke-CycFirewallElevatedTransaction `
+            -BoundRequestPath $publicRecoveryRequestPath `
+            -RequestHash $publicRecoveryRequestHash `
+            -HelperHash $publicRecoveryHelperHash `
+            -RecoveryAction Rollback `
+            -RecoveryJournalPhase prepared `
+            -RecoveryJournalPath $publicRecoveryJournalPath `
+            -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+            -VerifiedHelperPath $publicRecoveryHelper
+        Assert-True ([string]$rollbackRecoveryResult.result -ceq 'rolledBack') 'an expired transaction with a dead helper produces a durable rollback receipt'
+        Assert-True (-not $script:RecoveryRollbackObserved) 'prepared recovery without helper state is a no-op rollback'
+        $rollbackRecoveryState = Read-CycFirewallJson `
+            -Path (Join-Path $publicRecoveryExchange 'state.json') `
+            -MaximumBytes 65536 `
+            -Label 'rollback recovery state fixture'
+        Assert-True ([string]$rollbackRecoveryState.phase -ceq 'rolledBack') 'dead-helper rollback persists the terminal state before exit'
+
+        $preCoreFailureReceipt = New-CycFirewallReceipt `
+            -Request $publicRecoveryRequest `
+            -RequestHash $publicRecoveryRequestHash `
+            -Result rollbackFailed `
+            -FailureCode 'helper-and-rollback-failure'
+        $preCoreResponsePath = Join-Path $publicRecoveryExchange 'response.json'
+        foreach ($preCorePhase in @('prepared', 'firewallApplied')) {
+            $rollbackRecoveryState.phase = 'rollbackFailed'
+            Write-CycFirewallAtomicJson -Path (Join-Path $publicRecoveryExchange 'state.json') -Value $rollbackRecoveryState
+            Write-CycFirewallAtomicJson -Path $preCoreResponsePath -Value $preCoreFailureReceipt
+            $preCoreFailureResponseHash = (Get-FileHash -LiteralPath $preCoreResponsePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $publicRecoveryJournalHash = & $writePublicRecoveryJournal $preCorePhase
+            $script:RecoveryRollbackObserved = $false
+            $script:RecoveryFinalizeObserved = $false
+            $script:RecoveryReapplyActions = @()
+            $preCoreRecoveryResult = Invoke-CycFirewallElevatedTransaction `
+                -BoundRequestPath $publicRecoveryRequestPath `
+                -RequestHash $publicRecoveryRequestHash `
+                -HelperHash $publicRecoveryHelperHash `
+                -RecoveryAction Rollback `
+                -RecoveryJournalPhase $preCorePhase `
+                -RecoveryJournalPath $publicRecoveryJournalPath `
+                -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+                -VerifiedHelperPath $publicRecoveryHelper
+            Assert-True ([string]$preCoreRecoveryResult.result -ceq 'rolledBack') "$preCorePhase rollbackFailed recovery converges to a durable snapshot rollback"
+            Assert-True $script:RecoveryRollbackObserved "$preCorePhase rollbackFailed recovery retries the exact persisted snapshot restore"
+            Assert-True ($script:RecoveryReapplyActions.Count -eq 0 -and -not $script:RecoveryFinalizeObserved) "$preCorePhase rollback recovery never applies or finalizes the request"
+            Assert-True ((Get-FileHash -LiteralPath $preCoreResponsePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $preCoreFailureResponseHash) "$preCorePhase rollback recovery atomically replaces the old rollbackFailed receipt"
+            $preCoreRecoveredState = Read-CycFirewallJson `
+                -Path (Join-Path $publicRecoveryExchange 'state.json') `
+                -MaximumBytes 65536 `
+                -Label "$preCorePhase recovered rollback state fixture"
+            Assert-True ([string]$preCoreRecoveredState.phase -ceq 'rolledBack') "$preCorePhase rollback recovery durably commits rolledBack state"
+            [void](Assert-CycFirewallReceiptBinding `
+                -Receipt $preCoreRecoveryResult `
+                -Request $publicRecoveryRequest `
+                -RequestHash $publicRecoveryRequestHash)
+        }
+
+        $rollbackRecoveryState.phase = 'applied'
+        $rollbackRecoveryState.appliedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        Write-CycFirewallAtomicJson -Path (Join-Path $publicRecoveryExchange 'state.json') -Value $rollbackRecoveryState
+        $publicRecoveryJournalHash = & $writePublicRecoveryJournal coreApplied
+        $rolledBackResponsePath = Join-Path $publicRecoveryExchange 'response.json'
+        $rolledBackResponseHash = (Get-FileHash -LiteralPath $rolledBackResponsePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $script:RecoveryFinalizeObserved = $false
+        $script:RecoveryRollbackObserved = $false
+        $script:RecoveryReapplyActions = @()
+        $appliedWithRolledBackResponseResult = Invoke-CycFirewallElevatedTransaction `
+            -BoundRequestPath $publicRecoveryRequestPath `
+            -RequestHash $publicRecoveryRequestHash `
+            -HelperHash $publicRecoveryHelperHash `
+            -RecoveryAction Finalize `
+            -RecoveryJournalPhase coreApplied `
+            -RecoveryJournalPath $publicRecoveryJournalPath `
+            -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+            -VerifiedHelperPath $publicRecoveryHelper
+        Assert-True ([string]$appliedWithRolledBackResponseResult.result -ceq 'verified') 'core-applied recovery supersedes a stale rolledBack response after desired state was already applied'
+        Assert-True ($script:RecoveryReapplyActions.Count -eq 0 -and $script:RecoveryFinalizeObserved -and -not $script:RecoveryRollbackObserved) 'applied state with a stale rolledBack response finalizes without repeating mutation'
+        Assert-True ((Get-FileHash -LiteralPath $rolledBackResponsePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $rolledBackResponseHash) 'verified finalization atomically replaces the old rolledBack response'
+
+        Remove-Item -LiteralPath $rolledBackResponsePath -Force
+        $rollbackRecoveryState.phase = 'rolledBack'
+        $rollbackRecoveryState.appliedAtUtc = $null
+        Write-CycFirewallAtomicJson -Path (Join-Path $publicRecoveryExchange 'state.json') -Value $rollbackRecoveryState
+        $script:RecoveryFinalizeObserved = $false
+        $script:RecoveryRollbackObserved = $false
+        $script:RecoveryReapplyActions = @()
+        $publicRecoveryJournalHash = & $writePublicRecoveryJournal coreApplied
+        $reapplyApplyResult = Invoke-CycFirewallElevatedTransaction `
+            -BoundRequestPath $publicRecoveryRequestPath `
+            -RequestHash $publicRecoveryRequestHash `
+            -HelperHash $publicRecoveryHelperHash `
+            -RecoveryAction Finalize `
+            -RecoveryJournalPhase coreApplied `
+            -RecoveryJournalPath $publicRecoveryJournalPath `
+            -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+            -VerifiedHelperPath $publicRecoveryHelper
+        Assert-True ([string]$reapplyApplyResult.result -ceq 'verified') 'core-applied recovery re-applies an Apply request after a durable helper rollback without a response'
+        Assert-True ($script:RecoveryReapplyActions.Count -eq 1 -and [string]$script:RecoveryReapplyActions[0] -ceq 'Apply') 'core-applied Apply recovery executes the exact bound desired-state mutation once'
+        Assert-True $script:RecoveryFinalizeObserved 'core-applied Apply recovery performs final desired-state verification'
+        Assert-True (-not $script:RecoveryRollbackObserved) 'successful core-applied Apply recovery does not restore the pre-transaction snapshot'
+        $reapplyApplyState = Read-CycFirewallJson `
+            -Path (Join-Path $publicRecoveryExchange 'state.json') `
+            -MaximumBytes 65536 `
+            -Label 're-applied Apply recovery state fixture'
+        Assert-True ([string]$reapplyApplyState.phase -ceq 'verified') 'core-applied Apply recovery durably commits verified state'
+        [void](Assert-CycFirewallReceiptBinding `
+            -Receipt $reapplyApplyResult `
+            -Request $publicRecoveryRequest `
+            -RequestHash $publicRecoveryRequestHash)
+        $verifiedApplyResponsePath = Join-Path $publicRecoveryExchange 'response.json'
+        $verifiedApplyResponseHash = (Get-FileHash -LiteralPath $verifiedApplyResponsePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $script:RecoveryFinalizeObserved = $false
+        $script:RecoveryRollbackObserved = $false
+        $script:RecoveryReapplyActions = @()
+        $replayedApplyResult = Invoke-CycFirewallElevatedTransaction `
+            -BoundRequestPath $publicRecoveryRequestPath `
+            -RequestHash $publicRecoveryRequestHash `
+            -HelperHash $publicRecoveryHelperHash `
+            -RecoveryAction Finalize `
+            -RecoveryJournalPhase coreApplied `
+            -RecoveryJournalPath $publicRecoveryJournalPath `
+            -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+            -VerifiedHelperPath $publicRecoveryHelper
+        Assert-True ([string]$replayedApplyResult.result -ceq 'verified') 'verified Apply recovery response is replayable'
+        Assert-True ($script:RecoveryReapplyActions.Count -eq 0 -and -not $script:RecoveryRollbackObserved -and -not $script:RecoveryFinalizeObserved) 'verified response replay precedes all mutation and verification work'
+        Assert-True ((Get-FileHash -LiteralPath $verifiedApplyResponsePath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $verifiedApplyResponseHash) 'verified response replay leaves the durable receipt byte-identical'
+
+        Remove-Item -LiteralPath $verifiedApplyResponsePath -Force
+        $script:RecoveryFinalizeObserved = $false
+        $script:RecoveryRollbackObserved = $false
+        $script:RecoveryReapplyActions = @()
+        $verifiedWithoutResponseResult = Invoke-CycFirewallElevatedTransaction `
+            -BoundRequestPath $publicRecoveryRequestPath `
+            -RequestHash $publicRecoveryRequestHash `
+            -HelperHash $publicRecoveryHelperHash `
+            -RecoveryAction Finalize `
+            -RecoveryJournalPhase coreApplied `
+            -RecoveryJournalPath $publicRecoveryJournalPath `
+            -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+            -VerifiedHelperPath $publicRecoveryHelper
+        Assert-True ([string]$verifiedWithoutResponseResult.result -ceq 'verified') 'verified-state-before-response recovery republishes a bound receipt'
+        Assert-True ($script:RecoveryReapplyActions.Count -eq 0 -and -not $script:RecoveryRollbackObserved -and $script:RecoveryFinalizeObserved) 'verified-state-before-response recovery verifies without reapplying or rolling back'
+
+        Remove-Item -LiteralPath $verifiedApplyResponsePath -Force
+        $verifiedApplyState = Read-CycFirewallJson `
+            -Path (Join-Path $publicRecoveryExchange 'state.json') `
+            -MaximumBytes 65536 `
+            -Label 'verified Apply recovery state fixture'
+        $verifiedApplyState.phase = 'applying'
+        $verifiedApplyState.appliedAtUtc = $null
+        Write-CycFirewallAtomicJson -Path (Join-Path $publicRecoveryExchange 'state.json') -Value $verifiedApplyState
+        $script:RecoveryFinalizeObserved = $false
+        $script:RecoveryRollbackObserved = $false
+        $script:RecoveryReapplyActions = @()
+        $reapplyApplyingApplyResult = Invoke-CycFirewallElevatedTransaction `
+            -BoundRequestPath $publicRecoveryRequestPath `
+            -RequestHash $publicRecoveryRequestHash `
+            -HelperHash $publicRecoveryHelperHash `
+            -RecoveryAction Finalize `
+            -RecoveryJournalPhase coreApplied `
+            -RecoveryJournalPath $publicRecoveryJournalPath `
+            -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+            -VerifiedHelperPath $publicRecoveryHelper
+        Assert-True ([string]$reapplyApplyingApplyResult.result -ceq 'verified') 'core-applied recovery resumes an Apply request from a durable applying state'
+        Assert-True ($script:RecoveryReapplyActions.Count -eq 1 -and [string]$script:RecoveryReapplyActions[0] -ceq 'Apply') 'core-applied applying-state recovery replays the exact Apply mutation once'
+        Assert-True ($script:RecoveryFinalizeObserved -and -not $script:RecoveryRollbackObserved) 'successful applying-state Apply recovery verifies without snapshot restoration'
+
+        Remove-Item -LiteralPath $verifiedApplyResponsePath -Force
+        $rollbackFailedApplyState = Read-CycFirewallJson `
+            -Path (Join-Path $publicRecoveryExchange 'state.json') `
+            -MaximumBytes 65536 `
+            -Label 'rollbackFailed Apply recovery state fixture'
+        $rollbackFailedApplyState.phase = 'rollbackFailed'
+        Write-CycFirewallAtomicJson -Path (Join-Path $publicRecoveryExchange 'state.json') -Value $rollbackFailedApplyState
+        $rollbackFailedApplyReceipt = New-CycFirewallReceipt `
+            -Request $publicRecoveryRequest `
+            -RequestHash $publicRecoveryRequestHash `
+            -Result rollbackFailed `
+            -FailureCode 'helper-and-rollback-failure'
+        Write-CycFirewallAtomicJson -Path $verifiedApplyResponsePath -Value $rollbackFailedApplyReceipt
+        $rollbackFailedApplyResponseHash = (Get-FileHash -LiteralPath $verifiedApplyResponsePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $script:RecoveryFinalizeObserved = $false
+        $script:RecoveryRollbackObserved = $false
+        $script:RecoveryReapplyActions = @()
+        $rollbackFailedApplyResult = Invoke-CycFirewallElevatedTransaction `
+            -BoundRequestPath $publicRecoveryRequestPath `
+            -RequestHash $publicRecoveryRequestHash `
+            -HelperHash $publicRecoveryHelperHash `
+            -RecoveryAction Finalize `
+            -RecoveryJournalPhase coreApplied `
+            -RecoveryJournalPath $publicRecoveryJournalPath `
+            -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+            -VerifiedHelperPath $publicRecoveryHelper
+        Assert-True ([string]$rollbackFailedApplyResult.result -ceq 'verified') 'core-applied Apply recovery supersedes an exact rollbackFailed response after converging desired state'
+        Assert-True ($script:RecoveryReapplyActions.Count -eq 1 -and [string]$script:RecoveryReapplyActions[0] -ceq 'Apply') 'rollbackFailed Apply response recovery executes the exact mutation once'
+        Assert-True ($script:RecoveryFinalizeObserved -and -not $script:RecoveryRollbackObserved) 'successful rollbackFailed Apply response recovery verifies without snapshot restoration'
+        Assert-True ((Get-FileHash -LiteralPath $verifiedApplyResponsePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $rollbackFailedApplyResponseHash) 'verified Apply recovery atomically replaces the old rollbackFailed receipt bytes'
+        [void](Assert-CycFirewallReceiptBinding `
+            -Receipt $rollbackFailedApplyResult `
+            -Request $publicRecoveryRequest `
+            -RequestHash $publicRecoveryRequestHash)
+
+        Remove-Item -LiteralPath $verifiedApplyResponsePath -Force
+        $appliedWithOldFailureState = Read-CycFirewallJson `
+            -Path (Join-Path $publicRecoveryExchange 'state.json') `
+            -MaximumBytes 65536 `
+            -Label 'applied state with old rollbackFailed response fixture'
+        $appliedWithOldFailureState.phase = 'applied'
+        Write-CycFirewallAtomicJson -Path (Join-Path $publicRecoveryExchange 'state.json') -Value $appliedWithOldFailureState
+        Write-CycFirewallAtomicJson -Path $verifiedApplyResponsePath -Value $rollbackFailedApplyReceipt
+        $script:RecoveryFinalizeObserved = $false
+        $script:RecoveryRollbackObserved = $false
+        $script:RecoveryReapplyActions = @()
+        $appliedWithOldFailureResult = Invoke-CycFirewallElevatedTransaction `
+            -BoundRequestPath $publicRecoveryRequestPath `
+            -RequestHash $publicRecoveryRequestHash `
+            -HelperHash $publicRecoveryHelperHash `
+            -RecoveryAction Finalize `
+            -RecoveryJournalPhase coreApplied `
+            -RecoveryJournalPath $publicRecoveryJournalPath `
+            -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+            -VerifiedHelperPath $publicRecoveryHelper
+        Assert-True ([string]$appliedWithOldFailureResult.result -ceq 'verified') 'recovery replaces an old rollbackFailed response after reapply already persisted applied state'
+        Assert-True ($script:RecoveryReapplyActions.Count -eq 0 -and $script:RecoveryFinalizeObserved -and -not $script:RecoveryRollbackObserved) 'applied-state recovery finalizes without repeating the exact mutation'
+
+        Remove-Item -LiteralPath $verifiedApplyResponsePath -Force
+        $finalFailureState = Read-CycFirewallJson `
+            -Path (Join-Path $publicRecoveryExchange 'state.json') `
+            -MaximumBytes 65536 `
+            -Label 'final verification failure state fixture'
+        $finalFailureState.phase = 'applied'
+        Write-CycFirewallAtomicJson -Path (Join-Path $publicRecoveryExchange 'state.json') -Value $finalFailureState
+        Write-CycFirewallAtomicJson -Path $verifiedApplyResponsePath -Value $rollbackFailedApplyReceipt
+        $visibleFailureReceiptHashBeforeFinalFailure = (Get-FileHash -LiteralPath $verifiedApplyResponsePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $script:RecoveryFinalizeObserved = $false
+        $script:RecoveryRollbackObserved = $false
+        $script:RecoveryReapplyActions = @()
+        $originalTestFirewallDesiredState = ${function:Test-CycFirewallDesiredState}
+        try {
+            Set-Item -Path Function:Test-CycFirewallDesiredState -Value {
+                param($Request, [switch]$Final)
+                if ($Final) {
+                    $script:RecoveryFinalizeObserved = $true
+                    throw 'injected-final-verification-failure'
+                }
+                return $true
+            }
+            Assert-ThrowsLike -Pattern 'injected-final-verification-failure' -Message 'an applied state with an old failure receipt compensates a failed final verification' -Action {
+                [void](Invoke-CycFirewallElevatedTransaction `
+                    -BoundRequestPath $publicRecoveryRequestPath `
+                    -RequestHash $publicRecoveryRequestHash `
+                    -HelperHash $publicRecoveryHelperHash `
+                    -RecoveryAction Finalize `
+                    -RecoveryJournalPhase coreApplied `
+                    -RecoveryJournalPath $publicRecoveryJournalPath `
+                    -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+                    -VerifiedHelperPath $publicRecoveryHelper)
+            }
+        } finally {
+            Set-Item -Path Function:Test-CycFirewallDesiredState -Value $originalTestFirewallDesiredState
+        }
+        Assert-True ($script:RecoveryFinalizeObserved -and $script:RecoveryRollbackObserved) 'failed final verification reopens the visible failure receipt and restores the exact snapshot'
+        Assert-True ($script:RecoveryReapplyActions.Count -eq 0) 'failed final verification does not repeat an already-applied mutation'
+        $finalFailureTerminalState = Read-CycFirewallJson `
+            -Path (Join-Path $publicRecoveryExchange 'state.json') `
+            -MaximumBytes 65536 `
+            -Label 'final verification failure terminal state fixture'
+        Assert-True ([string]$finalFailureTerminalState.phase -ceq 'rolledBack') 'failed final verification durably records rolledBack after compensation'
+        $finalFailureReceipt = Read-CycFirewallJson `
+            -Path $verifiedApplyResponsePath `
+            -MaximumBytes 32768 `
+            -Label 'final verification failure receipt fixture'
+        Assert-True ([string]$finalFailureReceipt.result -ceq 'rolledBack' -and [string]$finalFailureReceipt.failureCode -ceq 'helper-failure') 'failed final verification replaces the old failure response with a compensated rollback receipt'
+        Assert-True ((Get-FileHash -LiteralPath $verifiedApplyResponsePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $visibleFailureReceiptHashBeforeFinalFailure) 'failed final verification atomically replaces the still-visible old failure receipt'
+
+        Remove-Item -LiteralPath $verifiedApplyResponsePath -Force
+        Remove-Item -LiteralPath (Join-Path $publicRecoveryExchange 'state.json') -Force
+        $script:RecoveryRollbackObserved = $false
+        $publicRecoveryJournalHash = & $writePublicRecoveryJournal firewallApplied
+        Assert-ThrowsLike -Pattern 'requires persisted helper state' -Message 'firewall-applied recovery never snapshots the already-mutated current rule as original' -Action {
+            [void](Invoke-CycFirewallElevatedTransaction `
+                -BoundRequestPath $publicRecoveryRequestPath `
+                -RequestHash $publicRecoveryRequestHash `
+                -HelperHash $publicRecoveryHelperHash `
+                -RecoveryAction Rollback `
+                -RecoveryJournalPhase firewallApplied `
+                -RecoveryJournalPath $publicRecoveryJournalPath `
+                -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+                -VerifiedHelperPath $publicRecoveryHelper)
+        }
+        Assert-True (-not $script:RecoveryRollbackObserved) 'missing firewall-applied state fails before any rollback mutation'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $publicRecoveryExchange 'response.json'))) 'missing firewall-applied state cannot mint a terminal receipt'
+
+        $rollbackRecoveryState.phase = 'applied'
+        $rollbackRecoveryState.appliedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        Write-CycFirewallAtomicJson -Path (Join-Path $publicRecoveryExchange 'state.json') -Value $rollbackRecoveryState
+        $publicRecoveryJournalHash = & $writePublicRecoveryJournal coreApplied
+        $finalizeRecoveryResult = Invoke-CycFirewallElevatedTransaction `
+            -BoundRequestPath $publicRecoveryRequestPath `
+            -RequestHash $publicRecoveryRequestHash `
+            -HelperHash $publicRecoveryHelperHash `
+            -RecoveryAction Finalize `
+            -RecoveryJournalPhase coreApplied `
+            -RecoveryJournalPath $publicRecoveryJournalPath `
+            -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+            -VerifiedHelperPath $publicRecoveryHelper
+        Assert-True ([string]$finalizeRecoveryResult.result -ceq 'verified') 'an expired applied transaction with a dead helper produces a durable verified receipt'
+        Assert-True $script:RecoveryFinalizeObserved 'dead-helper finalize verifies the final desired firewall state'
+        $finalizeRecoveryState = Read-CycFirewallJson `
+            -Path (Join-Path $publicRecoveryExchange 'state.json') `
+            -MaximumBytes 65536 `
+            -Label 'finalize recovery state fixture'
+        Assert-True ([string]$finalizeRecoveryState.phase -ceq 'verified') 'dead-helper finalize persists the verified terminal state before exit'
+        $finalizeRecoveryState.phase = 'applied'
+        Write-CycFirewallAtomicJson -Path (Join-Path $publicRecoveryExchange 'state.json') -Value $finalizeRecoveryState
+        $publicRecoveryJournalHash = & $writePublicRecoveryJournal prepared
+        Assert-ThrowsLike -Pattern 'does not match the requested recovery action' -Message 'rollback cannot reuse an existing verified response' -Action {
+            [void](Invoke-CycFirewallElevatedTransaction `
+                -BoundRequestPath $publicRecoveryRequestPath `
+                -RequestHash $publicRecoveryRequestHash `
+                -HelperHash $publicRecoveryHelperHash `
+                -RecoveryAction Rollback `
+                -RecoveryJournalPhase prepared `
+                -RecoveryJournalPath $publicRecoveryJournalPath `
+                -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+                -VerifiedHelperPath $publicRecoveryHelper)
+        }
+
+        Remove-Item -LiteralPath (Join-Path $publicRecoveryExchange 'response.json') -Force
+        $staleJournalHash = $publicRecoveryJournalHash
+        Add-Content -LiteralPath $publicRecoveryJournalPath -Value ' '
+        Assert-ThrowsLike -Pattern 'journal changed' -Message 'elevated recovery hashes and parses the exact same coordinator-approved journal bytes' -Action {
+            [void](Invoke-CycFirewallElevatedTransaction `
+                -BoundRequestPath $publicRecoveryRequestPath `
+                -RequestHash $publicRecoveryRequestHash `
+                -HelperHash $publicRecoveryHelperHash `
+                -RecoveryAction Rollback `
+                -RecoveryJournalPhase prepared `
+                -RecoveryJournalPath $publicRecoveryJournalPath `
+                -ExpectedRecoveryJournalSha256 $staleJournalHash `
+                -VerifiedHelperPath $publicRecoveryHelper)
+        }
+
+        $publicRecoveryJournalHash = & $writePublicRecoveryJournal coreApplied
+        $finalizeRecoveryState.phase = 'applied'
+        Write-CycFirewallAtomicJson -Path (Join-Path $publicRecoveryExchange 'state.json') -Value $finalizeRecoveryState
+        $script:RecoveryRollbackObserved = $false
+        $originalFirewallAtomicWriter = ${function:Write-CycFirewallAtomicJson}
+        $script:CycFirewallAtomicWriterFixture = $originalFirewallAtomicWriter
+        $script:CycFirewallInjectedResponsePath = Resolve-CycFirewallPath (Join-Path $publicRecoveryExchange 'response.json')
+        try {
+            Set-Item -Path Function:Write-CycFirewallAtomicJson -Value {
+                param(
+                    [Parameter(Mandatory = $true)][string]$Path,
+                    [Parameter(Mandatory = $true)]$Value,
+                    [int]$Depth = 10
+                )
+                & $script:CycFirewallAtomicWriterFixture -Path $Path -Value $Value -Depth $Depth
+                if ([string]::Equals(
+                    (Resolve-CycFirewallPath $Path),
+                    $script:CycFirewallInjectedResponsePath,
+                    [System.StringComparison]::OrdinalIgnoreCase
+                )) {
+                    throw 'injected-after-response-commit'
+                }
+            }
+            Assert-ThrowsLike -Pattern 'injected-after-response-commit' -Message 'a post-response exception is surfaced without compensating a committed terminal state' -Action {
+                [void](Invoke-CycFirewallElevatedTransaction `
+                    -BoundRequestPath $publicRecoveryRequestPath `
+                    -RequestHash $publicRecoveryRequestHash `
+                    -HelperHash $publicRecoveryHelperHash `
+                    -RecoveryAction Finalize `
+                    -RecoveryJournalPhase coreApplied `
+                    -RecoveryJournalPath $publicRecoveryJournalPath `
+                    -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+                    -VerifiedHelperPath $publicRecoveryHelper)
+            }
+        } finally {
+            Set-Item -Path Function:Write-CycFirewallAtomicJson -Value $originalFirewallAtomicWriter
+            Remove-Variable -Scope Script -Name CycFirewallAtomicWriterFixture -ErrorAction SilentlyContinue
+            Remove-Variable -Scope Script -Name CycFirewallInjectedResponsePath -ErrorAction SilentlyContinue
+        }
+        $postResponseFailureState = Read-CycFirewallJson `
+            -Path (Join-Path $publicRecoveryExchange 'state.json') `
+            -MaximumBytes 65536 `
+            -Label 'post-response recovery state fixture'
+        Assert-True ([string]$postResponseFailureState.phase -ceq 'verified') 'terminal verified state is durable before the response is published'
+        Assert-True (Test-Path -LiteralPath (Join-Path $publicRecoveryExchange 'response.json') -PathType Leaf) 'response became externally visible before the injected post-commit exception'
+        Assert-True (-not $script:RecoveryRollbackObserved) 'catch never rolls back after terminal state and response publication'
+
+        $publicRecoveryResponsePath = Join-Path $publicRecoveryExchange 'response.json'
+        Remove-Item -LiteralPath $publicRecoveryResponsePath -Force
+        $publicRecoveryRequest.action = 'Remove'
+        $publicRecoveryRequest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $publicRecoveryRequestPath -Encoding UTF8
+        $publicRecoveryRequestHash = (Get-FileHash -LiteralPath $publicRecoveryRequestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $publicRecoveryJournal.action = 'Uninstall'
+        $publicRecoveryJournal.requestSha256 = $publicRecoveryRequestHash
+        $removeRecoveryState = $postResponseFailureState
+        $removeRecoveryState.requestSha256 = $publicRecoveryRequestHash
+        $removeRecoveryState.phase = 'rolledBack'
+        $removeRecoveryState.appliedAtUtc = $null
+        Write-CycFirewallAtomicJson -Path (Join-Path $publicRecoveryExchange 'state.json') -Value $removeRecoveryState
+        $publicRecoveryJournalHash = & $writePublicRecoveryJournal coreApplied
+        $script:RecoveryFinalizeObserved = $false
+        $script:RecoveryRollbackObserved = $false
+        $script:RecoveryReapplyActions = @()
+        $reapplyRemoveResult = Invoke-CycFirewallElevatedTransaction `
+            -BoundRequestPath $publicRecoveryRequestPath `
+            -RequestHash $publicRecoveryRequestHash `
+            -HelperHash $publicRecoveryHelperHash `
+            -RecoveryAction Finalize `
+            -RecoveryJournalPhase coreApplied `
+            -RecoveryJournalPath $publicRecoveryJournalPath `
+            -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+            -VerifiedHelperPath $publicRecoveryHelper
+        Assert-True ([string]$reapplyRemoveResult.result -ceq 'verified') 'core-applied recovery re-applies a Remove request after a durable helper rollback without a response'
+        Assert-True ($script:RecoveryReapplyActions.Count -eq 1 -and [string]$script:RecoveryReapplyActions[0] -ceq 'Remove') 'core-applied Remove recovery executes the exact bound desired-state mutation once'
+        Assert-True ($script:RecoveryFinalizeObserved -and -not $script:RecoveryRollbackObserved) 'successful core-applied Remove recovery verifies without snapshot restoration'
+        $reapplyRemoveState = Read-CycFirewallJson `
+            -Path (Join-Path $publicRecoveryExchange 'state.json') `
+            -MaximumBytes 65536 `
+            -Label 're-applied Remove recovery state fixture'
+        Assert-True ([string]$reapplyRemoveState.phase -ceq 'verified') 'core-applied Remove recovery durably commits verified state'
+        [void](Assert-CycFirewallReceiptBinding `
+            -Receipt $reapplyRemoveResult `
+            -Request $publicRecoveryRequest `
+            -RequestHash $publicRecoveryRequestHash)
+
+        Remove-Item -LiteralPath $publicRecoveryResponsePath -Force
+        $reapplyRemoveState.phase = 'applying'
+        $reapplyRemoveState.appliedAtUtc = $null
+        Write-CycFirewallAtomicJson -Path (Join-Path $publicRecoveryExchange 'state.json') -Value $reapplyRemoveState
+        $script:RecoveryFinalizeObserved = $false
+        $script:RecoveryRollbackObserved = $false
+        $script:RecoveryReapplyActions = @()
+        $reapplyApplyingRemoveResult = Invoke-CycFirewallElevatedTransaction `
+            -BoundRequestPath $publicRecoveryRequestPath `
+            -RequestHash $publicRecoveryRequestHash `
+            -HelperHash $publicRecoveryHelperHash `
+            -RecoveryAction Finalize `
+            -RecoveryJournalPhase coreApplied `
+            -RecoveryJournalPath $publicRecoveryJournalPath `
+            -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+            -VerifiedHelperPath $publicRecoveryHelper
+        Assert-True ([string]$reapplyApplyingRemoveResult.result -ceq 'verified') 'core-applied recovery resumes a Remove request from a durable applying state'
+        Assert-True ($script:RecoveryReapplyActions.Count -eq 1 -and [string]$script:RecoveryReapplyActions[0] -ceq 'Remove') 'core-applied applying-state recovery replays the exact Remove mutation once'
+        Assert-True ($script:RecoveryFinalizeObserved -and -not $script:RecoveryRollbackObserved) 'successful applying-state Remove recovery verifies without snapshot restoration'
+
+        Remove-Item -LiteralPath $publicRecoveryResponsePath -Force
+        $rollbackFailedRemoveState = Read-CycFirewallJson `
+            -Path (Join-Path $publicRecoveryExchange 'state.json') `
+            -MaximumBytes 65536 `
+            -Label 'rollbackFailed Remove recovery state fixture'
+        $rollbackFailedRemoveState.phase = 'rollbackFailed'
+        Write-CycFirewallAtomicJson -Path (Join-Path $publicRecoveryExchange 'state.json') -Value $rollbackFailedRemoveState
+        $rollbackFailedRemoveReceipt = New-CycFirewallReceipt `
+            -Request $publicRecoveryRequest `
+            -RequestHash $publicRecoveryRequestHash `
+            -Result rollbackFailed `
+            -FailureCode 'helper-and-rollback-failure'
+        Write-CycFirewallAtomicJson -Path $publicRecoveryResponsePath -Value $rollbackFailedRemoveReceipt
+        $rollbackFailedRemoveResponseHash = (Get-FileHash -LiteralPath $publicRecoveryResponsePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $script:RecoveryFinalizeObserved = $false
+        $script:RecoveryRollbackObserved = $false
+        $script:RecoveryReapplyActions = @()
+        $rollbackFailedRemoveResult = Invoke-CycFirewallElevatedTransaction `
+            -BoundRequestPath $publicRecoveryRequestPath `
+            -RequestHash $publicRecoveryRequestHash `
+            -HelperHash $publicRecoveryHelperHash `
+            -RecoveryAction Finalize `
+            -RecoveryJournalPhase coreApplied `
+            -RecoveryJournalPath $publicRecoveryJournalPath `
+            -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+            -VerifiedHelperPath $publicRecoveryHelper
+        Assert-True ([string]$rollbackFailedRemoveResult.result -ceq 'verified') 'core-applied Remove recovery supersedes an exact rollbackFailed response after converging desired state'
+        Assert-True ($script:RecoveryReapplyActions.Count -eq 1 -and [string]$script:RecoveryReapplyActions[0] -ceq 'Remove') 'rollbackFailed Remove response recovery executes the exact mutation once'
+        Assert-True ($script:RecoveryFinalizeObserved -and -not $script:RecoveryRollbackObserved) 'successful rollbackFailed Remove response recovery verifies without snapshot restoration'
+        Assert-True ((Get-FileHash -LiteralPath $publicRecoveryResponsePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $rollbackFailedRemoveResponseHash) 'verified Remove recovery atomically replaces the old rollbackFailed receipt bytes'
+        [void](Assert-CycFirewallReceiptBinding `
+            -Receipt $rollbackFailedRemoveResult `
+            -Request $publicRecoveryRequest `
+            -RequestHash $publicRecoveryRequestHash)
+
+        Write-CycFirewallAtomicJson -Path $publicRecoveryResponsePath -Value $rollbackFailedRemoveReceipt
+        $visibleFailureReceiptHashBeforeInjectedReapply = (Get-FileHash -LiteralPath $publicRecoveryResponsePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $reapplyFailureState = Read-CycFirewallJson `
+            -Path (Join-Path $publicRecoveryExchange 'state.json') `
+            -MaximumBytes 65536 `
+            -Label 'reapply failure recovery state fixture'
+        $reapplyFailureState.phase = 'rolledBack'
+        $reapplyFailureState.appliedAtUtc = $null
+        Write-CycFirewallAtomicJson -Path (Join-Path $publicRecoveryExchange 'state.json') -Value $reapplyFailureState
+        $script:RecoveryFinalizeObserved = $false
+        $script:RecoveryRollbackObserved = $false
+        $script:RecoveryReapplyActions = @()
+        $originalSetExactFirewallDesiredState = ${function:Set-CycExactFirewallDesiredState}
+        try {
+            Set-Item -Path Function:Set-CycExactFirewallDesiredState -Value {
+                param($Request)
+                $script:RecoveryReapplyActions += [string]$Request.action
+                throw 'injected-reapply-failure-after-mutation'
+            }
+            Assert-ThrowsLike -Pattern 'injected-reapply-failure-after-mutation' -Message 'a failed core-applied reapply surfaces its original failure after compensation' -Action {
+                [void](Invoke-CycFirewallElevatedTransaction `
+                    -BoundRequestPath $publicRecoveryRequestPath `
+                    -RequestHash $publicRecoveryRequestHash `
+                    -HelperHash $publicRecoveryHelperHash `
+                    -RecoveryAction Finalize `
+                    -RecoveryJournalPhase coreApplied `
+                    -RecoveryJournalPath $publicRecoveryJournalPath `
+                    -ExpectedRecoveryJournalSha256 $publicRecoveryJournalHash `
+                    -VerifiedHelperPath $publicRecoveryHelper)
+            }
+        } finally {
+            Set-Item -Path Function:Set-CycExactFirewallDesiredState -Value $originalSetExactFirewallDesiredState
+        }
+        Assert-True ($script:RecoveryReapplyActions.Count -eq 1 -and [string]$script:RecoveryReapplyActions[0] -ceq 'Remove') 'failed reapply attempted only the exact bound Remove mutation'
+        Assert-True $script:RecoveryRollbackObserved 'failed reapply restores the exact pre-transaction firewall snapshot'
+        $failedReapplyState = Read-CycFirewallJson `
+            -Path (Join-Path $publicRecoveryExchange 'state.json') `
+            -MaximumBytes 65536 `
+            -Label 'failed reapply terminal state fixture'
+        Assert-True ([string]$failedReapplyState.phase -ceq 'rolledBack') 'failed reapply durably records rolledBack state after compensation'
+        $failedReapplyReceipt = Read-CycFirewallJson `
+            -Path $publicRecoveryResponsePath `
+            -MaximumBytes 32768 `
+            -Label 'failed reapply receipt fixture'
+        Assert-True ([string]$failedReapplyReceipt.result -ceq 'rolledBack' -and [string]$failedReapplyReceipt.failureCode -ceq 'helper-failure') 'failed reapply publishes the exact helper-failure rollback receipt'
+        Assert-True ((Get-FileHash -LiteralPath $publicRecoveryResponsePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $visibleFailureReceiptHashBeforeInjectedReapply) 'failed reapply atomically replaces the still-visible old rollbackFailed receipt after compensation'
+        [void](Assert-CycFirewallReceiptBinding `
+            -Receipt $failedReapplyReceipt `
+            -Request $publicRecoveryRequest `
+            -RequestHash $publicRecoveryRequestHash)
+    } finally {
+        if (Test-Path -LiteralPath $publicRecoveryExchange) {
+            Remove-Item -LiteralPath $publicRecoveryExchange -Recurse -Force
         }
     }
-    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $pendingManifest -RequestedAction Install) -eq 'Commit') 'response loss resumes at receipt commit without another firewall mutation'
+
+    $resumeBinding = Get-CycInitiatorBinding
+    $resumeRoots = [PSCustomObject]@{
+        installRoot = Resolve-CycLifecyclePath $install
+        dataRoot = Resolve-CycLifecyclePath $data
+    }
+    $resumePrivateReceiptRoot = Join-Path $resumeRoots.dataRoot '.installer\firewall-receipts'
+    $resumeExchangeRoot = Join-Path `
+        (Join-Path `
+            (Join-Path ([Environment]::GetFolderPath('CommonDocuments')) 'ClusterYourCodex-Firewall') `
+            ([string]$resumeBinding.sid).Replace('-', '_')) `
+        $transactionId
+    $resumeProgram = Join-Path $resumeRoots.installRoot 'cyc-controller.exe'
+    $resumeProgramSha256 = ('b' * 64)
+    $resumeReceiptSha256 = ('d' * 64)
+    $resumeRuleName = 'ClusterYourCodex.ManagedWorker.' + ([string]$resumeBinding.sid).Replace('-', '_')
+    $resumeJournal = [PSCustomObject][ordered]@{
+        schemaVersion = 'cyc.dev/windows-external-lifecycle/v1'
+        transactionId = $transactionId
+        action = 'Install'
+        phase = 'coreApplied'
+        initiatorSid = [string]$resumeBinding.sid
+        initiatorProfile = [string]$resumeBinding.profile
+        initiatorLocalAppData = [string]$resumeBinding.localAppData
+        installRoot = [string]$resumeRoots.installRoot
+        dataRoot = [string]$resumeRoots.dataRoot
+        exchangeRoot = $resumeExchangeRoot
+        requestPath = Join-Path $resumeExchangeRoot 'request.json'
+        requestSha256 = $requestHash
+        helperSha256 = ('e' * 64)
+        privateReceiptPath = Join-Path $resumePrivateReceiptRoot ($transactionId + '.json')
+        packageManifestSha256 = ('c' * 64)
+        updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+    }
+    $resumeReceipt = [PSCustomObject][ordered]@{
+        schemaVersion = 'cyc.dev/windows-firewall-receipt/v1'
+        transactionId = $transactionId
+        requestSha256 = $requestHash
+        action = 'Apply'
+        result = 'verified'
+        failureCode = $null
+        initiatorSid = [string]$resumeBinding.sid
+        initiatorProfile = [string]$resumeBinding.profile
+        initiatorLocalAppData = [string]$resumeBinding.localAppData
+        ruleName = $resumeRuleName
+        program = $resumeProgram
+        programSha256 = $resumeProgramSha256
+        port = 47832
+        verifiedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+    }
+    $pendingManifest = [PSCustomObject][ordered]@{
+        schemaVersion = 'cyc.dev/windows-install-manifest/v1'
+        installRoot = [string]$resumeRoots.installRoot
+        dataRoot = [string]$resumeRoots.dataRoot
+        initiator = [PSCustomObject][ordered]@{
+            sid = [string]$resumeBinding.sid
+            profile = [string]$resumeBinding.profile
+            localAppData = [string]$resumeBinding.localAppData
+        }
+        coreCommit = [PSCustomObject][ordered]@{
+            schemaVersion = 'cyc.dev/windows-core-commit/v1'
+            action = 'Install'
+            state = 'committed'
+            transactionId = $transactionId
+            requestSha256 = $requestHash
+            committedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        }
+        files = @([PSCustomObject][ordered]@{
+            relativePath = 'cyc-controller.exe'
+            sha256 = $resumeProgramSha256
+        })
+        managedWorker = [PSCustomObject][ordered]@{
+            firewall = [PSCustomObject][ordered]@{
+                enabled = $true
+                lifecycle = 'external-elevated-helper'
+                transactionId = $transactionId
+                requestSha256 = $requestHash
+                receiptSha256 = $null
+                state = 'pending'
+                name = $resumeRuleName
+                program = $resumeProgram
+                port = 47832
+                appliedAtUtc = $null
+            }
+        }
+    }
+    $resumeRequest = [PSCustomObject][ordered]@{
+        schemaVersion = 'cyc.dev/windows-firewall-request/v1'
+        transactionId = $transactionId
+        requestNonce = ('9' * 64)
+        action = 'Apply'
+        createdAtUtc = [DateTimeOffset]::UtcNow.AddMinutes(-2).ToString('o')
+        deadlineUtc = [DateTimeOffset]::UtcNow.AddMinutes(10).ToString('o')
+        initiatorSid = [string]$resumeBinding.sid
+        initiatorProfile = [string]$resumeBinding.profile
+        initiatorLocalAppData = [string]$resumeBinding.localAppData
+        installRoot = [string]$resumeRoots.installRoot
+        program = $resumeProgram
+        programSha256 = $resumeProgramSha256
+        port = 47832
+        ruleName = $resumeRuleName
+        displayName = 'ClusterYourCodex Managed Worker'
+        group = 'ClusterYourCodex'
+        ruleDescription = 'ClusterYourCodex owned managed-worker TLS listener'
+        remoteAddress = 'LocalSubnet'
+        exchangeRoot = $resumeExchangeRoot
+        packageManifestSha256 = [string]$resumeJournal.packageManifestSha256
+        packageExecutable = $lifecycleScript
+        helperAuthenticodeRequired = $false
+    }
+
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $null -Receipt $null -Manifest $null -RequestedAction Install) -eq 'Start') 'an installation without a lifecycle journal starts a new transaction'
+    [void](Assert-CycLifecycleJournal `
+        -Journal $resumeJournal `
+        -Binding $resumeBinding `
+        -Roots $resumeRoots `
+        -PrivateReceiptRoot $resumePrivateReceiptRoot)
+    Assert-True (Test-CycFirewallRequestJournalBinding -Request $resumeRequest -Journal $resumeJournal) 'recovered request binds to the exact lifecycle journal'
+    $resumeJournal.phase = 'firewallApplied'
+    Assert-True (Test-CycLifecycleCoreCommitAfterImage -Journal $resumeJournal -Manifest $pendingManifest -Request $resumeRequest) 'firewallApplied Install promotes only from the exact committed-core pending-firewall manifest after-image'
+    $pendingManifest.coreCommit.state = 'pending'
+    $pendingManifest.coreCommit.committedAtUtc = $null
+    Assert-True (-not (Test-CycLifecycleCoreCommitAfterImage -Journal $resumeJournal -Manifest $pendingManifest -Request $resumeRequest)) 'a provisional manifest written before runtime readiness cannot prove core commit'
+    $pendingManifest.coreCommit.state = 'committed'
+    $pendingManifest.coreCommit.committedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+    $pendingManifest.coreCommit.requestSha256 = ('2' * 64)
+    Assert-True (-not (Test-CycLifecycleCoreCommitAfterImage -Journal $resumeJournal -Manifest $pendingManifest -Request $resumeRequest)) 'core commit marker must bind to the exact immutable request'
+    $pendingManifest.coreCommit.requestSha256 = $requestHash
+    $pendingManifest.files[0].sha256 = ('1' * 64)
+    Assert-True (-not (Test-CycLifecycleCoreCommitAfterImage -Journal $resumeJournal -Manifest $pendingManifest -Request $resumeRequest)) 'pending manifest with a different controller digest cannot prove core commit'
+    $pendingManifest.files[0].sha256 = $resumeProgramSha256
+    $resumeJournal.action = 'Uninstall'
+    $resumeRequest.action = 'Remove'
+    Assert-True (Test-CycLifecycleCoreCommitAfterImage -Journal $resumeJournal -Manifest $null -Request $resumeRequest) 'firewallApplied Uninstall promotes when the exact Remove request has an absent manifest after-image'
+    Assert-True (-not (Test-CycLifecycleCoreCommitAfterImage -Journal $resumeJournal -Manifest $pendingManifest -Request $resumeRequest)) 'Uninstall with a surviving manifest cannot prove core commit'
+    $resumeJournal.action = 'Install'
+    $resumeJournal.phase = 'coreApplied'
+    $resumeRequest.action = 'Apply'
+    $receiptPublishRoot = Join-Path $testRoot 'atomic-firewall-receipt'
+    [void](New-Item -ItemType Directory -Path $receiptPublishRoot -Force)
+    $receiptPublishSource = Join-Path $receiptPublishRoot 'response.json'
+    $receiptPublishDestination = Join-Path $receiptPublishRoot 'durable.json'
+    [System.IO.File]::WriteAllText(
+        $receiptPublishSource,
+        (($resumeReceipt | ConvertTo-Json -Depth 8 -Compress) + "`n"),
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+    [System.IO.File]::WriteAllText($receiptPublishDestination, '{', (New-Object System.Text.UTF8Encoding($false)))
+    $publishedFixtureReceipt = Publish-CycLifecycleReceiptAtomic `
+        -SourcePath $receiptPublishSource `
+        -DestinationPath $receiptPublishDestination `
+        -Request $resumeRequest `
+        -RequestHash $requestHash
+    Assert-True ([string]$publishedFixtureReceipt.receipt.result -ceq 'verified') 'atomic receipt publication replaces a truncated private cache from exact exchange evidence'
+    Assert-True ([string]$publishedFixtureReceipt.sha256 -ceq ((Get-FileHash -LiteralPath $receiptPublishDestination -Algorithm SHA256).Hash.ToLowerInvariant())) 'atomic receipt publication reports the digest of the exact committed bytes'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $pendingManifest -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Install) -eq 'Commit') 'response loss resumes at receipt commit without another firewall mutation'
+
     $pendingManifest.managedWorker.firewall.state = 'applied'
-    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $pendingManifest -RequestedAction Install) -eq 'Complete') 'repeated install after committed response is idempotent'
+    $pendingManifest.managedWorker.firewall.receiptSha256 = $resumeReceiptSha256
+    $pendingManifest.managedWorker.firewall.appliedAtUtc = [string]$resumeReceipt.verifiedAtUtc
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $pendingManifest -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Install) -eq 'Complete') 'a committed in-progress transaction converges without repeating firewall or core work'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $pendingManifest -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Repair) -eq 'Reject') 'an in-progress transaction cannot be replaced by a different lifecycle action'
+    $pendingManifest.managedWorker.firewall.receiptSha256 = 'not-a-digest'
+    Assert-True (-not (Test-CycAppliedFirewallManifestBinding -Manifest $pendingManifest -Journal $resumeJournal -Receipt $resumeReceipt -ReceiptSha256 'not-a-digest')) 'applied manifest binding rejects equal but malformed receipt digests'
+    $pendingManifest.managedWorker.firewall.receiptSha256 = $resumeReceiptSha256.ToUpperInvariant()
+    Assert-True (-not (Test-CycAppliedFirewallManifestBinding -Manifest $pendingManifest -Journal $resumeJournal -Receipt $resumeReceipt -ReceiptSha256 $resumeReceiptSha256.ToUpperInvariant())) 'applied manifest binding rejects uppercase receipt digests'
+    $pendingManifest.managedWorker.firewall.receiptSha256 = $resumeReceiptSha256
+    $pendingManifest.managedWorker.firewall.appliedAtUtc = [DateTimeOffset]::UtcNow.AddMinutes(1).ToString('o')
+    Assert-True (-not (Test-CycAppliedFirewallManifestBinding -Manifest $pendingManifest -Journal $resumeJournal -Receipt $resumeReceipt -ReceiptSha256 $resumeReceiptSha256)) 'applied manifest binding requires the receipt verification timestamp'
+    $pendingManifest.managedWorker.firewall.appliedAtUtc = [string]$resumeReceipt.verifiedAtUtc
+    $resumeReceipt.failureCode = 'unexpected-success-failure'
+    Assert-True (-not (Test-CycFirewallReceiptJournalBinding -Receipt $resumeReceipt -Journal $resumeJournal)) 'verified receipt binding rejects a non-null failure code'
+    $resumeReceipt.failureCode = $null
+    $resumeReceipt.verifiedAtUtc = 'not-a-timestamp'
+    Assert-True (-not (Test-CycFirewallReceiptJournalBinding -Receipt $resumeReceipt -Journal $resumeJournal)) 'receipt binding rejects a malformed verification timestamp'
+    $resumeReceipt.verifiedAtUtc = [string]$pendingManifest.managedWorker.firewall.appliedAtUtc
+
+    $resumeJournal.phase = 'complete'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $pendingManifest -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Repair) -eq 'RetireThenStart') 'completed Install permits a new Repair transaction'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $pendingManifest -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Install) -eq 'RetireThenStart') 'completed Install permits a distinct repeated Install transaction'
+    $resumeReceipt.requestSha256 = ('f' * 64)
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $pendingManifest -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Repair) -eq 'Reject') 'cross-action restart rejects a receipt not bound to the completed transaction'
+    $resumeReceipt.requestSha256 = $requestHash
+    $pendingManifest.managedWorker.firewall.receiptSha256 = ('a' * 64)
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $pendingManifest -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Repair) -eq 'Reject') 'completed transaction rejects a manifest bound to a different receipt digest'
+    $pendingManifest.managedWorker.firewall.receiptSha256 = $resumeReceiptSha256
+    $pendingManifest.managedWorker.firewall.enabled = 'false'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $pendingManifest -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Repair) -eq 'Reject') 'firewall manifest requires a real true Boolean instead of a truthy string'
+    $pendingManifest.managedWorker.firewall.enabled = $true
+
+    $resumeJournal.action = 'Repair'
+    $pendingManifest.coreCommit.action = 'Repair'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $pendingManifest -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Uninstall) -eq 'RetireThenStart') 'completed Repair permits a new Uninstall transaction'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $pendingManifest -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Repair) -eq 'RetireThenStart') 'completed Repair permits a distinct repeated Repair transaction'
+
+    $resumeJournal.action = 'Uninstall'
+    $resumeReceipt.action = 'Remove'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $null -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Install) -eq 'RetireThenStart') 'completed Uninstall without an installed manifest permits a new Install transaction'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $null -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Uninstall) -eq 'RetireThenStart') 'completed Uninstall can be retired before an idempotent repeated Uninstall'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $pendingManifest -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Install) -eq 'Reject') 'completed Uninstall with a surviving installed manifest fails closed'
+
+    $resumeJournal.phase = 'coreApplied'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $null -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Uninstall) -eq 'Complete') 'in-progress Uninstall with a verified Remove receipt and no manifest converges'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $pendingManifest -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Uninstall) -eq 'Reject') 'in-progress Uninstall refuses completion while the manifest survives'
+    $resumeJournal.action = 'Install'
+    $pendingManifest.coreCommit.action = 'Install'
+    $resumeReceipt.action = 'Apply'
+    $resumeReceipt.result = 'rollbackFailed'
+    $resumeReceipt.failureCode = 'helper-and-rollback-failure'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $null -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Install) -eq 'Resume') 'exact coreApplied rollbackFailed evidence resumes finalization instead of deadlocking'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $null -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Repair) -eq 'Reject') 'rollbackFailed recovery remains bound to the exact lifecycle action'
+    $resumeJournal.phase = 'firewallApplied'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $null -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Install) -eq 'Resume') 'firewall-applied rollbackFailed evidence resumes exact pre-core snapshot rollback'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $null -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Repair) -eq 'Reject') 'pre-core rollbackFailed recovery cannot cross lifecycle actions'
+    $resumeJournal.phase = 'prepared'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $null -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Install) -eq 'Resume') 'prepared rollbackFailed evidence resumes exact snapshot rollback'
+    $resumeJournal.phase = 'coreApplied'
+    $resumeReceipt.result = 'rolledBack'
+    $resumeReceipt.failureCode = 'coordinator-cancelled-or-timed-out'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $null -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Install) -eq 'RetireAbortedThenStart') 'an exactly bound rolledBack transaction can be retired before retry'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $null -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Uninstall) -eq 'RetireAbortedThenStart') 'an aborted Install transaction can retire before cleanup Uninstall'
+    $resumeJournal.action = 'Repair'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $null -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Uninstall) -eq 'RetireAbortedThenStart') 'an aborted Repair transaction can retire before cleanup Uninstall'
+    $resumeJournal.action = 'Uninstall'
+    $resumeRequest.action = 'Remove'
+    $resumeReceipt.action = 'Remove'
+    $rolledBackUninstallRetry = Get-CycRolledBackUninstallRetryEvidence `
+        -Journal $resumeJournal `
+        -Receipt $resumeReceipt `
+        -Manifest $null `
+        -Request $resumeRequest `
+        -RequestedAction Uninstall
+    Assert-True ($null -ne $rolledBackUninstallRetry) 'rolled-back Uninstall with an absent manifest retains exact evidence for a second Remove transaction'
+    Assert-True ([string]$rolledBackUninstallRetry.programSha256 -ceq $resumeProgramSha256) 'rolled-back Uninstall retry preserves the request-bound controller digest'
+    Assert-True ([string]$rolledBackUninstallRetry.predecessorTransactionId -ceq [string]$resumeJournal.transactionId) 'rolled-back Uninstall retry preserves the exact predecessor transaction identity'
+    Assert-True ([string]$rolledBackUninstallRetry.predecessorRequestSha256 -ceq [string]$resumeJournal.requestSha256) 'rolled-back Uninstall retry preserves the exact predecessor request digest'
+    Assert-True ($null -eq (Get-CycRolledBackUninstallRetryEvidence -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $pendingManifest -Request $resumeRequest -RequestedAction Uninstall)) 'a surviving manifest does not use the absent-manifest firewall retry path'
+    Assert-True ($null -eq (Get-CycRolledBackUninstallRetryEvidence -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $null -Request $resumeRequest -RequestedAction Install)) 'rolled-back Uninstall retry evidence is consumed only by a repeated Uninstall'
+
+    # Integration regression for the second orphan Remove: a prepared
+    # Uninstall with no manifest and an exact rollbackFailed receipt first
+    # resumes snapshot rollback.  Once recovery atomically publishes
+    # rolledBack, completion must retain a durable predecessor tombstone until
+    # a successor Remove journal replaces it by compare-and-swap.
+    $orphanRetryRoot = Join-Path $testRoot 'prepared-rollbackfailed-orphan-remove'
+    [void](New-Item -ItemType Directory -Path $orphanRetryRoot -Force)
+    $orphanRetryJournalPath = Join-Path $orphanRetryRoot 'firewall-lifecycle.json'
+    $orphanRetryRequestPath = Join-Path $orphanRetryRoot 'request.json'
+    $orphanRetryReceiptPath = Join-Path $orphanRetryRoot 'receipt.json'
+    $orphanRetryRequest = Convert-CycPackagingJson ($resumeRequest | ConvertTo-Json -Depth 12)
+    $orphanRetryRequest.action = 'Remove'
+    $orphanRetryRequest.exchangeRoot = $orphanRetryRoot
+    Write-CycLifecycleAtomicJson -Path $orphanRetryRequestPath -Value $orphanRetryRequest
+    $orphanRetryRequestSha256 = Get-CycLifecycleSha256 -Path $orphanRetryRequestPath
+    $orphanRetryJournal = Convert-CycPackagingJson ($resumeJournal | ConvertTo-Json -Depth 12)
+    $orphanRetryJournal.action = 'Uninstall'
+    $orphanRetryJournal.phase = 'prepared'
+    $orphanRetryJournal.exchangeRoot = $orphanRetryRoot
+    $orphanRetryJournal.requestPath = $orphanRetryRequestPath
+    $orphanRetryJournal.requestSha256 = $orphanRetryRequestSha256
+    $orphanRetryJournal.privateReceiptPath = $orphanRetryReceiptPath
+    $orphanRetryJournal.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+    Write-CycLifecycleAtomicJson -Path $orphanRetryJournalPath -Value $orphanRetryJournal
+    $orphanRollbackFailedReceipt = New-CycFirewallReceipt `
+        -Request $orphanRetryRequest `
+        -RequestHash $orphanRetryRequestSha256 `
+        -Result rollbackFailed `
+        -FailureCode 'helper-and-rollback-failure'
+    Write-CycLifecycleAtomicJson -Path $orphanRetryReceiptPath -Value $orphanRollbackFailedReceipt
+    $orphanRollbackFailedReceiptSha256 = Get-CycLifecycleSha256 -Path $orphanRetryReceiptPath
+    Assert-True ((Get-CycFirewallResumeDecision `
+                -Journal $orphanRetryJournal `
+                -Receipt $orphanRollbackFailedReceipt `
+                -Manifest $null `
+                -ReceiptSha256 $orphanRollbackFailedReceiptSha256 `
+                -RequestedAction Uninstall) -eq 'Resume') 'prepared absent-manifest Remove with rollbackFailed evidence resumes exact pre-core rollback'
+
+    $orphanRecoveredReceipt = New-CycFirewallReceipt `
+        -Request $orphanRetryRequest `
+        -RequestHash $orphanRetryRequestSha256 `
+        -Result rolledBack `
+        -FailureCode 'coordinator-cancelled-or-timed-out'
+    Write-CycLifecycleAtomicJson -Path $orphanRetryReceiptPath -Value $orphanRecoveredReceipt
+    Assert-True (Test-CycFirewallRequestJournalBinding -Request $orphanRetryRequest -Journal $orphanRetryJournal) 'prepared orphan retry request remains exactly bound to its Uninstall journal'
+    Assert-True (Test-CycFirewallReceiptJournalBinding -Receipt $orphanRecoveredReceipt -Journal $orphanRetryJournal) 'published rolledBack recovery receipt remains exactly bound to its Uninstall journal'
+    $orphanRetryCompletion = Complete-CycPreCoreFirewallRecovery `
+        -Journal $orphanRetryJournal `
+        -Receipt $orphanRecoveredReceipt `
+        -Manifest $null `
+        -Request $orphanRetryRequest `
+        -RequestedAction Uninstall `
+        -JournalPath $orphanRetryJournalPath
+    Assert-True ($null -ne $orphanRetryCompletion.retryEvidence) 'pre-core rolledBack recovery retains immutable orphan Remove retry evidence'
+    Assert-True ([string]$orphanRetryCompletion.replaceCompletedTransactionId -ceq [string]$orphanRetryJournal.transactionId) 'pre-core recovery binds successor CAS to the exact predecessor transaction'
+    Assert-True ([string]$orphanRetryCompletion.replaceCompletedRequestSha256 -ceq $orphanRetryRequestSha256) 'pre-core recovery binds successor CAS to the exact predecessor request bytes'
+    $orphanRetryTombstone = Read-CycLifecycleJson -Path $orphanRetryJournalPath -MaximumBytes 65536 -Label 'rolled-back Uninstall retry tombstone'
+    Assert-True ([string]$orphanRetryTombstone.phase -ceq 'complete') 'pre-core rolledBack recovery durably commits a completed predecessor tombstone'
+    $orphanRetryAfterCrashReceipt = Read-CycLifecycleJson -Path $orphanRetryReceiptPath -MaximumBytes 32768 -Label 'rolled-back Uninstall retry receipt'
+    $orphanRetryAfterCrashRequest = Read-CycLifecycleJson -Path $orphanRetryRequestPath -MaximumBytes 32768 -Label 'rolled-back Uninstall retry request'
+    Assert-True ($null -ne (Get-CycRolledBackUninstallRetryEvidence -Journal $orphanRetryTombstone -Receipt $orphanRetryAfterCrashReceipt -Manifest $null -Request $orphanRetryAfterCrashRequest -RequestedAction Uninstall)) 'a crash before successor publication reconstructs retry evidence from the retained exact request and receipt'
+    $orphanSuccessor = Convert-CycPackagingJson ($orphanRetryTombstone | ConvertTo-Json -Depth 12)
+    $orphanSuccessor.transactionId = [Guid]::NewGuid().ToString('N')
+    $orphanSuccessor.requestSha256 = ('7' * 64)
+    $orphanSuccessor.phase = 'prepared'
+    Write-CycLifecycleActiveJournal `
+        -Path $orphanRetryJournalPath `
+        -Value $orphanSuccessor `
+        -ExpectedCompletedTransactionId ([string]$orphanRetryCompletion.replaceCompletedTransactionId) `
+        -ExpectedCompletedRequestSha256 ([string]$orphanRetryCompletion.replaceCompletedRequestSha256) `
+        -ExpectedCompletedAction ([string]$orphanRetryCompletion.replaceCompletedAction)
+    $orphanPublished = Read-CycLifecycleJson -Path $orphanRetryJournalPath -MaximumBytes 65536 -Label 'rolled-back Uninstall successor journal'
+    Assert-True ([string]$orphanPublished.transactionId -ceq [string]$orphanSuccessor.transactionId) 'successor Remove journal atomically replaces the retained rolled-back Uninstall tombstone'
+
+    # A firewallApplied Remove plus absent manifest is the exact durable core
+    # after-image.  rollbackFailed must not force pre-core retirement here: the
+    # coordinator promotes to coreApplied and accepts only a verified Remove.
+    $promotedRemoveRoot = Join-Path $testRoot 'firewallapplied-promoted-remove'
+    [void](New-Item -ItemType Directory -Path $promotedRemoveRoot -Force)
+    $promotedRemoveRequestPath = Join-Path $promotedRemoveRoot 'request.json'
+    $promotedRemoveJournalPath = Join-Path $promotedRemoveRoot 'firewall-lifecycle.json'
+    $promotedRemoveRequest = Convert-CycPackagingJson ($resumeRequest | ConvertTo-Json -Depth 12)
+    $promotedRemoveRequest.action = 'Remove'
+    $promotedRemoveRequest.exchangeRoot = $promotedRemoveRoot
+    Write-CycLifecycleAtomicJson -Path $promotedRemoveRequestPath -Value $promotedRemoveRequest
+    $promotedRemoveRequestSha256 = Get-CycLifecycleSha256 -Path $promotedRemoveRequestPath
+    $promotedRemoveJournal = Convert-CycPackagingJson ($resumeJournal | ConvertTo-Json -Depth 12)
+    $promotedRemoveJournal.action = 'Uninstall'
+    $promotedRemoveJournal.phase = 'firewallApplied'
+    $promotedRemoveJournal.exchangeRoot = $promotedRemoveRoot
+    $promotedRemoveJournal.requestPath = $promotedRemoveRequestPath
+    $promotedRemoveJournal.requestSha256 = $promotedRemoveRequestSha256
+    $promotedRemoveJournal.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+    $promotedRollbackFailedReceipt = New-CycFirewallReceipt `
+        -Request $promotedRemoveRequest `
+        -RequestHash $promotedRemoveRequestSha256 `
+        -Result rollbackFailed `
+        -FailureCode 'helper-and-rollback-failure'
+    Assert-True (Test-CycLifecycleCoreCommitAfterImage -Journal $promotedRemoveJournal -Manifest $null -Request $promotedRemoveRequest) 'firewallApplied absent-manifest Remove proves the exact committed Uninstall after-image despite rollbackFailed helper evidence'
+    $promotedRemoveJournal.phase = 'coreApplied'
+    Write-CycLifecycleAtomicJson -Path $promotedRemoveJournalPath -Value $promotedRemoveJournal
+    $persistedPromotedRemove = Read-CycLifecycleJson -Path $promotedRemoveJournalPath -MaximumBytes 65536 -Label 'promoted Remove lifecycle journal'
+    Assert-True ([string]$persistedPromotedRemove.phase -ceq 'coreApplied') 'firewallApplied absent-manifest Remove promotion is durable before helper finalization'
+    $promotedVerifiedReceipt = New-CycFirewallReceipt `
+        -Request $promotedRemoveRequest `
+        -RequestHash $promotedRemoveRequestSha256 `
+        -Result verified
+    Assert-True ([string]$promotedVerifiedReceipt.action -ceq 'Remove') 'promoted Uninstall finalization remains bound to Remove'
+    Assert-True ((Get-CycFirewallResumeDecision `
+                -Journal $persistedPromotedRemove `
+                -Receipt $promotedVerifiedReceipt `
+                -Manifest $null `
+                -ReceiptSha256 ('6' * 64) `
+                -RequestedAction Uninstall) -eq 'Complete') 'promoted coreApplied Uninstall completes only after a verified Remove with no manifest'
+    $resumeJournal.action = 'Repair'
+    $resumeRequest.action = 'Apply'
+    $resumeReceipt.action = 'Apply'
+    $resumeJournal.phase = 'complete'
+    Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $null -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Install) -eq 'RetireAbortedThenStart') 'a crash between rolledBack tombstone write and retirement remains convergent'
+    $resumeJournal.action = 'Install'
+    $resumeJournal.phase = 'coreApplied'
+    $resumeReceipt.result = 'verified'
+    $resumeReceipt.failureCode = $null
+
+    $resumeJournal | Add-Member -NotePropertyName unexpectedField -NotePropertyValue 'reject-me'
+    Assert-ThrowsLike `
+        -Action {
+            [void](Assert-CycLifecycleJournal `
+                -Journal $resumeJournal `
+                -Binding $resumeBinding `
+                -Roots $resumeRoots `
+                -PrivateReceiptRoot $resumePrivateReceiptRoot)
+        } `
+        -Pattern 'unsupported or missing field' `
+        -Message 'lifecycle journal rejects every unsupported field before using persisted paths'
+    $resumeJournal.PSObject.Properties.Remove('unexpectedField')
+
+    $journalCasRoot = Join-Path $testRoot 'lifecycle-journal-cas'
+    [void](New-Item -ItemType Directory -Path $journalCasRoot -Force)
+    $journalCasPath = Join-Path $journalCasRoot 'firewall-lifecycle.json'
+    $resumeJournal.phase = 'complete'
+    Write-CycLifecycleAtomicJson -Path $journalCasPath -Value $resumeJournal
+    $journalCasOriginalHash = Get-CycLifecycleSha256 -Path $journalCasPath
+    $nextJournal = Convert-CycPackagingJson ($resumeJournal | ConvertTo-Json -Depth 12)
+    $nextJournal.transactionId = [Guid]::NewGuid().ToString('N')
+    $nextJournal.requestSha256 = ('9' * 64)
+    $nextJournal.action = 'Repair'
+    $nextJournal.phase = 'prepared'
+    Assert-ThrowsLike `
+        -Action {
+            Write-CycLifecycleActiveJournal `
+                -Path $journalCasPath `
+                -Value $nextJournal `
+                -ExpectedCompletedTransactionId ('0' * 32) `
+                -ExpectedCompletedRequestSha256 $requestHash `
+                -ExpectedCompletedAction Install
+        } `
+        -Pattern 'changed before the next transaction' `
+        -Message 'journal compare-and-swap rejects a stale completed transaction identity'
+    Assert-True ((Get-CycLifecycleSha256 -Path $journalCasPath) -ceq $journalCasOriginalHash) 'failed lifecycle compare-and-swap preserves the previous journal bytes'
+    Write-CycLifecycleActiveJournal `
+        -Path $journalCasPath `
+        -Value $nextJournal `
+        -ExpectedCompletedTransactionId $transactionId `
+        -ExpectedCompletedRequestSha256 $requestHash `
+        -ExpectedCompletedAction Install
+    $writtenNextJournal = Read-CycLifecycleJson -Path $journalCasPath -MaximumBytes 65536 -Label 'CAS test lifecycle journal'
+    Assert-True ([string]$writtenNextJournal.transactionId -ceq [string]$nextJournal.transactionId) 'journal compare-and-swap installs the new active transaction only after the terminal identity matches'
+    Assert-ThrowsLike `
+        -Action {
+            [void](Remove-CycCompletedLifecycleJournal `
+                -Path $journalCasPath `
+                -TransactionId ([string]$nextJournal.transactionId) `
+                -ExpectedAction Repair `
+                -ExpectedRequestSha256 ([string]$nextJournal.requestSha256))
+        } `
+        -Pattern 'not the completed active transaction' `
+        -Message 'an in-progress lifecycle journal cannot be retired'
+    $nextJournal.phase = 'complete'
+    Write-CycLifecycleAtomicJson -Path $journalCasPath -Value $nextJournal
+    $journalCasCompleteHash = Get-CycLifecycleSha256 -Path $journalCasPath
+    Assert-ThrowsLike `
+        -Action {
+            [void](Remove-CycCompletedLifecycleJournal `
+                -Path $journalCasPath `
+                -TransactionId ([string]$nextJournal.transactionId) `
+                -ExpectedAction Repair `
+                -ExpectedRequestSha256 ('8' * 64))
+        } `
+        -Pattern 'not the completed active transaction' `
+        -Message 'completed lifecycle retirement rejects a stale request digest'
+    Assert-True ((Get-CycLifecycleSha256 -Path $journalCasPath) -ceq $journalCasCompleteHash) 'failed completed-journal retirement preserves the terminal journal bytes'
+    Assert-True (Remove-CycCompletedLifecycleJournal `
+        -Path $journalCasPath `
+        -TransactionId ([string]$nextJournal.transactionId) `
+        -ExpectedAction Repair `
+        -ExpectedRequestSha256 ([string]$nextJournal.requestSha256)) 'exact terminal journal identity can be retired'
+    Assert-True (-not (Test-Path -LiteralPath $journalCasPath)) 'completed lifecycle retirement removes only the fixed active journal'
+
+    $heldLifecycleMutex = Enter-CycLifecycleMutex -Sid ([string]$resumeBinding.sid) -TimeoutSeconds 5
+    try {
+        $escapedLifecycleScript = $lifecycleScript.Replace("'", "''")
+        $mutexProbeSource = @"
+`$ErrorActionPreference = 'Stop'
+. '$escapedLifecycleScript' -Action Install
+`$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+try {
+    `$probeMutex = Enter-CycLifecycleMutex -Sid `$sid -TimeoutSeconds 1
+    try { exit 41 } finally { Exit-CycLifecycleMutex -Mutex `$probeMutex }
+} catch {
+    if (`$_.Exception.Message -ceq 'Another ClusterYourCodex install, repair, or uninstall is still active.') { exit 0 }
+    exit 42
+}
+"@
+        $encodedMutexProbe = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($mutexProbeSource))
+        $mutexProbe = Start-Process `
+            -FilePath $windowsPowerShell `
+            -ArgumentList @(
+                '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                '-EncodedCommand', $encodedMutexProbe
+            ) `
+            -WorkingDirectory $testRoot `
+            -WindowStyle Hidden `
+            -Wait `
+            -PassThru
+        Assert-True ($mutexProbe.ExitCode -eq 0) 'a second Windows process cannot enter the same per-SID lifecycle mutex'
+    } finally {
+        Exit-CycLifecycleMutex -Mutex $heldLifecycleMutex
+    }
 
     $wrapper = Get-Content -LiteralPath (Join-Path $preview 'Install-ClusterYourCodex.cmd') -Raw
     Assert-True ($wrapper -match '%~dp0') 'wrapper resolves its own directory'
@@ -1738,6 +3193,55 @@ exit /b !ERRORLEVEL!
     $desktopIntegrationSource = Get-Content -LiteralPath (Join-Path $repoRoot 'apps\desktop\src-tauri\src\integration.rs') -Raw
     Assert-True (([regex]::Matches($lifecycleSource, '(?i)-Verb\s+RunAs')).Count -eq 1) 'coordinator contains exactly one firewall-only elevation site'
     Assert-True ($lifecycleSource -match 'Start-CycFirewallOnlyElevation') 'only the narrow firewall helper crosses UAC'
+    Assert-True ($lifecycleSource -match 'Start-CycFirewallRecoveryElevationIfNeeded') 'dead-helper recovery relaunches only the transaction-bound helper'
+    Assert-True ($lifecycleSource -match 'Test-CycLifecycleHelperLockHeld') 'recovery avoids duplicating a helper that still owns the transaction lock'
+    Assert-True ($lifecycleSource -match 'EncodedCommand[\s\S]{0,80}encodedLoader') 'UAC starts a fixed captured-byte verifier instead of a user-writable helper file'
+    Assert-True ($lifecycleSource -notmatch 'ExecutionPolicy[^\r\n]+-File[^\r\n]+\$HelperPath') 'UAC never directly executes the copied helper through -File'
+    Assert-True ($lifecycleSource -match 'Get-AuthenticodeSignature\s+-Content\s+`?\$helperBytes') 'GA elevation verifies Authenticode over the same captured helper bytes it executes'
+    Assert-True ($lifecycleSource -match '\[ScriptBlock\]::Create\(`?\$helperText\)') 'only digest-verified captured helper text becomes executable'
+    Assert-True ($firewallSource -match "ValidateSet\('Rollback', 'Finalize'\).*RecoveryAction") 'elevated recovery exposes only rollback or finalize actions'
+    $helperProbeStdout = Join-Path $testRoot 'helper-normal-entry.stdout.log'
+    $helperProbeStderr = Join-Path $testRoot 'helper-normal-entry.stderr.log'
+    $helperProbePath64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($firewallScript))
+    $helperProbeMissing64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(
+        (Join-Path $testRoot ('missing-normal-request-' + [Guid]::NewGuid().ToString('N') + '.json'))
+    ))
+    $helperProbeSource = @"
+`$ErrorActionPreference = 'Stop'
+`$helperPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$helperProbePath64'))
+`$missingRequest = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$helperProbeMissing64'))
+`$helperBytes = [IO.File]::ReadAllBytes(`$helperPath)
+`$helperText = (New-Object Text.UTF8Encoding(`$false, `$true)).GetString(`$helperBytes)
+`$hasher = [Security.Cryptography.SHA256]::Create()
+try { `$helperHash = ([BitConverter]::ToString(`$hasher.ComputeHash(`$helperBytes))).Replace('-', '').ToLowerInvariant() }
+finally { `$hasher.Dispose() }
+`$verifiedBlock = [ScriptBlock]::Create(`$helperText)
+& `$verifiedBlock -RequestPath `$missingRequest -ExpectedRequestSha256 ('0' * 64) -ExpectedHelperSha256 `$helperHash -VerifiedHelperPath `$helperPath
+exit 91
+"@
+    $helperProbeEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($helperProbeSource))
+    $helperProbe = Start-Process `
+        -FilePath $windowsPowerShell `
+        -ArgumentList @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-EncodedCommand', $helperProbeEncoded
+        ) `
+        -WorkingDirectory $testRoot `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $helperProbeStdout `
+        -RedirectStandardError $helperProbeStderr `
+        -Wait `
+        -PassThru
+    $helperProbeOutput = ((Get-Content -LiteralPath $helperProbeStdout -Raw -ErrorAction SilentlyContinue) +
+        (Get-Content -LiteralPath $helperProbeStderr -Raw -ErrorAction SilentlyContinue))
+    Assert-True ($helperProbe.ExitCode -eq 1) 'captured helper normal mode reaches its fail-closed administrator/request guard'
+    Assert-True ($helperProbeOutput -notmatch "RecoveryAction[\s\S]+does not belong to the set") 'normal non-recovery helper entry does not bind empty strings through ValidateSet'
+    Assert-True ($firewallSource -match 'AllowExpiredRecovery') 'expired requests are accepted only through the explicit bound recovery path'
+    Assert-True ($firewallSource -match 'Read-CycFirewallDigestBoundJson') 'elevated helper hashes and parses request and journal from one captured byte sequence'
+    Assert-True ($firewallSource -match 'ExpectedRecoveryJournalSha256') 'recovery is bound to the coordinator-approved lifecycle journal digest'
+    Assert-True ($firewallSource -match 'ReapplyThenFinalize') 'core-applied recovery explicitly re-establishes a timed-out or interrupted desired firewall state'
+    Assert-True ($firewallSource -match '\[System\.IO\.File\]::Replace\(') 'firewall state and receipts use native same-volume atomic replacement'
+    Assert-True ($firewallSource -notmatch '(?m)^\s*Move-Item\s+-LiteralPath\s+\$temporary') 'firewall atomic writer does not emulate replacement with non-atomic Move-Item -Force'
     Assert-True ($lifecycleSource -match 'CycMaxInstallManifestBytes\s*=\s*16MB') 'lifecycle coordinator accepts the bounded self-contained install manifest size'
     Assert-True ($desktopIntegrationSource -match 'MAX_INSTALL_MANIFEST:\s*u64\s*=\s*16\s*\*\s*1024\s*\*\s*1024') 'desktop integration accepts the same bounded self-contained install manifest size'
     Assert-True ($lifecycleSource -match 'CYC_SETUP_DIAGNOSTIC_LOG') 'lifecycle writes a harness-bound structured Setup diagnostic'
@@ -1745,6 +3249,19 @@ exit /b !ERRORLEVEL!
     Assert-True ($lifecycleSource -match 'lastStage\s*=\s*\$script:CycLifecycleDiagnosticStage') 'lifecycle diagnostic identifies the last coordinator stage reached'
     Assert-True ($lifecycleSource -match '\$systemPowerShell\s+@Arguments\s+2>\s*\$stderrPath') 'lifecycle preserves bounded bootstrap stderr without Windows PowerShell NativeCommandError promotion'
     Assert-True ($lifecycleSource -match 'InitiatingSid[\s\S]+InitiatingProfile[\s\S]+InitiatingLocalAppData') 'core calls retain the initiating SID/profile binding'
+    Assert-True ($lifecycleSource -match "Global\\ClusterYourCodex\.WindowsLifecycle\.v1\.") 'one global per-SID mutex serializes install, repair, and uninstall across Windows sessions'
+    Assert-True ($lifecycleSource -match 'Write-CycLifecycleActiveJournal') 'a new lifecycle transaction uses compare-and-swap replacement of a verified completed journal'
+    Assert-True ($lifecycleSource -match "return 'RetireThenStart'") 'completed transactions retire before a distinct lifecycle action starts'
+    Assert-True ($lifecycleSource -match "return 'RetireAbortedThenStart'") 'rolled-back transactions retire before any later lifecycle action starts'
+    Assert-True ($lifecycleSource -match 'Test-CycPendingFirewallManifestBinding') 'receipt recovery commits only an exactly bound pending manifest'
+    Assert-True ($lifecycleSource -match 'Test-CycLifecycleCoreCommitAfterImage') 'recovery reconciles the core-commit crash window from an exact request-bound after-image'
+    Assert-True ($lifecycleSource -match "receiptAllowsCorePromotion[\s\S]+rollbackFailed") 'an exact rollbackFailed receipt no longer blocks core after-image promotion'
+    Assert-True ($lifecycleSource -match 'PreviousSha256') 'rollbackFailed recovery waits for atomic response replacement rather than stale filename existence'
+    Assert-True ($lifecycleSource -match 'Get-CycRolledBackUninstallRetryEvidence') 'a rolled-back Uninstall with an absent manifest is retried from exact immutable firewall evidence'
+    Assert-True ($lifecycleSource -match 'uninstall-firewall-retry') 'repeated Uninstall cannot report unchanged while its previous firewall rollback remains outstanding'
+    Assert-True ($lifecycleSource -match 'Publish-CycLifecycleReceiptAtomic') 'private firewall receipts are published by same-directory atomic replacement'
+    Assert-True ($lifecycleSource -match '\[System\.IO\.File\]::Replace\(') 'lifecycle journal replacement uses the native same-volume atomic replace primitive'
+    Assert-True ($lifecycleSource -match 'Remove-CycCompletedLifecycleJournal[\s\S]+-ExpectedRequestSha256') 'normal and resumed completion retire only the expected terminal transaction'
     Assert-True ($uninstallerSource -notmatch '(?i)-Verb\s+RunAs|-Elevated') 'uninstaller stays in initiating HKCU/profile context'
     Assert-True ($uninstallerSource -match 'Invoke-ClusterYourCodexLifecycle\.ps1') 'uninstaller delegates only the firewall sub-step to the coordinator'
     Assert-True ($firewallSource -notmatch '(?i)Invoke-Expression|cmd\.exe|Start-Process|&\s+\$Request') 'elevated helper has no arbitrary command or script channel'
@@ -1767,6 +3284,8 @@ exit /b !ERRORLEVEL!
     Assert-True ($nsis -match 'Function \.onGUIEnd[\s\S]+Call CycCleanupShortStaging') 'Setup.exe has an idempotent GUI-end cleanup backstop'
     Assert-True ($nsis -match 'CYC_MAX_PACKAGE_RELATIVE_PATH[\s\S]+exceeds the supported 190-character limit') 'Setup.exe compile fails closed when the package path budget is exceeded'
     Assert-True ($nsis -match 'Invoke-ClusterYourCodexLifecycle\.ps1[\s\S]+-PackageManifest ') 'Setup.exe invokes the coordinator and manifest validation gate'
+    Assert-True ($nsis -match 'powershell\.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden') 'silent Setup hides the non-elevated lifecycle PowerShell console'
+    Assert-True ($lifecycleSource -match 'Start-Process[\s\S]+-Verb RunAs -WindowStyle Hidden -PassThru') 'firewall-only elevation hides its PowerShell console after UAC consent'
     Assert-True ($nsis -match 'SetErrorLevel \$0') 'Setup.exe preserves bootstrap failure status'
     Assert-True ($nsis -match 'MessageBox[\s\S]+/SD IDOK') 'silent Setup failure never blocks on an interactive message box'
     Assert-True ($nsis -match 'IfSilent silent_complete[\s\S]+Exec[\s\S]+silent_complete:') 'silent Setup success never launches the GUI'
@@ -1780,6 +3299,7 @@ exit /b !ERRORLEVEL!
     Assert-True ($setupBuilder -match 'SpecialFolder\]::ProgramFilesX86') 'Setup builder uses the OS Program Files x86 folder when environment variables are incomplete'
     Assert-True ($setupBuilder -match 'subst\.exe') 'Setup builder maps long package roots to a short NSIS source path'
     Assert-True ($setupBuilder -match 'maximumPackageRelativePath\s*=\s*190') 'Setup builder enforces the 190-character package-relative path budget'
+    Assert-True ($setupBuilder -match 'Test-SetupPathEqualOrDescendant[\s\S]+must be outside') 'Setup builder rejects output/package overlap before source staging or deletion'
     Assert-True ($setupBuilder -match '/DCYC_MAX_PACKAGE_RELATIVE_PATH=\$\(\$packagePathMetrics\.longestRelativePathLength\)') 'Setup builder passes the measured package path budget into NSIS'
     Assert-True ($setupBuilder.IndexOf('$validationPackageRoot = $candidateRoot', [StringComparison]::Ordinal) -lt $setupBuilder.IndexOf('Assert-CycPackageManifest', [StringComparison]::Ordinal)) 'Setup builder establishes short source staging before manifest validation'
     Assert-True ($setupBuilder.IndexOf('if ($null -ne $primaryFailure)', [StringComparison]::Ordinal) -lt $setupBuilder.IndexOf('if ($null -ne $cleanupFailure)', [StringComparison]::Ordinal)) 'Setup builder preserves its primary failure ahead of subst cleanup failure'
@@ -1789,6 +3309,8 @@ exit /b !ERRORLEVEL!
     Assert-True ($freshDeploymentSource -match "'-WorkerConfig',\s+\`$workerConfig") 'fresh deployment smoke keeps the worker config beneath its isolated data root'
     Assert-True (-not $freshDeploymentSource.Contains("'-PurgeData'")) 'fresh deployment smoke preserves isolated product data before harness-owned cleanup'
     Assert-True ($freshDeploymentSource -match 'Remove-FreshOwnedIsolationRoot') 'fresh deployment smoke cleans only its validated harness-owned isolation root'
+    Assert-True ($freshDeploymentSource -match 'Remove-FreshOwnedWorkRoot[\s\S]+reparse point') 'fresh deployment work-root cleanup rejects nested reparse points'
+    Assert-True ($freshDeploymentSource -match 'repair precondition corrupts the installed CLI[\s\S]+repair restores the exact packaged CLI bytes') 'fresh deployment Repair restores a deliberately corrupted production file'
     Assert-True ($freshDeploymentSource -match "'ClusterYourCodex Controller', 'ClusterYourCodex Worker'") 'fresh deployment smoke protects both fixed product task names'
     Assert-True ($freshDeploymentSource -match 'fresh deployment runner starts without pre-existing product tasks') 'fresh deployment smoke fails closed around pre-existing product tasks'
     $setupSilentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-SetupSilent.ps1') -Raw
@@ -1801,6 +3323,8 @@ exit /b !ERRORLEVEL!
     Assert-True ($setupSilentSource -match '\[string\]\$PackageRoot') 'silent Setup smoke binds Repair to the matching staged package'
     Assert-True ($setupSilentSource -match "ArgumentList\s+@?\('?'/S") 'silent Setup smoke executes the real case-sensitive NSIS /S path'
     Assert-True ($setupSilentSource -match 'does not launch the GUI') 'silent Setup smoke rejects an unexpected GUI launch'
+    Assert-True ($setupSilentSource -match 'AssertNoNewVisiblePowerShellWindow') 'silent Setup smoke polls for transient PowerShell consoles while Setup is running'
+    Assert-True ($setupSilentSource -match 'Assert-SetupSilentTreeHasNoReparsePoints') 'silent Setup cleanup rejects nested reparse points before recursive deletion'
     Assert-True ($setupSilentSource -match 'Action.+Repair|''Repair''') 'silent Setup smoke exercises Repair after installation'
     Assert-True ($setupSilentSource -match 'installed uninstaller|Uninstall-ClusterYourCodex\.ps1') 'silent Setup smoke invokes the installed uninstaller'
     Assert-True ($setupSilentSource -match 'restores the pre-test Scheduled Task state') 'silent Setup smoke verifies Scheduled Task restoration'
@@ -1809,6 +3333,10 @@ exit /b !ERRORLEVEL!
     Assert-True (([regex]::Matches($releaseWorkflow, 'name:\s*Test full Rust workspace')).Count -eq 2) 'release runs the native workspace suite in the platform matrix and self-contained Windows job without a redundant integration-bundle copy'
     Assert-True ($releaseWorkflow -match 'NSIS installation completed but makensis\.exe was not found') 'release workflow validates its explicit NSIS compiler path'
     Assert-True ($releaseWorkflow -match 'New-SetupExecutable\.ps1[\s\S]+-MakeNsisPath \$makeNsis') 'release workflow passes the resolved NSIS compiler into Setup.exe staging'
+    Assert-True ($releaseWorkflow -match 'ZipFileExtensions\]::CreateEntryFromFile') 'release ZIP creation explicitly includes forced and hidden files instead of Compress-Archive omission semantics'
+    Assert-True ($releaseWorkflow -match 'Expand-Archive[\s\S]+Get-CycArchiveInventory[\s\S]+exact forced/hidden package tree') 'release expands the final ZIP and compares its exact tree and bytes with staging'
+    Assert-True ($releaseWorkflow -match 'clusteryourcodex-post-archive-[\s\S]+NewGuid') 'post-archive smoke uses a fresh GUID extraction root instead of recursively deleting a fixed runner path'
+    Assert-True ($releaseWorkflow -match 'Test-FreshDeployment\.ps1 -PackageRoot \$extractedPackage') 'fresh deployment smoke runs against the just-created ZIP after extraction'
     Assert-True ($releaseWorkflow -match 'CYC_DISPOSABLE_WINDOWS:[\s\S]+Test-SetupSilent\.ps1[\s\S]+-PackageRoot \$preview[\s\S]+-DisposableEnvironment') 'release workflow runs silent Setup only inside the disposable Windows runner'
     Assert-True ($releaseWorkflow -match 'Upload silent Setup diagnostics[\s\S]+if: always\(\)') 'release workflow retains silent Setup diagnostics on success and failure'
     Assert-True (([regex]::Matches($releaseWorkflow, 'pnpm --filter @clusteryourcodex/codex-mcp deploy')).Count -eq 2) 'release builds exactly two MCP deployment artifacts'

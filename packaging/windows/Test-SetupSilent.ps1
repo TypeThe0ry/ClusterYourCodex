@@ -27,7 +27,12 @@ $script:FirewallDescription = 'ClusterYourCodex owned managed-worker TLS listene
 $script:UninstallRegistryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ClusterYourCodex'
 $script:InstallManifestSchema = 'cyc.dev/windows-install-manifest/v1'
 $script:PreviewManifestSchema = 'cyc.dev/windows-preview/v1'
+$script:LifecycleJournalSchema = 'cyc.dev/windows-external-lifecycle/v1'
+$script:FirewallReceiptSchema = 'cyc.dev/windows-firewall-receipt/v1'
+$script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
+$script:FirewallLifecycleName = 'external-elevated-helper'
 $script:MaximumInstallManifestBytes = 16MB
+$script:MaximumFirewallReceiptBytes = 32768
 $script:BoundedProcessTerminationUncertain = $false
 
 function Assert-SetupSilent {
@@ -72,6 +77,38 @@ function Assert-SetupSilentChildPath {
     return $candidatePath
 }
 
+function Assert-SetupSilentTreeHasNoReparsePoints {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $resolvedRoot = Resolve-SetupSilentPath $Root
+    if (-not (Test-Path -LiteralPath $resolvedRoot)) {
+        return
+    }
+    if (-not (Test-Path -LiteralPath $resolvedRoot -PathType Container)) {
+        throw "cleanup tree is not a directory: $resolvedRoot"
+    }
+
+    # Scan without descending through any link/junction. Remove-Item -Recurse
+    # is used only after the complete harness-owned tree is proven ordinary.
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $pending.Push($resolvedRoot)
+    while ($pending.Count -gt 0) {
+        $current = $pending.Pop()
+        $currentItem = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+        if (($currentItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "cleanup tree contains a reparse point: $current"
+        }
+        foreach ($child in @(Get-ChildItem -LiteralPath $current -Force -ErrorAction Stop)) {
+            if (($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "cleanup tree contains a reparse point: $($child.FullName)"
+            }
+            if ($child.PSIsContainer) {
+                $pending.Push($child.FullName)
+            }
+        }
+    }
+}
+
 function Assert-SetupSilentOwnedRoot {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -93,6 +130,7 @@ function Assert-SetupSilentOwnedRoot {
         if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "cleanup root is a reparse point: $resolved"
         }
+        Assert-SetupSilentTreeHasNoReparsePoints -Root $resolved
     }
     return $resolved
 }
@@ -106,8 +144,228 @@ function Read-SetupSilentJson {
     if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or $item.Length -le 0 -or $item.Length -gt $MaximumBytes) {
         throw "JSON file is not a bounded regular file: $Path"
     }
-    try { return (Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json) } catch {
+    try {
+        $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+        $converter = Get-Command ConvertFrom-Json -CommandType Cmdlet -ErrorAction Stop
+        if ($converter.Parameters.ContainsKey('DateKind')) {
+            return ConvertFrom-Json -InputObject $raw -DateKind String
+        }
+        return ConvertFrom-Json -InputObject $raw
+    } catch {
         throw "JSON file is invalid: $Path"
+    }
+}
+
+function Assert-SetupSilentExactProperties {
+    param(
+        [Parameter(Mandatory = $true)]$Object,
+        [Parameter(Mandatory = $true)][string[]]$Expected,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    [string[]]$actualNames = @($Object.PSObject.Properties.Name)
+    [string[]]$expectedNames = @($Expected)
+    [Array]::Sort($actualNames, [System.StringComparer]::Ordinal)
+    [Array]::Sort($expectedNames, [System.StringComparer]::Ordinal)
+    Assert-SetupSilent `
+        ([string]::Join(',', $actualNames) -ceq [string]::Join(',', $expectedNames)) `
+        "$Label contains exactly the supported fields"
+}
+
+function Get-SetupSilentFirewallReceiptSnapshot {
+    param([Parameter(Mandatory = $true)][string]$DataRoot)
+    $receiptRoot = Resolve-SetupSilentPath (Join-Path $DataRoot '.installer\firewall-receipts')
+    Assert-SetupSilent (Test-Path -LiteralPath $receiptRoot -PathType Container) 'durable firewall receipt directory exists'
+    $rootItem = Get-Item -LiteralPath $receiptRoot -Force
+    Assert-SetupSilent (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) 'durable firewall receipt directory is not a reparse point'
+
+    $records = @()
+    foreach ($item in @(Get-ChildItem -LiteralPath $receiptRoot -Force | Sort-Object Name)) {
+        Assert-SetupSilent (-not $item.PSIsContainer) "firewall receipt directory contains only files: $($item.Name)"
+        Assert-SetupSilent (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) "firewall receipt is not a reparse point: $($item.Name)"
+        Assert-SetupSilent ($item.Name -cmatch '^[0-9a-f]{32}\.json$') "firewall receipt filename is a transaction id: $($item.Name)"
+        Assert-SetupSilent ($item.Length -gt 0 -and $item.Length -le $script:MaximumFirewallReceiptBytes) "firewall receipt is bounded: $($item.Name)"
+        $records += [PSCustomObject]@{
+            path = Resolve-SetupSilentPath $item.FullName
+            name = [string]$item.Name
+            transactionId = [System.IO.Path]::GetFileNameWithoutExtension($item.Name)
+            sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+    return @($records)
+}
+
+function Assert-SetupSilentReceiptSnapshotPreserved {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Before,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$After,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    foreach ($old in @($Before)) {
+        $matches = @($After | Where-Object {
+            [string]::Equals([string]$_.path, [string]$old.path, [System.StringComparison]::OrdinalIgnoreCase)
+        })
+        Assert-SetupSilent ($matches.Count -eq 1) "$Label preserves receipt $([string]$old.name)"
+        Assert-SetupSilent ([string]$matches[0].sha256 -ceq [string]$old.sha256) "$Label preserves receipt bytes $([string]$old.name)"
+    }
+}
+
+function Assert-SetupSilentFirewallReceipt {
+    param(
+        [Parameter(Mandatory = $true)][string]$ReceiptPath,
+        [Parameter(Mandatory = $true)][ValidateSet('Apply', 'Remove')][string]$ExpectedAction,
+        [Parameter(Mandatory = $true)][string]$ExpectedTransactionId,
+        [Parameter(Mandatory = $true)][string]$ExpectedRequestSha256,
+        [Parameter(Mandatory = $true)][string]$ExpectedReceiptSha256,
+        [Parameter(Mandatory = $true)][string]$ExpectedProgramSha256,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedSid,
+        [Parameter(Mandatory = $true)][string]$ExpectedProfile,
+        [Parameter(Mandatory = $true)][string]$ExpectedLocalAppData,
+        [Parameter(Mandatory = $true)][string]$ExpectedRuleName
+    )
+    $receiptFile = Resolve-SetupSilentPath $ReceiptPath
+    $receipt = Read-SetupSilentJson -Path $receiptFile -MaximumBytes $script:MaximumFirewallReceiptBytes
+    Assert-SetupSilentExactProperties -Object $receipt -Label 'durable firewall receipt' -Expected @(
+        'action', 'failureCode', 'initiatorLocalAppData', 'initiatorProfile',
+        'initiatorSid', 'port', 'program', 'programSha256', 'requestSha256',
+        'result', 'ruleName', 'schemaVersion', 'transactionId', 'verifiedAtUtc'
+    )
+    Assert-SetupSilent ([string]$receipt.schemaVersion -ceq $script:FirewallReceiptSchema) 'durable firewall receipt schema is current'
+    Assert-SetupSilent ([string]$receipt.transactionId -cmatch '^[0-9a-f]{32}$') 'durable firewall receipt has a canonical transaction id'
+    Assert-SetupSilent ([string]$receipt.transactionId -ceq $ExpectedTransactionId) 'durable firewall receipt transaction matches the lifecycle'
+    Assert-SetupSilent ([System.IO.Path]::GetFileName($receiptFile) -ceq ($ExpectedTransactionId + '.json')) 'durable firewall receipt filename matches the transaction'
+    Assert-SetupSilent ([string]$receipt.requestSha256 -cmatch '^[0-9a-f]{64}$') 'durable firewall receipt has a canonical request digest'
+    Assert-SetupSilent ([string]$receipt.requestSha256 -ceq $ExpectedRequestSha256) 'durable firewall receipt binds the request digest'
+    Assert-SetupSilent ([string]$receipt.action -ceq $ExpectedAction) "durable firewall receipt records $ExpectedAction"
+    Assert-SetupSilent ([string]$receipt.result -ceq 'verified') 'durable firewall receipt records verified success'
+    Assert-SetupSilent ([string]::IsNullOrWhiteSpace([string]$receipt.failureCode)) 'verified firewall receipt has no failure code'
+    Assert-SetupSilent ([string]$receipt.initiatorSid -ceq $ExpectedSid) 'durable firewall receipt binds the initiating SID'
+    Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$receipt.initiatorProfile) -Right $ExpectedProfile) 'durable firewall receipt binds the initiating profile'
+    Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$receipt.initiatorLocalAppData) -Right $ExpectedLocalAppData) 'durable firewall receipt binds LOCALAPPDATA'
+    Assert-SetupSilent ([string]$receipt.ruleName -ceq $ExpectedRuleName) 'durable firewall receipt binds the owned rule name'
+    Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$receipt.program) -Right (Join-Path $InstallRoot 'cyc-controller.exe')) 'durable firewall receipt binds the installed controller path'
+    Assert-SetupSilent ([string]$receipt.programSha256 -cmatch '^[0-9a-f]{64}$') 'durable firewall receipt has a canonical controller digest'
+    Assert-SetupSilent ([string]$receipt.programSha256 -ceq $ExpectedProgramSha256) 'durable firewall receipt binds the installed controller digest'
+    Assert-SetupSilent ([int]$receipt.port -eq 47832) 'durable firewall receipt binds the managed-worker port'
+    $verifiedAt = [DateTimeOffset]::MinValue
+    Assert-SetupSilent ([DateTimeOffset]::TryParse([string]$receipt.verifiedAtUtc, [ref]$verifiedAt)) 'durable firewall receipt has a valid verification timestamp'
+    $actualReceiptSha256 = (Get-FileHash -LiteralPath $receiptFile -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-SetupSilent ($actualReceiptSha256 -ceq $ExpectedReceiptSha256) 'durable firewall receipt bytes match the committed digest'
+    return [PSCustomObject]@{
+        path = $receiptFile
+        sha256 = $actualReceiptSha256
+        transactionId = [string]$receipt.transactionId
+        requestSha256 = [string]$receipt.requestSha256
+        action = [string]$receipt.action
+        receipt = $receipt
+    }
+}
+
+function Assert-SetupSilentJournalRetiredOrComplete {
+    param(
+        [Parameter(Mandatory = $true)][string]$JournalPath,
+        [Parameter(Mandatory = $true)][ValidateSet('Install', 'Repair', 'Uninstall')][string]$ExpectedAction,
+        [Parameter(Mandatory = $true)][string]$ExpectedTransactionId,
+        [Parameter(Mandatory = $true)][string]$ExpectedRequestSha256,
+        [Parameter(Mandatory = $true)][string]$ExpectedReceiptPath,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$DataRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedSid,
+        [Parameter(Mandatory = $true)][string]$ExpectedProfile,
+        [Parameter(Mandatory = $true)][string]$ExpectedLocalAppData
+    )
+    if (-not (Test-Path -LiteralPath $JournalPath)) { return 'absent' }
+    Assert-SetupSilent (Test-Path -LiteralPath $JournalPath -PathType Leaf) 'firewall lifecycle journal tombstone is a regular-file candidate'
+
+    $journal = Read-SetupSilentJson -Path $JournalPath -MaximumBytes 65536
+    Assert-SetupSilentExactProperties -Object $journal -Label 'firewall lifecycle journal tombstone' -Expected @(
+        'action', 'dataRoot', 'exchangeRoot', 'helperSha256', 'initiatorLocalAppData',
+        'initiatorProfile', 'initiatorSid', 'installRoot', 'packageManifestSha256',
+        'phase', 'privateReceiptPath', 'requestPath', 'requestSha256', 'schemaVersion',
+        'transactionId', 'updatedAtUtc'
+    )
+    Assert-SetupSilent ([string]$journal.schemaVersion -ceq $script:LifecycleJournalSchema) 'firewall lifecycle journal tombstone schema is current'
+    Assert-SetupSilent ([string]$journal.phase -ceq 'complete') 'firewall lifecycle journal is retired or a complete tombstone'
+    Assert-SetupSilent ([string]$journal.action -ceq $ExpectedAction) 'firewall lifecycle journal tombstone records the completed action'
+    Assert-SetupSilent ([string]$journal.transactionId -ceq $ExpectedTransactionId) 'firewall lifecycle journal tombstone binds the completed transaction'
+    Assert-SetupSilent ([string]$journal.requestSha256 -ceq $ExpectedRequestSha256) 'firewall lifecycle journal tombstone binds the request digest'
+    Assert-SetupSilent ([string]$journal.helperSha256 -cmatch '^[0-9a-f]{64}$') 'firewall lifecycle journal tombstone binds the helper digest'
+    Assert-SetupSilent ([string]$journal.packageManifestSha256 -cmatch '^[0-9a-f]{64}$') 'firewall lifecycle journal tombstone binds the package digest'
+    Assert-SetupSilent ([string]$journal.initiatorSid -ceq $ExpectedSid) 'firewall lifecycle journal tombstone binds the initiating SID'
+    Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$journal.initiatorProfile) -Right $ExpectedProfile) 'firewall lifecycle journal tombstone binds the initiating profile'
+    Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$journal.initiatorLocalAppData) -Right $ExpectedLocalAppData) 'firewall lifecycle journal tombstone binds LOCALAPPDATA'
+    Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$journal.installRoot) -Right $InstallRoot) 'firewall lifecycle journal tombstone binds the install root'
+    Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$journal.dataRoot) -Right $DataRoot) 'firewall lifecycle journal tombstone binds the data root'
+    Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$journal.privateReceiptPath) -Right $ExpectedReceiptPath) 'firewall lifecycle journal tombstone binds the durable receipt path'
+
+    $commonDocuments = [Environment]::GetFolderPath('CommonDocuments')
+    Assert-SetupSilent (-not [string]::IsNullOrWhiteSpace($commonDocuments)) 'Public Documents is available for journal validation'
+    $expectedExchangeRoot = Join-Path (Join-Path (Join-Path $commonDocuments 'ClusterYourCodex-Firewall') $ExpectedSid.Replace('-', '_')) $ExpectedTransactionId
+    Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$journal.exchangeRoot) -Right $expectedExchangeRoot) 'firewall lifecycle journal tombstone binds the per-user exchange root'
+    Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$journal.requestPath) -Right (Join-Path $expectedExchangeRoot 'request.json')) 'firewall lifecycle journal tombstone binds the transaction request path'
+    if (Test-Path -LiteralPath ([string]$journal.requestPath) -PathType Leaf) {
+        $requestHash = (Get-FileHash -LiteralPath ([string]$journal.requestPath) -Algorithm SHA256).Hash.ToLowerInvariant()
+        Assert-SetupSilent ($requestHash -ceq $ExpectedRequestSha256) 'firewall lifecycle journal tombstone request evidence is unchanged'
+    } else {
+        Assert-SetupSilent ($ExpectedAction -cne 'Uninstall') 'completed Uninstall tombstone retains its request evidence'
+    }
+    $updatedAt = [DateTimeOffset]::MinValue
+    Assert-SetupSilent ([DateTimeOffset]::TryParse([string]$journal.updatedAtUtc, [ref]$updatedAt)) 'firewall lifecycle journal tombstone has a valid update timestamp'
+    return 'complete'
+}
+
+function Assert-SetupSilentAppliedLifecycleEvidence {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][ValidateSet('Install', 'Repair')][string]$ExpectedAction,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$DataRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedSid,
+        [Parameter(Mandatory = $true)][string]$ExpectedProfile,
+        [Parameter(Mandatory = $true)][string]$ExpectedLocalAppData,
+        [Parameter(Mandatory = $true)][string]$ExpectedRuleName
+    )
+    $firewall = $Manifest.managedWorker.firewall
+    Assert-SetupSilent (($firewall.enabled -is [bool]) -and [bool]$firewall.enabled) "$ExpectedAction manifest enables the managed-worker firewall with a real Boolean"
+    Assert-SetupSilent ([string]$firewall.lifecycle -ceq $script:FirewallLifecycleName) "$ExpectedAction manifest uses the external firewall lifecycle"
+    Assert-SetupSilent ([string]$firewall.state -ceq 'applied') "$ExpectedAction manifest commits the firewall receipt"
+    Assert-SetupSilent ([string]$firewall.transactionId -cmatch '^[0-9a-f]{32}$') "$ExpectedAction manifest records a transaction id"
+    Assert-SetupSilent ([string]$firewall.requestSha256 -cmatch '^[0-9a-f]{64}$') "$ExpectedAction manifest records a request digest"
+    Assert-SetupSilent ([string]$firewall.receiptSha256 -cmatch '^[0-9a-f]{64}$') "$ExpectedAction manifest records a receipt digest"
+    Assert-SetupSilent ([string]$firewall.name -ceq $ExpectedRuleName) "$ExpectedAction manifest records the owned firewall rule"
+
+    $controllerRecord = Get-SetupSilentManifestFile -Manifest $Manifest -RelativePath 'cyc-controller.exe'
+    $receiptPath = Join-Path (Join-Path $DataRoot '.installer\firewall-receipts') (([string]$firewall.transactionId) + '.json')
+    $receiptEvidence = Assert-SetupSilentFirewallReceipt `
+        -ReceiptPath $receiptPath `
+        -ExpectedAction Apply `
+        -ExpectedTransactionId ([string]$firewall.transactionId) `
+        -ExpectedRequestSha256 ([string]$firewall.requestSha256) `
+        -ExpectedReceiptSha256 ([string]$firewall.receiptSha256) `
+        -ExpectedProgramSha256 ([string]$controllerRecord.sha256) `
+        -InstallRoot $InstallRoot `
+        -ExpectedSid $ExpectedSid `
+        -ExpectedProfile $ExpectedProfile `
+        -ExpectedLocalAppData $ExpectedLocalAppData `
+        -ExpectedRuleName $ExpectedRuleName
+    $journalState = Assert-SetupSilentJournalRetiredOrComplete `
+        -JournalPath (Join-Path $DataRoot '.installer\firewall-lifecycle.json') `
+        -ExpectedAction $ExpectedAction `
+        -ExpectedTransactionId ([string]$firewall.transactionId) `
+        -ExpectedRequestSha256 ([string]$firewall.requestSha256) `
+        -ExpectedReceiptPath $receiptPath `
+        -InstallRoot $InstallRoot `
+        -DataRoot $DataRoot `
+        -ExpectedSid $ExpectedSid `
+        -ExpectedProfile $ExpectedProfile `
+        -ExpectedLocalAppData $ExpectedLocalAppData
+    return [PSCustomObject]@{
+        lifecycleAction = $ExpectedAction
+        transactionId = [string]$firewall.transactionId
+        requestSha256 = [string]$firewall.requestSha256
+        receiptPath = [string]$receiptEvidence.path
+        receiptSha256 = [string]$receiptEvidence.sha256
+        journalState = [string]$journalState
     }
 }
 
@@ -149,7 +407,8 @@ function Invoke-SetupSilentBoundedProcess {
         [Parameter(Mandatory = $true)][string]$Label,
         [ValidateRange(1, 2400)][int]$TimeoutSeconds = 120,
         [string]$WorkingDirectory,
-        [hashtable]$EnvironmentVariables = @{}
+        [hashtable]$EnvironmentVariables = @{},
+        [switch]$AssertNoNewVisiblePowerShellWindow
     )
     $resolvedExecutable = Resolve-SetupSilentPath $FilePath
     if (-not (Test-Path -LiteralPath $resolvedExecutable -PathType Leaf)) {
@@ -160,6 +419,12 @@ function Invoke-SetupSilentBoundedProcess {
     $stderrPath = Join-Path $LogRoot ($Label + '.stderr.log')
     $start = [DateTimeOffset]::UtcNow
     $process = $null
+    $powerShellPidsBefore = New-Object 'System.Collections.Generic.HashSet[int]'
+    if ($AssertNoNewVisiblePowerShellWindow) {
+        foreach ($existingPowerShell in @(Get-Process -Name powershell -ErrorAction SilentlyContinue)) {
+            [void]$powerShellPidsBefore.Add([int]$existingPowerShell.Id)
+        }
+    }
     try {
         $startInfo = New-Object System.Diagnostics.ProcessStartInfo
         $startInfo.FileName = $resolvedExecutable
@@ -191,7 +456,26 @@ function Invoke-SetupSilentBoundedProcess {
         if (-not $process.Start()) { throw "$Label could not start." }
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+        $visiblePowerShellPid = $null
+        $timedOut = $false
+        while (-not $process.WaitForExit(100)) {
+            if ($AssertNoNewVisiblePowerShellWindow) {
+                foreach ($candidate in @(Get-Process -Name powershell -ErrorAction SilentlyContinue)) {
+                    if (-not $powerShellPidsBefore.Contains([int]$candidate.Id) -and
+                        [int64]$candidate.MainWindowHandle -ne 0) {
+                        $visiblePowerShellPid = [int]$candidate.Id
+                        break
+                    }
+                }
+                if ($null -ne $visiblePowerShellPid) { break }
+            }
+            if ([DateTimeOffset]::UtcNow -ge $deadline) {
+                $timedOut = $true
+                break
+            }
+        }
+        if ($timedOut -or $null -ne $visiblePowerShellPid) {
             $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
             $taskKillExit = -1
             try {
@@ -202,6 +486,9 @@ function Invoke-SetupSilentBoundedProcess {
             try { $terminated = [bool]$process.WaitForExit(30000) } catch { $terminated = $false }
             if ($taskKillExit -ne 0 -or -not $terminated) {
                 $script:BoundedProcessTerminationUncertain = $true
+            }
+            if ($null -ne $visiblePowerShellPid) {
+                throw "$Label displayed a transient PowerShell console during silent execution (pid=$visiblePowerShellPid)."
             }
             throw "$Label timed out after $TimeoutSeconds seconds (pid=$($process.Id))."
         }
@@ -349,6 +636,7 @@ function Assert-SetupSilentManifest {
         [Parameter(Mandatory = $true)][string]$ManifestPath,
         [Parameter(Mandatory = $true)][string]$InstallRoot,
         [Parameter(Mandatory = $true)][string]$DataRoot,
+        [Parameter(Mandatory = $true)][ValidateSet('Install', 'Repair')][string]$ExpectedAction,
         [Parameter(Mandatory = $true)][string]$ExpectedSid,
         [Parameter(Mandatory = $true)][string]$ExpectedProfile,
         [Parameter(Mandatory = $true)][string]$ExpectedLocalAppData
@@ -360,6 +648,25 @@ function Assert-SetupSilentManifest {
     Assert-SetupSilent ([string]$manifest.initiator.sid -ceq $ExpectedSid) 'install manifest binds the initiating SID'
     Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$manifest.initiator.profile) -Right $ExpectedProfile) 'install manifest binds the initiating profile'
     Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$manifest.initiator.localAppData) -Right $ExpectedLocalAppData) 'install manifest binds LOCALAPPDATA'
+    Assert-SetupSilent ($null -ne $manifest.PSObject.Properties['coreCommit']) 'install manifest contains a core commit marker'
+    Assert-SetupSilentExactProperties -Object $manifest.coreCommit -Label 'install core commit marker' -Expected @(
+        'action', 'committedAtUtc', 'requestSha256', 'schemaVersion', 'state', 'transactionId'
+    )
+    Assert-SetupSilent ([string]$manifest.coreCommit.schemaVersion -ceq $script:CoreCommitSchema) 'install core commit marker schema is current'
+    Assert-SetupSilent ([string]$manifest.coreCommit.action -ceq $ExpectedAction) "install core commit marker records $ExpectedAction"
+    Assert-SetupSilent ([string]$manifest.coreCommit.state -ceq 'committed') 'install core commit marker records durable completion'
+    Assert-SetupSilent ([string]$manifest.coreCommit.transactionId -ceq [string]$manifest.managedWorker.firewall.transactionId) 'install core commit marker binds the firewall transaction'
+    Assert-SetupSilent ([string]$manifest.coreCommit.requestSha256 -ceq [string]$manifest.managedWorker.firewall.requestSha256) 'install core commit marker binds the firewall request'
+    $coreCommittedAt = [DateTimeOffset]::MinValue
+    Assert-SetupSilent (
+        [string]$manifest.coreCommit.committedAtUtc -cmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}(?:Z|[+-]\d{2}:\d{2})$' -and
+        [DateTimeOffset]::TryParse(
+            [string]$manifest.coreCommit.committedAtUtc,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind,
+            [ref]$coreCommittedAt
+        )
+    ) 'install core commit marker has a strict round-trip timestamp'
 
     $files = @($manifest.files)
     Assert-SetupSilent ($files.Count -gt 0) 'install manifest contains files'
@@ -580,6 +887,7 @@ if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
 $setup = Resolve-SetupSilentPath $SetupPath
 $package = Resolve-SetupSilentPath $PackageRoot
 $work = Resolve-SetupSilentPath $WorkRoot
+$workExistedAtStart = Test-Path -LiteralPath $work
 $logRoot = Join-Path $work 'logs'
 $lifecycleDiagnosticPath = Join-Path $logRoot 'setup-lifecycle.json'
 $localAppData = Resolve-SetupSilentPath $env:LOCALAPPDATA
@@ -587,6 +895,7 @@ $profile = Resolve-SetupSilentPath $env:USERPROFILE
 $installRoot = Resolve-SetupSilentPath (Join-Path $localAppData 'Programs\ClusterYourCodex')
 $dataRoot = Resolve-SetupSilentPath (Join-Path $localAppData 'ClusterYourCodex')
 $manifestPath = Join-Path $dataRoot '.installer\install-manifest.json'
+$journalPath = Join-Path $dataRoot '.installer\firewall-lifecycle.json'
 $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $identityName = [string]$identity.Name
@@ -600,14 +909,22 @@ if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
     [void]$allowedTempRoots.Add((Resolve-SetupSilentPath $env:RUNNER_TEMP))
 }
 $workRootAccepted = $false
+$workDirectTempChild = $false
 foreach ($tempRoot in @($allowedTempRoots | Sort-Object -Unique)) {
     try {
         [void](Assert-SetupSilentChildPath -Root $tempRoot -Candidate $work)
         $workRootAccepted = $true
-        break
+        if (Test-SetupSilentPathEqual -Left (Split-Path -Parent $work) -Right $tempRoot) {
+            $workDirectTempChild = $true
+        }
     } catch { }
 }
 Assert-SetupSilent $workRootAccepted 'work root is beneath the OS temp or GitHub runner temp root'
+if (-not $KeepWorkRoot) {
+    Assert-SetupSilent (-not $workExistedAtStart) 'auto-cleaned work root did not exist before this harness run'
+    Assert-SetupSilent $workDirectTempChild 'auto-cleaned work root is a direct child of an approved temporary root'
+    Assert-SetupSilent ((Split-Path -Leaf $work) -match '^clusteryourcodex-setup-silent-[0-9a-f]{32}$') 'auto-cleaned work root uses the harness-owned GUID name'
+}
 [void](Assert-SetupSilentChildPath -Root $localAppData -Candidate $installRoot)
 [void](Assert-SetupSilentChildPath -Root $localAppData -Candidate $dataRoot)
 Assert-SetupSilent (-not $work.StartsWith($installRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) 'work root is outside the install root'
@@ -638,6 +955,7 @@ Assert-SetupSilent (Test-Path -LiteralPath $packagePayload -PathType Container) 
 Assert-SetupSilent (Test-Path -LiteralPath $packageCoordinator -PathType Leaf) 'matching lifecycle coordinator exists'
 $previewManifest = Read-SetupSilentJson -Path $packageManifest -MaximumBytes 8MB
 Assert-SetupSilent ([string]$previewManifest.schemaVersion -ceq $script:PreviewManifestSchema) 'matching preview manifest schema is current'
+$expectedPackageManifestSha256 = (Get-FileHash -LiteralPath $packageManifest -Algorithm SHA256).Hash.ToLowerInvariant()
 
 $taskBefore = @(Get-SetupSilentTaskSnapshot)
 $firewallBefore = @(Get-SetupSilentFirewallSnapshot)
@@ -653,6 +971,13 @@ Assert-SetupSilent ($processesBefore.Count -eq 0) 'product processes start absen
 $preflightComplete = $true
 
 [void](New-Item -ItemType Directory -Path $logRoot -Force)
+if (Test-Path -LiteralPath $lifecycleDiagnosticPath) {
+    $staleDiagnostic = Get-Item -LiteralPath $lifecycleDiagnosticPath -Force -ErrorAction Stop
+    Assert-SetupSilent (-not $staleDiagnostic.PSIsContainer -and
+        ($staleDiagnostic.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) 'stale Setup lifecycle diagnostic is a regular file before removal'
+    [System.IO.File]::Delete($lifecycleDiagnosticPath)
+}
+Assert-SetupSilent (-not (Test-Path -LiteralPath $lifecycleDiagnosticPath)) 'Setup lifecycle diagnostic starts absent for this invocation'
 $operations = New-Object System.Collections.Generic.List[object]
 $primaryFailure = $null
 $cleanupFailures = New-Object System.Collections.Generic.List[string]
@@ -660,6 +985,7 @@ $result = $null
 $formalUninstallCompleted = $false
 
 try {
+    $setupInvocationStartedAt = [DateTimeOffset]::UtcNow
     $operations.Add((Invoke-SetupSilentBoundedProcess `
         -FilePath $setup `
         -ArgumentList @('/S') `
@@ -667,12 +993,23 @@ try {
         -Label 'setup-silent' `
         -TimeoutSeconds $LifecycleTimeoutSeconds `
         -WorkingDirectory (Split-Path -Parent $setup) `
+        -AssertNoNewVisiblePowerShellWindow `
         -EnvironmentVariables @{ CYC_SETUP_DIAGNOSTIC_LOG = $lifecycleDiagnosticPath }))
 
     $setupLifecycleDiagnostic = Read-SetupSilentJson -Path $lifecycleDiagnosticPath -MaximumBytes 1MB
     Assert-SetupSilent ([string]$setupLifecycleDiagnostic.schemaVersion -ceq 'cyc.dev/setup-lifecycle-diagnostic/v1') 'Setup lifecycle diagnostic schema is current'
     Assert-SetupSilent ([string]$setupLifecycleDiagnostic.status -ceq 'succeeded') 'Setup lifecycle reports success independently of the NSIS exit code'
     Assert-SetupSilent ([string]$setupLifecycleDiagnostic.requestedAction -ceq 'Install') 'Setup lifecycle diagnostic binds the Install action'
+    Assert-SetupSilent ([string]$setupLifecycleDiagnostic.packageManifestSha256 -ceq $expectedPackageManifestSha256) 'Setup.exe installed the exact supplied self-contained package manifest'
+    $diagnosticRecordedAt = [DateTimeOffset]::MinValue
+    Assert-SetupSilent ([string]$setupLifecycleDiagnostic.recordedAtUtc -cmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}(?:Z|[+-]\d{2}:\d{2})$' -and
+        [DateTimeOffset]::TryParse(
+            [string]$setupLifecycleDiagnostic.recordedAtUtc,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind,
+            [ref]$diagnosticRecordedAt
+        )) 'Setup lifecycle diagnostic has a strict round-trip timestamp'
+    Assert-SetupSilent ($diagnosticRecordedAt -ge $setupInvocationStartedAt -and $diagnosticRecordedAt -le [DateTimeOffset]::UtcNow.AddMinutes(1)) 'Setup lifecycle diagnostic was freshly written by this invocation'
 
     # NSIS uses Exec for the interactive success launch. Give that asynchronous
     # branch a deterministic window so this assertion catches regressions.
@@ -687,6 +1024,7 @@ try {
         -ManifestPath $manifestPath `
         -InstallRoot $installRoot `
         -DataRoot $dataRoot `
+        -ExpectedAction Install `
         -ExpectedSid $identitySid `
         -ExpectedProfile $profile `
         -ExpectedLocalAppData $localAppData
@@ -694,6 +1032,18 @@ try {
     [void](Assert-SetupSilentControllerTask -InstallRoot $installRoot -ExpectedIdentity $identityName -ExpectedSid $identitySid)
     $runtime = Assert-SetupSilentControllerRuntime -InstallRoot $installRoot
     [void](Assert-SetupSilentFirewall -Manifest $manifest)
+    $installLifecycleEvidence = Assert-SetupSilentAppliedLifecycleEvidence `
+        -Manifest $manifest `
+        -ExpectedAction Install `
+        -InstallRoot $installRoot `
+        -DataRoot $dataRoot `
+        -ExpectedSid $identitySid `
+        -ExpectedProfile $profile `
+        -ExpectedLocalAppData $localAppData `
+        -ExpectedRuleName $expectedRuleName
+    $receiptsAfterInstall = @(Get-SetupSilentFirewallReceiptSnapshot -DataRoot $dataRoot)
+    Assert-SetupSilent ($receiptsAfterInstall.Count -eq 1) 'Install publishes exactly one durable firewall receipt in a fresh profile'
+    Assert-SetupSilent ([string]$receiptsAfterInstall[0].transactionId -ceq [string]$installLifecycleEvidence.transactionId) 'Install receipt inventory contains the committed transaction'
     foreach ($probe in @(Invoke-SetupSilentProbes -InstallRoot $installRoot -WorkRoot $work -LogRoot $logRoot -Prefix 'installed')) {
         $operations.Add($probe)
     }
@@ -736,6 +1086,7 @@ try {
         -ManifestPath $manifestPath `
         -InstallRoot $installRoot `
         -DataRoot $dataRoot `
+        -ExpectedAction Repair `
         -ExpectedSid $identitySid `
         -ExpectedProfile $profile `
         -ExpectedLocalAppData $localAppData
@@ -747,9 +1098,79 @@ try {
     $runtimeAfterRepair = Assert-SetupSilentControllerRuntime -InstallRoot $installRoot
     [void](Assert-SetupSilentFirewall -Manifest $manifestAfterRepair)
     [void](Assert-SetupSilentUninstallRegistration -InstallRoot $installRoot -DataRoot $dataRoot)
+    $firstRepairLifecycleEvidence = Assert-SetupSilentAppliedLifecycleEvidence `
+        -Manifest $manifestAfterRepair `
+        -ExpectedAction Repair `
+        -InstallRoot $installRoot `
+        -DataRoot $dataRoot `
+        -ExpectedSid $identitySid `
+        -ExpectedProfile $profile `
+        -ExpectedLocalAppData $localAppData `
+        -ExpectedRuleName $expectedRuleName
+    Assert-SetupSilent ([string]$firstRepairLifecycleEvidence.transactionId -cne [string]$installLifecycleEvidence.transactionId) 'first Repair uses a new firewall transaction'
+    $receiptsAfterFirstRepair = @(Get-SetupSilentFirewallReceiptSnapshot -DataRoot $dataRoot)
+    Assert-SetupSilentReceiptSnapshotPreserved -Before $receiptsAfterInstall -After $receiptsAfterFirstRepair -Label 'first Repair'
+    Assert-SetupSilent ($receiptsAfterFirstRepair.Count -eq ($receiptsAfterInstall.Count + 1)) 'first Repair adds exactly one durable firewall receipt'
+    Assert-SetupSilent (@($receiptsAfterFirstRepair | Where-Object { [string]$_.transactionId -ceq [string]$firstRepairLifecycleEvidence.transactionId }).Count -eq 1) 'first Repair receipt inventory contains the new transaction'
     foreach ($probe in @(Invoke-SetupSilentProbes -InstallRoot $installRoot -WorkRoot $work -LogRoot $logRoot -Prefix 'repaired')) {
         $operations.Add($probe)
     }
+
+    $secondTamperBytes = [System.Text.Encoding]::UTF8.GetBytes("`ncyc-second-repair-regression-$([Guid]::NewGuid().ToString('N'))")
+    $secondTamperStream = [System.IO.File]::Open($cliPath, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+    try { $secondTamperStream.Write($secondTamperBytes, 0, $secondTamperBytes.Length) } finally { $secondTamperStream.Dispose() }
+    $secondTamperedHash = (Get-FileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-SetupSilent ($secondTamperedHash -cne ([string]$cliRecord.sha256).ToLowerInvariant()) 'second Repair fixture changes the installed CLI again'
+
+    $operations.Add((Invoke-SetupSilentBoundedProcess `
+        -FilePath $windowsPowerShell `
+        -ArgumentList @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', $packageCoordinator,
+            '-Action', 'Repair',
+            '-BundleRoot', $packagePayload,
+            '-PackageRoot', $package,
+            '-PackageManifest', $packageManifest,
+            '-PackageExecutable', $setup,
+            '-NoLaunch', '-Quiet'
+        ) `
+        -LogRoot $logRoot `
+        -Label 'repair-second' `
+        -TimeoutSeconds $LifecycleTimeoutSeconds `
+        -WorkingDirectory $package))
+
+    $manifestAfterSecondRepair = Assert-SetupSilentManifest `
+        -ManifestPath $manifestPath `
+        -InstallRoot $installRoot `
+        -DataRoot $dataRoot `
+        -ExpectedAction Repair `
+        -ExpectedSid $identitySid `
+        -ExpectedProfile $profile `
+        -ExpectedLocalAppData $localAppData
+    $cliRecordAfterSecondRepair = Get-SetupSilentManifestFile -Manifest $manifestAfterSecondRepair -RelativePath 'cyc.exe'
+    $cliHashAfterSecondRepair = (Get-FileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-SetupSilent ($cliHashAfterSecondRepair -ceq ([string]$cliRecordAfterSecondRepair.sha256).ToLowerInvariant()) 'second Repair restores the corrupted installed CLI again'
+    Assert-SetupSilent ((Get-FileHash -LiteralPath $certificatePath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $certificateHashBefore) 'second Repair preserves the TLS certificate identity'
+    Assert-SetupSilent ((Get-FileHash -LiteralPath $privateKeyPath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $privateKeyHashBefore) 'second Repair preserves the TLS private key identity'
+    [void](Assert-SetupSilentControllerTask -InstallRoot $installRoot -ExpectedIdentity $identityName -ExpectedSid $identitySid)
+    $runtimeAfterSecondRepair = Assert-SetupSilentControllerRuntime -InstallRoot $installRoot
+    [void](Assert-SetupSilentFirewall -Manifest $manifestAfterSecondRepair)
+    [void](Assert-SetupSilentUninstallRegistration -InstallRoot $installRoot -DataRoot $dataRoot)
+    $secondRepairLifecycleEvidence = Assert-SetupSilentAppliedLifecycleEvidence `
+        -Manifest $manifestAfterSecondRepair `
+        -ExpectedAction Repair `
+        -InstallRoot $installRoot `
+        -DataRoot $dataRoot `
+        -ExpectedSid $identitySid `
+        -ExpectedProfile $profile `
+        -ExpectedLocalAppData $localAppData `
+        -ExpectedRuleName $expectedRuleName
+    Assert-SetupSilent ([string]$secondRepairLifecycleEvidence.transactionId -cne [string]$firstRepairLifecycleEvidence.transactionId) 'second Repair uses another new firewall transaction'
+    Assert-SetupSilent ([string]$secondRepairLifecycleEvidence.transactionId -cne [string]$installLifecycleEvidence.transactionId) 'second Repair does not reuse the Install transaction'
+    $receiptsAfterSecondRepair = @(Get-SetupSilentFirewallReceiptSnapshot -DataRoot $dataRoot)
+    Assert-SetupSilentReceiptSnapshotPreserved -Before $receiptsAfterFirstRepair -After $receiptsAfterSecondRepair -Label 'second Repair'
+    Assert-SetupSilent ($receiptsAfterSecondRepair.Count -eq ($receiptsAfterFirstRepair.Count + 1)) 'second Repair adds exactly one durable firewall receipt'
+    Assert-SetupSilent (@($receiptsAfterSecondRepair | Where-Object { [string]$_.transactionId -ceq [string]$secondRepairLifecycleEvidence.transactionId }).Count -eq 1) 'second Repair receipt inventory contains the new transaction'
 
     $installedUninstaller = Join-Path $installRoot 'installer\Uninstall-ClusterYourCodex.ps1'
     Assert-SetupSilent (Test-Path -LiteralPath $installedUninstaller -PathType Leaf) 'installed uninstaller exists before product uninstall'
@@ -776,6 +1197,78 @@ try {
     Assert-SetupSilent (($firewallBefore | ConvertTo-Json -Depth 6 -Compress) -ceq ($firewallAfterProductUninstall | ConvertTo-Json -Depth 6 -Compress)) 'installed uninstaller restores the pre-test firewall state'
     Assert-SetupSilent (Test-Path -LiteralPath $dataRoot -PathType Container) 'default installed uninstaller preserves user data'
 
+    $receiptsAfterUninstall = @(Get-SetupSilentFirewallReceiptSnapshot -DataRoot $dataRoot)
+    Assert-SetupSilentReceiptSnapshotPreserved -Before $receiptsAfterSecondRepair -After $receiptsAfterUninstall -Label 'Uninstall'
+    Assert-SetupSilent ($receiptsAfterUninstall.Count -eq ($receiptsAfterSecondRepair.Count + 1)) 'Uninstall adds exactly one durable firewall receipt'
+    $newUninstallReceipts = @($receiptsAfterUninstall | Where-Object {
+        $candidate = $_
+        @($receiptsAfterSecondRepair | Where-Object {
+            [string]::Equals([string]$_.path, [string]$candidate.path, [System.StringComparison]::OrdinalIgnoreCase)
+        }).Count -eq 0
+    })
+    Assert-SetupSilent ($newUninstallReceipts.Count -eq 1) 'Uninstall publishes one new transaction receipt'
+    $uninstallReceiptPreview = Read-SetupSilentJson -Path $newUninstallReceipts[0].path -MaximumBytes $script:MaximumFirewallReceiptBytes
+    $controllerRecordBeforeUninstall = Get-SetupSilentManifestFile -Manifest $manifestAfterSecondRepair -RelativePath 'cyc-controller.exe'
+    $uninstallReceiptEvidence = Assert-SetupSilentFirewallReceipt `
+        -ReceiptPath $newUninstallReceipts[0].path `
+        -ExpectedAction Remove `
+        -ExpectedTransactionId ([string]$newUninstallReceipts[0].transactionId) `
+        -ExpectedRequestSha256 ([string]$uninstallReceiptPreview.requestSha256) `
+        -ExpectedReceiptSha256 ([string]$newUninstallReceipts[0].sha256) `
+        -ExpectedProgramSha256 ([string]$controllerRecordBeforeUninstall.sha256) `
+        -InstallRoot $installRoot `
+        -ExpectedSid $identitySid `
+        -ExpectedProfile $profile `
+        -ExpectedLocalAppData $localAppData `
+        -ExpectedRuleName $expectedRuleName
+    $uninstallJournalState = Assert-SetupSilentJournalRetiredOrComplete `
+        -JournalPath $journalPath `
+        -ExpectedAction Uninstall `
+        -ExpectedTransactionId ([string]$uninstallReceiptEvidence.transactionId) `
+        -ExpectedRequestSha256 ([string]$uninstallReceiptEvidence.requestSha256) `
+        -ExpectedReceiptPath ([string]$uninstallReceiptEvidence.path) `
+        -InstallRoot $installRoot `
+        -DataRoot $dataRoot `
+        -ExpectedSid $identitySid `
+        -ExpectedProfile $profile `
+        -ExpectedLocalAppData $localAppData
+
+    # The installed uninstaller removes itself. Reuse the matching staged
+    # coordinator to prove the already-absent path returns before elevation.
+    $operations.Add((Invoke-SetupSilentBoundedProcess `
+        -FilePath $windowsPowerShell `
+        -ArgumentList @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', $packageCoordinator,
+            '-Action', 'Uninstall',
+            '-NoLaunch', '-Quiet'
+        ) `
+        -LogRoot $logRoot `
+        -Label 'uninstall-repeated' `
+        -TimeoutSeconds $LifecycleTimeoutSeconds `
+        -WorkingDirectory $package))
+    $receiptsAfterRepeatedUninstall = @(Get-SetupSilentFirewallReceiptSnapshot -DataRoot $dataRoot)
+    Assert-SetupSilentReceiptSnapshotPreserved -Before $receiptsAfterUninstall -After $receiptsAfterRepeatedUninstall -Label 'repeated Uninstall'
+    Assert-SetupSilent ($receiptsAfterRepeatedUninstall.Count -eq $receiptsAfterUninstall.Count) 'repeated Uninstall is receipt-idempotent and does not invoke another firewall mutation'
+    $repeatedUninstallJournalState = Assert-SetupSilentJournalRetiredOrComplete `
+        -JournalPath $journalPath `
+        -ExpectedAction Uninstall `
+        -ExpectedTransactionId ([string]$uninstallReceiptEvidence.transactionId) `
+        -ExpectedRequestSha256 ([string]$uninstallReceiptEvidence.requestSha256) `
+        -ExpectedReceiptPath ([string]$uninstallReceiptEvidence.path) `
+        -InstallRoot $installRoot `
+        -DataRoot $dataRoot `
+        -ExpectedSid $identitySid `
+        -ExpectedProfile $profile `
+        -ExpectedLocalAppData $localAppData
+    Assert-SetupSilent (-not (Test-Path -LiteralPath $installRoot)) 'repeated Uninstall leaves the install root absent'
+    Assert-SetupSilent (-not (Test-Path -LiteralPath $manifestPath)) 'repeated Uninstall leaves the install manifest absent'
+    Assert-SetupSilent (-not (Test-Path -LiteralPath $script:UninstallRegistryPath)) 'repeated Uninstall leaves Apps & Features registration absent'
+    $taskAfterRepeatedUninstall = @(Get-SetupSilentTaskSnapshot)
+    $firewallAfterRepeatedUninstall = @(Get-SetupSilentFirewallSnapshot)
+    Assert-SetupSilent (($taskBefore | ConvertTo-Json -Depth 6 -Compress) -ceq ($taskAfterRepeatedUninstall | ConvertTo-Json -Depth 6 -Compress)) 'repeated Uninstall leaves the exact Scheduled Task state restored'
+    Assert-SetupSilent (($firewallBefore | ConvertTo-Json -Depth 6 -Compress) -ceq ($firewallAfterRepeatedUninstall | ConvertTo-Json -Depth 6 -Compress)) 'repeated Uninstall leaves the exact firewall state restored'
+
     $ownedData = Assert-SetupSilentOwnedRoot -Path $dataRoot -Expected $dataRoot -Parent $localAppData
     Remove-Item -LiteralPath $ownedData -Recurse -Force -ErrorAction Stop
     Assert-SetupSilent (-not (Test-Path -LiteralPath $dataRoot)) 'disposable test harness removes preserved user data separately from product uninstall'
@@ -792,6 +1285,20 @@ try {
         dataRoot = $dataRoot
         controllerProcessIdBeforeRepair = $runtime.processId
         controllerProcessIdAfterRepair = $runtimeAfterRepair.processId
+        controllerProcessIdAfterSecondRepair = $runtimeAfterSecondRepair.processId
+        lifecycleEvidence = [ordered]@{
+            install = $installLifecycleEvidence
+            firstRepair = $firstRepairLifecycleEvidence
+            secondRepair = $secondRepairLifecycleEvidence
+            uninstall = [ordered]@{
+                transactionId = [string]$uninstallReceiptEvidence.transactionId
+                requestSha256 = [string]$uninstallReceiptEvidence.requestSha256
+                receiptPath = [string]$uninstallReceiptEvidence.path
+                receiptSha256 = [string]$uninstallReceiptEvidence.sha256
+                journalState = [string]$uninstallJournalState
+                repeatedJournalState = [string]$repeatedUninstallJournalState
+            }
+        }
         operations = @($operations)
         steps = @(
             'setup-sidecar',
@@ -807,7 +1314,14 @@ try {
             'cli-help',
             'repair-corrupted-file',
             'repair-preserves-tls-identity',
+            'repair-repeat-corrupted-file',
+            'repair-repeat-preserves-tls-identity',
+            'lifecycle-transaction-receipts',
+            'lifecycle-complete-journal-retirement',
             'installed-uninstaller',
+            'uninstall-remove-receipt',
+            'uninstall-preserves-apply-receipts',
+            'uninstall-repeat-idempotent',
             'task-restore',
             'firewall-restore',
             'product-preserves-data',
@@ -925,5 +1439,9 @@ if (-not $KeepWorkRoot -and (Test-Path -LiteralPath $work -PathType Container)) 
         } catch { }
     }
     Assert-SetupSilent $workDeleteAccepted 'work root remains beneath an approved temporary root'
+    Assert-SetupSilent (-not $workExistedAtStart) 'work root was created by this harness run'
+    Assert-SetupSilent $workDirectTempChild 'work root remains a direct child of an approved temporary root'
+    Assert-SetupSilent ((Split-Path -Leaf $work) -match '^clusteryourcodex-setup-silent-[0-9a-f]{32}$') 'work root retains the harness-owned GUID name'
+    Assert-SetupSilentTreeHasNoReparsePoints -Root $work
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction Stop
 }

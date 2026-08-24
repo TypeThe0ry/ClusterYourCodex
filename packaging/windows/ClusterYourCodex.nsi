@@ -236,7 +236,7 @@ cyc_package_extraction_failed:
 cyc_package_extraction_complete:
   DetailPrint "Validating package for the initiating user; only the firewall step will request UAC..."
   ClearErrors
-  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$CycMappedDrive\p\Invoke-ClusterYourCodexLifecycle.ps1" -Action Install -BundleRoot "$CycMappedDrive\p\payload" -PackageRoot "$CycMappedDrive\p" -PackageManifest "$CycMappedDrive\p\preview-manifest.json" -PackageExecutable "$EXEPATH" ${CYC_SIGNATURE_ARGUMENT} -NoLaunch' $0
+  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$CycMappedDrive\p\Invoke-ClusterYourCodexLifecycle.ps1" -Action Install -BundleRoot "$CycMappedDrive\p\payload" -PackageRoot "$CycMappedDrive\p" -PackageManifest "$CycMappedDrive\p\preview-manifest.json" -PackageExecutable "$EXEPATH" ${CYC_SIGNATURE_ARGUMENT} -NoLaunch' $0
   IfErrors cyc_lifecycle_launch_failed cyc_lifecycle_finished
 
 cyc_lifecycle_launch_failed:

@@ -79,6 +79,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
+$script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
 $script:WorkerTaskName = 'ClusterYourCodex Worker'
@@ -2281,7 +2282,10 @@ function Get-InstallPlan {
 }
 
 function New-PrivateFileSystemAcl {
-    param([Parameter(Mandatory = $true)][bool]$Directory)
+    param(
+        [Parameter(Mandatory = $true)][bool]$Directory,
+        [switch]$AllowAdministratorsReadAndExecute
+    )
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $sid = $identity.User.Value
     $systemSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
@@ -2307,6 +2311,13 @@ function New-PrivateFileSystemAcl {
     [void]$privateAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
         $systemSid, $rights, $inheritance, $propagation, $allow
     )))
+    if ($AllowAdministratorsReadAndExecute) {
+        $administratorsSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
+        $readAndExecute = [System.Security.AccessControl.FileSystemRights]::ReadAndExecute
+        [void]$privateAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $administratorsSid, $readAndExecute, $inheritance, $propagation, $allow
+        )))
+    }
     return $privateAcl
 }
 
@@ -2348,7 +2359,10 @@ function Set-FileSystemAclPortable {
 }
 
 function Assert-PrivatePathAcl {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$AllowAdministratorsReadAndExecute
+    )
     $item = Get-Item -LiteralPath $Path -Force
     if (Test-ReparsePoint $item) {
         throw "Owned ACL path must not be a reparse point: $($item.FullName)"
@@ -2356,8 +2370,23 @@ function Assert-PrivatePathAcl {
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $userSid = $identity.User.Value
     $expected = @{}
-    $expected[$userSid] = $false
-    $expected['S-1-5-18'] = $false
+    $expected[$userSid] = [PSCustomObject]@{
+        seen = $false
+        rights = [System.Security.AccessControl.FileSystemRights]::FullControl
+    }
+    $expected['S-1-5-18'] = [PSCustomObject]@{
+        seen = $false
+        rights = [System.Security.AccessControl.FileSystemRights]::FullControl
+    }
+    if ($AllowAdministratorsReadAndExecute) {
+        $administratorReadRights = [System.Security.AccessControl.FileSystemRights]::ReadAndExecute -bor
+            [System.Security.AccessControl.FileSystemRights]::Synchronize
+        $expected['S-1-5-32-544'] = [PSCustomObject]@{
+            seen = $false
+            # FileSystemAccessRule normalizes an Allow ACE by adding Synchronize.
+            rights = $administratorReadRights
+        }
+    }
     $acl = Get-FileSystemAclPortable -Item $item
     if (-not $acl.AreAccessRulesProtected) {
         throw "ACL inheritance remains enabled on $($item.FullName)"
@@ -2371,7 +2400,7 @@ function Assert-PrivatePathAcl {
         $true,
         [System.Security.Principal.SecurityIdentifier]
     ))
-    if ($rules.Count -ne 2) {
+    if ($rules.Count -ne $expected.Count) {
         throw "Unexpected ACE count on $($item.FullName)"
     }
     $requiredInheritance = if ($item.PSIsContainer) {
@@ -2381,48 +2410,61 @@ function Assert-PrivatePathAcl {
     }
     foreach ($rule in $rules) {
         $ruleSid = $rule.IdentityReference.Value
-        if (-not $expected.ContainsKey($ruleSid) -or $expected[$ruleSid]) {
+        if (-not $expected.ContainsKey($ruleSid) -or [bool]$expected[$ruleSid].seen) {
             throw "Unexpected or duplicate principal on $($item.FullName)"
         }
         if ($rule.IsInherited -or
             $rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or
             $rule.InheritanceFlags -ne $requiredInheritance -or
             $rule.PropagationFlags -ne [System.Security.AccessControl.PropagationFlags]::None -or
-            (($rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne
-             [System.Security.AccessControl.FileSystemRights]::FullControl)) {
+            $rule.FileSystemRights -ne $expected[$ruleSid].rights) {
             throw "Unexpected access rule on $($item.FullName)"
         }
-        $expected[$ruleSid] = $true
+        $expected[$ruleSid].seen = $true
     }
-    if ($expected.Values -contains $false) {
+    if (@($expected.Values | Where-Object { -not [bool]$_.seen }).Count -ne 0) {
         throw "Required principal is missing from $($item.FullName)"
     }
 }
 
 function Set-PrivatePathAcl {
-    param([Parameter(Mandatory = $true)][System.IO.FileSystemInfo]$Item)
+    param(
+        [Parameter(Mandatory = $true)][System.IO.FileSystemInfo]$Item,
+        [switch]$AllowAdministratorsReadAndExecute
+    )
     if (Test-ReparsePoint $Item) {
         throw "Owned ACL path must not be a reparse point: $($Item.FullName)"
     }
-    $replacement = New-PrivateFileSystemAcl -Directory ([bool]$Item.PSIsContainer)
+    $replacement = New-PrivateFileSystemAcl `
+        -Directory ([bool]$Item.PSIsContainer) `
+        -AllowAdministratorsReadAndExecute:$AllowAdministratorsReadAndExecute
     Set-FileSystemAclPortable -Item $Item -Acl $replacement
-    Assert-PrivatePathAcl -Path $Item.FullName
+    Assert-PrivatePathAcl `
+        -Path $Item.FullName `
+        -AllowAdministratorsReadAndExecute:$AllowAdministratorsReadAndExecute
 }
 
 function Set-PrivateDirectoryAcl {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$AllowAdministratorsReadAndExecute
+    )
     $directory = Resolve-NormalizedPath $Path
     [void](New-Item -ItemType Directory -Path $directory -Force)
     $root = Get-Item -LiteralPath $directory -Force
     if (-not $root.PSIsContainer) { throw "Private ACL root is not a directory: $directory" }
-    Set-PrivatePathAcl -Item $root
+    Set-PrivatePathAcl `
+        -Item $root `
+        -AllowAdministratorsReadAndExecute:$AllowAdministratorsReadAndExecute
 
     $pending = New-Object 'System.Collections.Generic.Stack[string]'
     $pending.Push($directory)
     while ($pending.Count -gt 0) {
         $current = $pending.Pop()
         foreach ($child in @(Get-ChildItem -LiteralPath $current -Force)) {
-            Set-PrivatePathAcl -Item $child
+            Set-PrivatePathAcl `
+                -Item $child `
+                -AllowAdministratorsReadAndExecute:$AllowAdministratorsReadAndExecute
             if ($child.PSIsContainer) { $pending.Push($child.FullName) }
         }
     }
@@ -2452,6 +2494,110 @@ function Invoke-CycIdentityCommand {
     try { return $raw | ConvertFrom-Json } catch {
         throw 'Controller TLS identity command returned invalid JSON.'
     }
+}
+
+function Resolve-CycIdentityReportedPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $candidate = $Path
+    if ($candidate.StartsWith('\\?\UNC\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $candidate = '\\' + $candidate.Substring(8)
+    } elseif ($candidate.StartsWith('\\?\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $candidate = $candidate.Substring(4)
+        if ($candidate -cnotmatch '^[A-Za-z]:[\\/]') {
+            throw 'Controller TLS identity command returned an unsupported extended path.'
+        }
+    } elseif ($candidate.StartsWith('\\.\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Controller TLS identity command returned a device path.'
+    }
+    return Resolve-NormalizedPath $candidate
+}
+
+function Test-CycIdentityHostEquivalent {
+    param(
+        [Parameter(Mandatory = $true)][string]$ReportedHost,
+        [Parameter(Mandatory = $true)][string]$ExpectedHost
+    )
+    $reportedIp = $null
+    $expectedIp = $null
+    $reportedIsIp = [System.Net.IPAddress]::TryParse($ReportedHost, [ref]$reportedIp)
+    $expectedIsIp = [System.Net.IPAddress]::TryParse($ExpectedHost, [ref]$expectedIp)
+    if ($reportedIsIp -or $expectedIsIp) {
+        return $reportedIsIp -and $expectedIsIp -and $reportedIp.Equals($expectedIp)
+    }
+    return [string]::Equals(
+        $ReportedHost.TrimEnd('.'),
+        $ExpectedHost.TrimEnd('.'),
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+}
+
+function Assert-CycIdentityMetadata {
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()]$Metadata,
+        [Parameter(Mandatory = $true)][string]$ExpectedCertificatePath,
+        [Parameter(Mandatory = $true)][string]$ExpectedPrivateKeyPath,
+        [Parameter(Mandatory = $true)][string]$ExpectedHost,
+        [Parameter(Mandatory = $true)][ValidateSet('init', 'verify')][string]$Operation
+    )
+    if ($null -eq $Metadata) {
+        throw "Controller TLS identity $Operation returned incomplete metadata."
+    }
+    [string[]]$expectedProperties = @(
+        'apiVersion',
+        'certificate',
+        'privateKey',
+        'sha256Fingerprint',
+        'subjectAltNames',
+        'notBefore',
+        'notAfter',
+        'valid'
+    )
+    [string[]]$actualProperties = @($Metadata.PSObject.Properties.Name)
+    [Array]::Sort($expectedProperties, [System.StringComparer]::Ordinal)
+    [Array]::Sort($actualProperties, [System.StringComparer]::Ordinal)
+    if ([string]::Join(',', $actualProperties) -cne [string]::Join(',', $expectedProperties)) {
+        throw "Controller TLS identity $Operation returned incomplete metadata."
+    }
+    if ([string]$Metadata.apiVersion -cne 'cyc.dev/identity/v1' -or
+        -not ($Metadata.valid -is [bool]) -or
+        -not [bool]$Metadata.valid -or
+        -not ($Metadata.subjectAltNames -is [System.Array]) -or
+        [string]::IsNullOrWhiteSpace([string]$Metadata.notBefore) -or
+        [string]::IsNullOrWhiteSpace([string]$Metadata.notAfter)) {
+        throw "Controller TLS identity $Operation returned invalid metadata."
+    }
+
+    try {
+        $reportedCertificatePath = Resolve-CycIdentityReportedPath ([string]$Metadata.certificate)
+        $reportedPrivateKeyPath = Resolve-CycIdentityReportedPath ([string]$Metadata.privateKey)
+    } catch {
+        throw "Controller TLS identity $Operation returned invalid output paths."
+    }
+    if (-not [string]::Equals(
+            $reportedCertificatePath,
+            (Resolve-NormalizedPath $ExpectedCertificatePath),
+            [System.StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not [string]::Equals(
+            $reportedPrivateKeyPath,
+            (Resolve-NormalizedPath $ExpectedPrivateKeyPath),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Controller TLS identity $Operation returned unexpected output paths."
+    }
+
+    $fingerprint = [string]$Metadata.sha256Fingerprint
+    if ($fingerprint -cnotmatch '^[0-9a-f]{64}$') {
+        throw "Controller TLS identity $Operation omitted its safe fingerprint."
+    }
+    $subjectAltNames = @($Metadata.subjectAltNames | ForEach-Object { [string]$_ })
+    $expectedSan = @($subjectAltNames | Where-Object {
+        Test-CycIdentityHostEquivalent -ReportedHost $_ -ExpectedHost $ExpectedHost
+    })
+    if ($subjectAltNames.Count -lt 1 -or $expectedSan.Count -ne 1) {
+        throw "Controller TLS identity $Operation did not bind the expected host."
+    }
+    return $fingerprint
 }
 
 function Ensure-CycTlsIdentity {
@@ -2490,19 +2636,12 @@ function Ensure-CycTlsIdentity {
                     '--host', [string]$Plan.managedWorker.publicHost
                 )
             $created = $true
-            if (-not $result.certificatePath -or -not $result.privateKeyPath -or
-                -not [string]::Equals(
-                    (Resolve-NormalizedPath ([string]$result.certificatePath)),
-                    $certificatePath,
-                    [System.StringComparison]::OrdinalIgnoreCase
-                ) -or
-                -not [string]::Equals(
-                    (Resolve-NormalizedPath ([string]$result.privateKeyPath)),
-                    $privateKeyPath,
-                    [System.StringComparison]::OrdinalIgnoreCase
-                )) {
-                throw 'Controller TLS identity command returned unexpected output paths.'
-            }
+            [void](Assert-CycIdentityMetadata `
+                -Metadata $result `
+                -ExpectedCertificatePath $certificatePath `
+                -ExpectedPrivateKeyPath $privateKeyPath `
+                -ExpectedHost ([string]$Plan.managedWorker.publicHost) `
+                -Operation init)
         }
         if (-not (Test-Path -LiteralPath $certificatePath -PathType Leaf) -or
             -not (Test-Path -LiteralPath $privateKeyPath -PathType Leaf)) {
@@ -2518,13 +2657,16 @@ function Ensure-CycTlsIdentity {
                 '--host', [string]$Plan.managedWorker.publicHost,
                 '--json'
             )
-        if (-not $verification.sha256Fingerprint) {
-            throw 'Controller TLS identity verification omitted its safe fingerprint.'
-        }
+        $fingerprint = Assert-CycIdentityMetadata `
+            -Metadata $verification `
+            -ExpectedCertificatePath $certificatePath `
+            -ExpectedPrivateKeyPath $privateKeyPath `
+            -ExpectedHost ([string]$Plan.managedWorker.publicHost) `
+            -Operation verify
         return [PSCustomObject]@{
             enabled = $true
             created = $created
-            fingerprint = [string]$verification.sha256Fingerprint
+            fingerprint = $fingerprint
         }
     } catch {
         $failure = $_
@@ -2773,7 +2915,13 @@ function Read-InstallManifest {
     if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) { return $null }
     $item = Get-Item -LiteralPath $ManifestPath -Force
     if ($item.Length -gt $script:MaxInstallManifestBytes) { throw 'Install manifest is unexpectedly large.' }
-    $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+    $raw = Get-Content -LiteralPath $ManifestPath -Raw
+    $converter = Get-Command ConvertFrom-Json -CommandType Cmdlet -ErrorAction Stop
+    $manifest = if ($converter.Parameters.ContainsKey('DateKind')) {
+        ConvertFrom-Json -InputObject $raw -DateKind String
+    } else {
+        ConvertFrom-Json -InputObject $raw
+    }
     if ($manifest.schemaVersion -ne $script:ManifestSchema) {
         throw 'Unsupported install manifest schema.'
     }
@@ -3714,26 +3862,22 @@ function Write-DurableAtomicJson {
             [System.IO.File]::Move($temporary, $Path)
         }
 
-        # Flush the installed record after the atomic rename/replace before a
-        # later external cleanup command is allowed to run.
-        $stream = [System.IO.FileStream]::new(
-            $Path,
-            [System.IO.FileMode]::Open,
-            [System.IO.FileAccess]::ReadWrite,
-            [System.IO.FileShare]::Read,
-            4096,
-            [System.IO.FileOptions]::WriteThrough
-        )
-        $stream.Flush($true)
-        $stream.Dispose()
-        $stream = $null
+        # The flushed same-directory replace/move above is the commit point.
+        # Do not reopen the destination afterwards: an AV/share race after a
+        # successful commit must never make callers compensate durable state.
         $committed = $true
     } finally {
-        if ($stream) { $stream.Dispose() }
-        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
-        if ($committed -and (Test-Path -LiteralPath $backup)) {
-            Remove-Item -LiteralPath $backup -Force
-        }
+        if ($stream) { try { $stream.Dispose() } catch { } }
+        try {
+            if (Test-Path -LiteralPath $temporary) {
+                Remove-Item -LiteralPath $temporary -Force
+            }
+        } catch { }
+        try {
+            if ($committed -and (Test-Path -LiteralPath $backup)) {
+                Remove-Item -LiteralPath $backup -Force
+            }
+        } catch { }
     }
 }
 
@@ -3764,6 +3908,7 @@ function Write-CodexCleanupState {
 function Write-InstallManifest {
     param(
         [Parameter(Mandatory = $true)]$Plan,
+        [Parameter(Mandatory = $true)][ValidateSet('Install', 'Repair')][string]$Action,
         [Parameter(Mandatory = $true)]$CodexResult,
         [Parameter(Mandatory = $true)]$AgentsResult,
         $TlsIdentityResult
@@ -3780,6 +3925,18 @@ function Write-InstallManifest {
             sid = [string]$Plan.initiator.sid
             profile = [string]$Plan.initiator.profile
             localAppData = [string]$Plan.initiator.localAppData
+        }
+        coreCommit = [ordered]@{
+            schemaVersion = $script:CoreCommitSchema
+            action = $Action
+            state = 'pending'
+            transactionId = if ($Plan.managedWorker.firewall.enabled) {
+                $Plan.managedWorker.firewall.transactionId
+            } else { $null }
+            requestSha256 = if ($Plan.managedWorker.firewall.enabled) {
+                $Plan.managedWorker.firewall.requestSha256
+            } else { $null }
+            committedAtUtc = $null
         }
         buildCatalogSha256 = $Plan.buildCatalogSha256
         codexPayloadCatalogSha256 = $Plan.codexPayloadCatalogSha256
@@ -3842,6 +3999,63 @@ function Write-InstallManifest {
         agentsIntegration = $AgentsResult
     }
     Write-DurableAtomicJson -Path $Plan.manifestPath -Value $record -Depth 12
+}
+
+function Complete-CycInstallCoreCommit {
+    param(
+        [Parameter(Mandatory = $true)]$Plan,
+        [Parameter(Mandatory = $true)][ValidateSet('Install', 'Repair')][string]$Action
+    )
+    $manifest = Read-InstallManifest -ManifestPath $Plan.manifestPath
+    if (-not $manifest -or -not $manifest.PSObject.Properties['coreCommit']) {
+        throw 'Install core commit marker is missing.'
+    }
+    $marker = $manifest.coreCommit
+    [string[]]$actual = @($marker.PSObject.Properties.Name)
+    [string[]]$expected = @(
+        'action', 'committedAtUtc', 'requestSha256', 'schemaVersion', 'state', 'transactionId'
+    )
+    [Array]::Sort($actual, [System.StringComparer]::Ordinal)
+    [Array]::Sort($expected, [System.StringComparer]::Ordinal)
+    if ([string]::Join(',', $actual) -cne [string]::Join(',', $expected) -or
+        [string]$marker.schemaVersion -cne $script:CoreCommitSchema -or
+        [string]$marker.action -cne $Action -or
+        [string]$marker.state -cnotin @('pending', 'committed')) {
+        throw 'Install core commit marker is invalid.'
+    }
+    if ($Plan.managedWorker.firewall.enabled) {
+        if ([string]$marker.transactionId -cne [string]$Plan.managedWorker.firewall.transactionId -or
+            [string]$marker.requestSha256 -cne [string]$Plan.managedWorker.firewall.requestSha256) {
+            throw 'Install core commit marker is not bound to the deferred firewall transaction.'
+        }
+    } elseif ($null -ne $marker.transactionId -or $null -ne $marker.requestSha256) {
+        throw 'Install core commit marker unexpectedly contains a firewall binding.'
+    }
+    if ([string]$marker.state -ceq 'committed') {
+        $committedAt = [DateTimeOffset]::MinValue
+        if ([string]$marker.committedAtUtc -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}(?:Z|[+-]\d{2}:\d{2})$' -or
+            -not [DateTimeOffset]::TryParse(
+                [string]$marker.committedAtUtc,
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::RoundtripKind,
+                [ref]$committedAt
+            )) {
+            throw 'Committed install core marker has an invalid commit timestamp.'
+        }
+        return $manifest
+    }
+    if ($null -ne $marker.committedAtUtc) {
+        throw 'Pending install core commit marker already has a commit timestamp.'
+    }
+    $marker.state = 'committed'
+    $marker.committedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+    Write-DurableAtomicJson -Path $Plan.manifestPath -Value $manifest -Depth 20
+    # The durable atomic replace above is the core commit point. Do not reopen
+    # the manifest here: a transient post-commit read failure must never make
+    # the caller compensate an already committed install. The lifecycle
+    # coordinator independently reads and validates this exact after-image
+    # before it commits the deferred firewall transaction.
+    return $manifest
 }
 
 function Set-CycObjectPropertyValue {
@@ -4463,7 +4677,10 @@ function Invoke-InstallOrRepairCore {
     if (-not $PSCmdlet.ShouldProcess($Plan.installRoot, "$Action ClusterYourCodex")) { return }
 
     $oldManifest = Read-InstallManifest -ManifestPath $Plan.manifestPath
-    Set-PrivateDirectoryAcl -Path $Plan.installRoot
+    # The elevated firewall-only helper may run as a different administrator
+    # during over-the-shoulder UAC. It needs read/execute access to hash the
+    # request-bound controller, but receives no write/delete/control rights.
+    Set-PrivateDirectoryAcl -Path $Plan.installRoot -AllowAdministratorsReadAndExecute
     Set-PrivateDirectoryAcl -Path $Plan.dataRoot
     $taskSnapshots = @(Get-CycTaskSnapshots)
     Stop-CycRuntime -InstallRoot $Plan.installRoot
@@ -4477,10 +4694,11 @@ function Invoke-InstallOrRepairCore {
     $tlsIdentityResult = $null
     $uninstallRegistrationSnapshot = $null
     $preserveRollbackSnapshot = $false
+    $coreCommitPublished = $false
     try {
         $rollback = New-FileRollbackSnapshot -Plan $Plan -OldManifest $oldManifest
         Install-PlannedFiles -Plan $Plan
-        Set-PrivateDirectoryAcl -Path $Plan.installRoot
+        Set-PrivateDirectoryAcl -Path $Plan.installRoot -AllowAdministratorsReadAndExecute
         Set-PrivateDirectoryAcl -Path $Plan.dataRoot
 
         $tlsIdentityResult = Ensure-CycTlsIdentity -Plan $Plan
@@ -4531,6 +4749,7 @@ function Invoke-InstallOrRepairCore {
         }
         Write-InstallManifest `
             -Plan $Plan `
+            -Action $Action `
             -CodexResult $codexResult `
             -AgentsResult $agentsResult `
             -TlsIdentityResult $tlsIdentityResult
@@ -4546,6 +4765,8 @@ function Invoke-InstallOrRepairCore {
             Wait-CycTaskStable -Name $script:WorkerTaskName -StableSeconds 1
         }
         Complete-CycAgentsInstallTransaction -Transaction $agentsTransaction
+        [void](Complete-CycInstallCoreCommit -Plan $Plan -Action $Action)
+        $coreCommitPublished = $true
     } catch {
         $failure = $_
         Stop-CycRuntime -InstallRoot $Plan.installRoot
@@ -4619,7 +4840,12 @@ function Invoke-InstallOrRepairCore {
         throw $failure
     } finally {
         if ($rollback -and -not $preserveRollbackSnapshot) {
-            Remove-FileRollbackSnapshot -Snapshot $rollback
+            try { Remove-FileRollbackSnapshot -Snapshot $rollback } catch {
+                # Once the exact core marker is committed, rollback snapshots
+                # are housekeeping only. Never report core failure or ask the
+                # coordinator to compensate an already-committed install.
+                if (-not $coreCommitPublished) { $preserveRollbackSnapshot = $true }
+            }
         }
     }
     [PSCustomObject]@{
@@ -4810,10 +5036,12 @@ function Invoke-UninstallCore {
                 -ExpectedInstallRoot $install
         }
 
+        Complete-CycAgentsRemovalTransaction -Transaction $agentsRemovalTransaction
+        # Manifest absence is the external uninstall commit marker. Publish it
+        # only after the AGENTS.md removal journal is durably committed.
         if (-not $PurgeData) {
             Remove-Item -LiteralPath $manifestPath -Force
         }
-        Complete-CycAgentsRemovalTransaction -Transaction $agentsRemovalTransaction
     } catch {
         $failure = $_
         $rollbackFailures = New-Object System.Collections.Generic.List[string]
@@ -4848,7 +5076,11 @@ function Invoke-UninstallCore {
     }
 
     if (-not $preserveUninstallSnapshot) {
-        Remove-FileRollbackSnapshot -Snapshot $fileSnapshot
+        try { Remove-FileRollbackSnapshot -Snapshot $fileSnapshot } catch {
+            # A retained transaction snapshot is housekeeping. For non-purge
+            # uninstall the absent manifest is already the durable core marker;
+            # for purge the data-root removal below consumes the snapshot too.
+        }
     }
     if ($PurgeData) {
         $purgeTarget = Assert-SafePurgeTarget -DataRoot $data -Manifest $manifest

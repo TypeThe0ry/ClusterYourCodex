@@ -82,6 +82,43 @@ function Remove-FreshOwnedIsolationRoot {
     Assert-FreshTest (-not (Test-Path -LiteralPath $resolvedRoot)) 'the harness removes its owned isolation root'
 }
 
+function Remove-FreshOwnedWorkRoot {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $resolvedRoot = Resolve-FreshPath $Root
+    $tempRoot = Resolve-FreshPath ([System.IO.Path]::GetTempPath())
+    $tempItem = Get-Item -LiteralPath $tempRoot -Force -ErrorAction Stop
+    if (($tempItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "refusing to remove a work root beneath redirected TEMP: $tempRoot"
+    }
+    if (-not [string]::Equals((Split-Path -Parent $resolvedRoot), $tempRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+        (Split-Path -Leaf $resolvedRoot) -cnotmatch '^clusteryourcodex-fresh-[0-9a-f]{32}$') {
+        throw "refusing to remove an unowned fresh deployment work root: $resolvedRoot"
+    }
+    if (-not (Test-Path -LiteralPath $resolvedRoot)) { return }
+    if (-not (Test-Path -LiteralPath $resolvedRoot -PathType Container)) {
+        throw "fresh deployment work root is not a directory: $resolvedRoot"
+    }
+
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $pending.Push($resolvedRoot)
+    while ($pending.Count -gt 0) {
+        $current = $pending.Pop()
+        $currentItem = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+        if (($currentItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "refusing to remove a fresh deployment work tree containing a reparse point: $current"
+        }
+        foreach ($child in @(Get-ChildItem -LiteralPath $current -Force -ErrorAction Stop)) {
+            if (($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "refusing to remove a fresh deployment work tree containing a reparse point: $($child.FullName)"
+            }
+            if ($child.PSIsContainer) { $pending.Push($child.FullName) }
+        }
+    }
+    Remove-Item -LiteralPath $resolvedRoot -Recurse -Force
+    Assert-FreshTest (-not (Test-Path -LiteralPath $resolvedRoot)) 'the harness removes its owned work root'
+}
+
 function Invoke-FreshPowerShell {
     param(
         [Parameter(Mandatory = $true)][string]$Bootstrap,
@@ -127,6 +164,7 @@ function Assert-InstalledFile {
 
 $package = Resolve-FreshPath $PackageRoot
 $work = Resolve-FreshPath $WorkRoot
+$workExistedAtStart = Test-Path -LiteralPath $work
 $payload = Join-Path $package 'payload'
 $manifestPath = Join-Path $package 'preview-manifest.json'
 $bootstrap = Join-Path $package 'payload\installer\bootstrap.ps1'
@@ -141,6 +179,11 @@ Assert-FreshTest (Test-Path -LiteralPath $package -PathType Container) "package 
 Assert-FreshTest (Test-Path -LiteralPath $payload -PathType Container) 'package payload exists'
 Assert-FreshTest (Test-Path -LiteralPath $manifestPath -PathType Leaf) 'package manifest exists'
 Assert-FreshTest (Test-Path -LiteralPath $bootstrap -PathType Leaf) 'payload bootstrap exists'
+if (-not $KeepWorkRoot) {
+    Assert-FreshTest (-not $workExistedAtStart) 'auto-cleaned work root did not exist before this harness run'
+    Assert-FreshTest ([string]::Equals((Split-Path -Parent $work), (Resolve-FreshPath ([System.IO.Path]::GetTempPath())), [System.StringComparison]::OrdinalIgnoreCase)) 'auto-cleaned work root is a direct TEMP child'
+    Assert-FreshTest ((Split-Path -Leaf $work) -cmatch '^clusteryourcodex-fresh-[0-9a-f]{32}$') 'auto-cleaned work root uses the harness-owned GUID name'
+}
 [void](New-Item -ItemType Directory -Path $logRoot -Force)
 
 $common = @(
@@ -220,11 +263,25 @@ try {
     & (Join-Path $installRoot 'cyc.exe') '--help' *> (Join-Path $logRoot 'cli-help.log')
     Assert-FreshTest ($LASTEXITCODE -eq 0) 'installed CLI --help succeeds'
 
+    $installedCliPath = Join-Path $installRoot 'cyc.exe'
+    $installedCliSha256 = (Get-FileHash -LiteralPath $installedCliPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $installedCliBytes = [System.IO.File]::ReadAllBytes($installedCliPath)
+    Assert-FreshTest ($installedCliBytes.Length -gt 4096) 'installed CLI is large enough for a deterministic repair mutation'
+    $mutationOffset = $installedCliBytes.Length - 1
+    $installedCliBytes[$mutationOffset] = $installedCliBytes[$mutationOffset] -bxor 0xff
+    [System.IO.File]::WriteAllBytes($installedCliPath, $installedCliBytes)
+    $mutatedCliSha256 = (Get-FileHash -LiteralPath $installedCliPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-FreshTest ($mutatedCliSha256 -cne $installedCliSha256) 'repair precondition corrupts the installed CLI'
+
     $repairArguments = @($common)
     $repairArguments[1] = 'Repair'
     [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $repairArguments -LogRoot $logRoot -Label 'repair')
     $repairedManifest = Get-Content -LiteralPath $installedManifestPath -Raw | ConvertFrom-Json
     Assert-FreshTest ([string]$repairedManifest.schemaVersion -eq 'cyc.dev/windows-install-manifest/v1') 'repair keeps a valid manifest'
+    $repairedCliSha256 = (Get-FileHash -LiteralPath $installedCliPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-FreshTest ($repairedCliSha256 -ceq $installedCliSha256) 'repair restores the exact packaged CLI bytes'
+    & $installedCliPath '--help' *> (Join-Path $logRoot 'cli-help-after-repair.log')
+    Assert-FreshTest ($LASTEXITCODE -eq 0) 'repaired CLI --help succeeds'
 
     $uninstallArguments = @(
         '-Action', 'Uninstall',
@@ -253,7 +310,7 @@ try {
         packageRoot = $package
         installRoot = $installRoot
         dataRoot = $dataRoot
-        steps = @('plan', 'install', 'controller-version', 'worker-probe', 'cli-help', 'repair', 'uninstall')
+        steps = @('plan', 'install', 'controller-version', 'worker-probe', 'cli-help', 'repair-corrupted-cli', 'uninstall')
         logs = $logRoot
     } | ConvertTo-Json -Depth 6
 } finally {
@@ -276,14 +333,8 @@ try {
     }
     try {
         if (-not $KeepWorkRoot -and (Test-Path -LiteralPath $work)) {
-            $resolvedWork = Resolve-FreshPath $work
-            $tempRoot = Resolve-FreshPath ([System.IO.Path]::GetTempPath())
-            $tempChildPrefix = $tempRoot + [System.IO.Path]::DirectorySeparatorChar
-            if ($resolvedWork.StartsWith($tempChildPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-                Remove-Item -LiteralPath $resolvedWork -Recurse -Force
-            } else {
-                Write-Warning "preserving work root outside the temp directory: $resolvedWork"
-            }
+            Assert-FreshTest (-not $workExistedAtStart) 'work root was created by this harness run'
+            Remove-FreshOwnedWorkRoot -Root $work
         }
     } catch {
         $message = "work-root cleanup failed: $($_.Exception.Message)"

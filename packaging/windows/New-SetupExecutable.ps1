@@ -41,6 +41,28 @@ function Resolve-SetupPath {
     return $resolved
 }
 
+function Test-SetupPathEqualOrDescendant {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Candidate
+    )
+    $rootPath = (Resolve-SetupPath -Path $Root).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $candidatePath = (Resolve-SetupPath -Path $Candidate).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    if ([string]::Equals($rootPath, $candidatePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    return $candidatePath.StartsWith(
+        $rootPath + [System.IO.Path]::DirectorySeparatorChar,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+}
+
 function Resolve-MakeNsis {
     param([string]$RequestedPath)
     if (-not [string]::IsNullOrWhiteSpace($RequestedPath)) {
@@ -152,6 +174,19 @@ $package = Resolve-SetupPath -Path $requestedPackageRoot
 $output = Resolve-SetupPath -Path $requestedOutputPath
 $makeNsis = Resolve-MakeNsis -RequestedPath $requestedMakeNsisPath
 $script = Resolve-SetupPath -Path (Join-Path -Path $setupScriptRoot -ChildPath 'ClusterYourCodex.nsi')
+$sidecarOutput = $output + '.sha256'
+foreach ($artifactPath in @($output, $sidecarOutput)) {
+    if ((Test-SetupPathEqualOrDescendant -Root $package -Candidate $artifactPath) -or
+        (Test-SetupPathEqualOrDescendant -Root $artifactPath -Candidate $package)) {
+        throw 'Setup output and sidecar must be outside, and must not contain, the package root.'
+    }
+}
+foreach ($protectedBuilderInput in @($makeNsis, $script)) {
+    if ([string]::Equals($output, $protectedBuilderInput, [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($sidecarOutput, $protectedBuilderInput, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Setup output and sidecar must not replace a builder executable or source script.'
+    }
+}
 $nsisPackageRoot = $package
 $validationPackageRoot = $package
 $maximumPackageRelativePath = 190
@@ -299,7 +334,7 @@ if ($bytes.Length -lt 4096 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
 }
 $hash = (Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash.ToLowerInvariant()
 $sidecar = "$hash  $([System.IO.Path]::GetFileName($output))"
-$sidecarPath = $output + '.sha256'
+$sidecarPath = $sidecarOutput
 $sidecar | Set-Content -LiteralPath $sidecarPath -Encoding ASCII -NoNewline
 [PSCustomObject]@{
     setupPath = $output

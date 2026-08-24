@@ -581,6 +581,12 @@ jobs:
         run: choco install nsis --yes --no-progress
       - run: pnpm -r build
       - run: cargo build --locked --release --bin cyc-controller --bin cyc-worker --bin cyc
+      - name: Validate production identity CLI/bootstrap contract
+        shell: powershell
+        run: >-
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+          -File .\packaging\windows\Test-WindowsPackaging.ps1
+          -IdentityCliPath .\target\release\cyc.exe
       - run: pnpm --filter @clusteryourcodex/desktop exec tauri build --no-bundle
       - name: Verify self-contained preview native binaries
         shell: pwsh
@@ -815,18 +821,80 @@ jobs:
             throw 'failed to build ClusterYourCodex-Setup.exe'
           }
           $archive = Join-Path $archiveRoot "$name.zip"
-          Compress-Archive -LiteralPath $preview -DestinationPath $archive
+          if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
+          Add-Type -AssemblyName System.IO.Compression
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::Open($archive, [System.IO.Compression.ZipArchiveMode]::Create)
+          try {
+            if ((Split-Path -Leaf $preview) -cne $name) {
+              throw 'preview root name changed before archive creation'
+            }
+            [void]$zip.CreateEntry("$name/", [System.IO.Compression.CompressionLevel]::NoCompression)
+            foreach ($entry in @(Get-ChildItem -LiteralPath $preview -Force -Recurse | Sort-Object FullName)) {
+              if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "refusing to archive a reparse point: $($entry.FullName)"
+              }
+              $relative = $entry.FullName.Substring($preview.Length + 1).Replace('\', '/')
+              $entryName = "$name/$relative"
+              if ($entry.PSIsContainer) {
+                [void]$zip.CreateEntry(($entryName.TrimEnd('/') + '/'), [System.IO.Compression.CompressionLevel]::NoCompression)
+              } else {
+                [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                  $zip,
+                  $entry.FullName,
+                  $entryName,
+                  [System.IO.Compression.CompressionLevel]::Optimal
+                )
+              }
+            }
+          } finally {
+            $zip.Dispose()
+          }
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
           "$hash  $(Split-Path $archive -Leaf)" |
             Set-Content -NoNewline -Encoding ascii "$archive.sha256"
-      - name: Run fresh deployment lifecycle smoke
+      - name: Run post-archive fresh deployment lifecycle smoke
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $safeRef = [string]$env:CYC_REF_NAME -replace '[^0-9A-Za-z._-]', '-'
           if ([string]::IsNullOrWhiteSpace($safeRef)) { $safeRef = 'build' }
-          $preview = Join-Path $env:RUNNER_TEMP "ClusterYourCodex-$safeRef-windows-x64-self-contained-preview"
-          & .\packaging\windows\Test-FreshDeployment.ps1 -PackageRoot $preview
+          $name = "ClusterYourCodex-$safeRef-windows-x64-self-contained-preview"
+          $preview = Join-Path $env:RUNNER_TEMP $name
+          $archive = Join-Path $PWD "release-assets\$name.zip"
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw "published ZIP is missing: $archive"
+          }
+          $extractRoot = Join-Path $env:RUNNER_TEMP ('clusteryourcodex-post-archive-' + [Guid]::NewGuid().ToString('N'))
+          if (Test-Path -LiteralPath $extractRoot) { throw 'fresh archive extraction root unexpectedly exists' }
+          New-Item -ItemType Directory -Path $extractRoot | Out-Null
+          Expand-Archive -LiteralPath $archive -DestinationPath $extractRoot -Force
+          $topLevel = @(Get-ChildItem -LiteralPath $extractRoot -Force)
+          if ($topLevel.Count -ne 1 -or -not $topLevel[0].PSIsContainer -or $topLevel[0].Name -cne $name) {
+            throw 'published ZIP must contain exactly one correctly named package root'
+          }
+          $extractedPackage = [string]$topLevel[0].FullName
+          function Get-CycArchiveInventory([string]$Root) {
+            return @(Get-ChildItem -LiteralPath $Root -Force -Recurse | Sort-Object FullName | ForEach-Object {
+              if (($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "archive inventory contains a reparse point: $($_.FullName)"
+              }
+              $relative = $_.FullName.Substring($Root.Length + 1).Replace('\', '/')
+              if ($_.PSIsContainer) {
+                "D  $relative"
+              } else {
+                $digest = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                "F  $relative  $([long]$_.Length)  $digest"
+              }
+            })
+          }
+          $sourceInventory = @(Get-CycArchiveInventory -Root $preview)
+          $extractedInventory = @(Get-CycArchiveInventory -Root $extractedPackage)
+          if ($sourceInventory.Count -ne $extractedInventory.Count -or
+              [string]::Join("`n", $sourceInventory) -cne [string]::Join("`n", $extractedInventory)) {
+            throw 'published ZIP did not preserve the exact forced/hidden package tree and file bytes'
+          }
+          & .\packaging\windows\Test-FreshDeployment.ps1 -PackageRoot $extractedPackage
           if ($LASTEXITCODE -ne 0) { throw 'fresh deployment lifecycle smoke failed' }
       - name: Run silent Setup lifecycle smoke in disposable runner
         shell: pwsh
