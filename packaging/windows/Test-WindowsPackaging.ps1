@@ -1673,6 +1673,9 @@ exit /b !ERRORLEVEL!
     Assert-True ($setupBuilder -match 'candidateRoots[\s\S]+IsNullOrWhiteSpace') 'Setup builder tolerates a missing ProgramFiles(x86) environment variable'
     Assert-True ($setupBuilder -match 'SpecialFolder\]::ProgramFilesX86') 'Setup builder uses the OS Program Files x86 folder when environment variables are incomplete'
     Assert-True ($setupBuilder -match 'subst\.exe') 'Setup builder maps long package roots to a short NSIS source path'
+    $freshDeploymentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-FreshDeployment.ps1') -Raw
+    Assert-True (-not $freshDeploymentSource.Contains("'-Confirm:`$false'")) 'fresh deployment smoke never serializes a false SwitchParameter through powershell.exe -File'
+    Assert-True ($freshDeploymentSource -match "'-NoLogo', '-NoProfile', '-NonInteractive'") 'fresh deployment smoke launches a clean non-interactive Windows PowerShell child'
     $releaseWorkflow = Get-Content -LiteralPath (Join-Path $repoRoot '.github\workflows\release.yml') -Raw
     Assert-True ($releaseWorkflow -match 'NSIS installation completed but makensis\.exe was not found') 'release workflow validates its explicit NSIS compiler path'
     Assert-True ($releaseWorkflow -match 'New-SetupExecutable\.ps1[\s\S]+-MakeNsisPath \$makeNsis') 'release workflow passes the resolved NSIS compiler into Setup.exe staging'

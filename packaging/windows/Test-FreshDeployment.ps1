@@ -98,9 +98,14 @@ $common = @(
     '-DisableManagedWorkerListener',
     '-SkipFirewall',
     '-SkipCodexIntegration',
-    '-SkipUninstallRegistration',
-    '-Confirm:$false'
+    '-SkipUninstallRegistration'
 )
+# Do not append a serialized `-Confirm:$false` token here. Windows PowerShell
+# 5.1 treats that native argv token as a String when a script is launched with
+# `powershell.exe -File`, then fails to bind it to SwitchParameter. This child
+# starts with -NoProfile and the default ConfirmPreference (High), while the
+# lifecycle's ConfirmImpact is Medium, so the non-interactive smoke remains
+# non-prompting without forwarding the common parameter.
 $installed = $false
 $uninstalled = $false
 $controllerTaskBefore = @(Get-ScheduledTask -TaskName 'ClusterYourCodex Controller' -ErrorAction SilentlyContinue | ForEach-Object {
@@ -147,8 +152,7 @@ try {
         '-SkipFirewall',
         '-SkipCodexIntegration',
         '-SkipUninstallRegistration',
-        '-PurgeData',
-        '-Confirm:$false'
+        '-PurgeData'
     )
     [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $uninstallArguments -LogRoot $logRoot -Label 'uninstall')
     $uninstalled = $true
@@ -180,8 +184,7 @@ try {
                 '-SkipFirewall',
                 '-SkipCodexIntegration',
                 '-SkipUninstallRegistration',
-                '-PurgeData',
-                '-Confirm:$false'
+                '-PurgeData'
             )
             [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $cleanupArguments -LogRoot $logRoot -Label 'cleanup')
         } catch {
