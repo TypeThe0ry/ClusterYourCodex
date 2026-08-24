@@ -1405,6 +1405,39 @@ exit 4
         -Root $preview `
         -ManifestPath (Join-Path $preview 'preview-manifest.json') `
         -PayloadRoot (Join-Path $preview 'payload')
+
+    # Exercise the actual setup-builder command path without making this test
+    # depend on a machine-wide NSIS installation. The stub accepts NSIS-style
+    # defines and writes a valid PE-shaped output from the Windows command host.
+    $fakeMakeNsis = Join-Path $testRoot 'fake-makensis.cmd'
+    @'
+@echo off
+setlocal EnableExtensions EnableDelayedExpansion
+set "output="
+set "expectOutput="
+for %%A in (%*) do (
+    set "argument=%%~A"
+    if defined expectOutput (
+        set "output=!argument!"
+        set "expectOutput="
+    ) else if /I "!argument!"=="/DCYC_OUTPUT" (
+        set "expectOutput=1"
+    )
+)
+if "!output!"=="" exit /b 2
+copy /Y "%ComSpec%" "!output!" >nul
+exit /b !ERRORLEVEL!
+'@ | Set-Content -LiteralPath $fakeMakeNsis -Encoding ASCII
+    $setupOutput = Join-Path $testRoot 'setup-output\ClusterYourCodex-Setup.exe'
+    $setupResult = @(& (Join-Path $PSScriptRoot 'New-SetupExecutable.ps1') `
+        -PackageRoot $preview `
+        -OutputPath $setupOutput `
+        -MakeNsisPath $fakeMakeNsis `
+        -Force)
+    Assert-True (Test-Path -LiteralPath $setupOutput -PathType Leaf) 'setup builder passes a non-empty output path to NSIS'
+    Assert-True (Test-Path -LiteralPath ($setupOutput + '.sha256') -PathType Leaf) 'setup builder writes its SHA-256 sidecar'
+    Assert-True ($setupResult.Count -eq 1 -and [string]$setupResult[0].setupPath -eq $setupOutput) 'setup builder returns the generated setup path'
+
     $tamperedPackage = Join-Path $testRoot 'tampered-package'
     Copy-Item -LiteralPath $preview -Destination $tamperedPackage -Recurse
     [System.IO.File]::AppendAllText((Join-Path $tamperedPackage 'payload\ClusterYourCodex.exe'), 'tampered')

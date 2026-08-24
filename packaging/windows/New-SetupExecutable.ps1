@@ -11,7 +11,26 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-. (Join-Path $PSScriptRoot 'bootstrap.ps1')
+# Dot-sourcing bootstrap.ps1 can replace the dynamic value of $PSScriptRoot
+# under Windows PowerShell 5.1. Preserve this script's location before loading
+# shared helpers so the NSIS source remains resolvable later in the build.
+# bootstrap.ps1 has its own param block, so preserve every builder input before
+# importing it as well; dot-sourcing otherwise replaces matching variables in
+# this script scope.
+$setupScriptRoot = [string]$PSScriptRoot
+$requestedPackageRoot = [string]$PackageRoot
+$requestedOutputPath = [string]$OutputPath
+$requestedMakeNsisPath = [string]$MakeNsisPath
+$requestedRequireRuntimeSignature = [bool]$RequireRuntimeSignature
+$requestedForce = [bool]$Force
+if ([string]::IsNullOrWhiteSpace($setupScriptRoot)) {
+    throw 'New-SetupExecutable.ps1 must be launched from a script file path.'
+}
+$bootstrapScript = Join-Path -Path $setupScriptRoot -ChildPath 'bootstrap.ps1'
+# The bootstrap script defines a default BundleRoot with its own dynamic
+# $PSScriptRoot. Supply a harmless non-empty value because this caller imports
+# helpers only and Windows PowerShell 5.1 can leave that automatic value blank.
+. $bootstrapScript -BundleRoot $setupScriptRoot
 
 function Resolve-SetupPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -66,8 +85,8 @@ function Resolve-MakeNsis {
     throw 'makensis.exe is required to build ClusterYourCodex-Setup.exe.'
 }
 
-$package = Resolve-SetupPath $PackageRoot
-$output = Resolve-SetupPath $OutputPath
+$package = Resolve-SetupPath -Path $requestedPackageRoot
+$output = Resolve-SetupPath -Path $requestedOutputPath
 $manifest = Join-Path $package 'preview-manifest.json'
 $payload = Join-Path $package 'payload'
 Assert-CycPackageManifest -Root $package -ManifestPath $manifest -PayloadRoot $payload
@@ -75,18 +94,18 @@ Assert-CycPackageManifest -Root $package -ManifestPath $manifest -PayloadRoot $p
 $outputParent = Split-Path -Parent $output
 [void](New-Item -ItemType Directory -Path $outputParent -Force)
 if (Test-Path -LiteralPath $output) {
-    if (-not $Force) { throw "Setup output already exists: $output" }
+    if (-not $requestedForce) { throw "Setup output already exists: $output" }
     Remove-Item -LiteralPath $output -Force
 }
 
-$makeNsis = Resolve-MakeNsis -RequestedPath $MakeNsisPath
-$script = Resolve-SetupPath (Join-Path $PSScriptRoot 'ClusterYourCodex.nsi')
+$makeNsis = Resolve-MakeNsis -RequestedPath $requestedMakeNsisPath
+$script = Resolve-SetupPath -Path (Join-Path -Path $setupScriptRoot -ChildPath 'ClusterYourCodex.nsi')
 $arguments = @(
     '/V4',
     "/DCYC_PACKAGE_ROOT=$package",
     "/DCYC_OUTPUT=$output"
 )
-if ($RequireRuntimeSignature) { $arguments += '/DCYC_REQUIRE_SIGNATURE=1' }
+if ($requestedRequireRuntimeSignature) { $arguments += '/DCYC_REQUIRE_SIGNATURE=1' }
 $arguments += $script
 $outputLines = @(& $makeNsis @arguments 2>&1)
 $exitCode = $LASTEXITCODE
