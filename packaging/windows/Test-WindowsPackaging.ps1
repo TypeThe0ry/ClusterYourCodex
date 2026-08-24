@@ -1678,6 +1678,7 @@ exit /b !ERRORLEVEL!
     $freshDeploymentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-FreshDeployment.ps1') -Raw
     Assert-True (-not $freshDeploymentSource.Contains("'-Confirm:`$false'")) 'fresh deployment smoke never serializes a false SwitchParameter through powershell.exe -File'
     Assert-True ($freshDeploymentSource -match "'-NoLogo', '-NoProfile', '-NonInteractive'") 'fresh deployment smoke launches a clean non-interactive Windows PowerShell child'
+    Assert-True ($freshDeploymentSource -match "'-WorkerConfig',\s+\`$workerConfig") 'fresh deployment smoke keeps the worker config beneath its isolated data root'
     $setupSilentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-SetupSilent.ps1') -Raw
     Assert-True ($setupSilentSource -match 'CYC_DISPOSABLE_WINDOWS') 'silent Setup smoke requires an explicit disposable-environment sentinel'
     Assert-True ($setupSilentSource -match '\[string\]\$PackageRoot') 'silent Setup smoke binds Repair to the matching staged package'

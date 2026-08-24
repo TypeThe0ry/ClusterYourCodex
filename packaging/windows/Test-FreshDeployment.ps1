@@ -80,6 +80,7 @@ $suffix = [Guid]::NewGuid().ToString('N')
 $isolatedRoot = Resolve-FreshPath (Join-Path $env:LOCALAPPDATA "ClusterYourCodex-fresh-$suffix")
 $installRoot = Resolve-FreshPath (Join-Path $isolatedRoot 'program')
 $dataRoot = Resolve-FreshPath (Join-Path $isolatedRoot 'data')
+$workerConfig = Resolve-FreshPath (Join-Path $dataRoot 'worker\config.json')
 
 Assert-FreshTest (Test-Path -LiteralPath $package -PathType Container) "package root exists: $package"
 Assert-FreshTest (Test-Path -LiteralPath $payload -PathType Container) 'package payload exists'
@@ -95,6 +96,7 @@ $common = @(
     '-PackageExecutable', (Join-Path $package 'bootstrap.ps1'),
     '-InstallRoot', $installRoot,
     '-DataRoot', $dataRoot,
+    '-WorkerConfig', $workerConfig,
     '-DisableManagedWorkerListener',
     '-SkipFirewall',
     '-SkipCodexIntegration',
