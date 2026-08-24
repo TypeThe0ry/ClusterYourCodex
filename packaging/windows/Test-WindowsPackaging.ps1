@@ -1638,6 +1638,10 @@ exit 4
     Assert-True ($setupBuilder -match 'RequireRuntimeSignature') 'GA setup can enforce Authenticode at runtime after signing'
     Assert-True ($setupBuilder -match "Get-FileHash.+SHA256") 'Setup builder emits a SHA-256 sidecar'
     Assert-True ($setupBuilder -match 'candidateRoots[\s\S]+IsNullOrWhiteSpace') 'Setup builder tolerates a missing ProgramFiles(x86) environment variable'
+    Assert-True ($setupBuilder -match 'SpecialFolder\]::ProgramFilesX86') 'Setup builder uses the OS Program Files x86 folder when environment variables are incomplete'
+    $releaseWorkflow = Get-Content -LiteralPath (Join-Path $repoRoot '.github\workflows\release.yml') -Raw
+    Assert-True ($releaseWorkflow -match 'NSIS installation completed but makensis\.exe was not found') 'release workflow validates its explicit NSIS compiler path'
+    Assert-True ($releaseWorkflow -match 'New-SetupExecutable\.ps1[\s\S]+-MakeNsisPath \$makeNsis') 'release workflow passes the resolved NSIS compiler into Setup.exe staging'
 
     [System.IO.File]::AppendAllText((Join-Path $workerKits 'artifact-linux-x86_64\cyc-worker'), 'tampered')
     $tamperedPreview = Join-Path $testRoot 'tampered-preview'

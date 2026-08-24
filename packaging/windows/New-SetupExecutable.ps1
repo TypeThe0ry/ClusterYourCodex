@@ -25,7 +25,7 @@ function Resolve-SetupPath {
 function Resolve-MakeNsis {
     param([string]$RequestedPath)
     if (-not [string]::IsNullOrWhiteSpace($RequestedPath)) {
-        $candidate = Resolve-SetupPath $RequestedPath
+        $candidate = Resolve-SetupPath -Path $RequestedPath.Trim()
         if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
             throw "makensis.exe was not found: $candidate"
         }
@@ -33,24 +33,35 @@ function Resolve-MakeNsis {
     }
     $commands = @(Get-Command makensis.exe -CommandType Application -All -ErrorAction SilentlyContinue)
     foreach ($command in $commands) {
-        # PowerShell 5.1 exposes Source while PowerShell 7 may expose Path;
-        # validate both because either property can be empty on tool-cache shims.
-        $commandPath = [string]$command.Path
-        if ([string]::IsNullOrWhiteSpace($commandPath)) {
-            $commandPath = [string]$command.Source
-        }
-        if (-not [string]::IsNullOrWhiteSpace($commandPath) -and
-            (Test-Path -LiteralPath $commandPath -PathType Leaf)) {
-            return (Resolve-SetupPath $commandPath)
+        # ApplicationInfo differs between Windows PowerShell and pwsh, and
+        # Chocolatey can expose a shim with one or more blank properties.
+        foreach ($propertyName in @('Path', 'Source', 'Definition')) {
+            $property = $command.PSObject.Properties[$propertyName]
+            if ($null -eq $property) { continue }
+            $commandPath = [string]$property.Value
+            if ([string]::IsNullOrWhiteSpace($commandPath)) { continue }
+            $commandPath = $commandPath.Trim()
+            if (Test-Path -LiteralPath $commandPath -PathType Leaf) {
+                return (Resolve-SetupPath -Path $commandPath)
+            }
         }
     }
     $candidateRoots = @(
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86),
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles),
         [string]${env:ProgramFiles(x86)},
         [string]$env:ProgramFiles
     ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    $seenRoots = @{}
     foreach ($root in $candidateRoots) {
-        $candidate = Join-Path $root 'NSIS\makensis.exe'
-        if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { return $candidate }
+        $normalizedRoot = $root.Trim()
+        if (-not $seenRoots.ContainsKey($normalizedRoot)) {
+            $seenRoots[$normalizedRoot] = $true
+            $candidate = Join-Path -Path $normalizedRoot -ChildPath 'NSIS\makensis.exe'
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                return (Resolve-SetupPath -Path $candidate)
+            }
+        }
     }
     throw 'makensis.exe is required to build ClusterYourCodex-Setup.exe.'
 }

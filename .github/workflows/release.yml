@@ -742,9 +742,27 @@ jobs:
           $archiveRoot = Join-Path $PWD 'release-assets'
           New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
           $setup = Join-Path $archiveRoot 'ClusterYourCodex-Setup.exe'
+          $makeNsis = $null
+          $nsisRoots = @(
+            [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86),
+            [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles),
+            [string]${env:ProgramFiles(x86)},
+            [string]$env:ProgramFiles
+          ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          foreach ($nsisRoot in $nsisRoots) {
+            $candidate = Join-Path -Path $nsisRoot.Trim() -ChildPath 'NSIS\makensis.exe'
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+              $makeNsis = [string](Resolve-Path -LiteralPath $candidate -ErrorAction Stop).ProviderPath
+              break
+            }
+          }
+          if ([string]::IsNullOrWhiteSpace($makeNsis)) {
+            throw 'NSIS installation completed but makensis.exe was not found in a standard Program Files location.'
+          }
           & .\packaging\windows\New-SetupExecutable.ps1 `
             -PackageRoot $preview `
             -OutputPath $setup `
+            -MakeNsisPath $makeNsis `
             -Force
           if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
             throw 'failed to build ClusterYourCodex-Setup.exe'
