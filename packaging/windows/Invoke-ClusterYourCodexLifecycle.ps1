@@ -29,6 +29,7 @@ $script:CycFirewallDisplayName = 'ClusterYourCodex Managed Worker'
 $script:CycFirewallExchangeDirectory = 'ClusterYourCodex-Firewall'
 $script:CycBootstrapName = 'bootstrap.ps1'
 $script:CycFirewallHelperName = 'Invoke-ClusterYourCodexFirewall.ps1'
+$script:CycMaxInstallManifestBytes = 16MB
 
 function Resolve-CycLifecyclePath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -528,7 +529,10 @@ function Invoke-ClusterYourCodexLifecycle {
         -InitiatorSid $binding.sid
 
     $oldJournal = Read-CycLifecycleJson -Path $journalPath -MaximumBytes 65536 -Label 'Firewall lifecycle journal'
-    $oldManifest = Read-CycLifecycleJson -Path $manifestPath -MaximumBytes 2MB -Label 'Install manifest'
+    $oldManifest = Read-CycLifecycleJson `
+        -Path $manifestPath `
+        -MaximumBytes $script:CycMaxInstallManifestBytes `
+        -Label 'Install manifest'
     $oldReceipt = $null
     if ($oldJournal -and $oldJournal.PSObject.Properties['privateReceiptPath']) {
         $candidateReceipt = Resolve-CycLifecyclePath ([string]$oldJournal.privateReceiptPath)

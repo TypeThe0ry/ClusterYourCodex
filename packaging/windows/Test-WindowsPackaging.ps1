@@ -139,6 +139,21 @@ $install = Join-Path $testRoot 'install'
 $data = Join-Path $testRoot 'data'
 $codexHome = Join-Path $testRoot 'codex-home'
 try {
+    [void](New-Item -ItemType Directory -Path $testRoot -Force)
+    $largeManifestPath = Join-Path $testRoot 'large-install-manifest.json'
+    $largeManifestJson = '{"schemaVersion":"cyc.dev/windows-install-manifest/v1","padding":"' + ('x' * (2MB)) + '"}'
+    [System.IO.File]::WriteAllText($largeManifestPath, $largeManifestJson, [System.Text.UTF8Encoding]::new($false))
+    $largeManifest = Read-InstallManifest -ManifestPath $largeManifestPath
+    Assert-True ($largeManifest.schemaVersion -eq $script:ManifestSchema) 'install manifest reader accepts a valid self-contained manifest larger than the obsolete 2 MiB cap'
+
+    $oversizedManifestPath = Join-Path $testRoot 'oversized-install-manifest.json'
+    $oversizedManifest = [System.IO.File]::Open($oversizedManifestPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try { $oversizedManifest.SetLength($script:MaxInstallManifestBytes + 1) } finally { $oversizedManifest.Dispose() }
+    Assert-ThrowsLike `
+        -Action { [void](Read-InstallManifest -ManifestPath $oversizedManifestPath) } `
+        -Pattern 'unexpectedly large' `
+        -Message 'install manifest reader retains a hard maximum size bound'
+
     [void](New-Item -ItemType Directory -Path $payload -Force)
     foreach ($name in @('ClusterYourCodex.exe', 'cyc-controller.exe', 'cyc.exe', 'cyc-worker.exe')) {
         [System.IO.File]::WriteAllText((Join-Path $payload $name), "fixture-$name")
@@ -1663,6 +1678,7 @@ exit /b !ERRORLEVEL!
     $uninstallerSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Uninstall-ClusterYourCodex.ps1') -Raw
     Assert-True (([regex]::Matches($lifecycleSource, '(?i)-Verb\s+RunAs')).Count -eq 1) 'coordinator contains exactly one firewall-only elevation site'
     Assert-True ($lifecycleSource -match 'Start-CycFirewallOnlyElevation') 'only the narrow firewall helper crosses UAC'
+    Assert-True ($lifecycleSource -match 'CycMaxInstallManifestBytes\s*=\s*16MB') 'lifecycle coordinator accepts the bounded self-contained install manifest size'
     Assert-True ($lifecycleSource -match 'InitiatingSid[\s\S]+InitiatingProfile[\s\S]+InitiatingLocalAppData') 'core calls retain the initiating SID/profile binding'
     Assert-True ($uninstallerSource -notmatch '(?i)-Verb\s+RunAs|-Elevated') 'uninstaller stays in initiating HKCU/profile context'
     Assert-True ($uninstallerSource -match 'Invoke-ClusterYourCodexLifecycle\.ps1') 'uninstaller delegates only the firewall sub-step to the coordinator'
@@ -1696,6 +1712,7 @@ exit /b !ERRORLEVEL!
     Assert-True ($freshDeploymentSource -match "'ClusterYourCodex Controller', 'ClusterYourCodex Worker'") 'fresh deployment smoke protects both fixed product task names'
     Assert-True ($freshDeploymentSource -match 'fresh deployment runner starts without pre-existing product tasks') 'fresh deployment smoke fails closed around pre-existing product tasks'
     $setupSilentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-SetupSilent.ps1') -Raw
+    Assert-True ($setupSilentSource -match 'MaximumInstallManifestBytes\s*=\s*16MB') 'silent Setup smoke accepts the bounded self-contained install manifest size'
     Assert-True ($setupSilentSource -match 'CYC_DISPOSABLE_WINDOWS') 'silent Setup smoke requires an explicit disposable-environment sentinel'
     Assert-True ($setupSilentSource -match '\[string\]\$PackageRoot') 'silent Setup smoke binds Repair to the matching staged package'
     Assert-True ($setupSilentSource -match "ArgumentList\s+@?\('?'/S") 'silent Setup smoke executes the real case-sensitive NSIS /S path'

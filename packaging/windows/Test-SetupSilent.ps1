@@ -27,6 +27,7 @@ $script:FirewallDescription = 'ClusterYourCodex owned managed-worker TLS listene
 $script:UninstallRegistryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ClusterYourCodex'
 $script:InstallManifestSchema = 'cyc.dev/windows-install-manifest/v1'
 $script:PreviewManifestSchema = 'cyc.dev/windows-preview/v1'
+$script:MaximumInstallManifestBytes = 16MB
 $script:BoundedProcessTerminationUncertain = $false
 
 function Assert-SetupSilent {
@@ -342,7 +343,7 @@ function Assert-SetupSilentManifest {
         [Parameter(Mandatory = $true)][string]$ExpectedProfile,
         [Parameter(Mandatory = $true)][string]$ExpectedLocalAppData
     )
-    $manifest = Read-SetupSilentJson -Path $ManifestPath -MaximumBytes 4MB
+    $manifest = Read-SetupSilentJson -Path $ManifestPath -MaximumBytes $script:MaximumInstallManifestBytes
     Assert-SetupSilent ([string]$manifest.schemaVersion -ceq $script:InstallManifestSchema) 'durable install manifest schema is current'
     Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$manifest.installRoot) -Right $InstallRoot) 'install manifest binds the default install root'
     Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$manifest.dataRoot) -Right $DataRoot) 'install manifest binds the default data root'

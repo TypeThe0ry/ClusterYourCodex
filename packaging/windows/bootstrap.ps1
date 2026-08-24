@@ -79,6 +79,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
+$script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
 $script:WorkerTaskName = 'ClusterYourCodex Worker'
 $script:FirewallRuleGroup = 'ClusterYourCodex'
@@ -2771,7 +2772,7 @@ function Read-InstallManifest {
     param([Parameter(Mandatory = $true)][string]$ManifestPath)
     if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) { return $null }
     $item = Get-Item -LiteralPath $ManifestPath -Force
-    if ($item.Length -gt 2MB) { throw 'Install manifest is unexpectedly large.' }
+    if ($item.Length -gt $script:MaxInstallManifestBytes) { throw 'Install manifest is unexpectedly large.' }
     $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
     if ($manifest.schemaVersion -ne $script:ManifestSchema) {
         throw 'Unsupported install manifest schema.'
@@ -3944,7 +3945,9 @@ function Get-CycCodexOnlyInstallState {
         throw 'IntegrateCodex requires an existing ClusterYourCodex install manifest.'
     }
     $manifestItem = Get-Item -LiteralPath $manifestPath -Force
-    if ((Test-ReparsePoint $manifestItem) -or $manifestItem.Length -lt 2 -or $manifestItem.Length -gt 2MB) {
+    if ((Test-ReparsePoint $manifestItem) -or
+        $manifestItem.Length -lt 2 -or
+        $manifestItem.Length -gt $script:MaxInstallManifestBytes) {
         throw 'ClusterYourCodex install manifest must be a bounded regular file.'
     }
     [byte[]]$manifestBytes = [System.IO.File]::ReadAllBytes($manifestPath)
