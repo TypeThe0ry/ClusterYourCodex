@@ -1171,7 +1171,10 @@ function Start-CycAgentsInstallTransaction {
 }
 
 function Complete-CycAgentsInstallTransaction {
-    param([Parameter(Mandatory = $true)]$Transaction)
+    # A disabled integration intentionally has no transaction to commit. Keep
+    # the no-op contract reachable instead of letting parameter binding reject
+    # the null value before the guard below executes.
+    param($Transaction)
     if (-not $Transaction -or $Transaction.disabled) { return }
     $journal = Read-CycAgentsJournal -Path $Transaction.journalPath
     if ([string]$journal.operation -cne 'InstallOrRepair') {

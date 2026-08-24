@@ -121,6 +121,10 @@ function Get-ValidatedNodeExecutable {
 $bootstrap = Join-Path $PSScriptRoot 'bootstrap.ps1'
 . $bootstrap
 
+$nullAgentsCommitSucceeded = $true
+try { Complete-CycAgentsInstallTransaction -Transaction $null } catch { $nullAgentsCommitSucceeded = $false }
+Assert-True $nullAgentsCommitSucceeded 'disabled AGENTS.md integration has no install transaction to commit'
+
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('cyc-packaging-test-' + [Guid]::NewGuid().ToString('N'))
 $payload = Join-Path $testRoot 'payload'
 $install = Join-Path $testRoot 'install'
