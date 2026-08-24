@@ -1354,17 +1354,19 @@ exit 4
     $rootTarget = Join-Path $testRoot 'root-target'
     $desktopTarget = Join-Path $testRoot 'desktop-target'
     $mcpDeploy = Join-Path $testRoot 'mcp-deploy'
+    $mcpSdk = Join-Path $mcpDeploy 'node_modules\@modelcontextprotocol\sdk'
     $nodeRuntime = Get-ValidatedNodeExecutable
     $nodeLicense = Join-Path $testRoot 'LICENSE.node'
     $preview = Join-Path $testRoot 'preview'
     $workerKits = Join-Path $testRoot 'worker-kits'
-    [void](New-Item -ItemType Directory -Path $rootTarget, $desktopTarget, (Join-Path $mcpDeploy 'dist') -Force)
+    [void](New-Item -ItemType Directory -Path $rootTarget, $desktopTarget, (Join-Path $mcpDeploy 'dist'), $mcpSdk -Force)
     foreach ($name in @('cyc-controller.exe', 'cyc-worker.exe', 'cyc.exe')) {
         [System.IO.File]::WriteAllText((Join-Path $rootTarget $name), "release-$name")
     }
     [System.IO.File]::WriteAllText((Join-Path $desktopTarget 'ClusterYourCodex.exe'), 'release-gui')
     [System.IO.File]::WriteAllText((Join-Path $mcpDeploy 'dist\server.js'), 'release-mcp')
     [System.IO.File]::WriteAllText((Join-Path $mcpDeploy 'package.json'), '{}')
+    [System.IO.File]::WriteAllText((Join-Path $mcpSdk 'package.json'), '{"name":"@modelcontextprotocol/sdk","version":"1.30.0"}')
     [System.IO.File]::WriteAllText($nodeLicense, 'node-license')
     $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
     $opensslCommand = Get-Command openssl -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -1425,6 +1427,26 @@ exit 4
     Assert-True ((Get-FileHash -LiteralPath $sourceMcpManifest -Algorithm SHA256).Hash -eq $sourceMcpHash) 'source MCP manifest remains unchanged'
     $previewManifest = Get-Content -LiteralPath (Join-Path $preview 'preview-manifest.json') -Raw | ConvertFrom-Json
     Assert-True (@($previewManifest.workerKits).Count -eq 3) 'preview manifest binds all worker kits'
+    $stagedMcpRoot = Join-Path $preview 'payload\integrations\codex-marketplace\plugins\cluster-your-codex\mcp'
+    Assert-True (Test-Path -LiteralPath (Join-Path $stagedMcpRoot 'node_modules\@modelcontextprotocol\sdk\package.json') -PathType Leaf) 'preview contains the declared MCP production dependency'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $stagedMcpRoot 'node_modules\.pnpm'))) 'preview never stages pnpm virtual-store metadata'
+    Assert-True (-not @(Get-ChildItem -LiteralPath $stagedMcpRoot -Recurse -Force | Where-Object {
+        $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint
+    }).Count) 'preview MCP deployment contains no reparse points'
+    $mcpPackageManifest = Get-Content -LiteralPath (Join-Path $repoRoot 'plugins\cluster-your-codex\mcp\package.json') -Raw | ConvertFrom-Json
+    $mcpProductionDependencyNames = @($mcpPackageManifest.dependencies.PSObject.Properties | ForEach-Object { $_.Name })
+    $mcpDevelopmentOnlyDependencyNames = @(
+        $mcpPackageManifest.devDependencies.PSObject.Properties |
+            ForEach-Object { $_.Name } |
+            Where-Object { $mcpProductionDependencyNames -notcontains $_ }
+    )
+    foreach ($developmentDependencyName in $mcpDevelopmentOnlyDependencyNames) {
+        Assert-True `
+            (-not (Test-Path -LiteralPath (Join-Path (Join-Path $stagedMcpRoot 'node_modules') $developmentDependencyName))) `
+            "preview MCP deployment excludes source-declared development dependency '$developmentDependencyName'"
+    }
+    $longestPreviewPath = @($previewManifest.files | ForEach-Object { ([string]$_.path).Length } | Measure-Object -Maximum).Maximum
+    Assert-True ([int]$longestPreviewPath -le 190) 'preview package remains within the Setup package-relative path budget'
     $agentsTemplateRecord = @($previewManifest.files | Where-Object { $_.path -eq 'payload/integrations/codex/cluster-agents-block.md' })
     Assert-True ($agentsTemplateRecord.Count -eq 1) 'preview manifest owns exactly one managed AGENTS.md template'
     Assert-True ($agentsTemplateRecord[0].sha256 -eq (Get-FileHash -LiteralPath (Join-Path $preview 'payload\integrations\codex\cluster-agents-block.md') -Algorithm SHA256).Hash.ToLowerInvariant()) 'preview manifest hashes the managed AGENTS.md template'
@@ -1733,6 +1755,17 @@ exit /b !ERRORLEVEL!
     Assert-True ($nsis -match 'RequestExecutionLevel user') 'Setup.exe remains in the initiating user token'
     Assert-True ($nsis -notmatch 'RequestExecutionLevel admin') 'Setup.exe never switches LOCALAPPDATA/HKCU to an over-the-shoulder admin'
     Assert-True ($nsis -match 'File /r "\$\{CYC_PACKAGE_ROOT\}\\\*\.\*"') 'Setup.exe embeds the complete self-contained package'
+    Assert-True ($nsis -notmatch 'SetOutPath "\$PLUGINSDIR\\cyc-package"') 'Setup.exe never extracts the package beneath the long plugin-directory path'
+    Assert-True ($nsis -match 'GetLogicalDrives') 'Setup.exe probes the current logical-drive mask before short-path mapping'
+    Assert-True ($nsis -match '\.cyc-subst-owner') 'Setup.exe creates a private mapping-ownership sentinel'
+    Assert-True ($nsis -match 'Call CycVerifyMappingOwnership[\s\S]+StrCpy \$CycMappingOwned "1"') 'Setup.exe verifies the sentinel before claiming a subst mapping'
+    Assert-True ($nsis -match 'ClearErrors\s+SetOutPath "\$CycMappedDrive\\p"\s+IfErrors cyc_package_extraction_failed\s+ClearErrors\s+File /r[\s\S]+IfErrors') 'Setup.exe checks short output-path creation before checking package extraction'
+    Assert-True ($nsis -match '-PackageRoot "\$CycMappedDrive\\p"') 'Setup.exe passes the short package root to lifecycle validation'
+    Assert-True ($nsis -match 'Function CycCleanupShortStaging[\s\S]+SetOutPath "\$PLUGINSDIR"[\s\S]+CycVerifyMappingOwnership[\s\S]+subst\.exe[\s\S]+/D') 'Setup.exe leaves the mapped drive and revalidates ownership before detaching it'
+    Assert-True ($nsis -match 'cyc_cleanup_package_failed:[\s\S]+CYC_RECORD_CLEANUP_FAILURE[\s\S]+Goto cyc_cleanup_done[\s\S]+cyc_cleanup_reverify_mapping:') 'Setup.exe retains its verified mapping when package cleanup fails so GUI-end cleanup can retry'
+    Assert-True ($nsis -match 'IfFileExists "\$CycMappedDrive\\p" cyc_cleanup_package_failed') 'Setup.exe confirms the staged package root is absent before detaching its mapping'
+    Assert-True ($nsis -match 'Function \.onGUIEnd[\s\S]+Call CycCleanupShortStaging') 'Setup.exe has an idempotent GUI-end cleanup backstop'
+    Assert-True ($nsis -match 'CYC_MAX_PACKAGE_RELATIVE_PATH[\s\S]+exceeds the supported 190-character limit') 'Setup.exe compile fails closed when the package path budget is exceeded'
     Assert-True ($nsis -match 'Invoke-ClusterYourCodexLifecycle\.ps1[\s\S]+-PackageManifest ') 'Setup.exe invokes the coordinator and manifest validation gate'
     Assert-True ($nsis -match 'SetErrorLevel \$0') 'Setup.exe preserves bootstrap failure status'
     Assert-True ($nsis -match 'MessageBox[\s\S]+/SD IDOK') 'silent Setup failure never blocks on an interactive message box'
@@ -1746,6 +1779,10 @@ exit /b !ERRORLEVEL!
     Assert-True ($setupBuilder -match 'candidateRoots[\s\S]+IsNullOrWhiteSpace') 'Setup builder tolerates a missing ProgramFiles(x86) environment variable'
     Assert-True ($setupBuilder -match 'SpecialFolder\]::ProgramFilesX86') 'Setup builder uses the OS Program Files x86 folder when environment variables are incomplete'
     Assert-True ($setupBuilder -match 'subst\.exe') 'Setup builder maps long package roots to a short NSIS source path'
+    Assert-True ($setupBuilder -match 'maximumPackageRelativePath\s*=\s*190') 'Setup builder enforces the 190-character package-relative path budget'
+    Assert-True ($setupBuilder -match '/DCYC_MAX_PACKAGE_RELATIVE_PATH=\$\(\$packagePathMetrics\.longestRelativePathLength\)') 'Setup builder passes the measured package path budget into NSIS'
+    Assert-True ($setupBuilder.IndexOf('$validationPackageRoot = $candidateRoot', [StringComparison]::Ordinal) -lt $setupBuilder.IndexOf('Assert-CycPackageManifest', [StringComparison]::Ordinal)) 'Setup builder establishes short source staging before manifest validation'
+    Assert-True ($setupBuilder.IndexOf('if ($null -ne $primaryFailure)', [StringComparison]::Ordinal) -lt $setupBuilder.IndexOf('if ($null -ne $cleanupFailure)', [StringComparison]::Ordinal)) 'Setup builder preserves its primary failure ahead of subst cleanup failure'
     $freshDeploymentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-FreshDeployment.ps1') -Raw
     Assert-True (-not $freshDeploymentSource.Contains("'-Confirm:`$false'")) 'fresh deployment smoke never serializes a false SwitchParameter through powershell.exe -File'
     Assert-True ($freshDeploymentSource -match "'-NoLogo', '-NoProfile', '-NonInteractive'") 'fresh deployment smoke launches a clean non-interactive Windows PowerShell child'
@@ -1774,6 +1811,97 @@ exit /b !ERRORLEVEL!
     Assert-True ($releaseWorkflow -match 'New-SetupExecutable\.ps1[\s\S]+-MakeNsisPath \$makeNsis') 'release workflow passes the resolved NSIS compiler into Setup.exe staging'
     Assert-True ($releaseWorkflow -match 'CYC_DISPOSABLE_WINDOWS:[\s\S]+Test-SetupSilent\.ps1[\s\S]+-PackageRoot \$preview[\s\S]+-DisposableEnvironment') 'release workflow runs silent Setup only inside the disposable Windows runner'
     Assert-True ($releaseWorkflow -match 'Upload silent Setup diagnostics[\s\S]+if: always\(\)') 'release workflow retains silent Setup diagnostics on success and failure'
+    Assert-True (([regex]::Matches($releaseWorkflow, 'pnpm --filter @clusteryourcodex/codex-mcp deploy')).Count -eq 2) 'release builds exactly two MCP deployment artifacts'
+    Assert-True (([regex]::Matches($releaseWorkflow, '--config\.node-linker=hoisted')).Count -eq 2) 'both release MCP deployments use a flat hoisted dependency layout'
+    Assert-True (([regex]::Matches($releaseWorkflow, '--config\.inject-workspace-packages=true')).Count -eq 2) 'both release MCP deployments use modern injected workspace packages'
+    Assert-True (([regex]::Matches($releaseWorkflow, 'codex-mcp deploy[^\r\n]*--frozen-lockfile')).Count -eq 2) 'both release MCP deployments are bound to the committed lockfile'
+    Assert-True (-not [regex]::IsMatch($releaseWorkflow, 'codex-mcp deploy[^\r\n]*--legacy')) 'release never uses the legacy pnpm deploy path'
+    Assert-True (([regex]::Matches($releaseWorkflow, "node_modules\\\.pnpm'")).Count -eq 2) 'both release MCP deployments explicitly remove bounded pnpm metadata before staging'
+    Assert-True (([regex]::Matches($releaseWorkflow, 'node packaging/windows/Test-McpDeployment\.mjs \$mcpDeploy')).Count -eq 2) 'both release MCP deployments pass a real initialize and tools/list smoke test'
+    $mcpDeploymentSmoke = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-McpDeployment.mjs') -Raw
+    Assert-True ($mcpDeploymentSmoke -match 'CYC_MCP_SELF_TEST:\s*"1"[\s\S]+NODE_OPTIONS:\s*""[\s\S]+NODE_PATH:\s*""') 'MCP deployment smoke isolates runtime resolution and receipt state'
+    Assert-True ($mcpDeploymentSmoke -match '"initialize"[\s\S]+notifications/initialized[\s\S]+"tools/list"') 'MCP deployment smoke performs the complete protocol handshake'
+    Assert-True ($mcpDeploymentSmoke -match 'EXPECTED_TOOLS') 'MCP deployment smoke checks the exact public tool surface'
+    Assert-True ($mcpDeploymentSmoke -match 'STABILITY_WINDOW_MS[\s\S]+unexpectedTermination[\s\S]+child\.exitCode') 'MCP deployment smoke rejects a server that exits after returning expected responses'
+    Assert-True ($mcpDeploymentSmoke.IndexOf('await stopChild();', [StringComparison]::Ordinal) -lt $mcpDeploymentSmoke.IndexOf('process.stdout.write(`${JSON.stringify(smokeResult)}', [StringComparison]::Ordinal)) 'MCP deployment smoke reports success only after lifecycle and shutdown checks pass'
+
+    $forbiddenPnpmDeploy = Join-Path $testRoot 'mcp-deploy-forbidden-pnpm'
+    Copy-Item -LiteralPath $mcpDeploy -Destination $forbiddenPnpmDeploy -Recurse
+    [void](New-Item -ItemType Directory -Path (Join-Path $forbiddenPnpmDeploy 'node_modules\.pnpm') -Force)
+    [System.IO.File]::WriteAllText((Join-Path $forbiddenPnpmDeploy 'node_modules\.pnpm\lock.yaml'), 'fixture')
+    $forbiddenPnpmOutput = Join-Path $testRoot 'forbidden-pnpm-preview'
+    Assert-ThrowsLike `
+        -Action {
+            & (Join-Path $PSScriptRoot 'New-PreviewPayload.ps1') `
+                -RepositoryRoot $repoRoot `
+                -RootCargoTarget $rootTarget `
+                -DesktopCargoTarget $desktopTarget `
+                -McpDeployRoot $forbiddenPnpmDeploy `
+                -NodeExecutable $nodeRuntime `
+                -NodeLicense $nodeLicense `
+                -WorkerKitsRoot $workerKits `
+                -OutputRoot $forbiddenPnpmOutput | Out-Null
+        } `
+        -Pattern 'forbidden \.pnpm entry' `
+        -Message 'preview staging rejects pnpm virtual-store metadata before copying inputs'
+    Assert-True (-not (Test-Path -LiteralPath $forbiddenPnpmOutput)) 'invalid MCP deploy is rejected before creating the preview output root'
+
+    $forbiddenDevelopmentDeploy = Join-Path $testRoot 'mcp-deploy-forbidden-development-dependency'
+    Copy-Item -LiteralPath $mcpDeploy -Destination $forbiddenDevelopmentDeploy -Recurse
+    $scopedDevelopmentPackage = Join-Path $forbiddenDevelopmentDeploy 'node_modules\@types\node'
+    [void](New-Item -ItemType Directory -Path $scopedDevelopmentPackage -Force)
+    [System.IO.File]::WriteAllText(
+        (Join-Path $scopedDevelopmentPackage 'package.json'),
+        '{"name":"@types/node","version":"24.10.0"}'
+    )
+    $forbiddenDevelopmentOutput = Join-Path $testRoot 'forbidden-development-dependency-preview'
+    Assert-ThrowsLike `
+        -Action {
+            & (Join-Path $PSScriptRoot 'New-PreviewPayload.ps1') `
+                -RepositoryRoot $repoRoot `
+                -RootCargoTarget $rootTarget `
+                -DesktopCargoTarget $desktopTarget `
+                -McpDeployRoot $forbiddenDevelopmentDeploy `
+                -NodeExecutable $nodeRuntime `
+                -NodeLicense $nodeLicense `
+                -WorkerKitsRoot $workerKits `
+                -OutputRoot $forbiddenDevelopmentOutput | Out-Null
+        } `
+        -Pattern "development-only package '@types/node'" `
+        -Message 'preview staging rejects a leaked scoped development dependency before copying inputs'
+    Assert-True (-not (Test-Path -LiteralPath $forbiddenDevelopmentOutput)) 'scoped development dependency is rejected before creating the preview output root'
+
+    $earlyExitMcpDeploy = Join-Path $testRoot 'mcp-deploy-early-exit'
+    [void](New-Item -ItemType Directory -Path (Join-Path $earlyExitMcpDeploy 'dist') -Force)
+    @'
+const readline = require("node:readline");
+const tools = [
+  "fleet_cancel", "fleet_info", "fleet_job", "fleet_plan",
+  "fleet_plan_submit", "fleet_snapshot_upload", "fleet_submit",
+  "workspace_snapshot_pack",
+].map((name) => ({ name }));
+const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+input.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method === "initialize") {
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: "2025-06-18" } }) + "\n");
+  } else if (request.method === "tools/list") {
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { tools } }) + "\n", () => {
+      setTimeout(() => process.exit(0), 10);
+    });
+  }
+});
+'@ | Set-Content -LiteralPath (Join-Path $earlyExitMcpDeploy 'dist\server.js') -Encoding ASCII
+    $savedErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $earlyExitSmokeOutput = @(& $nodeRuntime (Join-Path $PSScriptRoot 'Test-McpDeployment.mjs') $earlyExitMcpDeploy 2>&1)
+        $earlyExitSmokeCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+    Assert-True ($earlyExitSmokeCode -ne 0) 'MCP deployment smoke rejects a server that exits immediately after tools/list'
+    Assert-True ((@($earlyExitSmokeOutput | ForEach-Object { [string]$_ }) -join "`n") -match 'exited before the probe completed') 'MCP early-exit rejection reports the lifecycle failure'
 
     [System.IO.File]::AppendAllText((Join-Path $workerKits 'artifact-linux-x86_64\cyc-worker'), 'tampered')
     $tamperedPreview = Join-Path $testRoot 'tampered-preview'

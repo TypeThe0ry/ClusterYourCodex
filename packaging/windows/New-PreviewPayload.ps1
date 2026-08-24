@@ -36,6 +36,79 @@ function Test-ReparsePoint {
     return (($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
 }
 
+function Assert-ValidMcpDeploy {
+    param(
+        [Parameter(Mandatory = $true)][string]$DeployRoot,
+        [Parameter(Mandatory = $true)][string]$SourcePackageManifest
+    )
+
+    if (-not (Test-Path -LiteralPath $SourcePackageManifest -PathType Leaf)) {
+        throw "MCP source package manifest is missing: $SourcePackageManifest"
+    }
+    $package = Get-Content -LiteralPath $SourcePackageManifest -Raw | ConvertFrom-Json
+    $dependenciesProperty = $package.PSObject.Properties['dependencies']
+    if ($null -eq $dependenciesProperty -or $null -eq $dependenciesProperty.Value) {
+        throw 'MCP source package manifest must declare production dependencies.'
+    }
+    $dependencyNames = @($dependenciesProperty.Value.PSObject.Properties | ForEach-Object { $_.Name })
+    if ($dependencyNames.Count -eq 0) {
+        throw 'MCP source package manifest must declare at least one production dependency.'
+    }
+    $developmentDependencyNames = @()
+    $developmentDependenciesProperty = $package.PSObject.Properties['devDependencies']
+    if ($null -ne $developmentDependenciesProperty -and
+        $null -ne $developmentDependenciesProperty.Value) {
+        $developmentDependencyNames = @(
+            $developmentDependenciesProperty.Value.PSObject.Properties |
+                ForEach-Object { $_.Name } |
+                Where-Object { $dependencyNames -notcontains $_ }
+        )
+    }
+
+    if (-not (Test-Path -LiteralPath $DeployRoot -PathType Container)) {
+        throw "McpDeployRoot does not exist: $DeployRoot"
+    }
+    $deployRootItem = Get-Item -LiteralPath $DeployRoot -Force
+    if (Test-ReparsePoint $deployRootItem) {
+        throw 'McpDeployRoot must not be a reparse point.'
+    }
+
+    $pendingDirectories = New-Object 'System.Collections.Generic.Stack[System.IO.DirectoryInfo]'
+    $pendingDirectories.Push($deployRootItem)
+    while ($pendingDirectories.Count -gt 0) {
+        $directory = $pendingDirectories.Pop()
+        foreach ($item in Get-ChildItem -LiteralPath $directory.FullName -Force) {
+            if (Test-ReparsePoint $item) {
+                throw "McpDeployRoot contains a reparse point: $($item.FullName)"
+            }
+            if ($item.Name -ieq '.pnpm') {
+                throw "McpDeployRoot contains a forbidden .pnpm entry: $($item.FullName)"
+            }
+            if ($item.PSIsContainer) {
+                $pendingDirectories.Push($item)
+            }
+        }
+    }
+
+    $server = Join-Path $DeployRoot 'dist\server.js'
+    if (-not (Test-Path -LiteralPath $server -PathType Leaf)) {
+        throw 'McpDeployRoot must contain the compiled dist/server.js.'
+    }
+    $nodeModulesRoot = Join-Path $DeployRoot 'node_modules'
+    foreach ($dependencyName in $dependencyNames) {
+        $dependencyPath = Join-Path $nodeModulesRoot $dependencyName
+        if (-not (Test-Path -LiteralPath $dependencyPath -PathType Container)) {
+            throw "McpDeployRoot is missing production dependency '$dependencyName': $dependencyPath"
+        }
+    }
+    foreach ($developmentDependencyName in $developmentDependencyNames) {
+        $developmentDependencyPath = Join-Path $nodeModulesRoot $developmentDependencyName
+        if (Test-Path -LiteralPath $developmentDependencyPath) {
+            throw "McpDeployRoot contains development-only package '$developmentDependencyName': $developmentDependencyPath"
+        }
+    }
+}
+
 function Copy-ValidatedWorkerKits {
     param(
         [Parameter(Mandatory = $true)][string]$SourceRoot,
@@ -178,6 +251,8 @@ $mcpDeploy = Resolve-FullPath $McpDeployRoot
 $nodeExecutablePath = Resolve-FullPath $NodeExecutable
 $nodeLicensePath = Resolve-FullPath $NodeLicense
 $output = Resolve-FullPath $OutputRoot
+$mcpPackageManifest = Join-Path $repo 'plugins\cluster-your-codex\mcp\package.json'
+Assert-ValidMcpDeploy -DeployRoot $mcpDeploy -SourcePackageManifest $mcpPackageManifest
 if (-not (Test-Path -LiteralPath $nodeExecutablePath -PathType Leaf) -or
     -not (Test-Path -LiteralPath $nodeLicensePath -PathType Leaf)) {
     throw 'NodeExecutable and its matching NodeLicense must both be regular files.'
@@ -266,9 +341,6 @@ $mcpConfiguration.mcpServers.cluster_your_codex.command = './mcp/runtime/node.ex
 $mcpConfiguration | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $stagedMcpManifest -Encoding UTF8
 if ((Get-FileHash -LiteralPath $sourceMcpManifest -Algorithm SHA256).Hash -ne $sourceMcpHash) {
     throw 'Source plugin .mcp.json changed during preview staging.'
-}
-if (-not (Test-Path -LiteralPath (Join-Path $mcpDeploy 'dist\server.js') -PathType Leaf)) {
-    throw 'McpDeployRoot must contain the compiled dist/server.js.'
 }
 Copy-Item -LiteralPath $mcpDeploy -Destination (Join-Path $pluginTarget 'mcp') -Recurse -Force
 Copy-RequiredFile `

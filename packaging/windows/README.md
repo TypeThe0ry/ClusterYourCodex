@@ -69,7 +69,35 @@ create a production-only MCP deployment and assemble a repeatable,
 checksum-recorded preview:
 
 ```powershell
-pnpm --filter @clusteryourcodex/codex-mcp deploy --prod --legacy "$env:RUNNER_TEMP\cyc-mcp"
+$mcpDeploy = "$env:RUNNER_TEMP\cyc-mcp"
+pnpm --filter @clusteryourcodex/codex-mcp deploy --prod `
+  --config.node-linker=hoisted `
+  --config.inject-workspace-packages=true `
+  --frozen-lockfile `
+  $mcpDeploy
+if ($LASTEXITCODE -ne 0) { throw 'pnpm production deployment failed.' }
+$pnpmMetadata = Join-Path $mcpDeploy 'node_modules\.pnpm'
+if (Test-Path -LiteralPath $pnpmMetadata) {
+  $metadataDirectory = Get-Item -LiteralPath $pnpmMetadata -Force
+  if (-not $metadataDirectory.PSIsContainer -or
+      ($metadataDirectory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Unexpected pnpm metadata directory in $pnpmMetadata"
+  }
+  $metadataEntries = @(Get-ChildItem -LiteralPath $pnpmMetadata -Force)
+  if ($metadataEntries.Count -ne 1 -or
+      $metadataEntries[0].PSIsContainer -or
+      $metadataEntries[0].Name -cne 'lock.yaml' -or
+      ($metadataEntries[0].Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Unexpected pnpm metadata layout in $pnpmMetadata"
+  }
+  Remove-Item -LiteralPath $metadataEntries[0].FullName -Force
+  Remove-Item -LiteralPath $metadataDirectory.FullName -Force
+}
+if (Test-Path -LiteralPath $pnpmMetadata) {
+  throw "Failed to remove pnpm metadata directory: $pnpmMetadata"
+}
+node .\packaging\windows\Test-McpDeployment.mjs $mcpDeploy
+if ($LASTEXITCODE -ne 0) { throw 'Deployed MCP runtime smoke test failed.' }
 $node = (Get-Command node -CommandType Application).Source
 $nodeLicense = Join-Path (Split-Path -Parent $node) 'LICENSE'
 if (-not (Test-Path -LiteralPath $nodeLicense)) {
@@ -100,7 +128,15 @@ the installed GUI. The staged plugin
 uses its bundled, license-accompanied private Node runtime rather than PATH
 `node`; only the staged `.mcp.json` is rewritten. The runtime and license
 hashes are recorded in `preview-manifest.json` and `SHA256SUMS`; release
-staging does not fetch an unverified replacement license. When
+staging does not fetch an unverified replacement license.
+
+The release workflow uses pnpm 11's modern production deploy with a hoisted
+dependency tree and injected workspace packages. It accepts only pnpm's
+deployment metadata directory when it contains exactly one regular `lock.yaml`
+file, removes that exact metadata before staging, and runs the deployed MCP
+initialize and tool-list smoke test. `New-PreviewPayload.ps1` then rejects
+reparse points, `.pnpm` directories, source-declared development-only packages, or
+missing production dependencies before copying any preview input. When
 `-WorkerKitsRoot` is supplied, staging requires all three supported worker-kit
 targets, revalidates their exact file sets, manifests, lengths, and SHA-256
 allowlists, requires each canonical manifest's detached Ed25519 publisher
