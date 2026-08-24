@@ -100,18 +100,70 @@ if (Test-Path -LiteralPath $output) {
 
 $makeNsis = Resolve-MakeNsis -RequestedPath $requestedMakeNsisPath
 $script = Resolve-SetupPath -Path (Join-Path -Path $setupScriptRoot -ChildPath 'ClusterYourCodex.nsi')
-$arguments = @(
-    '/V4',
-    "/DCYC_PACKAGE_ROOT=$package",
-    "/DCYC_OUTPUT=$output"
-)
-if ($requestedRequireRuntimeSignature) { $arguments += '/DCYC_REQUIRE_SIGNATURE=1' }
-$arguments += $script
-$outputLines = @(& $makeNsis @arguments 2>&1)
-$exitCode = $LASTEXITCODE
-if ($exitCode -ne 0) {
-    $tail = @($outputLines | Select-Object -Last 20 | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
-    throw "makensis.exe failed (exit=$exitCode).`n$tail"
+$nsisPackageRoot = $package
+$substExe = $null
+$substDrive = $null
+try {
+    # NSIS still opens source files through MAX_PATH-sensitive Win32 APIs even
+    # when the package itself is valid.  A self-contained MCP deployment can
+    # contain pnpm's `.pnpm/<package>/node_modules/...` paths, which can push
+    # even a short package root past 260 characters.  Map the package root to
+    # a disposable drive letter for every Windows build so NSIS receives
+    # short source paths; the archive and manifest continue to use the
+    # original absolute package.
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $substCommand = Get-Command -Name 'subst.exe' -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($null -eq $substCommand) {
+            throw 'A long package path requires subst.exe to provide NSIS short-path staging.'
+        }
+        $substExe = [string]$substCommand.Path
+        if ([string]::IsNullOrWhiteSpace($substExe)) {
+            $substExe = [string]$substCommand.Source
+        }
+        if ([string]::IsNullOrWhiteSpace($substExe)) {
+            throw 'subst.exe was discovered but its executable path is unavailable.'
+        }
+        $usedDrives = @(
+            Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+                ForEach-Object { ([string]$_.Name).ToUpperInvariant() }
+        )
+        foreach ($letter in @('Z', 'Y', 'X', 'W', 'V', 'U', 'T', 'S', 'R', 'Q')) {
+            if ($usedDrives -notcontains $letter) {
+                $substDrive = "${letter}:"
+                break
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($substDrive)) {
+            throw 'No unused drive letter is available for NSIS short-path staging.'
+        }
+        & $substExe $substDrive $package *> $null
+        if ($LASTEXITCODE -ne 0) {
+            throw "subst.exe failed to map the package root (exit=$LASTEXITCODE)."
+        }
+        $nsisPackageRoot = $substDrive
+    }
+
+    $arguments = @(
+        '/V4',
+        "/DCYC_PACKAGE_ROOT=$nsisPackageRoot",
+        "/DCYC_OUTPUT=$output"
+    )
+    if ($requestedRequireRuntimeSignature) { $arguments += '/DCYC_REQUIRE_SIGNATURE=1' }
+    $arguments += $script
+    $outputLines = @(& $makeNsis @arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        $tail = @($outputLines | Select-Object -Last 20 | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
+        throw "makensis.exe failed (exit=$exitCode).`n$tail"
+    }
+} finally {
+    if (-not [string]::IsNullOrWhiteSpace($substDrive)) {
+        & $substExe $substDrive '/D' *> $null
+        if ($LASTEXITCODE -ne 0) {
+            throw "subst.exe failed to remove the temporary package mapping (exit=$LASTEXITCODE)."
+        }
+    }
 }
 if (-not (Test-Path -LiteralPath $output -PathType Leaf)) {
     throw 'makensis.exe returned success without producing Setup.exe.'
