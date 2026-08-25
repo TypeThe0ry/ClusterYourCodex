@@ -1468,6 +1468,7 @@ mod tests {
     use std::{
         collections::{BTreeMap, HashMap},
         fs,
+        path::PathBuf,
         sync::atomic::{AtomicBool, AtomicU8, Ordering},
         sync::{Arc, Mutex},
     };
@@ -1515,6 +1516,14 @@ mod tests {
     const GOOD_PASSWORD: &str = "good-password-value";
     const BAD_PASSWORD: &str = "bad-password-must-never-persist";
     const PAIRING_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+    fn private_key_fixture_path(directory: &TempDir, file_name: &str) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        let root = fs::canonicalize(directory.path()).unwrap();
+        #[cfg(not(target_os = "macos"))]
+        let root = directory.path().to_path_buf();
+        root.join(file_name)
+    }
     const PAIRING_PENDING: u8 = 0;
     const PAIRING_CONSUMED: u8 = 1;
     const PAIRING_READY: u8 = 2;
@@ -1833,7 +1842,7 @@ mod tests {
     #[test]
     fn private_key_passphrase_is_transient_redacted_and_retryable() {
         let key_dir = TempDir::new().unwrap();
-        let key_path = key_dir.path().join("id_fixture");
+        let key_path = private_key_fixture_path(&key_dir, "id_fixture");
         fs::write(&key_path, b"fixture-private-key-material").unwrap();
         let private_key = PrivateKeyFile::new(&key_path).unwrap();
 
@@ -1892,7 +1901,7 @@ mod tests {
     #[test]
     fn unencrypted_private_key_authentication_needs_no_transient_secret() {
         let key_dir = TempDir::new().unwrap();
-        let key_path = key_dir.path().join("id_unencrypted_fixture");
+        let key_path = private_key_fixture_path(&key_dir, "id_unencrypted_fixture");
         fs::write(&key_path, b"fixture-unencrypted-private-key-material").unwrap();
         let private_key = PrivateKeyFile::new(&key_path).unwrap();
         let harness = Harness::new(GOOD_PASSWORD);

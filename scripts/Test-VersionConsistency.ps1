@@ -237,7 +237,8 @@ function Assert-CycReleaseWorkflowIdentity {
             '(?ms)^  msrv:\s*\r?\n(?<body>.*?)(?=^  [0-9A-Za-z_-]+:\s*\r?$|\z)'
         )
         if (-not $msrvJob.Success -or
-            $msrvJob.Groups['body'].Value -notmatch '(?m)^\s*toolchain:\s*1\.88\.0\s*$' -or
+            $msrvJob.Groups['body'].Value -notmatch '(?m)^\s*RUSTUP_TOOLCHAIN:\s*1\.88\.0\s*$' -or
+            $msrvJob.Groups['body'].Value -notmatch 'dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b\s+#\s+1\.88\.0' -or
             $msrvJob.Groups['body'].Value -notmatch '(?m)^\s*run:\s*\.\/scripts\/Test-RustMsrv\.ps1\s*$' -or
             $msrvJob.Groups['body'].Value -notmatch '(?m)^\s*run:\s*cargo check --workspace --locked\s*$' -or
             $msrvJob.Groups['body'].Value -notmatch '(?m)^\s*run:\s*cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo\.toml\s*$') {
@@ -490,7 +491,7 @@ if (-not $SkipNegativeTests) {
 
         $fixtureCiPath = Join-Path $fixture '.github/workflows/ci.yml'
         $ciWorkflowText = [System.IO.File]::ReadAllText($fixtureCiPath)
-        $ciMsrvMismatch = $ciWorkflowText.Replace('toolchain: 1.88.0', 'toolchain: 1.89.0')
+        $ciMsrvMismatch = $ciWorkflowText.Replace('RUSTUP_TOOLCHAIN: 1.88.0', 'RUSTUP_TOOLCHAIN: 1.89.0')
         if ($ciMsrvMismatch -ceq $ciWorkflowText) {
             throw 'Negative MSRV fixture could not be constructed.'
         }

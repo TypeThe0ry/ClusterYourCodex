@@ -58,6 +58,8 @@ jobs:
   msrv:
     name: Minimum supported Rust 1.88.0 (${{ matrix.graph }})
     needs: [release-identity]
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
     strategy:
       fail-fast: false
       matrix:
@@ -69,9 +71,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0 action implementation
-        with:
-          toolchain: 1.88.0
+      - uses: dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b # 1.88.0
       - name: Assert exact MSRV toolchain
         shell: pwsh
         run: |
