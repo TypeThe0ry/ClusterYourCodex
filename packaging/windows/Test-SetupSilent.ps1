@@ -1479,7 +1479,10 @@ try {
                 repeatedJournalState = [string]$repeatedUninstallJournalState
             }
         }
-        operations = @($operations)
+        # Windows PowerShell 5.1 cannot bind @($genericListOfObject) while
+        # constructing a PSCustomObject ("Argument types do not match").
+        # Materialize the generic list explicitly before result serialization.
+        operations = $operations.ToArray()
         steps = @(
             'setup-sidecar',
             'setup-silent',

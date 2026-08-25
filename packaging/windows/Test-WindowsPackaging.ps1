@@ -3720,6 +3720,63 @@ exit 91
     Assert-True ($setupSilentSource -match 'triggerElements\.Count\s+-ne\s+1[\s\S]+LogonTrigger[\s\S]+triggerUserIds\.Count\s+-ne\s+1') 'silent Setup requires one account-bound logon trigger'
     Assert-True ($setupSilentSource -match 'Invoke-SetupSilentTaskIdentityContractSelfTest[\s\S]+foreign-namespace principal sibling[\s\S]+foreign-namespace logon trigger') 'silent Setup executes positive and foreign-namespace identity fixtures before installation'
     Assert-True ($setupSilentSource -match 'Get-ScheduledTask[\s\S]+-TaskPath ''\\''[\s\S]+Export-ScheduledTask[\s\S]+-TaskPath ''\\''') 'silent Setup scopes task identity checks to the root task path'
+    Assert-True ($setupSilentSource -match 'operations\s*=\s*\$operations\.ToArray\(\)') 'silent Setup materializes its generic operation list before result serialization on Windows PowerShell 5.1'
+    Assert-True ($setupSilentSource -notmatch 'operations\s*=\s*@\(\$operations\)') 'silent Setup avoids the Windows PowerShell 5.1 generic-list array-subexpression binder failure'
+    $operationListCompatibilityProbe = New-Object System.Collections.Generic.List[object]
+    [void]$operationListCompatibilityProbe.Add([PSCustomObject]@{ label = 'probe'; exitCode = 0 })
+    $operationResultCompatibilityProbe = [PSCustomObject]@{
+        operations = $operationListCompatibilityProbe.ToArray()
+    }
+    Assert-True (@($operationResultCompatibilityProbe.operations).Count -eq 1) 'generic operation list materializes into one result entry'
+    Assert-True ([string]$operationResultCompatibilityProbe.operations[0].label -ceq 'probe') 'materialized generic operation result preserves its fields'
+    $genericListProbeSource = @'
+$ErrorActionPreference = 'Stop'
+foreach ($expectedCount in @(0, 1, 2)) {
+    $operations = New-Object System.Collections.Generic.List[object]
+    for ($index = 0; $index -lt $expectedCount; $index++) {
+        [void]$operations.Add([PSCustomObject]@{
+            index = $index
+            label = "operation-$index"
+        })
+    }
+    $result = [PSCustomObject]@{
+        operations = $operations.ToArray()
+    }
+    if (-not ($result.operations -is [object[]])) {
+        throw "operations is not Object[] for count $expectedCount"
+    }
+    if ($result.operations.Count -ne $expectedCount) {
+        throw "operations count changed for count $expectedCount"
+    }
+    for ($index = 0; $index -lt $expectedCount; $index++) {
+        if ([int]$result.operations[$index].index -ne $index) {
+            throw "operations order changed at index $index"
+        }
+    }
+    $json = $result | ConvertTo-Json -Depth 4 -Compress
+    if ($expectedCount -eq 0 -and $json -notmatch '"operations":\[\]') {
+        throw 'empty operations did not remain a JSON array'
+    }
+    if ($expectedCount -gt 0 -and $json -notmatch '"operations":\[') {
+        throw "non-empty operations did not remain a JSON array for count $expectedCount"
+    }
+}
+exit 0
+'@
+    $genericListProbeEncoded = [Convert]::ToBase64String(
+        [Text.Encoding]::Unicode.GetBytes($genericListProbeSource)
+    )
+    $genericListProbe = Start-Process `
+        -FilePath $windowsPowerShell `
+        -ArgumentList @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-EncodedCommand', $genericListProbeEncoded
+        ) `
+        -WorkingDirectory $testRoot `
+        -WindowStyle Hidden `
+        -Wait `
+        -PassThru
+    Assert-True ($genericListProbe.ExitCode -eq 0) 'Windows PowerShell 5.1 materializes the silent Setup operation list as a stable Object array'
     $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $currentIdentityName = [string]$currentIdentity.Name
     $currentIdentitySid = [string]$currentIdentity.User.Value
