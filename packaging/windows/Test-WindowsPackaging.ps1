@@ -223,7 +223,11 @@ try {
         -EnableWorker `
         -WorkerConfig (Join-Path $data 'worker\config.json') `
         -CodexHome $codexHome `
-        -WorkerPublicHost '192.0.2.10'
+        -WorkerPublicHost '192.168.50.10' `
+        -WorkerBindHost '192.168.50.10' `
+        -WorkerInterfaceIndex 7 `
+        -WorkerControllerHostName 'controller-test' `
+        -WorkerPrivateAddress @('192.168.50.10', 'fd12:3456:789a::10')
 
     Assert-True ($plan.schemaVersion -eq 'cyc.dev/windows-install-manifest/v1') 'plan schema'
     Assert-True ($plan.files.Count -eq @(Get-PayloadFiles -Root $payload).Count) 'all payload files are owned'
@@ -231,12 +235,18 @@ try {
     Assert-True ($plan.tasks[0].action.arguments -match '^--bind 127\.0\.0\.1:47831 ') 'controller bind is explicit loopback'
     Assert-True ($plan.tasks[0].action.arguments -match '--database "[^\"]+\\controller\.db"') 'controller database path is explicit'
     Assert-True ($plan.tasks[0].action.arguments -match '--token-file "[^\"]+\\controller\.token"') 'controller gets only the token file path'
-    Assert-True ($plan.tasks[0].action.arguments -match '--worker-bind 0\.0\.0\.0:47832') 'managed-worker TLS listener is enabled by default'
-    Assert-True ($plan.tasks[0].action.arguments -match '--worker-public-url "https://192\.0\.2\.10:47832"') 'managed-worker public URL is explicit'
-    Assert-True ($plan.tasks[0].action.arguments -match '--worker-cert "[^\"]+\\tls\\controller\.crt\.pem"') 'controller receives only the certificate path'
-    Assert-True ($plan.tasks[0].action.arguments -match '--worker-key "[^\"]+\\tls\\controller\.key\.pem"') 'controller receives only the private-key path'
+    Assert-True ($plan.tasks[0].action.arguments -match '--worker-bind 192\.168\.50\.10:47832') 'managed-worker TLS listener has one explicit private bind'
+    Assert-True ($plan.tasks[0].action.arguments -notmatch '--worker-bind (?:0\.0\.0\.0|\[?::\]?):') 'managed-worker TLS listener never uses a wildcard bind'
+    Assert-True ($plan.tasks[0].action.arguments -match '--worker-public-url "https://192\.168\.50\.10:47832"') 'managed-worker public URL is explicit'
+    Assert-True ($plan.tasks[0].action.arguments -match '--worker-cert "[^\"]+\\tls\\managed-worker-v2\\controller\.crt\.pem"') 'controller receives only the versioned certificate path'
+    Assert-True ($plan.tasks[0].action.arguments -match '--worker-key "[^\"]+\\tls\\managed-worker-v2\\controller\.key\.pem"') 'controller receives only the versioned private-key path'
     Assert-True ($plan.tasks[0].action.arguments -notmatch '(?i)Bearer|authorization|--token\s') 'controller task has no raw token'
     Assert-True $plan.managedWorker.enabled 'managed worker is enabled by default'
+    Assert-True ([string]$plan.managedWorker.networkPlan.schemaVersion -ceq 'cyc.dev/windows-managed-worker-network/v1') 'managed worker has a versioned immutable network plan'
+    Assert-True ([int]$plan.managedWorker.networkPlan.selectedInterfaceIndex -eq 7) 'network plan records the selected interface'
+    Assert-True ([string]$plan.managedWorker.bindHost -ceq '192.168.50.10') 'managed worker bind host is exact'
+    Assert-True ([string]::Join(',', @($plan.managedWorker.networkPlan.privateAddresses)) -ceq '192.168.50.10,fd12:3456:789a::10') 'network plan records the canonical selected private-address set'
+    Assert-True ([string]::Join(',', @($plan.managedWorker.identityHosts)) -ceq '127.0.0.1,192.168.50.10,::1,controller-test,fd12:3456:789a::10') 'identity SAN set is exact, canonical, and complete'
     Assert-True $plan.managedWorker.firewall.enabled 'LocalSubnet firewall rule is enabled by default'
     Assert-True ($plan.managedWorker.firewall.name -match '^ClusterYourCodex\.ManagedWorker\.S_1_5_') 'firewall rule is scoped to the installing SID'
     Assert-True ($plan.managedWorker.firewall.lifecycle -eq 'external-elevated-helper') 'firewall mutation is delegated outside the per-user core'
@@ -252,6 +262,118 @@ try {
     Assert-True $plan.agentsIntegration.enabled 'global AGENTS.md additive integration is enabled by default'
     Assert-True ($plan.agentsIntegration.agentsPath -eq (Join-Path $codexHome 'AGENTS.md')) 'global AGENTS.md is scoped to the selected Codex home'
     Assert-True ($plan.agentsIntegration.templateRelativePath -eq 'integrations/codex/cluster-agents-block.md') 'managed block template is an owned payload file'
+
+    $networkConfigurations = @(
+        [PSCustomObject]@{
+            InterfaceIndex = 3
+            NetAdapter = [PSCustomObject]@{ Status = 'Up' }
+            IPv4DefaultGateway = $null
+            IPv6DefaultGateway = $null
+            NetIPv4Interface = [PSCustomObject]@{ InterfaceMetric = 1 }
+            NetIPv6Interface = $null
+            IPv4Address = @([PSCustomObject]@{ IPAddress = '10.1.2.3'; AddressState = 'Preferred'; SkipAsSource = $false })
+            IPv6Address = @()
+        },
+        [PSCustomObject]@{
+            InterfaceIndex = 8
+            NetAdapter = [PSCustomObject]@{ Status = 'Up' }
+            IPv4DefaultGateway = [PSCustomObject]@{ NextHop = '192.168.80.1' }
+            IPv6DefaultGateway = $null
+            NetIPv4Interface = [PSCustomObject]@{ InterfaceMetric = 50 }
+            NetIPv6Interface = $null
+            IPv4Address = @([PSCustomObject]@{ IPAddress = '192.168.80.10'; AddressState = 'Preferred'; SkipAsSource = $false })
+            IPv6Address = @()
+        },
+        [PSCustomObject]@{
+            InterfaceIndex = 7
+            NetAdapter = [PSCustomObject]@{ Status = 'Up' }
+            IPv4DefaultGateway = [PSCustomObject]@{ NextHop = '192.168.50.1' }
+            IPv6DefaultGateway = $null
+            NetIPv4Interface = [PSCustomObject]@{ InterfaceMetric = 20 }
+            NetIPv6Interface = [PSCustomObject]@{ InterfaceMetric = 25 }
+            IPv4Address = @(
+                [PSCustomObject]@{ IPAddress = '192.168.50.11'; AddressState = 'Preferred'; SkipAsSource = $false },
+                [PSCustomObject]@{ IPAddress = '192.168.50.10'; AddressState = 'Preferred'; SkipAsSource = $false },
+                [PSCustomObject]@{ IPAddress = '192.0.2.10'; AddressState = 'Preferred'; SkipAsSource = $false }
+            )
+            IPv6Address = @(
+                [PSCustomObject]@{ IPAddress = 'fd12:3456:789a::10'; AddressState = 'Preferred'; SkipAsSource = $false },
+                [PSCustomObject]@{ IPAddress = 'fe80::10'; AddressState = 'Preferred'; SkipAsSource = $false }
+            )
+        }
+    )
+    $discoveredNetworkPlan = New-CycDiscoveredManagedWorkerNetworkPlan `
+        -RequestedPublicHost 'controller.test' `
+        -ListenPort 47832 `
+        -Configurations $networkConfigurations
+    Assert-True ([int]$discoveredNetworkPlan.selectedInterfaceIndex -eq 7) 'network discovery deterministically prefers default route, metric, then interface index'
+    Assert-True ([string]$discoveredNetworkPlan.bindHost -ceq '192.168.50.10') 'network discovery deterministically chooses the canonical IPv4 bind on the selected interface'
+    Assert-True ([string]::Join(',', @($discoveredNetworkPlan.privateAddresses)) -ceq '192.168.50.10,192.168.50.11,fd12:3456:789a::10') 'network discovery includes only selected-interface RFC1918 and ULA addresses'
+    $requestedAddressPlan = New-CycDiscoveredManagedWorkerNetworkPlan `
+        -RequestedPublicHost '10.1.2.3' `
+        -ListenPort 47832 `
+        -Configurations $networkConfigurations
+    Assert-True ([int]$requestedAddressPlan.selectedInterfaceIndex -eq 3 -and [string]$requestedAddressPlan.bindHost -ceq '10.1.2.3') 'an assigned requested private IP deterministically selects its owning interface and exact bind'
+    Assert-ThrowsLike `
+        -Action {
+            [void](New-CycManagedWorkerNetworkPlan `
+                -InterfaceIndex 7 `
+                -BindHost '0.0.0.0' `
+                -PublicHost 'controller.test' `
+                -ControllerHostName 'controller-test' `
+                -PrivateAddresses @('192.168.50.10') `
+                -ListenPort 47832)
+        } `
+        -Pattern 'RFC1918|ULA' `
+        -Message 'wildcard worker bind is rejected before task construction'
+    Assert-ThrowsLike `
+        -Action {
+            [void](New-CycDiscoveredManagedWorkerNetworkPlan `
+                -RequestedPublicHost '192.0.2.10' `
+                -ListenPort 47832 `
+                -Configurations $networkConfigurations)
+        } `
+        -Pattern 'RFC1918|ULA' `
+        -Message 'public IP literals are rejected as managed-worker public hosts'
+
+    $reusableManifest = [PSCustomObject]@{
+        productVersion = $script:ProductVersion
+        managedWorker = [PSCustomObject]@{
+            enabled = $true
+            networkPlan = $plan.managedWorker.networkPlan
+        }
+    }
+    $reusedNetworkPlan = Resolve-CycManagedWorkerNetworkPlan `
+        -ExistingManifest $reusableManifest `
+        -ListenPort 47999
+    Assert-True (($reusedNetworkPlan | ConvertTo-Json -Depth 6 -Compress) -ceq
+        ($plan.managedWorker.networkPlan | ConvertTo-Json -Depth 6 -Compress)) 'repair reuses the complete immutable network plan without rediscovery or default-port drift'
+    Assert-ThrowsLike `
+        -Action {
+            [void](Resolve-CycManagedWorkerNetworkPlan `
+                -ExistingManifest $reusableManifest `
+                -RequestedPublicHost '192.168.50.11' `
+                -ExplicitBindHost '192.168.50.11' `
+                -ExplicitInterfaceIndex 7 `
+                -ExplicitControllerHostName 'controller-test' `
+                -ExplicitPrivateAddresses @('192.168.50.10', '192.168.50.11', 'fd12:3456:789a::10') `
+                -ListenPort 47832)
+        } `
+        -Pattern 'immutable managed-worker network plan' `
+        -Message 'repair rejects any replacement of the immutable network plan'
+    Assert-True ($null -eq (Get-CycReusableManagedWorkerNetworkPlan -Manifest ([PSCustomObject]@{
+        productVersion = '0.1.0-preview.3'
+        managedWorker = [PSCustomObject]@{ enabled = $true }
+    }))) 'explicit preview.3 legacy state is eligible for versioned identity migration'
+    Assert-ThrowsLike `
+        -Action {
+            [void](Get-CycReusableManagedWorkerNetworkPlan -Manifest ([PSCustomObject]@{
+                productVersion = $script:ProductVersion
+                managedWorker = [PSCustomObject]@{ enabled = $true }
+            }))
+        } `
+        -Pattern 'missing its immutable network plan' `
+        -Message 'current manifests without a network plan fail closed instead of rediscovering'
 
     $pluginFixture = Join-Path $plugin '.mcp.json'
     Remove-Item -LiteralPath $pluginFixture -Force
@@ -369,6 +491,9 @@ try {
         -AgentsResult $agentsInstalled
     $agentsReceipt = Read-InstallManifest -ManifestPath $agentsReceiptPath
     Assert-True ([string]$agentsReceipt.coreCommit.state -ceq 'pending') 'install manifest remains provisional until runtime and AGENTS readiness finish'
+    Assert-True (($agentsReceipt.managedWorker.networkPlan | ConvertTo-Json -Depth 6 -Compress) -ceq
+        ($plan.managedWorker.networkPlan | ConvertTo-Json -Depth 6 -Compress)) 'install manifest persists the complete immutable network plan without projection drift'
+    Assert-True ([string]$agentsReceipt.managedWorker.tlsDirectory -like '*\tls\managed-worker-v2') 'install manifest records the versioned managed-worker identity directory'
     [void](Complete-CycInstallCoreCommit -Plan $plan -Action Install)
     $agentsReceipt = Read-InstallManifest -ManifestPath $agentsReceiptPath
     Assert-True ([string]$agentsReceipt.coreCommit.state -ceq 'committed') 'final install core marker is published explicitly'
@@ -725,6 +850,15 @@ try {
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Remaining)
 $ErrorActionPreference = 'Stop'
 if ($Remaining.Count -lt 2 -or $Remaining[0] -ne 'identity') { exit 2 }
+$hosts = @()
+for ($argumentIndex = 0; $argumentIndex -lt $Remaining.Count; $argumentIndex++) {
+    if ($Remaining[$argumentIndex] -eq '--host') {
+        if ($argumentIndex + 1 -ge $Remaining.Count) { exit 6 }
+        $hosts += [string]$Remaining[$argumentIndex + 1]
+        $argumentIndex++
+    }
+}
+if ($hosts.Count -lt 1) { exit 7 }
 if ($Remaining[1] -eq 'init') {
     $outputIndex = [Array]::IndexOf($Remaining, '--output-dir')
     if ($outputIndex -lt 0 -or $outputIndex + 1 -ge $Remaining.Count) { exit 3 }
@@ -739,7 +873,7 @@ if ($Remaining[1] -eq 'init') {
         certificate = '\\?\' + $certificate
         privateKey = '\\?\' + $key
         sha256Fingerprint = ('a' * 64)
-        subjectAltNames = @('192.0.2.10')
+        subjectAltNames = [object[]]$hosts
         notBefore = '2026-01-01T00:00:00Z'
         notAfter = '2036-01-01T00:00:00Z'
         valid = $true
@@ -749,16 +883,14 @@ if ($Remaining[1] -eq 'init') {
 if ($Remaining[1] -eq 'verify') {
     $certificateIndex = [Array]::IndexOf($Remaining, '--certificate')
     $privateKeyIndex = [Array]::IndexOf($Remaining, '--private-key')
-    $hostIndex = [Array]::IndexOf($Remaining, '--host')
     if ($certificateIndex -lt 0 -or $certificateIndex + 1 -ge $Remaining.Count -or
-        $privateKeyIndex -lt 0 -or $privateKeyIndex + 1 -ge $Remaining.Count -or
-        $hostIndex -lt 0 -or $hostIndex + 1 -ge $Remaining.Count) { exit 5 }
+        $privateKeyIndex -lt 0 -or $privateKeyIndex + 1 -ge $Remaining.Count) { exit 5 }
     [ordered]@{
         apiVersion = 'cyc.dev/identity/v1'
         certificate = '\\?\' + [System.IO.Path]::GetFullPath($Remaining[$certificateIndex + 1])
         privateKey = '\\?\' + [System.IO.Path]::GetFullPath($Remaining[$privateKeyIndex + 1])
         sha256Fingerprint = ('a' * 64)
-        subjectAltNames = @($Remaining[$hostIndex + 1])
+        subjectAltNames = [object[]]$hosts
         notBefore = '2026-01-01T00:00:00Z'
         notAfter = '2036-01-01T00:00:00Z'
         valid = $true
@@ -783,6 +915,68 @@ exit 4
     Assert-True $partialIdentityRejected 'repair rejects an incomplete TLS identity without rotation'
     Assert-True (Test-Path -LiteralPath $plan.managedWorker.certificatePath -PathType Leaf) 'incomplete identity failure preserves the remaining certificate for diagnosis'
 
+    $legacyIdentityRoot = Join-Path $testRoot 'legacy-identity-migration'
+    $legacyTlsRoot = Join-Path $legacyIdentityRoot 'tls'
+    $legacyVersionedTls = Join-Path $legacyTlsRoot 'managed-worker-v2'
+    [void](New-Item -ItemType Directory -Path $legacyTlsRoot -Force)
+    $legacyCertificate = Join-Path $legacyTlsRoot 'controller.crt.pem'
+    $legacyPrivateKey = Join-Path $legacyTlsRoot 'controller.key.pem'
+    [byte[]]$legacyCertificateBytes = [Text.Encoding]::UTF8.GetBytes('legacy-certificate-preserve-exactly')
+    [byte[]]$legacyPrivateKeyBytes = [Text.Encoding]::UTF8.GetBytes('legacy-private-key-preserve-exactly')
+    [System.IO.File]::WriteAllBytes($legacyCertificate, $legacyCertificateBytes)
+    [System.IO.File]::WriteAllBytes($legacyPrivateKey, $legacyPrivateKeyBytes)
+    $legacyMigrationPlan = [PSCustomObject]@{
+        dataRoot = $legacyIdentityRoot
+        managedWorker = [PSCustomObject]@{
+            enabled = $true
+            networkPlan = $plan.managedWorker.networkPlan
+            identityVersion = 'managed-worker-v2'
+            identityHosts = [object[]]@($plan.managedWorker.identityHosts)
+            tlsRoot = $legacyTlsRoot
+            tlsDirectory = $legacyVersionedTls
+            certificatePath = Join-Path $legacyVersionedTls 'controller.crt.pem'
+            privateKeyPath = Join-Path $legacyVersionedTls 'controller.key.pem'
+            legacyTlsCertificatePath = $legacyCertificate
+            legacyTlsPrivateKeyPath = $legacyPrivateKey
+            identityCli = $fakeIdentityCli
+        }
+    }
+    $legacyMigrationResult = Ensure-CycTlsIdentity -Plan $legacyMigrationPlan
+    Assert-True ($legacyMigrationResult.created -and $legacyMigrationResult.migratedFromLegacy -and
+        $legacyMigrationResult.legacyIdentityPreserved) 'legacy prerelease identity migrates into a separate versioned identity directory'
+    Assert-BytesEqual $legacyCertificateBytes ([System.IO.File]::ReadAllBytes($legacyCertificate)) 'legacy migration preserves the predecessor certificate byte-for-byte'
+    Assert-BytesEqual $legacyPrivateKeyBytes ([System.IO.File]::ReadAllBytes($legacyPrivateKey)) 'legacy migration preserves the predecessor private key byte-for-byte'
+    Remove-NewCycTlsIdentity -Plan $legacyMigrationPlan -IdentityResult $legacyMigrationResult
+    Assert-True (-not (Test-Path -LiteralPath $legacyVersionedTls)) 'identity rollback removes only the newly created versioned directory'
+    Assert-BytesEqual $legacyCertificateBytes ([System.IO.File]::ReadAllBytes($legacyCertificate)) 'identity rollback leaves the legacy certificate intact'
+    Assert-BytesEqual $legacyPrivateKeyBytes ([System.IO.File]::ReadAllBytes($legacyPrivateKey)) 'identity rollback leaves the legacy private key intact'
+
+    $partialLegacyRoot = Join-Path $testRoot 'partial-legacy-identity'
+    $partialLegacyTlsRoot = Join-Path $partialLegacyRoot 'tls'
+    [void](New-Item -ItemType Directory -Path $partialLegacyTlsRoot -Force)
+    [System.IO.File]::WriteAllText((Join-Path $partialLegacyTlsRoot 'controller.crt.pem'), 'partial-legacy-certificate')
+    $partialLegacyPlan = [PSCustomObject]@{
+        dataRoot = $partialLegacyRoot
+        managedWorker = [PSCustomObject]@{
+            enabled = $true
+            networkPlan = $plan.managedWorker.networkPlan
+            identityVersion = 'managed-worker-v2'
+            identityHosts = [object[]]@($plan.managedWorker.identityHosts)
+            tlsRoot = $partialLegacyTlsRoot
+            tlsDirectory = Join-Path $partialLegacyTlsRoot 'managed-worker-v2'
+            certificatePath = Join-Path $partialLegacyTlsRoot 'managed-worker-v2\controller.crt.pem'
+            privateKeyPath = Join-Path $partialLegacyTlsRoot 'managed-worker-v2\controller.key.pem'
+            legacyTlsCertificatePath = Join-Path $partialLegacyTlsRoot 'controller.crt.pem'
+            legacyTlsPrivateKeyPath = Join-Path $partialLegacyTlsRoot 'controller.key.pem'
+            identityCli = $fakeIdentityCli
+        }
+    }
+    Assert-ThrowsLike `
+        -Action { [void](Ensure-CycTlsIdentity -Plan $partialLegacyPlan) } `
+        -Pattern 'Legacy controller TLS identity is incomplete' `
+        -Message 'partial legacy prerelease identities fail closed without creating a replacement'
+    Assert-True (-not (Test-Path -LiteralPath $partialLegacyPlan.managedWorker.tlsDirectory)) 'partial legacy rejection performs no versioned identity mutation'
+
     Assert-ThrowsLike `
         -Action {
             [void](Assert-CycIdentityMetadata `
@@ -793,7 +987,7 @@ exit 4
                 }) `
                 -ExpectedCertificatePath 'C:\legacy.crt.pem' `
                 -ExpectedPrivateKeyPath 'C:\legacy.key.pem' `
-                -ExpectedHost '192.0.2.10' `
+                -ExpectedHosts @('192.168.50.10') `
                 -Operation init)
         } `
         -Pattern 'incomplete metadata' `
@@ -813,30 +1007,55 @@ exit 4
         -Metadata $normalizedHostMetadata `
         -ExpectedCertificatePath $plan.managedWorker.certificatePath `
         -ExpectedPrivateKeyPath $plan.managedWorker.privateKeyPath `
-        -ExpectedHost '0:0:0:0:0:0:0:1' `
+        -ExpectedHosts @('0:0:0:0:0:0:0:1') `
         -Operation verify) -ceq ('c' * 64)) 'identity SAN comparison accepts equivalent expanded and compressed IPv6 forms'
     $normalizedHostMetadata.subjectAltNames = [object[]]@('example.com')
     Assert-True ((Assert-CycIdentityMetadata `
         -Metadata $normalizedHostMetadata `
         -ExpectedCertificatePath $plan.managedWorker.certificatePath `
         -ExpectedPrivateKeyPath $plan.managedWorker.privateKeyPath `
-        -ExpectedHost 'EXAMPLE.COM.' `
+        -ExpectedHosts @('EXAMPLE.COM.') `
         -Operation verify) -ceq ('c' * 64)) 'identity SAN comparison accepts DNS case and trailing-dot normalization'
+    $normalizedHostMetadata.subjectAltNames = [object[]]@('example.com', 'unexpected.example')
+    Assert-ThrowsLike `
+        -Action {
+            [void](Assert-CycIdentityMetadata `
+                -Metadata $normalizedHostMetadata `
+                -ExpectedCertificatePath $plan.managedWorker.certificatePath `
+                -ExpectedPrivateKeyPath $plan.managedWorker.privateKeyPath `
+                -ExpectedHosts @('example.com') `
+                -Operation verify)
+        } `
+        -Pattern 'exact immutable SAN set' `
+        -Message 'identity verification rejects certificates with an unexpected extra SAN'
 
     if (-not [string]::IsNullOrWhiteSpace($IdentityCliPath)) {
         $resolvedIdentityCli = [string](Resolve-Path -LiteralPath $IdentityCliPath -ErrorAction Stop).ProviderPath
         Assert-True ([System.IO.Path]::GetFileName($resolvedIdentityCli) -ieq 'cyc.exe') 'production identity contract test uses cyc.exe'
         $realIdentityRoot = Join-Path $testRoot 'real-identity'
-        $realIdentityTls = Join-Path $realIdentityRoot 'tls'
+        $realIdentityTlsRoot = Join-Path $realIdentityRoot 'tls'
+        $realIdentityTls = Join-Path $realIdentityTlsRoot 'managed-worker-v2'
+        $realNetworkPlan = New-CycManagedWorkerNetworkPlan `
+            -InterfaceIndex 7 `
+            -BindHost '192.168.50.10' `
+            -PublicHost 'controller.test' `
+            -ControllerHostName 'controller-test' `
+            -PrivateAddresses @('192.168.50.10', 'fd12:3456:789a::10') `
+            -ListenPort 47832
         $realIdentityPlan = [PSCustomObject]@{
             dataRoot = $realIdentityRoot
             managedWorker = [PSCustomObject]@{
                 enabled = $true
+                networkPlan = $realNetworkPlan
+                identityVersion = 'managed-worker-v2'
+                identityHosts = [object[]]@($realNetworkPlan.identityHosts)
+                tlsRoot = $realIdentityTlsRoot
                 tlsDirectory = $realIdentityTls
                 certificatePath = Join-Path $realIdentityTls 'controller.crt.pem'
                 privateKeyPath = Join-Path $realIdentityTls 'controller.key.pem'
+                legacyTlsCertificatePath = Join-Path $realIdentityTlsRoot 'controller.crt.pem'
+                legacyTlsPrivateKeyPath = Join-Path $realIdentityTlsRoot 'controller.key.pem'
                 identityCli = $resolvedIdentityCli
-                publicHost = '127.0.0.1'
             }
         }
         $realIdentityFirst = Ensure-CycTlsIdentity -Plan $realIdentityPlan
@@ -997,7 +1216,8 @@ exit 4
         -BundleRoot $payload `
         -InstallRoot $codexOnlyInstall `
         -DataRoot $codexOnlyData `
-        -CodexHome $codexOnlyHome
+        -CodexHome $codexOnlyHome `
+        -DisableManagedWorkerListener
     Install-PlannedFiles -Plan $codexOnlyPlan
     $codexOnlyInitialResult = [PSCustomObject]@{
         attempted = $true
@@ -1741,8 +1961,38 @@ exit /b !ERRORLEVEL!
         -SignatureRequired $false `
         -Binding $binding `
         -Roots ([PSCustomObject]@{ installRoot = $install; dataRoot = $data }) `
-        -TransactionId ([Guid]::NewGuid().ToString('N'))
+        -TransactionId ([Guid]::NewGuid().ToString('N')) `
+        -ExistingManifest $reusableManifest
     Assert-True ($typedCoordinatorPlan.managedWorker.firewall.lifecycle -eq 'external-elevated-helper') 'coordinator obtains a typed manifest-validated plan before UAC'
+    Assert-True (($typedCoordinatorPlan.managedWorker.networkPlan | ConvertTo-Json -Depth 6 -Compress) -ceq
+        ($plan.managedWorker.networkPlan | ConvertTo-Json -Depth 6 -Compress)) 'PlanOnly coordinator reuses the installed immutable network plan exactly'
+    $typedBootstrapArguments = Get-CycBootstrapArguments `
+        -BootstrapPath $bootstrap `
+        -Operation Repair `
+        -Binding $binding `
+        -Roots ([PSCustomObject]@{ installRoot = $install; dataRoot = $data }) `
+        -TransactionId ([Guid]::NewGuid().ToString('N')) `
+        -RequestSha256 ('d' * 64) `
+        -ManagedWorker $typedCoordinatorPlan.managedWorker
+    function Get-TypedBootstrapArgumentValue {
+        param([Parameter(Mandatory = $true)][string]$Name)
+        $positions = @()
+        for ($argumentIndex = 0; $argumentIndex -lt $typedBootstrapArguments.Count; $argumentIndex++) {
+            if ([string]$typedBootstrapArguments[$argumentIndex] -ceq $Name) { $positions += $argumentIndex }
+        }
+        Assert-True ($positions.Count -eq 1 -and $positions[0] + 1 -lt $typedBootstrapArguments.Count) "typed core argv contains exactly one $Name value"
+        return [string]$typedBootstrapArguments[$positions[0] + 1]
+    }
+    $propagatedNetworkPlan = New-CycManagedWorkerNetworkPlan `
+        -InterfaceIndex ([int](Get-TypedBootstrapArgumentValue '-WorkerInterfaceIndex')) `
+        -BindHost (Get-TypedBootstrapArgumentValue '-WorkerBindHost') `
+        -PublicHost (Get-TypedBootstrapArgumentValue '-WorkerPublicHost') `
+        -ControllerHostName (Get-TypedBootstrapArgumentValue '-WorkerControllerHostName') `
+        -PrivateAddresses @((Get-TypedBootstrapArgumentValue '-WorkerPrivateAddress').Split(',')) `
+        -ListenPort ([int](Get-TypedBootstrapArgumentValue '-WorkerListenPort'))
+    Assert-True (($propagatedNetworkPlan | ConvertTo-Json -Depth 6 -Compress) -ceq
+        ($typedCoordinatorPlan.managedWorker.networkPlan | ConvertTo-Json -Depth 6 -Compress)) 'core argv propagates every typed network-plan field without rediscovery'
+    Remove-Item Function:\Get-TypedBootstrapArgumentValue -Force
     $fakeBinding = [PSCustomObject]@{
         sid = 'S-1-5-21-100-200-300-1001'
         profile = 'C:\Users\InitiatingUser'

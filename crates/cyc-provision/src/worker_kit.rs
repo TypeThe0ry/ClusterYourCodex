@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fs::{self, OpenOptions},
     io::{self, Read},
     path::{Path, PathBuf},
 };
@@ -72,7 +72,7 @@ impl WorkerKitTarget {
         }
     }
 
-    fn expected_names(self) -> [&'static str; 5] {
+    pub(crate) fn expected_names(self) -> [&'static str; 5] {
         match self {
             Self::WindowsX86_64 => [
                 "cyc-worker.exe",
@@ -192,15 +192,19 @@ impl WorkerKitCatalog {
     }
 
     pub fn load_target(&self, target: WorkerKitTarget) -> Result<WorkerKit, WorkerKitError> {
+        validate_absolute_existing_path(&self.root, EntryKind::Directory)?;
         let root_metadata = fs::symlink_metadata(&self.root).map_err(WorkerKitError::Io)?;
-        if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        if !metadata_is_safe_directory(&root_metadata) {
             return Err(WorkerKitError::UnsafeEntry);
         }
+        let root_identity = FileSystemIdentity::from_metadata(&root_metadata)?;
         let directory = self.root.join(target.as_str());
+        validate_absolute_existing_path(&directory, EntryKind::Directory)?;
         let directory_metadata = fs::symlink_metadata(&directory).map_err(WorkerKitError::Io)?;
-        if !directory_metadata.is_dir() || directory_metadata.file_type().is_symlink() {
+        if !metadata_is_safe_directory(&directory_metadata) {
             return Err(WorkerKitError::UnsafeEntry);
         }
+        let directory_identity = FileSystemIdentity::from_metadata(&directory_metadata)?;
 
         let expected: BTreeSet<String> = target
             .expected_names()
@@ -214,8 +218,8 @@ impl WorkerKitCatalog {
                 .file_name()
                 .into_string()
                 .map_err(|_| WorkerKitError::UnsafeEntry)?;
-            let kind = entry.file_type().map_err(WorkerKitError::Io)?;
-            if !kind.is_file() || kind.is_symlink() || !actual.insert(name) {
+            let metadata = fs::symlink_metadata(entry.path()).map_err(WorkerKitError::Io)?;
+            if !metadata_is_safe_regular_file(&metadata) || !actual.insert(name) {
                 return Err(WorkerKitError::UnsafeEntry);
             }
         }
@@ -235,9 +239,12 @@ impl WorkerKitCatalog {
             };
             bytes.insert(
                 name.to_owned(),
-                read_bounded(&directory.join(name), maximum)?,
+                read_bounded_nofollow(&directory.join(name), maximum)?,
             );
         }
+
+        verify_unchanged_identity(&directory, EntryKind::Directory, &directory_identity)?;
+        verify_unchanged_identity(&self.root, EntryKind::Directory, &root_identity)?;
 
         let manifest_bytes = bytes
             .get("worker-kit.json")
@@ -349,6 +356,35 @@ impl WorkerKit {
 
     pub(crate) fn lifecycle_name(&self) -> &'static str {
         self.target.lifecycle_name()
+    }
+
+    /// Recheck the private in-memory representation immediately before a
+    /// materializer or transport consumes it. `WorkerKit` can only be built by
+    /// the signature-verifying catalog, and this second check ensures an
+    /// accidental mutation inside this crate cannot turn that verified value
+    /// into an unbound export.
+    pub(crate) fn validate_in_memory(&self) -> Result<(), WorkerKitError> {
+        if !valid_version(&self.version) || self.files.len() != 5 {
+            return Err(WorkerKitError::UnsafeEntry);
+        }
+        let expected: BTreeSet<&str> = self.target.expected_names().into_iter().collect();
+        let mut observed = BTreeSet::new();
+        for file in &self.files {
+            if !expected.contains(file.name.as_str())
+                || !observed.insert(file.name.as_str())
+                || file.content.is_empty()
+                || file.content.len() as u64 > maximum_for_name(&file.name)?
+                || !valid_sha256(&file.sha256)
+                || sha256_hex(&file.content) != file.sha256
+                || !matches!(file.unix_mode, 0o600 | 0o700)
+            {
+                return Err(WorkerKitError::DigestMismatch);
+            }
+        }
+        if observed != expected {
+            return Err(WorkerKitError::UnexpectedFileSet);
+        }
+        Ok(())
     }
 }
 
@@ -510,16 +546,34 @@ fn parse_sums(content: &[u8]) -> Result<BTreeMap<String, String>, WorkerKitError
     Ok(result)
 }
 
-fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, WorkerKitError> {
+fn maximum_for_name(name: &str) -> Result<u64, WorkerKitError> {
+    match name {
+        "cyc-worker" | "cyc-worker.exe" => Ok(MAX_WORKER_BYTES),
+        "install-worker.sh" | "Install-Worker.ps1" => Ok(MAX_LIFECYCLE_BYTES),
+        "worker-kit.json" => Ok(MAX_MANIFEST_BYTES),
+        "worker-kit.sig" => Ok(MAX_SIGNATURE_BYTES),
+        "SHA256SUMS" => Ok(MAX_SUMS_BYTES),
+        _ => Err(WorkerKitError::UnexpectedFileSet),
+    }
+}
+
+fn read_bounded_nofollow(path: &Path, maximum: u64) -> Result<Vec<u8>, WorkerKitError> {
     let metadata = fs::symlink_metadata(path).map_err(WorkerKitError::Io)?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() == 0
-        || metadata.len() > maximum
+    if !metadata_is_safe_regular_file(&metadata) || metadata.len() == 0 || metadata.len() > maximum
     {
         return Err(WorkerKitError::UnsafeEntry);
     }
-    let mut file = fs::File::open(path).map_err(WorkerKitError::Io)?;
+    let before = FileSystemIdentity::from_metadata(&metadata)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_nofollow_open(&mut options);
+    let mut file = options.open(path).map_err(WorkerKitError::Io)?;
+    let open_metadata = file.metadata().map_err(WorkerKitError::Io)?;
+    if !metadata_is_safe_regular_file(&open_metadata)
+        || FileSystemIdentity::from_metadata(&open_metadata)? != before
+    {
+        return Err(WorkerKitError::UnsafeEntry);
+    }
     let mut content = Vec::with_capacity(metadata.len() as usize);
     file.by_ref()
         .take(maximum + 1)
@@ -528,7 +582,192 @@ fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, WorkerKitError> {
     if content.len() as u64 != metadata.len() || content.len() as u64 > maximum {
         return Err(WorkerKitError::UnsafeEntry);
     }
+    let after_open = file.metadata().map_err(WorkerKitError::Io)?;
+    if FileSystemIdentity::from_metadata(&after_open)? != before {
+        return Err(WorkerKitError::UnsafeEntry);
+    }
+    verify_unchanged_identity(path, EntryKind::File, &before)?;
     Ok(content)
+}
+
+#[derive(Clone, Copy)]
+enum EntryKind {
+    Directory,
+    File,
+}
+
+fn validate_absolute_existing_path(path: &Path, kind: EntryKind) -> Result<(), WorkerKitError> {
+    if !path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+    {
+        return Err(WorkerKitError::InvalidCatalogRoot);
+    }
+    let mut candidate = PathBuf::new();
+    for component in path.components() {
+        candidate.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&candidate).map_err(WorkerKitError::Io)?;
+        if metadata.file_type().is_symlink() || metadata_is_windows_reparse(&metadata) {
+            return Err(WorkerKitError::UnsafeEntry);
+        }
+    }
+    let metadata = fs::symlink_metadata(path).map_err(WorkerKitError::Io)?;
+    let valid = match kind {
+        EntryKind::Directory => metadata_is_safe_directory(&metadata),
+        EntryKind::File => metadata_is_safe_regular_file(&metadata),
+    };
+    if !valid {
+        return Err(WorkerKitError::UnsafeEntry);
+    }
+    Ok(())
+}
+
+fn verify_unchanged_identity(
+    path: &Path,
+    kind: EntryKind,
+    expected: &FileSystemIdentity,
+) -> Result<(), WorkerKitError> {
+    let metadata = fs::symlink_metadata(path).map_err(WorkerKitError::Io)?;
+    let valid = match kind {
+        EntryKind::Directory => metadata_is_safe_directory(&metadata),
+        EntryKind::File => metadata_is_safe_regular_file(&metadata),
+    };
+    if !valid || &FileSystemIdentity::from_metadata(&metadata)? != expected {
+        return Err(WorkerKitError::UnsafeEntry);
+    }
+    Ok(())
+}
+
+fn metadata_is_safe_directory(metadata: &fs::Metadata) -> bool {
+    metadata.is_dir()
+        && !metadata.file_type().is_symlink()
+        && !metadata_is_windows_reparse(metadata)
+}
+
+fn metadata_is_safe_regular_file(metadata: &fs::Metadata) -> bool {
+    metadata.is_file()
+        && !metadata.file_type().is_symlink()
+        && !metadata_is_windows_reparse(metadata)
+        && metadata_has_single_link(metadata)
+}
+
+#[cfg(unix)]
+fn metadata_has_single_link(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    metadata.nlink() == 1
+}
+
+#[cfg(windows)]
+fn metadata_has_single_link(_metadata: &fs::Metadata) -> bool {
+    // The stable Windows MetadataExt surface does not expose the link count.
+    // Read handles exclude write/delete sharing and are revalidated before and
+    // after use, which prevents a second hard-link name from changing bytes
+    // during verification.
+    true
+}
+
+#[cfg(not(any(unix, windows)))]
+fn metadata_has_single_link(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileSystemIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+impl FileSystemIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Result<Self, WorkerKitError> {
+        use std::os::unix::fs::MetadataExt;
+
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileSystemIdentity {
+    creation_time: u64,
+    file_size: u64,
+    attributes: u32,
+}
+
+#[cfg(windows)]
+impl FileSystemIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Result<Self, WorkerKitError> {
+        use std::os::windows::fs::MetadataExt;
+
+        Ok(Self {
+            creation_time: metadata.creation_time(),
+            file_size: metadata.file_size(),
+            attributes: metadata.file_attributes(),
+        })
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileSystemIdentity;
+
+#[cfg(not(any(unix, windows)))]
+impl FileSystemIdentity {
+    fn from_metadata(_metadata: &fs::Metadata) -> Result<Self, WorkerKitError> {
+        Err(WorkerKitError::UnsafeEntry)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn configure_nofollow_open(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    const O_NOFOLLOW: i32 = 0x0002_0000;
+    options.custom_flags(O_NOFOLLOW);
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn configure_nofollow_open(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    const O_NOFOLLOW: i32 = 0x0000_0100;
+    options.custom_flags(O_NOFOLLOW);
+}
+
+#[cfg(windows)]
+fn configure_nofollow_open(options: &mut OpenOptions) {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    options
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios", windows)))]
+fn configure_nofollow_open(_options: &mut OpenOptions) {}
+
+#[cfg(windows)]
+fn metadata_is_windows_reparse(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_windows_reparse(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 fn valid_sha256(value: &str) -> bool {

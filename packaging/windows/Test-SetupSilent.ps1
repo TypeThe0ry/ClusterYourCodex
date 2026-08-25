@@ -30,6 +30,8 @@ $script:PreviewManifestSchema = 'cyc.dev/windows-preview/v1'
 $script:LifecycleJournalSchema = 'cyc.dev/windows-external-lifecycle/v1'
 $script:FirewallReceiptSchema = 'cyc.dev/windows-firewall-receipt/v1'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
+$script:ManagedWorkerNetworkPlanSchema = 'cyc.dev/windows-managed-worker-network/v1'
+$script:ManagedWorkerIdentityVersion = 'managed-worker-v2'
 $script:FirewallLifecycleName = 'external-elevated-helper'
 $script:MaximumInstallManifestBytes = 16MB
 $script:MaximumFirewallReceiptBytes = 32768
@@ -43,6 +45,43 @@ function Assert-SetupSilent {
     if (-not $Condition) {
         throw "silent Setup assertion failed: $Message"
     }
+}
+
+function Test-SetupSilentPrivateLanAddress {
+    param([Parameter(Mandatory = $true)][string]$Address)
+    $parsed = $null
+    if (-not [System.Net.IPAddress]::TryParse($Address, [ref]$parsed)) { return $false }
+    $bytes = $parsed.GetAddressBytes()
+    if ($parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+        return $bytes[0] -eq 10 -or
+            ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) -or
+            ($bytes[0] -eq 192 -and $bytes[1] -eq 168)
+    }
+    return $parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6 -and
+        (($bytes[0] -band 0xfe) -eq 0xfc)
+}
+
+function ConvertTo-SetupSilentCanonicalHost {
+    param([Parameter(Mandatory = $true)][string]$HostValue)
+    $value = $HostValue.Trim().TrimEnd('.').ToLowerInvariant()
+    $parsed = $null
+    if ([System.Net.IPAddress]::TryParse($value, [ref]$parsed)) {
+        return $parsed.ToString().ToLowerInvariant()
+    }
+    return $value
+}
+
+function Get-SetupSilentCanonicalHostSet {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Hosts)
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    [string[]]$values = @(
+        $Hosts | ForEach-Object {
+            $canonical = ConvertTo-SetupSilentCanonicalHost ([string]$_)
+            if ($seen.Add($canonical)) { $canonical }
+        }
+    )
+    [Array]::Sort($values, [System.StringComparer]::Ordinal)
+    return ,$values
 }
 
 function ConvertTo-SetupSilentSid {
@@ -842,6 +881,59 @@ function Assert-SetupSilentManifest {
         )
     ) 'install core commit marker has a strict round-trip timestamp'
 
+    $managedWorker = $manifest.managedWorker
+    Assert-SetupSilent (($managedWorker.enabled -is [bool]) -and [bool]$managedWorker.enabled) 'managed-worker listener is enabled with a real Boolean'
+    $networkPlan = $managedWorker.networkPlan
+    Assert-SetupSilentExactProperties -Object $networkPlan -Label 'managed-worker network plan' -Expected @(
+        'bindHost', 'controllerHostName', 'identityHosts', 'identityVersion', 'listenPort',
+        'privateAddresses', 'publicHost', 'schemaVersion', 'selectedInterfaceIndex'
+    )
+    Assert-SetupSilent ([string]$networkPlan.schemaVersion -ceq $script:ManagedWorkerNetworkPlanSchema) 'managed-worker network plan schema is current'
+    Assert-SetupSilent ([string]$networkPlan.identityVersion -ceq $script:ManagedWorkerIdentityVersion) 'managed-worker identity version is current'
+    Assert-SetupSilent (($networkPlan.selectedInterfaceIndex -is [int] -or $networkPlan.selectedInterfaceIndex -is [long]) -and
+        [int64]$networkPlan.selectedInterfaceIndex -gt 0) 'managed-worker network plan records one selected interface index'
+    Assert-SetupSilent (($networkPlan.listenPort -is [int] -or $networkPlan.listenPort -is [long]) -and
+        [int]$networkPlan.listenPort -eq 47832) 'managed-worker network plan records the exact listener port'
+    $bindHost = ConvertTo-SetupSilentCanonicalHost ([string]$networkPlan.bindHost)
+    Assert-SetupSilent (Test-SetupSilentPrivateLanAddress $bindHost) 'managed-worker bind host is RFC1918 IPv4 or ULA IPv6'
+    Assert-SetupSilent ($bindHost -cnotin @('0.0.0.0', '::', '127.0.0.1', '::1')) 'managed-worker bind host is neither wildcard nor loopback'
+    Assert-SetupSilent ([string]$managedWorker.bindHost -ceq [string]$networkPlan.bindHost) 'manifest managed-worker bind host matches the immutable plan'
+    Assert-SetupSilent ([string]$managedWorker.publicHost -ceq [string]$networkPlan.publicHost) 'manifest managed-worker public host matches the immutable plan'
+    Assert-SetupSilent ([int]$managedWorker.listenPort -eq [int]$networkPlan.listenPort) 'manifest managed-worker listener port matches the immutable plan'
+    Assert-SetupSilent ([string]$managedWorker.identityVersion -ceq [string]$networkPlan.identityVersion) 'manifest managed-worker identity version matches the immutable plan'
+    [string[]]$privateAddresses = @($networkPlan.privateAddresses | ForEach-Object { [string]$_ })
+    [string[]]$canonicalPrivateAddresses = Get-SetupSilentCanonicalHostSet -Hosts $privateAddresses
+    Assert-SetupSilent ($privateAddresses.Count -gt 0 -and $privateAddresses.Count -eq $canonicalPrivateAddresses.Count -and
+        [string]::Join("`n", $privateAddresses) -ceq [string]::Join("`n", $canonicalPrivateAddresses)) 'managed-worker private-address set is exact, unique, and canonical'
+    foreach ($privateAddress in $privateAddresses) {
+        Assert-SetupSilent (Test-SetupSilentPrivateLanAddress $privateAddress) "managed-worker address is private: $privateAddress"
+    }
+    Assert-SetupSilent ($privateAddresses -ccontains $bindHost) 'managed-worker bind belongs to the selected interface address set'
+    $publicHost = ConvertTo-SetupSilentCanonicalHost ([string]$networkPlan.publicHost)
+    $publicIp = $null
+    if ([System.Net.IPAddress]::TryParse($publicHost, [ref]$publicIp)) {
+        Assert-SetupSilent ([string]::Equals($publicHost, $bindHost, [System.StringComparison]::Ordinal)) 'IP-literal public host exactly matches the bind host'
+    }
+    $publicUri = [Uri]([string]$managedWorker.publicUrl)
+    Assert-SetupSilent ([string]$publicUri.Scheme -ceq 'https' -and [int]$publicUri.Port -eq [int]$networkPlan.listenPort) 'managed-worker public URL is the exact HTTPS listener origin'
+    $publicUriHost = ([string]$publicUri.Host).Trim([char[]]@('[', ']'))
+    Assert-SetupSilent ((ConvertTo-SetupSilentCanonicalHost $publicUriHost) -ceq $publicHost) 'managed-worker public URL authenticates the planned public host'
+
+    [string[]]$reportedIdentityHosts = @($networkPlan.identityHosts | ForEach-Object { [string]$_ })
+    [string[]]$canonicalReportedIdentityHosts = Get-SetupSilentCanonicalHostSet -Hosts $reportedIdentityHosts
+    [string[]]$expectedSanHosts = Get-SetupSilentCanonicalHostSet -Hosts @(
+        $privateAddresses + @('127.0.0.1', '::1', [string]$networkPlan.controllerHostName, $publicHost)
+    )
+    Assert-SetupSilent ($reportedIdentityHosts.Count -eq $canonicalReportedIdentityHosts.Count -and
+        [string]::Join("`n", $reportedIdentityHosts) -ceq [string]::Join("`n", $canonicalReportedIdentityHosts) -and
+        [string]::Join("`n", $reportedIdentityHosts) -ceq [string]::Join("`n", $expectedSanHosts)) 'managed-worker identity SAN set exactly covers loopback, hostname, public host, and selected private addresses'
+    Assert-SetupSilent ([string]::Join("`n", @($managedWorker.identityHosts)) -ceq [string]::Join("`n", $reportedIdentityHosts)) 'manifest identity host projection exactly matches the immutable plan'
+    $expectedTlsDirectory = Resolve-SetupSilentPath (Join-Path (Join-Path $DataRoot 'tls') $script:ManagedWorkerIdentityVersion)
+    Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$managedWorker.tlsDirectory) -Right $expectedTlsDirectory) 'managed-worker identity uses the versioned TLS directory'
+    Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$managedWorker.certificatePath) -Right (Join-Path $expectedTlsDirectory 'controller.crt.pem')) 'managed-worker certificate path is versioned'
+    Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$managedWorker.privateKeyPath) -Right (Join-Path $expectedTlsDirectory 'controller.key.pem')) 'managed-worker private-key path is versioned'
+    Assert-SetupSilent ([string]$managedWorker.certificateFingerprint -cmatch '^[0-9a-f]{64}$') 'managed-worker manifest records the identity fingerprint without secret material'
+
     $files = @($manifest.files)
     Assert-SetupSilent ($files.Count -gt 0) 'install manifest contains files'
     foreach ($record in $files) {
@@ -872,7 +964,8 @@ function Assert-SetupSilentManifest {
 function Assert-SetupSilentControllerTask {
     param(
         [Parameter(Mandatory = $true)][string]$InstallRoot,
-        [Parameter(Mandatory = $true)][string]$ExpectedSid
+        [Parameter(Mandatory = $true)][string]$ExpectedSid,
+        [Parameter(Mandatory = $true)]$Manifest
     )
     $controllerTasks = @(Get-ScheduledTask -TaskName $script:ControllerTaskName -TaskPath '\' -ErrorAction SilentlyContinue)
     $workerTasks = @(Get-ScheduledTask -TaskName $script:WorkerTaskName -TaskPath '\' -ErrorAction SilentlyContinue)
@@ -886,7 +979,22 @@ function Assert-SetupSilentControllerTask {
     Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$actions[0].Execute) -Right $expectedExecutable) 'controller task is bound to the installed executable'
     Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$actions[0].WorkingDirectory) -Right $InstallRoot) 'controller task working directory is the install root'
     Assert-SetupSilent ([string]$actions[0].Arguments -match '(?:^|\s)--bind\s+127\.0\.0\.1:47831(?:\s|$)') 'controller task binds the loopback API'
-    Assert-SetupSilent ([string]$actions[0].Arguments -match '(?:^|\s)--worker-bind\s+0\.0\.0\.0:47832(?:\s|$)') 'controller task binds the managed-worker listener'
+    $networkPlan = $Manifest.managedWorker.networkPlan
+    $workerBind = if ([string]$networkPlan.bindHost -match ':') {
+        "[$([string]$networkPlan.bindHost)]:$([int]$networkPlan.listenPort)"
+    } else {
+        "$([string]$networkPlan.bindHost):$([int]$networkPlan.listenPort)"
+    }
+    Assert-SetupSilent ([string]$actions[0].Arguments -match
+        "(?:^|\s)--worker-bind\s+$([regex]::Escape($workerBind))(?:\s|$)") 'controller task binds only the planned private interface address'
+    Assert-SetupSilent ([string]$actions[0].Arguments -notmatch
+        '(?:^|\s)--worker-bind\s+(?:0\.0\.0\.0|\[?::\]?):') 'controller task has no wildcard managed-worker listener'
+    Assert-SetupSilent ([string]$actions[0].Arguments -match
+        "(?:^|\s)--worker-public-url\s+`"$([regex]::Escape([string]$Manifest.managedWorker.publicUrl))`"(?:\s|$)") 'controller task uses the immutable public origin'
+    Assert-SetupSilent ([string]$actions[0].Arguments -match
+        "(?:^|\s)--worker-cert\s+`"$([regex]::Escape([string]$Manifest.managedWorker.certificatePath))`"(?:\s|$)") 'controller task uses the versioned certificate'
+    Assert-SetupSilent ([string]$actions[0].Arguments -match
+        "(?:^|\s)--worker-key\s+`"$([regex]::Escape([string]$Manifest.managedWorker.privateKeyPath))`"(?:\s|$)") 'controller task uses the versioned private key'
     # The ScheduledTasks CIM provider may display the same principal as a SID,
     # qualified NTAccount, UPN, or bare local account. Compare only canonical
     # SIDs, then independently verify the persisted task definition.
@@ -908,7 +1016,10 @@ function Assert-SetupSilentControllerTask {
 }
 
 function Assert-SetupSilentControllerRuntime {
-    param([Parameter(Mandatory = $true)][string]$InstallRoot)
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)]$Manifest
+    )
     $health = Wait-SetupSilentController
     Assert-SetupSilent ([string]$health.status -ceq 'ok') 'controller loopback health succeeds'
     $apiListeners = @(Get-NetTCPConnection -State Listen -LocalPort 47831 -ErrorAction SilentlyContinue)
@@ -916,6 +1027,14 @@ function Assert-SetupSilentControllerRuntime {
     Assert-SetupSilent ($apiListeners.Count -ge 1) 'controller loopback listener is active'
     Assert-SetupSilent ($workerListeners.Count -ge 1) 'managed-worker TLS listener is active'
     Assert-SetupSilent (@($apiListeners | Where-Object { [string]$_.LocalAddress -eq '127.0.0.1' }).Count -ge 1) 'controller API is bound to IPv4 loopback'
+    $expectedBindAddress = [System.Net.IPAddress]::Parse([string]$Manifest.managedWorker.networkPlan.bindHost)
+    $exactWorkerListeners = @($workerListeners | Where-Object {
+        $observed = $null
+        [System.Net.IPAddress]::TryParse([string]$_.LocalAddress, [ref]$observed) -and
+            $observed.Equals($expectedBindAddress)
+    })
+    Assert-SetupSilent ($exactWorkerListeners.Count -ge 1) 'managed-worker runtime listener uses the exact planned bind address'
+    Assert-SetupSilent (@($workerListeners | Where-Object { [string]$_.LocalAddress -in @('0.0.0.0', '::') }).Count -eq 0) 'managed-worker runtime exposes no wildcard listener'
     $expectedExecutable = Join-Path $InstallRoot 'cyc-controller.exe'
     $owners = @($apiListeners + $workerListeners | ForEach-Object { [int]$_.OwningProcess } | Sort-Object -Unique)
     Assert-SetupSilent ($owners.Count -eq 1) 'both listeners belong to one controller process'
@@ -1214,8 +1333,8 @@ try {
         -ExpectedProfile $profile `
         -ExpectedLocalAppData $localAppData
     [void](Assert-SetupSilentUninstallRegistration -InstallRoot $installRoot -DataRoot $dataRoot)
-    [void](Assert-SetupSilentControllerTask -InstallRoot $installRoot -ExpectedSid $identitySid)
-    $runtime = Assert-SetupSilentControllerRuntime -InstallRoot $installRoot
+    [void](Assert-SetupSilentControllerTask -InstallRoot $installRoot -ExpectedSid $identitySid -Manifest $manifest)
+    $runtime = Assert-SetupSilentControllerRuntime -InstallRoot $installRoot -Manifest $manifest
     [void](Assert-SetupSilentFirewall -Manifest $manifest)
     $installLifecycleEvidence = Assert-SetupSilentAppliedLifecycleEvidence `
         -Manifest $manifest `
@@ -1241,6 +1360,7 @@ try {
     Assert-SetupSilent (Test-Path -LiteralPath $privateKeyPath -PathType Leaf) 'TLS private key exists before Repair'
     $certificateHashBefore = (Get-FileHash -LiteralPath $certificatePath -Algorithm SHA256).Hash.ToLowerInvariant()
     $privateKeyHashBefore = (Get-FileHash -LiteralPath $privateKeyPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $networkPlanJsonBefore = $manifest.managedWorker.networkPlan | ConvertTo-Json -Depth 8 -Compress
 
     $cliRecord = Get-SetupSilentManifestFile -Manifest $manifest -RelativePath 'cyc.exe'
     $cliPath = Join-Path $installRoot 'cyc.exe'
@@ -1279,8 +1399,9 @@ try {
     Assert-SetupSilent ($cliHashAfterRepair -ceq ([string]$cliRecord.sha256).ToLowerInvariant()) 'Repair restores the corrupted installed CLI'
     Assert-SetupSilent ((Get-FileHash -LiteralPath $certificatePath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $certificateHashBefore) 'Repair preserves the TLS certificate identity'
     Assert-SetupSilent ((Get-FileHash -LiteralPath $privateKeyPath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $privateKeyHashBefore) 'Repair preserves the TLS private key identity'
-    [void](Assert-SetupSilentControllerTask -InstallRoot $installRoot -ExpectedSid $identitySid)
-    $runtimeAfterRepair = Assert-SetupSilentControllerRuntime -InstallRoot $installRoot
+    Assert-SetupSilent (($manifestAfterRepair.managedWorker.networkPlan | ConvertTo-Json -Depth 8 -Compress) -ceq $networkPlanJsonBefore) 'Repair reuses the immutable network plan byte-for-byte at the JSON value level'
+    [void](Assert-SetupSilentControllerTask -InstallRoot $installRoot -ExpectedSid $identitySid -Manifest $manifestAfterRepair)
+    $runtimeAfterRepair = Assert-SetupSilentControllerRuntime -InstallRoot $installRoot -Manifest $manifestAfterRepair
     [void](Assert-SetupSilentFirewall -Manifest $manifestAfterRepair)
     [void](Assert-SetupSilentUninstallRegistration -InstallRoot $installRoot -DataRoot $dataRoot)
     $firstRepairLifecycleEvidence = Assert-SetupSilentAppliedLifecycleEvidence `
@@ -1337,8 +1458,9 @@ try {
     Assert-SetupSilent ($cliHashAfterSecondRepair -ceq ([string]$cliRecordAfterSecondRepair.sha256).ToLowerInvariant()) 'second Repair restores the corrupted installed CLI again'
     Assert-SetupSilent ((Get-FileHash -LiteralPath $certificatePath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $certificateHashBefore) 'second Repair preserves the TLS certificate identity'
     Assert-SetupSilent ((Get-FileHash -LiteralPath $privateKeyPath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $privateKeyHashBefore) 'second Repair preserves the TLS private key identity'
-    [void](Assert-SetupSilentControllerTask -InstallRoot $installRoot -ExpectedSid $identitySid)
-    $runtimeAfterSecondRepair = Assert-SetupSilentControllerRuntime -InstallRoot $installRoot
+    Assert-SetupSilent (($manifestAfterSecondRepair.managedWorker.networkPlan | ConvertTo-Json -Depth 8 -Compress) -ceq $networkPlanJsonBefore) 'second Repair reuses the same immutable network plan exactly'
+    [void](Assert-SetupSilentControllerTask -InstallRoot $installRoot -ExpectedSid $identitySid -Manifest $manifestAfterSecondRepair)
+    $runtimeAfterSecondRepair = Assert-SetupSilentControllerRuntime -InstallRoot $installRoot -Manifest $manifestAfterSecondRepair
     [void](Assert-SetupSilentFirewall -Manifest $manifestAfterSecondRepair)
     [void](Assert-SetupSilentUninstallRegistration -InstallRoot $installRoot -DataRoot $dataRoot)
     $secondRepairLifecycleEvidence = Assert-SetupSilentAppliedLifecycleEvidence `

@@ -20,6 +20,20 @@ function Resolve-FullPath {
     return [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
 }
 
+function Test-CycPreviewPrivateLanAddress {
+    param([Parameter(Mandatory = $true)][string]$Address)
+    $parsed = $null
+    if (-not [System.Net.IPAddress]::TryParse($Address, [ref]$parsed)) { return $false }
+    $bytes = $parsed.GetAddressBytes()
+    if ($parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+        return $bytes[0] -eq 10 -or
+            ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) -or
+            ($bytes[0] -eq 192 -and $bytes[1] -eq 168)
+    }
+    return $parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6 -and
+        (($bytes[0] -band 0xfe) -eq 0xfc)
+}
+
 function Copy-RequiredFile {
     param(
         [Parameter(Mandatory = $true)][string]$Source,
@@ -415,6 +429,31 @@ $checksumRecords = @(Get-ChildItem -LiteralPath $output -File -Recurse -Force | 
 })
 $checksumRecords | Set-Content -LiteralPath (Join-Path $output 'SHA256SUMS') -Encoding ASCII
 
-# Reuse the installer planner as the final payload-layout acceptance check.
-& (Join-Path $output 'bootstrap.ps1') -Action Install -BundleRoot $payload -PlanOnly | Out-Null
+# Reuse the installer planner as the final payload-layout and private-network
+# acceptance check. The transient typed plan is inspected in-process and is
+# never serialized into the public preview package.
+$previewPlanNonce = [Guid]::NewGuid().ToString('N')
+$previewPlanInstallRoot = Join-Path $env:LOCALAPPDATA "Programs\ClusterYourCodex-PreviewPlan-$previewPlanNonce"
+$previewPlanDataRoot = Join-Path $env:LOCALAPPDATA "ClusterYourCodex-PreviewPlan-$previewPlanNonce"
+$previewPlans = @(& (Join-Path $output 'bootstrap.ps1') `
+    -Action Install `
+    -BundleRoot $payload `
+    -InstallRoot $previewPlanInstallRoot `
+    -DataRoot $previewPlanDataRoot `
+    -WorkerConfig (Join-Path $previewPlanDataRoot 'worker\config.json') `
+    -PlanOnly)
+if ($previewPlans.Count -ne 1) { throw 'Installer PlanOnly did not return exactly one typed plan.' }
+$previewPlan = $previewPlans[0]
+if (-not [bool]$previewPlan.managedWorker.enabled -or
+    [string]$previewPlan.managedWorker.networkPlan.schemaVersion -cne 'cyc.dev/windows-managed-worker-network/v1' -or
+    [int]$previewPlan.managedWorker.networkPlan.selectedInterfaceIndex -lt 1 -or
+    -not (Test-CycPreviewPrivateLanAddress ([string]$previewPlan.managedWorker.networkPlan.bindHost)) -or
+    [string]$previewPlan.managedWorker.networkPlan.bindHost -cin @('0.0.0.0', '::', '127.0.0.1', '::1') -or
+    [string]$previewPlan.tasks[0].action.arguments -match '(?:^|\s)--worker-bind\s+(?:0\.0\.0\.0|\[?::\]?):' -or
+    -not ([string]$previewPlan.managedWorker.tlsDirectory).EndsWith(
+        '\tls\managed-worker-v2',
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw 'Installer PlanOnly did not produce a private, non-wildcard, versioned managed-worker plan.'
+}
 Write-Output $output

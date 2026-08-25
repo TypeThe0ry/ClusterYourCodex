@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
@@ -134,6 +134,7 @@ fn worker_options(args: &Args) -> Result<Option<WorkerOptions>> {
     {
         bail!("--worker-public-url must be an HTTPS origin without credentials, path, query, or fragment");
     }
+    validate_worker_network(args.worker_bind.unwrap(), &uri)?;
     let certificate = args.worker_cert.clone().unwrap();
     let private_key = args.worker_key.clone().unwrap();
     cyc_controller::auth::validate_public_file(&certificate).with_context(|| {
@@ -162,6 +163,42 @@ fn worker_options(args: &Args) -> Result<Option<WorkerOptions>> {
         certificate_pem,
         private_key,
     }))
+}
+
+fn validate_worker_network(bind: SocketAddr, public_uri: &axum::http::Uri) -> Result<()> {
+    if !is_private_lan_ip(bind.ip()) {
+        bail!("--worker-bind must use an explicit RFC1918 IPv4 or ULA IPv6 address");
+    }
+    let authority = public_uri
+        .authority()
+        .context("--worker-public-url has no authority")?;
+    let public_port = authority.port_u16().unwrap_or(443);
+    if public_port != bind.port() {
+        bail!("--worker-public-url port must exactly match --worker-bind");
+    }
+    let public_host = authority.host();
+    let ip_candidate = public_host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(public_host);
+    if let Ok(public_ip) = ip_candidate.parse::<IpAddr>() {
+        if public_ip != bind.ip() {
+            bail!("an IP-literal --worker-public-url host must exactly match --worker-bind");
+        }
+    }
+    Ok(())
+}
+
+fn is_private_lan_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            let octets = address.octets();
+            octets[0] == 10
+                || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 168)
+        }
+        IpAddr::V6(address) => address.octets()[0] & 0xfe == 0xfc,
+    }
 }
 
 /// Return the exact public certificate distributed in enrollment bundles.
@@ -239,6 +276,58 @@ mod tests {
     }
 
     #[test]
+    fn worker_network_accepts_only_explicit_private_lan_binds() {
+        for bind in [
+            "10.20.30.40:47832",
+            "172.16.0.1:47832",
+            "172.31.255.254:47832",
+            "192.168.50.10:47832",
+            "[fd12:3456:789a::10]:47832",
+        ] {
+            let bind: SocketAddr = bind.parse().unwrap();
+            let uri: axum::http::Uri = "https://controller.test:47832".parse().unwrap();
+            validate_worker_network(bind, &uri).unwrap();
+        }
+        for bind in [
+            "0.0.0.0:47832",
+            "127.0.0.1:47832",
+            "169.254.1.1:47832",
+            "192.0.2.10:47832",
+            "8.8.8.8:47832",
+            "[::]:47832",
+            "[::1]:47832",
+            "[fe80::1]:47832",
+            "[2001:db8::1]:47832",
+        ] {
+            let bind: SocketAddr = bind.parse().unwrap();
+            let uri: axum::http::Uri = "https://controller.test:47832".parse().unwrap();
+            assert!(validate_worker_network(bind, &uri).is_err(), "{bind}");
+        }
+    }
+
+    #[test]
+    fn worker_network_binds_public_origin_to_the_exact_endpoint() {
+        let bind: SocketAddr = "192.168.50.10:47832".parse().unwrap();
+        let dns: axum::http::Uri = "https://controller.test:47832".parse().unwrap();
+        validate_worker_network(bind, &dns).unwrap();
+
+        let exact_ip: axum::http::Uri = "https://192.168.50.10:47832".parse().unwrap();
+        validate_worker_network(bind, &exact_ip).unwrap();
+
+        let wrong_ip: axum::http::Uri = "https://192.168.50.11:47832".parse().unwrap();
+        assert!(validate_worker_network(bind, &wrong_ip).is_err());
+
+        let wrong_port: axum::http::Uri = "https://controller.test:47833".parse().unwrap();
+        assert!(validate_worker_network(bind, &wrong_port).is_err());
+
+        let ipv6_bind: SocketAddr = "[fd12:3456:789a::10]:47832".parse().unwrap();
+        let exact_ipv6: axum::http::Uri = "https://[fd12:3456:789a::10]:47832".parse().unwrap();
+        validate_worker_network(ipv6_bind, &exact_ipv6).unwrap();
+        let wrong_ipv6: axum::http::Uri = "https://[fd12:3456:789a::11]:47832".parse().unwrap();
+        assert!(validate_worker_network(ipv6_bind, &wrong_ipv6).is_err());
+    }
+
+    #[test]
     fn enrollment_certificate_rejects_chains_keys_and_surrounding_data() {
         let certificate = "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n";
         assert_eq!(single_certificate_pem(certificate).unwrap(), certificate);
@@ -286,9 +375,9 @@ mod tests {
         let argv = vec![
             OsString::from("cyc-controller"),
             OsString::from("--worker-bind"),
-            OsString::from("127.0.0.1:47832"),
+            OsString::from("192.168.50.10:47832"),
             OsString::from("--worker-public-url"),
-            OsString::from("https://127.0.0.1:47832"),
+            OsString::from("https://192.168.50.10:47832"),
             OsString::from("--worker-cert"),
             certificate.as_os_str().to_owned(),
             OsString::from("--worker-key"),

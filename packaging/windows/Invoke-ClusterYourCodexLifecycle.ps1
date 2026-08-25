@@ -1680,6 +1680,7 @@ function Get-CycBootstrapArguments {
         [Parameter(Mandatory = $true)]$Roots,
         [string]$TransactionId,
         [string]$RequestSha256,
+        [AllowNull()]$ManagedWorker,
         [switch]$Plan
     )
     $arguments = @(
@@ -1702,6 +1703,21 @@ function Get-CycBootstrapArguments {
     if ($Plan) { $arguments += '-PlanOnly' }
     if ($Operation -in @('Install', 'Repair')) {
         $arguments += @('-BundleRoot', $BundleRoot)
+        if ($ManagedWorker) {
+            if (-not [bool]$ManagedWorker.enabled) {
+                $arguments += '-DisableManagedWorkerListener'
+            } else {
+                $networkPlan = $ManagedWorker.networkPlan
+                $arguments += @(
+                    '-WorkerBindHost', [string]$networkPlan.bindHost,
+                    '-WorkerPublicHost', [string]$networkPlan.publicHost,
+                    '-WorkerInterfaceIndex', [string]$networkPlan.selectedInterfaceIndex,
+                    '-WorkerControllerHostName', [string]$networkPlan.controllerHostName,
+                    '-WorkerListenPort', [string]$networkPlan.listenPort,
+                    '-WorkerPrivateAddress', [string]::Join(',', @($networkPlan.privateAddresses))
+                )
+            }
+        }
         if (-not [string]::IsNullOrWhiteSpace($PackageRoot)) {
             $arguments += @('-PackageRoot', $PackageRoot, '-PackageManifest', $PackageManifest)
         }
@@ -1762,7 +1778,8 @@ function Get-CycValidatedInstallPlan {
         [Parameter(Mandatory = $true)][bool]$SignatureRequired,
         [Parameter(Mandatory = $true)]$Binding,
         [Parameter(Mandatory = $true)]$Roots,
-        [Parameter(Mandatory = $true)][string]$TransactionId
+        [Parameter(Mandatory = $true)][string]$TransactionId,
+        [AllowNull()]$ExistingManifest
     )
     # Dot-source inside this function scope only. This gives the coordinator a
     # typed plan while keeping bootstrap's parameter variables out of the
@@ -1784,7 +1801,8 @@ function Get-CycValidatedInstallPlan {
         -InitiatingSid $Binding.sid `
         -InitiatingProfile $Binding.profile `
         -InitiatingLocalAppData $Binding.localAppData `
-        -FirewallTransactionId $TransactionId
+        -FirewallTransactionId $TransactionId `
+        -ExistingManifest $ExistingManifest
 }
 
 function New-CycFirewallExchange {
@@ -2307,7 +2325,8 @@ function Invoke-ClusterYourCodexLifecycleCore {
             -SignatureRequired ([bool]$RequirePackageSignature) `
             -Binding $binding `
             -Roots $roots `
-            -TransactionId $transactionId
+            -TransactionId $transactionId `
+            -ExistingManifest $oldManifest
         if (-not $plan) { throw 'Core planner returned no install plan.' }
         $controllerRecord = @($plan.files | Where-Object { [string]$_.relativePath -ceq 'cyc-controller.exe' })
         if ($controllerRecord.Count -ne 1) { throw 'Install plan has no unique controller executable.' }
@@ -2429,7 +2448,8 @@ function Invoke-ClusterYourCodexLifecycleCore {
             -Binding $binding `
             -Roots $roots `
             -TransactionId $transactionId `
-            -RequestSha256 $requestHash
+            -RequestSha256 $requestHash `
+            -ManagedWorker $plan.managedWorker
         Set-CycLifecycleDiagnosticStage -Stage 'core-applying'
         [void](Invoke-CycBootstrapProcess -Arguments $coreArgs)
         $coreManifest = Read-CycLifecycleJson `
