@@ -7,6 +7,17 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.8] - 2026-08-26
+
+### Fixed
+
+- Windows installer controller readiness now probes the loopback health
+  endpoint through a direct TCP request instead of inheriting ambient HTTP
+  proxy behavior from PowerShell. This keeps the clean Windows 11 ARM64
+  x64-emulation acceptance path deterministic while preserving the strict
+  loopback-only bind contract.
+- Added a packaging regression guard for the direct controller health probe.
+
 ## [0.1.0-preview.7] - 2026-08-26
 
 ### Fixed

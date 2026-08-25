@@ -223,7 +223,7 @@ lifecycle code. On success it exits zero and stdout is exactly one compact JSON
 object of at most 4096 UTF-8 bytes:
 
 ```json
-{"schemaVersion":"cyc.dev/codex-integration-receipt/v1","status":"unchanged","pluginId":"cluster-your-codex@clusteryourcodex","pluginVersion":"0.1.0-preview.7","agentsBlockSha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+{"schemaVersion":"cyc.dev/codex-integration-receipt/v1","status":"unchanged","pluginId":"cluster-your-codex@clusteryourcodex","pluginVersion":"0.1.0-preview.8","agentsBlockSha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
 ```
 
 `status` is `installed`, `repaired`, or `unchanged`. Failure exits nonzero,

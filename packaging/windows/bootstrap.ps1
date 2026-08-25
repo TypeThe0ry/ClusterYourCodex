@@ -88,7 +88,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
-$script:ProductVersion = '0.1.0-preview.7'
+$script:ProductVersion = '0.1.0-preview.8'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
@@ -3710,18 +3710,64 @@ function Test-CycWorkerStatus {
 
 function Wait-CycControllerReady {
     param([int]$TimeoutSeconds = 15)
+
+    function Test-CycControllerLoopbackHealth {
+        $client = New-Object System.Net.Sockets.TcpClient
+        $stream = $null
+        $connectWaitHandle = $null
+        try {
+            $connect = $client.BeginConnect('127.0.0.1', 47831, $null, $null)
+            $connectWaitHandle = $connect.AsyncWaitHandle
+            if (-not $connectWaitHandle.WaitOne(1000)) {
+                return $false
+            }
+            $client.EndConnect($connect)
+            $stream = $client.GetStream()
+            $stream.ReadTimeout = 1000
+            $stream.WriteTimeout = 1000
+
+            $request = [Text.Encoding]::ASCII.GetBytes(
+                "GET /v1/health HTTP/1.1`r`nHost: 127.0.0.1`r`nConnection: close`r`n`r`n"
+            )
+            $stream.Write($request, 0, $request.Length)
+            $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::ASCII, $false, 1024, $true)
+            try {
+                $response = $reader.ReadToEnd()
+            } finally {
+                $reader.Dispose()
+            }
+
+            $separator = $response.IndexOf("`r`n`r`n", [StringComparison]::Ordinal)
+            if ($separator -lt 0) {
+                return $false
+            }
+            $headers = $response.Substring(0, $separator)
+            if ($headers -notmatch '(?m)^HTTP/1\.1 200(?:\s|$)') {
+                return $false
+            }
+            $body = $response.Substring($separator + 4)
+            if ([string]::IsNullOrWhiteSpace($body) -or $body.Length -gt 1MB) {
+                return $false
+            }
+            try {
+                $health = $body | ConvertFrom-Json
+            } catch {
+                return $false
+            }
+            return ([string]$health.status -ceq 'ok' -and
+                -not [string]::IsNullOrWhiteSpace([string]$health.apiVersion))
+        } catch {
+            return $false
+        } finally {
+            if ($stream) { $stream.Dispose() }
+            if ($connectWaitHandle) { $connectWaitHandle.Dispose() }
+            $client.Dispose()
+        }
+    }
+
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
-        try {
-            $response = Invoke-RestMethod `
-                -Uri 'http://127.0.0.1:47831/v1/health' `
-                -Method Get `
-                -TimeoutSec 1 `
-                -UseBasicParsing
-            if ($response.status -eq 'ok' -and $response.apiVersion) { return }
-        } catch {
-            # Controller startup is bounded and retried below without logging response data.
-        }
+        if (Test-CycControllerLoopbackHealth) { return }
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
     throw 'Controller failed the loopback health check.'

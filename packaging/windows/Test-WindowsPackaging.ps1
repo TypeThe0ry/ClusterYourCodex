@@ -397,6 +397,8 @@ try {
     Assert-True ($source -match 'Restore-CycTaskSnapshots') 'failed replacement has task rollback'
     Assert-True ($source -match 'Wait-CycTaskStable') 'Scheduled Tasks require a stable running window'
     Assert-True ($source -match 'LastTaskResult') 'Scheduled Task health checks LastTaskResult'
+    Assert-True ($source -match 'Test-CycControllerLoopbackHealth') 'controller readiness uses the direct loopback health probe'
+    Assert-True ($source -match 'System\.Net\.Sockets\.TcpClient') 'controller readiness bypasses ambient HTTP proxy configuration'
     Assert-True ($source -match 'Test-CycWorkerStatus') 'worker readiness runs cyc-worker status'
     Assert-True ($source -match 'Write-CodexCleanupState') 'failed Codex cleanup is persisted for retry'
     Assert-True ($source -match 'Write-DurableAtomicJson') 'Codex cleanup checkpoints use an atomic writer'
