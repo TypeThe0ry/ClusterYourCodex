@@ -317,7 +317,9 @@ function Read-SetupSilentJson {
         throw "JSON file is not a bounded regular file: $Path"
     }
     try {
-        $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+        $bytes = [System.IO.File]::ReadAllBytes($item.FullName)
+        $utf8Strict = New-Object System.Text.UTF8Encoding($false, $true)
+        $raw = $utf8Strict.GetString($bytes)
         $converter = Get-Command ConvertFrom-Json -CommandType Cmdlet -ErrorAction Stop
         if ($converter.Parameters.ContainsKey('DateKind')) {
             return ConvertFrom-Json -InputObject $raw -DateKind String

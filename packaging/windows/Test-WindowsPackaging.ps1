@@ -49,6 +49,14 @@ function Convert-CycPackagingJson {
     return ConvertFrom-Json -InputObject $Raw
 }
 
+function Read-CycPackagingUtf8Json {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $utf8Strict = New-Object System.Text.UTF8Encoding($false, $true)
+    return Convert-CycPackagingJson -Raw $utf8Strict.GetString($bytes)
+}
+
 function Write-FakeCodexPluginList {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -1692,19 +1700,19 @@ exit /b !ERRORLEVEL!
     $oldDiagnosticEnvironment = [string]$env:CYC_SETUP_DIAGNOSTIC_LOG
     try {
         $env:CYC_SETUP_DIAGNOSTIC_LOG = $diagnosticPath
-        $diagnosticFailure = try { throw 'cyc-structured-diagnostic-marker' } catch { $_ }
+        $diagnosticFailure = try { throw 'cyc-structured-diagnostic-marker-路径' } catch { $_ }
         Write-CycLifecycleDiagnostic -Status failed -Result $null -Failure $diagnosticFailure
-        $failedDiagnostic = Get-Content -LiteralPath $diagnosticPath -Raw | ConvertFrom-Json
+        $failedDiagnostic = Read-CycPackagingUtf8Json -Path $diagnosticPath
         Assert-True ([string]$failedDiagnostic.schemaVersion -ceq 'cyc.dev/setup-lifecycle-diagnostic/v1') 'lifecycle writes the versioned structured failure diagnostic'
         Assert-True ([string]$failedDiagnostic.status -ceq 'failed') 'lifecycle failure diagnostic records failed status'
         Assert-True ([string]$failedDiagnostic.lastStage -ceq 'entry') 'lifecycle failure diagnostic retains the last completed coordinator stage'
-        Assert-True ([string]$failedDiagnostic.error.message -ceq 'cyc-structured-diagnostic-marker') 'lifecycle failure diagnostic retains the root message'
+        Assert-True ([string]$failedDiagnostic.error.message -ceq 'cyc-structured-diagnostic-marker-路径') 'lifecycle failure diagnostic retains the UTF-8 root message independent of the system code page'
 
         Write-CycLifecycleDiagnostic `
             -Status succeeded `
             -Result ([PSCustomObject]@{ action = 'Install'; status = 'installed'; resumed = $false; firewallVerified = $true; coreSucceeded = $true }) `
             -Failure $null
-        $successDiagnostic = Get-Content -LiteralPath $diagnosticPath -Raw | ConvertFrom-Json
+        $successDiagnostic = Read-CycPackagingUtf8Json -Path $diagnosticPath
         Assert-True ([string]$successDiagnostic.status -ceq 'succeeded') 'lifecycle atomically replaces the diagnostic after success'
         Assert-True ([bool]$successDiagnostic.result.coreSucceeded) 'lifecycle success diagnostic retains core verification'
     } finally {
@@ -3813,6 +3821,7 @@ exit 0
     }
     Assert-True ($setupSilentSource -notmatch '(?<!@)\(Get-SetupSilent(?:TaskSnapshot|FirewallSnapshot|Listeners|ProductProcesses)\)\.Count') 'silent Setup smoke array-wraps zero-or-one item function output before Count'
     Assert-True ($setupSilentSource -match 'EnvironmentVariables[\s\S]+CYC_SETUP_DIAGNOSTIC_LOG') 'silent Setup smoke injects the structured lifecycle diagnostic path into Setup.exe'
+    Assert-True ($setupSilentSource -match 'Read-SetupSilentJson[\s\S]+ReadAllBytes[\s\S]+UTF8Encoding\(\$false,\s*\$true\)') 'silent Setup reads lifecycle diagnostics as strict UTF-8 independently of the Windows ANSI code page'
     Assert-True ($setupSilentSource -match 'primaryFailure\s*=\s*if\s*\(\$primaryFailure\)') 'silent Setup cleanup receipt preserves the primary failure independently of cleanup'
     Assert-True ($setupSilentSource.IndexOf('if ($primaryFailure) { throw $primaryFailure }', [StringComparison]::Ordinal) -lt $setupSilentSource.IndexOf('if ($cleanupFailures.Count -gt 0)', [StringComparison]::Ordinal)) 'silent Setup preserves the primary lifecycle exception ahead of secondary cleanup failures'
     Assert-True ($setupSilentSource -match 'CYC_DISPOSABLE_WINDOWS') 'silent Setup smoke requires an explicit disposable-environment sentinel'
