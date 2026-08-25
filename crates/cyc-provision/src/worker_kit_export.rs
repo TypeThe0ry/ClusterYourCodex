@@ -269,7 +269,7 @@ impl WorkerKitExporter {
 
         let result = (|| {
             write_verified_file(&marker_path, &marker_bytes, 0o600, MAX_MARKER_BYTES)?;
-            maybe_fault(fault, ExportFault::AfterMarker)?;
+            maybe_fault(fault, ExportFault::MarkerWritten)?;
 
             let kit_directory = paths.staging.join(KIT_DIRECTORY);
             let private_directory = paths.staging.join(PRIVATE_DIRECTORY);
@@ -301,13 +301,13 @@ impl WorkerKitExporter {
             sync_directory(&paths.staging)?;
             verify_private_tree_permissions(&paths.staging)?;
             validate_export_tree(&paths.staging, &marker, kit, &enrollment)?;
-            maybe_fault(fault, ExportFault::AfterFiles)?;
+            maybe_fault(fault, ExportFault::FilesWritten)?;
 
             self.verify_parent_identity()?;
             verify_identity(&paths.staging, ExpectedKind::Directory, &staging_identity)?;
             rename_noreplace(&paths.staging, &paths.final_root)?;
             sync_directory(&self.selected_parent)?;
-            maybe_fault(fault, ExportFault::AfterRename)?;
+            maybe_fault(fault, ExportFault::RenameCompleted)?;
 
             verify_identity(
                 &paths.final_root,
@@ -1334,9 +1334,9 @@ pub enum WorkerKitExportError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExportFault {
-    AfterMarker,
-    AfterFiles,
-    AfterRename,
+    MarkerWritten,
+    FilesWritten,
+    RenameCompleted,
 }
 
 #[cfg(test)]
