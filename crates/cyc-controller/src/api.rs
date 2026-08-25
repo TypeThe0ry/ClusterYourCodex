@@ -14,7 +14,8 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use cyc_protocol::onboarding::{
-    CreatePairingRequestV1, EnrollmentBundleV1, PairingStatusV1, ENROLLMENT_API_VERSION,
+    CreatePairingRequestV1, EnrollmentBundleV1, PairingFailureCodeV1, PairingPhaseV1,
+    PairingStatusErrorV1, PairingStatusV1, ENROLLMENT_API_VERSION,
 };
 use cyc_protocol::{
     CleanupReservationReleaseReasonV1, CleanupStatusPhaseV1, CleanupStatusV1,
@@ -90,6 +91,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/jobs/{id}/cleanup", get(get_job_cleanup))
         .route("/v1/pairings", post(create_pairing))
         .route("/v1/pairings/{id}", get(get_pairing_status))
+        .route("/v1/pairings/{id}/failure", put(report_pairing_failure))
         .route("/v1/pairings/{id}/revoke", post(revoke_pairing))
         .route(
             "/v1/snapshots/{sha256}",
@@ -701,6 +703,13 @@ async fn get_pairing_status(
 ) -> Result<Json<PairingStatusV1>, ApiError> {
     let store = state.store.clone();
     let stored = store_call(move || store.get_pairing_status(id)).await?;
+    let error = if matches!(stored.phase, PairingPhaseV1::Failed) {
+        Some(canonical_pairing_error(
+            stored.failure_code.ok_or_else(ApiError::internal)?,
+        ))
+    } else {
+        None
+    };
     let status = PairingStatusV1 {
         api_version: ENROLLMENT_API_VERSION.to_owned(),
         pairing_id: stored.pairing_id,
@@ -711,14 +720,51 @@ async fn get_pairing_status(
         expires_at: stored.expires_at,
         consumed_at: stored.consumed_at,
         revoked_at: stored.revoked_at,
-        ready: matches!(
-            stored.phase,
-            cyc_protocol::onboarding::PairingPhaseV1::Ready
-        ),
-        error: None,
+        ready: matches!(stored.phase, PairingPhaseV1::Ready),
+        error,
     };
     status.validate().map_err(|_| ApiError::internal())?;
     Ok(Json(status))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PairingFailureRequest {
+    code: PairingFailureCodeV1,
+}
+
+async fn report_pairing_failure(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Result<StatusCode, ApiError> {
+    let request: PairingFailureRequest = parse_json_body(&headers, &bytes)?;
+    let store = state.store.clone();
+    store_call(move || store.fail_pairing(id, request.code)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn canonical_pairing_error(code: PairingFailureCodeV1) -> PairingStatusErrorV1 {
+    let message = match code {
+        PairingFailureCodeV1::ProvisioningFailed => {
+            "Provisioning stopped before enrollment completed."
+        }
+        PairingFailureCodeV1::WorkerInstallFailed => {
+            "Worker installation failed before enrollment completed."
+        }
+        PairingFailureCodeV1::WorkerPairingFailed => {
+            "The worker could not complete controller pairing."
+        }
+        PairingFailureCodeV1::WorkerHealthCheckFailed => {
+            "The worker did not pass its health check."
+        }
+    };
+    PairingStatusErrorV1 {
+        code,
+        message: message.to_owned(),
+        retryable: false,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1120,6 +1166,17 @@ impl From<StoreError> for ApiError {
                 message: "the original pairing operation is no longer pending",
                 extra: Some(("details", json!({ "phase": phase }))),
             },
+            StoreError::PairingFailureMismatch => Self::new(
+                StatusCode::CONFLICT,
+                "pairing_failure_mismatch",
+                "pairing already has a different immutable failure code",
+            ),
+            StoreError::PairingFailureFinalized { phase } => Self {
+                status: StatusCode::CONFLICT,
+                code: "pairing_failure_finalized",
+                message: "pairing can no longer transition to failed",
+                extra: Some(("details", json!({ "phase": phase }))),
+            },
             StoreError::UploadConflict => Self::new(
                 StatusCode::CONFLICT,
                 "upload_conflict",
@@ -1178,6 +1235,7 @@ impl From<StoreError> for ApiError {
             | StoreError::NodeIdentityMismatch
             | StoreError::InvalidPlanBinding
             | StoreError::InvalidFleetRevision
+            | StoreError::InvalidPairingFailureState
             | StoreError::Identifier(_)
             | StoreError::Timestamp
             | StoreError::Poisoned
@@ -1692,6 +1750,181 @@ mod tests {
             "idempotency_operation_finalized"
         );
         assert_eq!(finalized["error"]["details"]["phase"], "revoked");
+    }
+
+    #[tokio::test]
+    async fn pairing_failure_endpoint_is_owner_authenticated_strict_and_non_secret() {
+        let store = Store::in_memory().unwrap();
+        let pairing = store.create_pairing().unwrap();
+        let pairing_id = pairing.id;
+        let pairing_code = pairing.code.clone();
+        let app = router(AppState::new(
+            store.clone(),
+            AuthToken::test_token(),
+            47_831,
+        ));
+        let path = format!("/v1/pairings/{pairing_id}/failure");
+        let valid_body = Body::from(r#"{"code":"worker_install_failed"}"#);
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(&path)
+                    .header(HOST, "127.0.0.1:47831")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(valid_body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let marker = "failure-diagnostic-secret-marker";
+        let rejected = app
+            .clone()
+            .oneshot(
+                request(Method::PUT, &path)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "code": "worker_install_failed",
+                            "diagnostic": marker,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        let rejected = body_json(rejected).await.to_string();
+        assert!(!rejected.contains(marker));
+        assert!(!rejected.contains("diagnostic"));
+
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(
+                    request(Method::PUT, &path)
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(r#"{"code":"worker_install_failed"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert!(response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty());
+        }
+
+        let conflict = app
+            .clone()
+            .oneshot(
+                request(Method::PUT, &path)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"code":"worker_pairing_failed"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body_json(conflict).await["error"]["code"],
+            "pairing_failure_mismatch"
+        );
+
+        let failed = app
+            .clone()
+            .oneshot(
+                request(Method::GET, &format!("/v1/pairings/{pairing_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(failed.status(), StatusCode::OK);
+        let failed = body_json(failed).await;
+        assert_eq!(failed["phase"], "failed");
+        assert_eq!(failed["ready"], false);
+        assert_eq!(failed["error"]["code"], "worker_install_failed");
+        assert_eq!(
+            failed["error"]["message"],
+            "Worker installation failed before enrollment completed."
+        );
+        assert_eq!(failed["error"]["retryable"], false);
+        let failed_text = failed.to_string();
+        assert!(!failed_text.contains(&pairing_code));
+        assert!(!failed_text.contains(marker));
+        assert!(failed.get("pairingCode").is_none());
+        assert!(failed.get("failedAt").is_none());
+
+        let revoked = app
+            .clone()
+            .oneshot(
+                request(Method::POST, &format!("/v1/pairings/{pairing_id}/revoke"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), StatusCode::OK);
+        let status = app
+            .oneshot(
+                request(Method::GET, &format!("/v1/pairings/{pairing_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = body_json(status).await;
+        assert_eq!(status["phase"], "revoked");
+        assert!(status.get("error").is_none());
+    }
+
+    #[tokio::test]
+    async fn pairing_failure_storage_corruption_maps_to_generic_internal_error() {
+        let response = ApiError::from(StoreError::InvalidPairingFailureState).into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_json(response).await;
+        assert_eq!(body["error"]["code"], "internal_error");
+        assert_eq!(body["error"]["message"], "controller operation failed");
+        assert!(!body.to_string().contains("failure state"));
+    }
+
+    #[test]
+    fn pairing_failure_messages_are_canonical_terminal_and_bounded() {
+        let cases = [
+            (
+                PairingFailureCodeV1::ProvisioningFailed,
+                "Provisioning stopped before enrollment completed.",
+            ),
+            (
+                PairingFailureCodeV1::WorkerInstallFailed,
+                "Worker installation failed before enrollment completed.",
+            ),
+            (
+                PairingFailureCodeV1::WorkerPairingFailed,
+                "The worker could not complete controller pairing.",
+            ),
+            (
+                PairingFailureCodeV1::WorkerHealthCheckFailed,
+                "The worker did not pass its health check.",
+            ),
+        ];
+        for (code, message) in cases {
+            let error = canonical_pairing_error(code);
+            assert_eq!(error.code, code);
+            assert_eq!(error.message, message);
+            assert!(!error.retryable);
+            error.validate().unwrap();
+        }
     }
 
     #[tokio::test]

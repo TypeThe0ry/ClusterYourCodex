@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use cyc_protocol::onboarding::PairingPhaseV1;
+use cyc_protocol::onboarding::{PairingFailureCodeV1, PairingPhaseV1};
 use cyc_protocol::worker::{
     ExecutionEvidence, NodeReportRequest, RunCompletion, StreamEvidence, TerminationReason,
     MAX_SAFE_JSON_INTEGER,
@@ -122,6 +122,12 @@ pub enum StoreError {
     PairingIdempotencyMismatch,
     #[error("pairing idempotency operation is no longer pending ({phase:?})")]
     PairingIdempotencyFinalized { phase: PairingPhaseV1 },
+    #[error("stored pairing failure state is invalid")]
+    InvalidPairingFailureState,
+    #[error("pairing failure conflicts with the immutable stored failure code")]
+    PairingFailureMismatch,
+    #[error("pairing can no longer transition to failed ({phase:?})")]
+    PairingFailureFinalized { phase: PairingPhaseV1 },
     #[error("paired node is not a managed worker")]
     InvalidManagedNode,
     #[error("worker does not own this run")]
@@ -231,6 +237,8 @@ pub struct StoredPairingStatus {
     pub consumed_at: Option<DateTime<Utc>>,
     pub acknowledged_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
+    pub failed_at: Option<DateTime<Utc>>,
+    pub failure_code: Option<PairingFailureCodeV1>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -611,7 +619,9 @@ impl Store {
                 acknowledged_at INTEGER,
                 revoked_at INTEGER,
                 node_id TEXT,
-                intended_node_id TEXT
+                intended_node_id TEXT,
+                failed_at INTEGER,
+                failure_code TEXT
             );
             CREATE INDEX IF NOT EXISTS pairings_expiry_idx
                 ON pairings(expires_at, used_at, revoked_at);
@@ -724,6 +734,7 @@ impl Store {
         )?;
 
         migrate_pairing_ack_schema(&mut connection)?;
+        migrate_pairing_failure_schema(&mut connection)?;
 
         connection.execute(
             "INSERT OR IGNORE INTO controller_identity(singleton, id) VALUES (1, ?1)",
@@ -1166,7 +1177,43 @@ impl Store {
                 r#"
                 SELECT
                     p.id, p.intended_node_id, p.created_at, p.expires_at,
-                    p.used_at, p.revoked_at, o.requested_node_id,
+                    p.used_at, p.acknowledged_at, p.node_id,
+                    p.revoked_at,
+                    p.failed_at, p.failure_code,
+                    EXISTS(SELECT 1 FROM nodes n WHERE n.id = p.node_id),
+                    (
+                        SELECT COUNT(*) FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                    ),
+                    (
+                        SELECT COUNT(*) FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                          AND wc.node_id = p.node_id
+                          AND wc.activated_at IS NULL
+                          AND wc.revoked_at IS NULL
+                    ),
+                    (
+                        SELECT COUNT(*) FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                          AND wc.node_id = p.node_id
+                          AND wc.activated_at IS NOT NULL
+                          AND wc.revoked_at IS NULL
+                    ),
+                    (
+                        SELECT COUNT(*) FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                          AND wc.node_id = p.node_id
+                          AND wc.activated_at IS NULL
+                          AND wc.revoked_at IS NOT NULL
+                    ),
+                    (
+                        SELECT COUNT(*) FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                          AND wc.node_id = p.node_id
+                          AND wc.activated_at IS NOT NULL
+                          AND wc.revoked_at IS NOT NULL
+                    ),
+                    o.requested_node_id,
                     o.worker_url, o.certificate_pem
                 FROM pairing_operations o
                 JOIN pairings p ON p.id = o.pairing_id
@@ -1182,34 +1229,66 @@ impl Store {
                         row.get::<_, Option<i64>>(4)?,
                         row.get::<_, Option<i64>>(5)?,
                         row.get::<_, Option<String>>(6)?,
-                        row.get::<_, String>(7)?,
-                        row.get::<_, String>(8)?,
+                        row.get::<_, Option<i64>>(7)?,
+                        row.get::<_, Option<i64>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, i64>(10)? != 0,
+                        row.get::<_, i64>(11)?,
+                        row.get::<_, i64>(12)?,
+                        row.get::<_, i64>(13)?,
+                        row.get::<_, i64>(14)?,
+                        row.get::<_, i64>(15)?,
+                        row.get::<_, Option<String>>(16)?,
+                        row.get::<_, String>(17)?,
+                        row.get::<_, String>(18)?,
                     ))
                 },
             )
             .optional()?;
 
         if let Some(existing) = existing {
-            let original_request = existing.6.as_deref().map(Uuid::parse_str).transpose()?;
+            let original_request = existing
+                .16
+                .as_deref()
+                .map(Uuid::parse_str)
+                .transpose()
+                .map_err(|_| StoreError::InvalidPairingFailureState)?;
             if original_request != requested_node_id {
                 return Err(StoreError::PairingIdempotencyMismatch);
             }
             let created_at = timestamp(existing.2)?;
             let expires_at = timestamp(existing.3)?;
-            let phase = if existing.5.is_some() {
-                Some(PairingPhaseV1::Revoked)
-            } else if existing.4.is_some() {
-                Some(PairingPhaseV1::Consumed)
-            } else if expires_at <= Utc::now() {
-                Some(PairingPhaseV1::Expired)
-            } else {
-                None
-            };
-            if let Some(phase) = phase {
+            let (failed_at, _) = pairing_failure_state(existing.8, existing.9.as_deref())?;
+            let intended_node_id =
+                Uuid::parse_str(&existing.1).map_err(|_| StoreError::InvalidPairingFailureState)?;
+            let node_id = existing
+                .6
+                .as_deref()
+                .map(Uuid::parse_str)
+                .transpose()
+                .map_err(|_| StoreError::InvalidPairingFailureState)?;
+            let phase = classify_pairing_phase(
+                intended_node_id,
+                node_id,
+                expires_at,
+                existing.4.is_some(),
+                existing.5.is_some(),
+                existing.7.is_some(),
+                failed_at.is_some(),
+                existing.10,
+                PairingCredentialState {
+                    total: existing.11,
+                    staged_unrevoked: existing.12,
+                    active_unrevoked: existing.13,
+                    staged_revoked: existing.14,
+                    active_revoked: existing.15,
+                },
+                Utc::now(),
+            )?;
+            if phase != PairingPhaseV1::Pending {
                 return Err(StoreError::PairingIdempotencyFinalized { phase });
             }
             let pairing_id = Uuid::parse_str(&existing.0)?;
-            let intended_node_id = Uuid::parse_str(&existing.1)?;
             let code = derive_pairing_code(
                 &seed,
                 operation_key,
@@ -1225,8 +1304,8 @@ impl Store {
                     created_at,
                     expires_at,
                 },
-                worker_url: existing.7,
-                certificate_pem: existing.8,
+                worker_url: existing.17,
+                certificate_pem: existing.18,
                 replayed: true,
             });
         }
@@ -1299,14 +1378,40 @@ impl Store {
                     p.used_at,
                     p.acknowledged_at,
                     p.revoked_at,
-                    EXISTS(
-                        SELECT 1 FROM worker_credentials wc
+                    p.failed_at,
+                    p.failure_code,
+                    EXISTS(SELECT 1 FROM nodes n WHERE n.id = p.node_id),
+                    (
+                        SELECT COUNT(*) FROM worker_credentials wc
                         WHERE wc.pairing_id = p.id
+                    ),
+                    (
+                        SELECT COUNT(*) FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                          AND wc.node_id = p.node_id
+                          AND wc.activated_at IS NULL
+                          AND wc.revoked_at IS NULL
+                    ),
+                    (
+                        SELECT COUNT(*) FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                          AND wc.node_id = p.node_id
                           AND wc.activated_at IS NOT NULL
                           AND wc.revoked_at IS NULL
                     ),
-                    EXISTS(
-                        SELECT 1 FROM nodes n WHERE n.id = p.node_id
+                    (
+                        SELECT COUNT(*) FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                          AND wc.node_id = p.node_id
+                          AND wc.activated_at IS NULL
+                          AND wc.revoked_at IS NOT NULL
+                    ),
+                    (
+                        SELECT COUNT(*) FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                          AND wc.node_id = p.node_id
+                          AND wc.activated_at IS NOT NULL
+                          AND wc.revoked_at IS NOT NULL
                     )
                 FROM pairings p WHERE p.id = ?1
                 "#,
@@ -1320,36 +1425,51 @@ impl Store {
                         row.get::<_, Option<i64>>(4)?,
                         row.get::<_, Option<i64>>(5)?,
                         row.get::<_, Option<i64>>(6)?,
-                        row.get::<_, i64>(7)? != 0,
-                        row.get::<_, i64>(8)? != 0,
+                        row.get::<_, Option<i64>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, i64>(9)? != 0,
+                        row.get::<_, i64>(10)?,
+                        row.get::<_, i64>(11)?,
+                        row.get::<_, i64>(12)?,
+                        row.get::<_, i64>(13)?,
+                        row.get::<_, i64>(14)?,
                     ))
                 },
             )
             .optional()?
             .ok_or(StoreError::NotFound)?;
-        let intended_node_id = Uuid::parse_str(&row.0)?;
-        let node_id = row.1.as_deref().map(Uuid::parse_str).transpose()?;
+        let intended_node_id =
+            Uuid::parse_str(&row.0).map_err(|_| StoreError::InvalidPairingFailureState)?;
+        let node_id = row
+            .1
+            .as_deref()
+            .map(Uuid::parse_str)
+            .transpose()
+            .map_err(|_| StoreError::InvalidPairingFailureState)?;
         let created_at = timestamp(row.2)?;
         let expires_at = timestamp(row.3)?;
         let consumed_at = row.4.map(timestamp).transpose()?;
         let acknowledged_at = row.5.map(timestamp).transpose()?;
         let revoked_at = row.6.map(timestamp).transpose()?;
-        let ready = acknowledged_at.is_some()
-            && consumed_at.is_some()
-            && node_id == Some(intended_node_id)
-            && row.7
-            && row.8;
-        let phase = if revoked_at.is_some() {
-            PairingPhaseV1::Revoked
-        } else if ready {
-            PairingPhaseV1::Ready
-        } else if consumed_at.is_some() {
-            PairingPhaseV1::Consumed
-        } else if expires_at <= Utc::now() {
-            PairingPhaseV1::Expired
-        } else {
-            PairingPhaseV1::Pending
-        };
+        let (failed_at, failure_code) = pairing_failure_state(row.7, row.8.as_deref())?;
+        let phase = classify_pairing_phase(
+            intended_node_id,
+            node_id,
+            expires_at,
+            consumed_at.is_some(),
+            acknowledged_at.is_some(),
+            revoked_at.is_some(),
+            failed_at.is_some(),
+            row.9,
+            PairingCredentialState {
+                total: row.10,
+                staged_unrevoked: row.11,
+                active_unrevoked: row.12,
+                staged_revoked: row.13,
+                active_revoked: row.14,
+            },
+            Utc::now(),
+        )?;
         Ok(StoredPairingStatus {
             pairing_id,
             intended_node_id,
@@ -1360,7 +1480,145 @@ impl Store {
             consumed_at,
             acknowledged_at,
             revoked_at,
+            failed_at,
+            failure_code,
         })
+    }
+
+    /// Persist a bounded, non-secret enrollment failure. Failure is a terminal
+    /// transition from a live pending pairing. A same-code replay is read-only
+    /// and succeeds so a lost controller response cannot change the evidence.
+    pub fn fail_pairing(
+        &self,
+        pairing_id: Uuid,
+        failure_code: PairingFailureCodeV1,
+    ) -> StoreResult<()> {
+        let now = Utc::now().timestamp();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = transaction
+            .query_row(
+                r#"
+                SELECT
+                    p.intended_node_id, p.node_id, p.expires_at, p.used_at,
+                    p.acknowledged_at, p.revoked_at, p.failed_at, p.failure_code,
+                    EXISTS(SELECT 1 FROM nodes n WHERE n.id = p.node_id),
+                    (SELECT COUNT(*) FROM worker_credentials wc WHERE wc.pairing_id = p.id),
+                    (
+                        SELECT COUNT(*) FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                          AND wc.node_id = p.node_id
+                          AND wc.activated_at IS NULL
+                          AND wc.revoked_at IS NULL
+                    ),
+                    (
+                        SELECT COUNT(*) FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                          AND wc.node_id = p.node_id
+                          AND wc.activated_at IS NOT NULL
+                          AND wc.revoked_at IS NULL
+                    ),
+                    (
+                        SELECT COUNT(*) FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                          AND wc.node_id = p.node_id
+                          AND wc.activated_at IS NULL
+                          AND wc.revoked_at IS NOT NULL
+                    ),
+                    (
+                        SELECT COUNT(*) FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                          AND wc.node_id = p.node_id
+                          AND wc.activated_at IS NOT NULL
+                          AND wc.revoked_at IS NOT NULL
+                    )
+                FROM pairings p WHERE p.id = ?1
+                "#,
+                [pairing_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, i64>(8)? != 0,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, i64>(10)?,
+                        row.get::<_, i64>(11)?,
+                        row.get::<_, i64>(12)?,
+                        row.get::<_, i64>(13)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound)?;
+
+        let intended_node_id =
+            Uuid::parse_str(&row.0).map_err(|_| StoreError::InvalidPairingFailureState)?;
+        let node_id = row
+            .1
+            .as_deref()
+            .map(Uuid::parse_str)
+            .transpose()
+            .map_err(|_| StoreError::InvalidPairingFailureState)?;
+        let expires_at = timestamp(row.2).map_err(|_| StoreError::InvalidPairingFailureState)?;
+        let (failed_at, stored_failure_code) = pairing_failure_state(row.6, row.7.as_deref())?;
+        let phase = classify_pairing_phase(
+            intended_node_id,
+            node_id,
+            expires_at,
+            row.3.is_some(),
+            row.4.is_some(),
+            row.5.is_some(),
+            failed_at.is_some(),
+            row.8,
+            PairingCredentialState {
+                total: row.9,
+                staged_unrevoked: row.10,
+                active_unrevoked: row.11,
+                staged_revoked: row.12,
+                active_revoked: row.13,
+            },
+            Utc::now(),
+        )?;
+        match phase {
+            PairingPhaseV1::Pending => {}
+            PairingPhaseV1::Failed => {
+                if stored_failure_code == Some(failure_code) {
+                    transaction.commit()?;
+                    return Ok(());
+                }
+                return Err(StoreError::PairingFailureMismatch);
+            }
+            phase => return Err(StoreError::PairingFailureFinalized { phase }),
+        }
+
+        let changed = transaction.execute(
+            r#"
+            UPDATE pairings SET failed_at = ?1, failure_code = ?2
+            WHERE id = ?3 AND used_at IS NULL AND acknowledged_at IS NULL
+              AND revoked_at IS NULL AND failed_at IS NULL AND failure_code IS NULL
+              AND node_id IS NULL AND expires_at > ?1
+              AND NOT EXISTS(
+                  SELECT 1 FROM worker_credentials wc
+                  WHERE wc.pairing_id = pairings.id
+              )
+            "#,
+            params![
+                now,
+                pairing_failure_code_name(failure_code),
+                pairing_id.to_string(),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidPairingFailureState);
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Validate a one-time pairing code without consuming it. The worker
@@ -1372,8 +1630,37 @@ impl Store {
             .connection()?
             .query_row(
                 r#"
-                SELECT 1 FROM pairings
-                WHERE code_hash = ?1 AND revoked_at IS NULL AND expires_at > ?2
+                SELECT 1 FROM pairings p
+                WHERE p.code_hash = ?1 AND p.revoked_at IS NULL AND p.expires_at > ?2
+                  AND p.failed_at IS NULL AND p.failure_code IS NULL
+                  AND (
+                    (
+                      p.used_at IS NULL
+                      AND p.acknowledged_at IS NULL
+                      AND p.node_id IS NULL
+                      AND NOT EXISTS(
+                        SELECT 1 FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                      )
+                    )
+                    OR (
+                      p.used_at IS NOT NULL
+                      AND p.acknowledged_at IS NULL
+                      AND p.node_id = p.intended_node_id
+                      AND EXISTS(SELECT 1 FROM nodes n WHERE n.id = p.node_id)
+                      AND EXISTS(
+                        SELECT 1 FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                          AND wc.node_id = p.node_id
+                          AND wc.activated_at IS NULL
+                          AND wc.revoked_at IS NULL
+                      )
+                      AND 1 = (
+                        SELECT COUNT(*) FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                      )
+                    )
+                  )
                 "#,
                 params![secret_hash(code), Utc::now().timestamp()],
                 |_| Ok(()),
@@ -1409,9 +1696,16 @@ impl Store {
         let pairing = transaction
             .query_row(
                 r#"
-                SELECT id, intended_node_id, node_id, used_at, acknowledged_at
-                FROM pairings
-                WHERE code_hash = ?1 AND revoked_at IS NULL AND expires_at > ?2
+                SELECT
+                    p.id, p.intended_node_id, p.node_id, p.used_at, p.acknowledged_at,
+                    (
+                        SELECT COUNT(*) FROM worker_credentials wc
+                        WHERE wc.pairing_id = p.id
+                    ),
+                    EXISTS(SELECT 1 FROM nodes n WHERE n.id = p.node_id)
+                FROM pairings p
+                WHERE p.code_hash = ?1 AND p.revoked_at IS NULL AND p.expires_at > ?2
+                  AND p.failed_at IS NULL AND p.failure_code IS NULL
                 "#,
                 params![code_hash, now],
                 |row| {
@@ -1421,6 +1715,8 @@ impl Store {
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, Option<i64>>(3)?,
                         row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)? != 0,
                     ))
                 },
             )
@@ -1442,15 +1738,19 @@ impl Store {
                 .map(Uuid::parse_str)
                 .transpose()?
                 .ok_or(StoreError::PairingBindingMismatch)?;
-            if stored_node_id != intended_node_id {
-                return Err(StoreError::PairingBindingMismatch);
+            if pairing.4.is_some()
+                || stored_node_id != intended_node_id
+                || pairing.5 != 1
+                || !pairing.6
+            {
+                return Err(StoreError::PairingUnavailable);
             }
             let exact = transaction
                 .query_row(
                     r#"
                     SELECT 1 FROM worker_credentials
                     WHERE pairing_id = ?1 AND node_id = ?2 AND credential_hash = ?3
-                      AND revoked_at IS NULL
+                      AND activated_at IS NULL AND revoked_at IS NULL
                     "#,
                     params![
                         pairing_id.to_string(),
@@ -1473,6 +1773,10 @@ impl Store {
             });
         }
 
+        if pairing.4.is_some() || pairing.2.is_some() || pairing.5 != 0 {
+            return Err(StoreError::PairingUnavailable);
+        }
+
         if transaction
             .query_row(
                 "SELECT 1 FROM worker_credentials WHERE credential_hash = ?1",
@@ -1485,6 +1789,28 @@ impl Store {
             return Err(StoreError::PairingBindingMismatch);
         }
 
+        let changed = transaction.execute(
+            r#"
+            UPDATE pairings SET used_at = ?1, node_id = ?2
+            WHERE id = ?3 AND intended_node_id = ?2 AND code_hash = ?4
+              AND used_at IS NULL AND acknowledged_at IS NULL AND node_id IS NULL
+              AND revoked_at IS NULL AND expires_at > ?1
+              AND failed_at IS NULL AND failure_code IS NULL
+              AND NOT EXISTS(
+                  SELECT 1 FROM worker_credentials wc
+                  WHERE wc.pairing_id = pairings.id
+              )
+            "#,
+            params![
+                now,
+                intended_node_id.to_string(),
+                pairing_id.to_string(),
+                code_hash,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::PairingUnavailable);
+        }
         let mut node = node.clone();
         node.id = intended_node_id;
         upsert_node_tx(&transaction, &node, NodeWriteAuthority::PairingProbe)?;
@@ -1503,16 +1829,6 @@ impl Store {
                 now,
             ],
         )?;
-        let changed = transaction.execute(
-            r#"
-            UPDATE pairings SET used_at = ?1, node_id = ?2
-            WHERE id = ?3 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?1
-            "#,
-            params![now, intended_node_id.to_string(), pairing_id.to_string()],
-        )?;
-        if changed != 1 {
-            return Err(StoreError::PairingUnavailable);
-        }
         transaction.commit()?;
         Ok(PairedWorker {
             pairing_id,
@@ -1530,8 +1846,22 @@ impl Store {
         self.connection()?
             .query_row(
                 r#"
-                SELECT 1 FROM worker_credentials
-                WHERE credential_hash = ?1 AND revoked_at IS NULL
+                SELECT 1 FROM worker_credentials wc
+                JOIN pairings p ON p.id = wc.pairing_id
+                JOIN nodes n ON n.id = wc.node_id
+                WHERE wc.credential_hash = ?1 AND wc.revoked_at IS NULL
+                  AND p.used_at IS NOT NULL AND p.revoked_at IS NULL
+                  AND p.failed_at IS NULL AND p.failure_code IS NULL
+                  AND wc.node_id = p.node_id AND p.node_id = p.intended_node_id
+                  AND (
+                    (p.acknowledged_at IS NULL AND wc.activated_at IS NULL)
+                    OR
+                    (p.acknowledged_at IS NOT NULL AND wc.activated_at IS NOT NULL)
+                  )
+                  AND NOT EXISTS(
+                    SELECT 1 FROM worker_credentials other
+                    WHERE other.pairing_id = p.id AND other.id != wc.id
+                  )
                 "#,
                 [secret_hash(credential)],
                 |_| Ok(()),
@@ -1560,50 +1890,85 @@ impl Store {
         let row = transaction
             .query_row(
                 r#"
-                SELECT p.used_at, p.acknowledged_at, wc.activated_at
+                SELECT p.acknowledged_at
                 FROM worker_credentials wc
                 JOIN pairings p ON p.id = wc.pairing_id
+                JOIN nodes n ON n.id = wc.node_id
                 WHERE wc.credential_hash = ?1 AND wc.pairing_id = ?2
-                  AND wc.node_id = ?3 AND p.node_id = ?3
+                  AND wc.node_id = ?3 AND p.node_id = ?3 AND p.intended_node_id = ?3
                   AND wc.revoked_at IS NULL AND p.revoked_at IS NULL
+                  AND p.used_at IS NOT NULL
+                  AND p.failed_at IS NULL AND p.failure_code IS NULL
+                  AND (
+                    (p.acknowledged_at IS NULL AND wc.activated_at IS NULL)
+                    OR
+                    (p.acknowledged_at IS NOT NULL AND wc.activated_at IS NOT NULL)
+                  )
+                  AND NOT EXISTS(
+                    SELECT 1 FROM worker_credentials other
+                    WHERE other.pairing_id = p.id AND other.id != wc.id
+                  )
                 "#,
                 params![
                     credential_sha256,
                     pairing_id.to_string(),
                     node_id.to_string(),
                 ],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<i64>>(0)?,
-                        row.get::<_, Option<i64>>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                    ))
-                },
+                |row| row.get::<_, Option<i64>>(0),
             )
             .optional()?
             .ok_or(StoreError::PairingAcknowledgementUnavailable)?;
-        if row.0.is_none() {
-            return Err(StoreError::PairingAcknowledgementUnavailable);
-        }
-
-        let acknowledged_at = if let Some(acknowledged_at) = row.1 {
-            if row.2.is_none() {
-                return Err(StoreError::PairingAcknowledgementUnavailable);
-            }
+        let acknowledged_at = if let Some(acknowledged_at) = row {
             acknowledged_at
         } else {
             transaction.execute(
                 r#"
                 UPDATE worker_credentials SET revoked_at = ?1
                 WHERE node_id = ?2 AND pairing_id != ?3 AND revoked_at IS NULL
+                  AND EXISTS(
+                    SELECT 1 FROM pairings p
+                    JOIN worker_credentials current ON current.pairing_id = p.id
+                    JOIN nodes n ON n.id = p.node_id
+                    WHERE p.id = ?3 AND current.credential_hash = ?4
+                      AND current.node_id = ?2 AND current.revoked_at IS NULL
+                      AND current.activated_at IS NULL
+                      AND p.used_at IS NOT NULL AND p.acknowledged_at IS NULL
+                      AND p.revoked_at IS NULL
+                      AND p.failed_at IS NULL AND p.failure_code IS NULL
+                      AND p.node_id = ?2 AND p.intended_node_id = ?2
+                      AND NOT EXISTS(
+                        SELECT 1 FROM worker_credentials other
+                        WHERE other.pairing_id = p.id AND other.id != current.id
+                      )
+                  )
                 "#,
-                params![now, node_id.to_string(), pairing_id.to_string()],
+                params![
+                    now,
+                    node_id.to_string(),
+                    pairing_id.to_string(),
+                    credential_sha256,
+                ],
             )?;
             let activated = transaction.execute(
                 r#"
                 UPDATE worker_credentials SET activated_at = ?1, last_used_at = ?1
                 WHERE pairing_id = ?2 AND node_id = ?3 AND credential_hash = ?4
                   AND activated_at IS NULL AND revoked_at IS NULL
+                  AND EXISTS(
+                    SELECT 1 FROM pairings p
+                    JOIN nodes n ON n.id = p.node_id
+                    WHERE p.id = worker_credentials.pairing_id
+                      AND p.id = ?2 AND p.used_at IS NOT NULL
+                      AND p.acknowledged_at IS NULL AND p.revoked_at IS NULL
+                      AND p.failed_at IS NULL AND p.failure_code IS NULL
+                      AND p.node_id = worker_credentials.node_id
+                      AND p.node_id = p.intended_node_id
+                  )
+                  AND NOT EXISTS(
+                    SELECT 1 FROM worker_credentials other
+                    WHERE other.pairing_id = worker_credentials.pairing_id
+                      AND other.id != worker_credentials.id
+                  )
                 "#,
                 params![
                     now,
@@ -1618,21 +1983,44 @@ impl Store {
             let acknowledged = transaction.execute(
                 r#"
                 UPDATE pairings SET acknowledged_at = ?1
-                WHERE id = ?2 AND node_id = ?3 AND acknowledged_at IS NULL
-                  AND revoked_at IS NULL
+                WHERE id = ?2 AND used_at IS NOT NULL
+                  AND node_id = ?3 AND intended_node_id = ?3
+                  AND acknowledged_at IS NULL
+                  AND revoked_at IS NULL AND failed_at IS NULL AND failure_code IS NULL
+                  AND EXISTS(SELECT 1 FROM nodes n WHERE n.id = pairings.node_id)
+                  AND EXISTS(
+                    SELECT 1 FROM worker_credentials wc
+                    WHERE wc.pairing_id = pairings.id
+                      AND wc.node_id = pairings.node_id
+                      AND wc.credential_hash = ?4
+                      AND wc.activated_at IS NOT NULL
+                      AND wc.revoked_at IS NULL
+                  )
+                  AND 1 = (
+                    SELECT COUNT(*) FROM worker_credentials wc
+                    WHERE wc.pairing_id = pairings.id
+                  )
                 "#,
-                params![now, pairing_id.to_string(), node_id.to_string()],
+                params![
+                    now,
+                    pairing_id.to_string(),
+                    node_id.to_string(),
+                    credential_sha256,
+                ],
             )?;
             if acknowledged != 1 {
                 return Err(StoreError::PairingAcknowledgementUnavailable);
             }
-            // Any competing unacknowledged enrollment for this stable node has
-            // lost the activation race and must not rotate the identity later.
+            // The newly activated credential is the sole current identity for
+            // this stable node. Mark every older enrollment terminal as well
+            // as revoking its credential, so status and authentication expose
+            // one coherent lifecycle rather than an unrevoked Ready pairing
+            // backed by a revoked credential.
             transaction.execute(
                 r#"
                 UPDATE pairings SET revoked_at = ?1
                 WHERE intended_node_id = ?2 AND id != ?3
-                  AND acknowledged_at IS NULL AND revoked_at IS NULL
+                  AND revoked_at IS NULL
                 "#,
                 params![now, node_id.to_string(), pairing_id.to_string()],
             )?;
@@ -1667,26 +2055,12 @@ impl Store {
     }
 
     pub fn authenticate_worker(&self, credential: &str) -> StoreResult<Uuid> {
-        let hash = secret_hash(credential);
         let now = Utc::now().timestamp();
-        let connection = self.connection()?;
-        let node_id = connection
-            .query_row(
-                r#"
-                SELECT node_id FROM worker_credentials
-                WHERE credential_hash = ?1 AND activated_at IS NOT NULL
-                  AND revoked_at IS NULL
-                "#,
-                [hash],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .ok_or(StoreError::WorkerUnauthorized)?;
-        connection.execute(
-            "UPDATE worker_credentials SET last_used_at = ?1 WHERE credential_hash = ?2",
-            params![now, secret_hash(credential)],
-        )?;
-        Ok(Uuid::parse_str(&node_id)?)
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let node_id = authenticate_worker_tx(&transaction, credential, now)?;
+        transaction.commit()?;
+        Ok(node_id)
     }
 
     /// Persist one authenticated, sequenced worker report. Node identity comes
@@ -3815,9 +4189,24 @@ fn authenticate_worker_tx(
     let node_id = transaction
         .query_row(
             r#"
-            SELECT node_id FROM worker_credentials
-            WHERE credential_hash = ?1 AND activated_at IS NOT NULL
-              AND revoked_at IS NULL
+            SELECT wc.node_id
+            FROM worker_credentials wc
+            JOIN pairings p ON p.id = wc.pairing_id
+            JOIN nodes n ON n.id = wc.node_id
+            WHERE wc.credential_hash = ?1
+              AND wc.activated_at IS NOT NULL
+              AND wc.revoked_at IS NULL
+              AND p.used_at IS NOT NULL
+              AND p.acknowledged_at IS NOT NULL
+              AND p.revoked_at IS NULL
+              AND p.failed_at IS NULL
+              AND p.failure_code IS NULL
+              AND p.node_id = wc.node_id
+              AND p.intended_node_id = wc.node_id
+              AND 1 = (
+                  SELECT COUNT(*) FROM worker_credentials other
+                  WHERE other.pairing_id = p.id
+              )
             "#,
             [hash.clone()],
             |row| row.get::<_, String>(0),
@@ -5149,9 +5538,12 @@ fn migrate_pairing_ack_schema(connection: &mut Connection) -> StoreResult<()> {
             r#"
             UPDATE pairings SET acknowledged_at = used_at
             WHERE acknowledged_at IS NULL AND used_at IS NOT NULL
+              AND node_id = intended_node_id
+              AND EXISTS(SELECT 1 FROM nodes n WHERE n.id = pairings.node_id)
               AND EXISTS(
                   SELECT 1 FROM worker_credentials wc
                   WHERE wc.pairing_id = pairings.id
+                    AND wc.node_id = pairings.node_id
                     AND wc.activated_at IS NOT NULL
                     AND wc.revoked_at IS NULL
               )
@@ -5159,6 +5551,42 @@ fn migrate_pairing_ack_schema(connection: &mut Connection) -> StoreResult<()> {
             [],
         )?;
     }
+
+    // Older credential rotation revoked the superseded Ready credential but
+    // left its pairing unrevoked. Repair only that exact historical shape:
+    // one node-bound active credential with revocation evidence and a complete
+    // consumed/acknowledged pairing. Ambiguous or partially bound rows remain
+    // untouched and are rejected by authoritative status classification.
+    transaction.execute(
+        r#"
+        UPDATE pairings
+        SET revoked_at = (
+            SELECT wc.revoked_at
+            FROM worker_credentials wc
+            WHERE wc.pairing_id = pairings.id
+              AND wc.node_id = pairings.node_id
+              AND wc.activated_at IS NOT NULL
+              AND wc.revoked_at IS NOT NULL
+        )
+        WHERE revoked_at IS NULL
+          AND used_at IS NOT NULL
+          AND acknowledged_at IS NOT NULL
+          AND node_id = intended_node_id
+          AND EXISTS(SELECT 1 FROM nodes n WHERE n.id = pairings.node_id)
+          AND 1 = (
+              SELECT COUNT(*) FROM worker_credentials wc
+              WHERE wc.pairing_id = pairings.id
+          )
+          AND 1 = (
+              SELECT COUNT(*) FROM worker_credentials wc
+              WHERE wc.pairing_id = pairings.id
+                AND wc.node_id = pairings.node_id
+                AND wc.activated_at IS NOT NULL
+                AND wc.revoked_at IS NOT NULL
+          )
+        "#,
+        [],
+    )?;
 
     transaction.execute_batch(
         r#"
@@ -5169,6 +5597,191 @@ fn migrate_pairing_ack_schema(connection: &mut Connection) -> StoreResult<()> {
     )?;
     transaction.commit()?;
     Ok(())
+}
+
+/// Add durable pairing-failure evidence as one atomic schema transition. A
+/// partially migrated schema or row is ambiguous and therefore rejected rather
+/// than repaired by guessing which half was authoritative.
+fn migrate_pairing_failure_schema(connection: &mut Connection) -> StoreResult<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let had_failed_at = table_has_column(&transaction, "pairings", "failed_at")?;
+    let had_failure_code = table_has_column(&transaction, "pairings", "failure_code")?;
+
+    match (had_failed_at, had_failure_code) {
+        (false, false) => transaction.execute_batch(
+            r#"
+            ALTER TABLE pairings ADD COLUMN failed_at INTEGER;
+            ALTER TABLE pairings ADD COLUMN failure_code TEXT;
+            "#,
+        )?,
+        (true, true) => {}
+        _ => return Err(StoreError::InvalidPairingFailureState),
+    }
+
+    {
+        let mut statement = transaction.prepare(
+            r#"
+            SELECT
+                failed_at, failure_code, used_at, acknowledged_at, node_id,
+                EXISTS(
+                    SELECT 1 FROM worker_credentials wc
+                    WHERE wc.pairing_id = pairings.id
+                )
+            FROM pairings
+            WHERE failed_at IS NOT NULL OR failure_code IS NOT NULL
+            "#,
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)? != 0,
+            ))
+        })?;
+        for row in rows {
+            let (
+                failed_at,
+                failure_code,
+                used_at,
+                acknowledged_at,
+                node_id,
+                has_worker_credentials,
+            ) = row?;
+            let (failed_at, _) = pairing_failure_state(failed_at, failure_code.as_deref())?;
+            if failed_at.is_some()
+                && (used_at.is_some()
+                    || acknowledged_at.is_some()
+                    || node_id.is_some()
+                    || has_worker_credentials)
+            {
+                return Err(StoreError::InvalidPairingFailureState);
+            }
+        }
+    }
+
+    transaction.commit()?;
+    Ok(())
+}
+
+fn pairing_failure_state(
+    failed_at: Option<i64>,
+    failure_code: Option<&str>,
+) -> StoreResult<(Option<DateTime<Utc>>, Option<PairingFailureCodeV1>)> {
+    match (failed_at, failure_code) {
+        (None, None) => Ok((None, None)),
+        (Some(failed_at), Some(failure_code)) => {
+            let failed_at =
+                timestamp(failed_at).map_err(|_| StoreError::InvalidPairingFailureState)?;
+            let failure_code = pairing_failure_code(failure_code)?;
+            Ok((Some(failed_at), Some(failure_code)))
+        }
+        _ => Err(StoreError::InvalidPairingFailureState),
+    }
+}
+
+fn pairing_failure_code(value: &str) -> StoreResult<PairingFailureCodeV1> {
+    match value {
+        "provisioning_failed" => Ok(PairingFailureCodeV1::ProvisioningFailed),
+        "worker_install_failed" => Ok(PairingFailureCodeV1::WorkerInstallFailed),
+        "worker_pairing_failed" => Ok(PairingFailureCodeV1::WorkerPairingFailed),
+        "worker_health_check_failed" => Ok(PairingFailureCodeV1::WorkerHealthCheckFailed),
+        _ => Err(StoreError::InvalidPairingFailureState),
+    }
+}
+
+fn pairing_failure_code_name(value: PairingFailureCodeV1) -> &'static str {
+    match value {
+        PairingFailureCodeV1::ProvisioningFailed => "provisioning_failed",
+        PairingFailureCodeV1::WorkerInstallFailed => "worker_install_failed",
+        PairingFailureCodeV1::WorkerPairingFailed => "worker_pairing_failed",
+        PairingFailureCodeV1::WorkerHealthCheckFailed => "worker_health_check_failed",
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PairingCredentialState {
+    total: i64,
+    staged_unrevoked: i64,
+    active_unrevoked: i64,
+    staged_revoked: i64,
+    active_revoked: i64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn classify_pairing_phase(
+    intended_node_id: Uuid,
+    node_id: Option<Uuid>,
+    expires_at: DateTime<Utc>,
+    consumed: bool,
+    acknowledged: bool,
+    revoked: bool,
+    failed: bool,
+    node_exists: bool,
+    credentials: PairingCredentialState,
+    now: DateTime<Utc>,
+) -> StoreResult<PairingPhaseV1> {
+    if credentials.total < 0
+        || credentials.staged_unrevoked < 0
+        || credentials.active_unrevoked < 0
+        || credentials.staged_revoked < 0
+        || credentials.active_revoked < 0
+        || credentials.staged_unrevoked
+            + credentials.active_unrevoked
+            + credentials.staged_revoked
+            + credentials.active_revoked
+            != credentials.total
+    {
+        return Err(StoreError::InvalidPairingFailureState);
+    }
+
+    let clean_pending =
+        !consumed && !acknowledged && node_id.is_none() && credentials.total == 0 && !failed;
+    let clean_failed =
+        failed && !consumed && !acknowledged && node_id.is_none() && credentials.total == 0;
+    let exact_node = node_id == Some(intended_node_id) && node_exists;
+    let exact_consumed = !failed
+        && consumed
+        && !acknowledged
+        && exact_node
+        && credentials.total == 1
+        && if revoked {
+            credentials.staged_revoked == 1
+        } else {
+            credentials.staged_unrevoked == 1
+        };
+    let exact_ready = !failed
+        && consumed
+        && acknowledged
+        && exact_node
+        && credentials.total == 1
+        && if revoked {
+            credentials.active_revoked == 1
+        } else {
+            credentials.active_unrevoked == 1
+        };
+
+    if !clean_pending && !clean_failed && !exact_consumed && !exact_ready {
+        return Err(StoreError::InvalidPairingFailureState);
+    }
+    if revoked {
+        return Ok(PairingPhaseV1::Revoked);
+    }
+    if exact_ready {
+        return Ok(PairingPhaseV1::Ready);
+    }
+    if exact_consumed {
+        return Ok(PairingPhaseV1::Consumed);
+    }
+    if clean_failed {
+        return Ok(PairingPhaseV1::Failed);
+    }
+    if expires_at <= now {
+        return Ok(PairingPhaseV1::Expired);
+    }
+    Ok(PairingPhaseV1::Pending)
 }
 
 fn table_has_column(transaction: &Transaction<'_>, table: &str, column: &str) -> StoreResult<bool> {
@@ -5612,6 +6225,12 @@ fn fresh_available_nodes(
         JOIN pairings p ON p.id = wc.pairing_id
         WHERE p.used_at IS NOT NULL AND p.acknowledged_at IS NOT NULL
           AND p.revoked_at IS NULL
+          AND p.failed_at IS NULL AND p.failure_code IS NULL
+          AND p.node_id = n.id AND p.intended_node_id = n.id
+          AND 1 = (
+              SELECT COUNT(*) FROM worker_credentials other
+              WHERE other.pairing_id = p.id
+          )
         ORDER BY t.received_at DESC
         "#,
     )?;
@@ -8678,6 +9297,177 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_unconsumed_pairing_never_reexports_secret_or_reports_pending() {
+        type PairingShape = (
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            i64,
+            String,
+        );
+
+        fn pairing_shape(store: &Store, pairing_id: Uuid) -> PairingShape {
+            store
+                .connection()
+                .unwrap()
+                .query_row(
+                    r#"
+                    SELECT
+                      p.used_at, p.acknowledged_at, p.node_id,
+                      p.failed_at, p.failure_code,
+                      (SELECT COUNT(*) FROM worker_credentials wc WHERE wc.pairing_id = p.id),
+                      p.code_hash
+                    FROM pairings p WHERE p.id = ?1
+                    "#,
+                    [pairing_id.to_string()],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<i64>>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, String>(6)?,
+                        ))
+                    },
+                )
+                .unwrap()
+        }
+
+        fn assert_corruption_is_terminal(
+            store: &Store,
+            operation: &str,
+            intended_node_id: Uuid,
+            pairing_id: Uuid,
+            pairing_code: &str,
+            before: PairingShape,
+        ) {
+            let status_error = store
+                .get_pairing_status(pairing_id)
+                .expect_err("corrupt unconsumed state must not be reported as pending");
+            assert!(matches!(
+                &status_error,
+                StoreError::InvalidPairingFailureState
+            ));
+            assert!(!status_error.to_string().contains(pairing_code));
+
+            let replay_error = match store.create_pairing_idempotent(
+                operation,
+                Some(intended_node_id),
+                "https://changed-listener.invalid:47832",
+                "changed certificate",
+            ) {
+                Ok(_) => panic!("corrupt unconsumed state re-exported a derived code"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                &replay_error,
+                StoreError::InvalidPairingFailureState
+            ));
+            assert!(!replay_error.to_string().contains(pairing_code));
+            let after = pairing_shape(store, pairing_id);
+            assert_eq!(after, before);
+            assert_eq!(after.6, secret_hash(pairing_code));
+            assert_ne!(after.6, pairing_code);
+        }
+
+        let store = Store::in_memory().unwrap();
+        let worker_url = "https://192.0.2.91:47832";
+        let certificate = "-----BEGIN CERTIFICATE-----\ncorrupt\n-----END CERTIFICATE-----\n";
+
+        let node_operation = "desktop-add-computer:corrupt-unconsumed-node";
+        let node_intended = Uuid::new_v4();
+        let node_issued = store
+            .create_pairing_idempotent(node_operation, Some(node_intended), worker_url, certificate)
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE pairings SET node_id = ?1 WHERE id = ?2",
+                params![
+                    Uuid::new_v4().to_string(),
+                    node_issued.pairing.id.to_string()
+                ],
+            )
+            .unwrap();
+        let node_before = pairing_shape(&store, node_issued.pairing.id);
+        assert_corruption_is_terminal(
+            &store,
+            node_operation,
+            node_intended,
+            node_issued.pairing.id,
+            &node_issued.pairing.code,
+            node_before,
+        );
+
+        let ack_operation = "desktop-add-computer:corrupt-unconsumed-ack";
+        let ack_intended = Uuid::new_v4();
+        let ack_issued = store
+            .create_pairing_idempotent(ack_operation, Some(ack_intended), worker_url, certificate)
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE pairings SET acknowledged_at = ?1 WHERE id = ?2",
+                params![Utc::now().timestamp(), ack_issued.pairing.id.to_string()],
+            )
+            .unwrap();
+        let ack_before = pairing_shape(&store, ack_issued.pairing.id);
+        assert_corruption_is_terminal(
+            &store,
+            ack_operation,
+            ack_intended,
+            ack_issued.pairing.id,
+            &ack_issued.pairing.code,
+            ack_before,
+        );
+
+        let credential_operation = "desktop-add-computer:corrupt-unconsumed-credential";
+        let credential_intended = Uuid::new_v4();
+        let credential_issued = store
+            .create_pairing_idempotent(
+                credential_operation,
+                Some(credential_intended),
+                worker_url,
+                certificate,
+            )
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                r#"
+                INSERT INTO worker_credentials(
+                    id, pairing_id, node_id, credential_hash, created_at,
+                    activated_at, last_used_at, revoked_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL)
+                "#,
+                params![
+                    Uuid::new_v4().to_string(),
+                    credential_issued.pairing.id.to_string(),
+                    credential_intended.to_string(),
+                    secret_hash("corrupt-unconsumed-staged-credential"),
+                    Utc::now().timestamp(),
+                ],
+            )
+            .unwrap();
+        let credential_before = pairing_shape(&store, credential_issued.pairing.id);
+        assert_corruption_is_terminal(
+            &store,
+            credential_operation,
+            credential_intended,
+            credential_issued.pairing.id,
+            &credential_issued.pairing.code,
+            credential_before,
+        );
+    }
+
+    #[test]
     fn worker_probe_updates_inventory_and_telemetry_but_not_config() {
         let store = Store::in_memory().unwrap();
         let mut configured = node();
@@ -8912,6 +9702,19 @@ mod tests {
         let status = store.get_pairing_status(pairing_id).unwrap();
         assert_eq!(status.phase, PairingPhaseV1::Ready);
         assert_eq!(status.acknowledged_at, status.consumed_at);
+        assert!(status.failed_at.is_none());
+        assert!(status.failure_code.is_none());
+        let failure_columns = {
+            let connection = store.connection().unwrap();
+            let mut statement = connection.prepare("PRAGMA table_info(pairings)").unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(failure_columns.iter().any(|name| name == "failed_at"));
+        assert!(failure_columns.iter().any(|name| name == "failure_code"));
         let timestamps = store
             .connection()
             .unwrap()
@@ -8935,6 +9738,69 @@ mod tests {
             .unwrap();
         assert_eq!(timestamps.0, timestamps.1);
         assert_eq!(timestamps.2, timestamps.3);
+    }
+
+    #[test]
+    fn migration_marks_exact_legacy_rotated_ready_pairing_revoked() {
+        let directory = test_directory("legacy-rotated-ready-pairing");
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("controller.db");
+        let worker = node();
+        let operation = "desktop-add-computer:legacy-rotated-ready";
+        let worker_url = "https://192.0.2.85:47832";
+        let certificate =
+            "-----BEGIN CERTIFICATE-----\nlegacy-rotation\n-----END CERTIFICATE-----\n";
+        let store = Store::open(&database).unwrap();
+        let issued = store
+            .create_pairing_idempotent(operation, Some(worker.id), worker_url, certificate)
+            .unwrap();
+        let credential = random_secret();
+        let digest = secret_hash(&credential);
+        store
+            .consume_pairing(
+                &issued.pairing.code,
+                issued.pairing.id,
+                issued.pairing.intended_node_id,
+                &digest,
+                &worker,
+            )
+            .unwrap();
+        store
+            .acknowledge_pairing(&credential, issued.pairing.id, worker.id, &digest)
+            .unwrap();
+
+        let legacy_revoked_at = Utc::now().timestamp();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE worker_credentials SET revoked_at = ?1 WHERE pairing_id = ?2",
+                params![legacy_revoked_at, issued.pairing.id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.get_pairing_status(issued.pairing.id),
+            Err(StoreError::InvalidPairingFailureState)
+        ));
+        drop(store);
+
+        let reopened = Store::open(&database).unwrap();
+        let status = reopened.get_pairing_status(issued.pairing.id).unwrap();
+        assert_eq!(status.phase, PairingPhaseV1::Revoked);
+        assert_eq!(status.revoked_at.unwrap().timestamp(), legacy_revoked_at);
+        assert!(matches!(
+            reopened
+                .create_pairing_idempotent(operation, Some(worker.id), worker_url, certificate,),
+            Err(StoreError::PairingIdempotencyFinalized {
+                phase: PairingPhaseV1::Revoked
+            })
+        ));
+        assert!(matches!(
+            reopened.authenticate_worker(&credential),
+            Err(StoreError::WorkerUnauthorized)
+        ));
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -9152,7 +10018,7 @@ mod tests {
         );
         assert_eq!(
             store.get_pairing_status(first_pairing.id).unwrap().phase,
-            PairingPhaseV1::Consumed
+            PairingPhaseV1::Revoked
         );
         assert_eq!(
             store.get_pairing_status(second_pairing.id).unwrap().phase,
@@ -9351,6 +10217,1001 @@ mod tests {
     }
 
     #[test]
+    fn ready_classification_rejects_missing_node_and_misbound_credential() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let operation = "desktop-add-computer:ready-invariant";
+        let worker_url = "https://192.0.2.81:47832";
+        let certificate = "-----BEGIN CERTIFICATE-----\nready\n-----END CERTIFICATE-----\n";
+        let issued = store
+            .create_pairing_idempotent(operation, Some(worker.id), worker_url, certificate)
+            .unwrap();
+        let credential = random_secret();
+        let digest = secret_hash(&credential);
+        store
+            .consume_pairing(
+                &issued.pairing.code,
+                issued.pairing.id,
+                issued.pairing.intended_node_id,
+                &digest,
+                &worker,
+            )
+            .unwrap();
+        store
+            .acknowledge_pairing(&credential, issued.pairing.id, worker.id, &digest)
+            .unwrap();
+        assert_eq!(
+            store.get_pairing_status(issued.pairing.id).unwrap().phase,
+            PairingPhaseV1::Ready
+        );
+        assert!(matches!(
+            store.create_pairing_idempotent(operation, Some(worker.id), worker_url, certificate,),
+            Err(StoreError::PairingIdempotencyFinalized {
+                phase: PairingPhaseV1::Ready
+            })
+        ));
+
+        let mut other = node();
+        other.id = Uuid::new_v4();
+        store.upsert_node(&other).unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                r#"
+                UPDATE worker_credentials SET node_id = ?1, last_used_at = 123
+                WHERE pairing_id = ?2
+                "#,
+                params![other.id.to_string(), issued.pairing.id.to_string()],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.get_pairing_status(issued.pairing.id),
+            Err(StoreError::InvalidPairingFailureState)
+        ));
+        assert!(matches!(
+            store.create_pairing_idempotent(operation, Some(worker.id), worker_url, certificate,),
+            Err(StoreError::InvalidPairingFailureState)
+        ));
+        assert!(matches!(
+            store.authenticate_worker(&credential),
+            Err(StoreError::WorkerUnauthorized)
+        ));
+        let last_used_after_misbind = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT last_used_at FROM worker_credentials WHERE pairing_id = ?1",
+                [issued.pairing.id.to_string()],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .unwrap();
+        assert_eq!(last_used_after_misbind, Some(123));
+
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE worker_credentials SET node_id = ?1 WHERE pairing_id = ?2",
+                params![worker.id.to_string(), issued.pairing.id.to_string()],
+            )
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute("DELETE FROM nodes WHERE id = ?1", [worker.id.to_string()])
+            .unwrap();
+
+        assert!(matches!(
+            store.get_pairing_status(issued.pairing.id),
+            Err(StoreError::InvalidPairingFailureState)
+        ));
+        assert!(matches!(
+            store.create_pairing_idempotent(operation, Some(worker.id), worker_url, certificate,),
+            Err(StoreError::InvalidPairingFailureState)
+        ));
+        assert!(matches!(
+            store.authenticate_worker(&credential),
+            Err(StoreError::WorkerUnauthorized)
+        ));
+        let last_used_after_node_delete = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT last_used_at FROM worker_credentials WHERE pairing_id = ?1",
+                [issued.pairing.id.to_string()],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .unwrap();
+        assert_eq!(last_used_after_node_delete, Some(123));
+    }
+
+    #[test]
+    fn authoritative_pairing_classification_rejects_corrupt_consumed_and_ready_shapes() {
+        type AuthoritativeShape = (
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            String,
+            Vec<(String, String, Option<i64>, Option<i64>, Option<i64>)>,
+        );
+
+        #[derive(Clone, Copy)]
+        enum Corruption {
+            MissingNode,
+            MissingCredential,
+            MisboundCredential,
+            ExtraCredential,
+            WrongActivation,
+            CredentialRevoked,
+        }
+
+        impl Corruption {
+            fn label(self) -> &'static str {
+                match self {
+                    Self::MissingNode => "missing-node",
+                    Self::MissingCredential => "missing-credential",
+                    Self::MisboundCredential => "misbound-credential",
+                    Self::ExtraCredential => "extra-credential",
+                    Self::WrongActivation => "wrong-activation",
+                    Self::CredentialRevoked => "credential-revoked",
+                }
+            }
+        }
+
+        fn shape(store: &Store, pairing_id: Uuid) -> AuthoritativeShape {
+            let connection = store.connection().unwrap();
+            let pairing = connection
+                .query_row(
+                    r#"
+                    SELECT used_at, acknowledged_at, revoked_at, failed_at,
+                           failure_code, node_id, code_hash
+                    FROM pairings WHERE id = ?1
+                    "#,
+                    [pairing_id.to_string()],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<i64>>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                            row.get::<_, String>(6)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            let credentials = {
+                let mut statement = connection
+                    .prepare(
+                        r#"
+                        SELECT id, node_id, activated_at, last_used_at, revoked_at
+                        FROM worker_credentials
+                        WHERE pairing_id = ?1
+                        ORDER BY id
+                        "#,
+                    )
+                    .unwrap();
+                statement
+                    .query_map([pairing_id.to_string()], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, Option<i64>>(4)?,
+                        ))
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            };
+            (
+                pairing.0,
+                pairing.1,
+                pairing.2,
+                pairing.3,
+                pairing.4,
+                pairing.5,
+                pairing.6,
+                credentials,
+            )
+        }
+
+        fn assert_case(ready: bool, corruption: Corruption) {
+            let store = Store::in_memory().unwrap();
+            let worker = node();
+            let phase = if ready { "ready" } else { "consumed" };
+            let operation = format!(
+                "desktop-add-computer:authoritative-{phase}-{}",
+                corruption.label()
+            );
+            let worker_url = "https://192.0.2.83:47832";
+            let certificate =
+                "-----BEGIN CERTIFICATE-----\nauthoritative\n-----END CERTIFICATE-----\n";
+            let issued = store
+                .create_pairing_idempotent(&operation, Some(worker.id), worker_url, certificate)
+                .unwrap();
+            let credential = random_secret();
+            let digest = secret_hash(&credential);
+            store
+                .consume_pairing(
+                    &issued.pairing.code,
+                    issued.pairing.id,
+                    issued.pairing.intended_node_id,
+                    &digest,
+                    &worker,
+                )
+                .unwrap();
+            if ready {
+                store
+                    .acknowledge_pairing(&credential, issued.pairing.id, worker.id, &digest)
+                    .unwrap();
+            }
+
+            match corruption {
+                Corruption::MissingNode => {
+                    store
+                        .connection()
+                        .unwrap()
+                        .execute("DELETE FROM nodes WHERE id = ?1", [worker.id.to_string()])
+                        .unwrap();
+                }
+                Corruption::MissingCredential => {
+                    store
+                        .connection()
+                        .unwrap()
+                        .execute(
+                            "DELETE FROM worker_credentials WHERE pairing_id = ?1",
+                            [issued.pairing.id.to_string()],
+                        )
+                        .unwrap();
+                }
+                Corruption::MisboundCredential => {
+                    let mut other = node();
+                    other.id = Uuid::new_v4();
+                    store.upsert_node(&other).unwrap();
+                    store
+                        .connection()
+                        .unwrap()
+                        .execute(
+                            "UPDATE worker_credentials SET node_id = ?1 WHERE pairing_id = ?2",
+                            params![other.id.to_string(), issued.pairing.id.to_string()],
+                        )
+                        .unwrap();
+                }
+                Corruption::ExtraCredential => {
+                    store
+                        .connection()
+                        .unwrap()
+                        .execute(
+                            r#"
+                            INSERT INTO worker_credentials(
+                                id, pairing_id, node_id, credential_hash, created_at,
+                                activated_at, last_used_at, revoked_at
+                            ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL)
+                            "#,
+                            params![
+                                Uuid::new_v4().to_string(),
+                                issued.pairing.id.to_string(),
+                                worker.id.to_string(),
+                                secret_hash(&format!("extra-{}-{phase}", corruption.label())),
+                                Utc::now().timestamp(),
+                            ],
+                        )
+                        .unwrap();
+                }
+                Corruption::WrongActivation => {
+                    let activated_at = if ready {
+                        None
+                    } else {
+                        Some(Utc::now().timestamp())
+                    };
+                    store
+                        .connection()
+                        .unwrap()
+                        .execute(
+                            "UPDATE worker_credentials SET activated_at = ?1 WHERE pairing_id = ?2",
+                            params![activated_at, issued.pairing.id.to_string()],
+                        )
+                        .unwrap();
+                }
+                Corruption::CredentialRevoked => {
+                    store
+                        .connection()
+                        .unwrap()
+                        .execute(
+                            "UPDATE worker_credentials SET revoked_at = ?1 WHERE pairing_id = ?2",
+                            params![Utc::now().timestamp(), issued.pairing.id.to_string()],
+                        )
+                        .unwrap();
+                }
+            }
+
+            let before = shape(&store, issued.pairing.id);
+            assert_eq!(before.6, secret_hash(&issued.pairing.code));
+            assert_ne!(before.6, issued.pairing.code);
+
+            let status_error = store
+                .get_pairing_status(issued.pairing.id)
+                .expect_err("corrupt lifecycle must not have an authoritative status");
+            assert!(matches!(
+                &status_error,
+                StoreError::InvalidPairingFailureState
+            ));
+            assert!(!status_error.to_string().contains(&issued.pairing.code));
+
+            let replay_error = match store.create_pairing_idempotent(
+                &operation,
+                Some(worker.id),
+                worker_url,
+                certificate,
+            ) {
+                Ok(_) => panic!("corrupt lifecycle re-exported a derived pairing code"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                &replay_error,
+                StoreError::InvalidPairingFailureState
+            ));
+            assert!(!replay_error.to_string().contains(&issued.pairing.code));
+
+            let failure_error = store
+                .fail_pairing(issued.pairing.id, PairingFailureCodeV1::WorkerPairingFailed)
+                .expect_err("corrupt lifecycle must not be classified as a valid terminal phase");
+            assert!(matches!(
+                &failure_error,
+                StoreError::InvalidPairingFailureState
+            ));
+            assert!(!failure_error.to_string().contains(&issued.pairing.code));
+            assert_eq!(shape(&store, issued.pairing.id), before);
+        }
+
+        for ready in [false, true] {
+            for corruption in [
+                Corruption::MissingNode,
+                Corruption::MissingCredential,
+                Corruption::MisboundCredential,
+                Corruption::ExtraCredential,
+                Corruption::WrongActivation,
+                Corruption::CredentialRevoked,
+            ] {
+                assert_case(ready, corruption);
+            }
+        }
+    }
+
+    #[test]
+    fn revoked_overlay_accepts_exact_pending_consumed_ready_and_failed_shapes() {
+        fn assert_revoked_replay(
+            store: &Store,
+            operation: &str,
+            requested_node_id: Uuid,
+            pairing_id: Uuid,
+        ) {
+            assert_eq!(
+                store.get_pairing_status(pairing_id).unwrap().phase,
+                PairingPhaseV1::Revoked
+            );
+            assert!(matches!(
+                store.create_pairing_idempotent(
+                    operation,
+                    Some(requested_node_id),
+                    "https://changed.invalid:47832",
+                    "changed certificate",
+                ),
+                Err(StoreError::PairingIdempotencyFinalized {
+                    phase: PairingPhaseV1::Revoked
+                })
+            ));
+        }
+
+        let store = Store::in_memory().unwrap();
+        let worker_url = "https://192.0.2.84:47832";
+        let certificate = "-----BEGIN CERTIFICATE-----\nrevocation\n-----END CERTIFICATE-----\n";
+
+        let pending_node_id = Uuid::new_v4();
+        let pending_operation = "desktop-add-computer:revoked-pending";
+        let pending = store
+            .create_pairing_idempotent(
+                pending_operation,
+                Some(pending_node_id),
+                worker_url,
+                certificate,
+            )
+            .unwrap();
+        store.revoke_pairing(pending.pairing.id).unwrap();
+        assert_revoked_replay(
+            &store,
+            pending_operation,
+            pending_node_id,
+            pending.pairing.id,
+        );
+
+        let consumed_worker = node();
+        let consumed_operation = "desktop-add-computer:revoked-consumed";
+        let consumed = store
+            .create_pairing_idempotent(
+                consumed_operation,
+                Some(consumed_worker.id),
+                worker_url,
+                certificate,
+            )
+            .unwrap();
+        let consumed_credential = random_secret();
+        let consumed_digest = secret_hash(&consumed_credential);
+        store
+            .consume_pairing(
+                &consumed.pairing.code,
+                consumed.pairing.id,
+                consumed.pairing.intended_node_id,
+                &consumed_digest,
+                &consumed_worker,
+            )
+            .unwrap();
+        store.revoke_pairing(consumed.pairing.id).unwrap();
+        assert_revoked_replay(
+            &store,
+            consumed_operation,
+            consumed_worker.id,
+            consumed.pairing.id,
+        );
+
+        let mut ready_worker = node();
+        ready_worker.id = Uuid::new_v4();
+        let ready_operation = "desktop-add-computer:revoked-ready";
+        let ready = store
+            .create_pairing_idempotent(
+                ready_operation,
+                Some(ready_worker.id),
+                worker_url,
+                certificate,
+            )
+            .unwrap();
+        let ready_credential = random_secret();
+        let ready_digest = secret_hash(&ready_credential);
+        store
+            .consume_pairing(
+                &ready.pairing.code,
+                ready.pairing.id,
+                ready.pairing.intended_node_id,
+                &ready_digest,
+                &ready_worker,
+            )
+            .unwrap();
+        store
+            .acknowledge_pairing(
+                &ready_credential,
+                ready.pairing.id,
+                ready_worker.id,
+                &ready_digest,
+            )
+            .unwrap();
+        store.revoke_pairing(ready.pairing.id).unwrap();
+        assert_revoked_replay(&store, ready_operation, ready_worker.id, ready.pairing.id);
+
+        let failed_node_id = Uuid::new_v4();
+        let failed_operation = "desktop-add-computer:revoked-failed";
+        let failed = store
+            .create_pairing_idempotent(
+                failed_operation,
+                Some(failed_node_id),
+                worker_url,
+                certificate,
+            )
+            .unwrap();
+        store
+            .fail_pairing(failed.pairing.id, PairingFailureCodeV1::WorkerInstallFailed)
+            .unwrap();
+        store.revoke_pairing(failed.pairing.id).unwrap();
+        assert_revoked_replay(&store, failed_operation, failed_node_id, failed.pairing.id);
+    }
+
+    #[test]
+    fn ack_requires_consumed_exact_binding_and_existing_node_without_mutation() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let old = pair_worker(&store, &worker);
+        let pairing = store.create_pairing_for(Some(worker.id)).unwrap();
+        let credential = random_secret();
+        let digest = secret_hash(&credential);
+        let consumed = store
+            .consume_pairing(
+                &pairing.code,
+                pairing.id,
+                pairing.intended_node_id,
+                &digest,
+                &worker,
+            )
+            .unwrap();
+        assert!(store.preauthorize_pairing_ack(&credential).is_ok());
+
+        let assert_unmutated = || {
+            let state = store
+                .connection()
+                .unwrap()
+                .query_row(
+                    r#"
+                    SELECT
+                      (SELECT revoked_at FROM worker_credentials WHERE pairing_id = ?1),
+                      (SELECT activated_at FROM worker_credentials
+                       WHERE pairing_id = ?2 AND credential_hash = ?3),
+                      (SELECT revoked_at FROM worker_credentials
+                       WHERE pairing_id = ?2 AND credential_hash = ?3),
+                      (SELECT acknowledged_at FROM pairings WHERE id = ?2)
+                    "#,
+                    params![old.pairing_id.to_string(), pairing.id.to_string(), digest],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<i64>>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            assert_eq!(state, (None, None, None, None));
+        };
+
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE pairings SET intended_node_id = ?1 WHERE id = ?2",
+                params![Uuid::new_v4().to_string(), pairing.id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.preauthorize_pairing_ack(&credential),
+            Err(StoreError::PairingAcknowledgementUnavailable)
+        ));
+        assert!(matches!(
+            store.acknowledge_pairing(&credential, pairing.id, worker.id, &digest),
+            Err(StoreError::PairingAcknowledgementUnavailable)
+        ));
+        assert_unmutated();
+
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE pairings SET intended_node_id = ?1 WHERE id = ?2",
+                params![worker.id.to_string(), pairing.id.to_string()],
+            )
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute("DELETE FROM nodes WHERE id = ?1", [worker.id.to_string()])
+            .unwrap();
+        assert!(matches!(
+            store.preauthorize_pairing_ack(&credential),
+            Err(StoreError::PairingAcknowledgementUnavailable)
+        ));
+        assert!(matches!(
+            store.acknowledge_pairing(&credential, pairing.id, worker.id, &digest),
+            Err(StoreError::PairingAcknowledgementUnavailable)
+        ));
+        assert_unmutated();
+
+        store.upsert_node(&worker).unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE pairings SET used_at = NULL WHERE id = ?1",
+                [pairing.id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.preauthorize_pairing_ack(&credential),
+            Err(StoreError::PairingAcknowledgementUnavailable)
+        ));
+        assert!(matches!(
+            store.acknowledge_pairing(&credential, pairing.id, worker.id, &digest),
+            Err(StoreError::PairingAcknowledgementUnavailable)
+        ));
+        assert_unmutated();
+
+        let mut other = node();
+        other.id = Uuid::new_v4();
+        store.upsert_node(&other).unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE pairings SET used_at = ?1 WHERE id = ?2",
+                params![consumed.consumed_at.timestamp(), pairing.id.to_string()],
+            )
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE worker_credentials SET node_id = ?1 WHERE pairing_id = ?2",
+                params![other.id.to_string(), pairing.id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.preauthorize_pairing_ack(&credential),
+            Err(StoreError::PairingAcknowledgementUnavailable)
+        ));
+        assert!(matches!(
+            store.acknowledge_pairing(&credential, pairing.id, worker.id, &digest),
+            Err(StoreError::PairingAcknowledgementUnavailable)
+        ));
+        assert_unmutated();
+
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE worker_credentials SET node_id = ?1 WHERE pairing_id = ?2",
+                params![worker.id.to_string(), pairing.id.to_string()],
+            )
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                r#"
+                INSERT INTO worker_credentials(
+                    id, pairing_id, node_id, credential_hash, created_at,
+                    activated_at, last_used_at, revoked_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL)
+                "#,
+                params![
+                    Uuid::new_v4().to_string(),
+                    pairing.id.to_string(),
+                    worker.id.to_string(),
+                    secret_hash("corrupt-extra-ack-credential"),
+                    Utc::now().timestamp(),
+                ],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.preauthorize_pairing_ack(&credential),
+            Err(StoreError::PairingAcknowledgementUnavailable)
+        ));
+        assert!(matches!(
+            store.acknowledge_pairing(&credential, pairing.id, worker.id, &digest),
+            Err(StoreError::PairingAcknowledgementUnavailable)
+        ));
+        assert_unmutated();
+    }
+
+    #[test]
+    fn pairing_pending_invariant_and_exact_consumed_replay_are_enforced() {
+        let store = Store::in_memory().unwrap();
+
+        let node_corrupt_worker = node();
+        let node_corrupt = store
+            .create_pairing_for(Some(node_corrupt_worker.id))
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE pairings SET node_id = ?1 WHERE id = ?2",
+                params![Uuid::new_v4().to_string(), node_corrupt.id.to_string()],
+            )
+            .unwrap();
+        let node_corrupt_before = store
+            .connection()
+            .unwrap()
+            .query_row(
+                r#"
+                SELECT used_at, acknowledged_at, node_id,
+                  (SELECT COUNT(*) FROM worker_credentials wc WHERE wc.pairing_id = pairings.id)
+                FROM pairings WHERE id = ?1
+                "#,
+                [node_corrupt.id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            store.preauthorize_pairing(&node_corrupt.code),
+            Err(StoreError::PairingUnavailable)
+        ));
+        assert!(matches!(
+            store.consume_pairing(
+                &node_corrupt.code,
+                node_corrupt.id,
+                node_corrupt.intended_node_id,
+                &secret_hash("node-corrupt-new-credential"),
+                &node_corrupt_worker,
+            ),
+            Err(StoreError::PairingUnavailable)
+        ));
+        let node_corrupt_after = store
+            .connection()
+            .unwrap()
+            .query_row(
+                r#"
+                SELECT used_at, acknowledged_at, node_id,
+                  (SELECT COUNT(*) FROM worker_credentials wc WHERE wc.pairing_id = pairings.id)
+                FROM pairings WHERE id = ?1
+                "#,
+                [node_corrupt.id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(node_corrupt_after, node_corrupt_before);
+        assert!(!store
+            .list_nodes()
+            .unwrap()
+            .iter()
+            .any(|node| node.id == node_corrupt_worker.id));
+
+        let ack_corrupt_worker = node();
+        let ack_corrupt = store
+            .create_pairing_for(Some(ack_corrupt_worker.id))
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE pairings SET acknowledged_at = ?1 WHERE id = ?2",
+                params![Utc::now().timestamp(), ack_corrupt.id.to_string()],
+            )
+            .unwrap();
+        let ack_corrupt_before = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT used_at, acknowledged_at, node_id FROM pairings WHERE id = ?1",
+                [ack_corrupt.id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            store.preauthorize_pairing(&ack_corrupt.code),
+            Err(StoreError::PairingUnavailable)
+        ));
+        assert!(matches!(
+            store.consume_pairing(
+                &ack_corrupt.code,
+                ack_corrupt.id,
+                ack_corrupt.intended_node_id,
+                &secret_hash("ack-corrupt-new-credential"),
+                &ack_corrupt_worker,
+            ),
+            Err(StoreError::PairingUnavailable)
+        ));
+        let ack_corrupt_after = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT used_at, acknowledged_at, node_id FROM pairings WHERE id = ?1",
+                [ack_corrupt.id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(ack_corrupt_after, ack_corrupt_before);
+        assert!(!store
+            .list_nodes()
+            .unwrap()
+            .iter()
+            .any(|node| node.id == ack_corrupt_worker.id));
+
+        let credential_corrupt_worker = node();
+        let credential_corrupt = store
+            .create_pairing_for(Some(credential_corrupt_worker.id))
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                r#"
+                INSERT INTO worker_credentials(
+                    id, pairing_id, node_id, credential_hash, created_at,
+                    activated_at, last_used_at, revoked_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL)
+                "#,
+                params![
+                    Uuid::new_v4().to_string(),
+                    credential_corrupt.id.to_string(),
+                    credential_corrupt_worker.id.to_string(),
+                    secret_hash("preexisting-pending-credential"),
+                    Utc::now().timestamp(),
+                ],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.preauthorize_pairing(&credential_corrupt.code),
+            Err(StoreError::PairingUnavailable)
+        ));
+        assert!(matches!(
+            store.consume_pairing(
+                &credential_corrupt.code,
+                credential_corrupt.id,
+                credential_corrupt.intended_node_id,
+                &secret_hash("credential-corrupt-new-credential"),
+                &credential_corrupt_worker,
+            ),
+            Err(StoreError::PairingUnavailable)
+        ));
+        let credential_corrupt_shape = store
+            .connection()
+            .unwrap()
+            .query_row(
+                r#"
+                SELECT used_at, acknowledged_at, node_id,
+                  (SELECT COUNT(*) FROM worker_credentials wc WHERE wc.pairing_id = pairings.id)
+                FROM pairings WHERE id = ?1
+                "#,
+                [credential_corrupt.id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(credential_corrupt_shape, (None, None, None, 1));
+        assert!(!store
+            .list_nodes()
+            .unwrap()
+            .iter()
+            .any(|node| node.id == credential_corrupt_worker.id));
+
+        let consumed_worker = node();
+        let consumed_pairing = store.create_pairing_for(Some(consumed_worker.id)).unwrap();
+        let consumed_credential = random_secret();
+        let consumed_digest = secret_hash(&consumed_credential);
+        let consumed = store
+            .consume_pairing(
+                &consumed_pairing.code,
+                consumed_pairing.id,
+                consumed_pairing.intended_node_id,
+                &consumed_digest,
+                &consumed_worker,
+            )
+            .unwrap();
+        assert!(store.preauthorize_pairing(&consumed_pairing.code).is_ok());
+        let replay = store
+            .consume_pairing(
+                &consumed_pairing.code,
+                consumed_pairing.id,
+                consumed_pairing.intended_node_id,
+                &consumed_digest,
+                &consumed_worker,
+            )
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.consumed_at, consumed.consumed_at);
+
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                r#"
+                INSERT INTO worker_credentials(
+                    id, pairing_id, node_id, credential_hash, created_at,
+                    activated_at, last_used_at, revoked_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL)
+                "#,
+                params![
+                    Uuid::new_v4().to_string(),
+                    consumed_pairing.id.to_string(),
+                    consumed_worker.id.to_string(),
+                    secret_hash("extra-consumed-credential"),
+                    Utc::now().timestamp(),
+                ],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.preauthorize_pairing(&consumed_pairing.code),
+            Err(StoreError::PairingUnavailable)
+        ));
+        assert!(matches!(
+            store.consume_pairing(
+                &consumed_pairing.code,
+                consumed_pairing.id,
+                consumed_pairing.intended_node_id,
+                &consumed_digest,
+                &consumed_worker,
+            ),
+            Err(StoreError::PairingUnavailable)
+        ));
+        let consumed_shape = store
+            .connection()
+            .unwrap()
+            .query_row(
+                r#"
+                SELECT used_at, acknowledged_at, node_id,
+                  (SELECT COUNT(*) FROM worker_credentials wc WHERE wc.pairing_id = pairings.id)
+                FROM pairings WHERE id = ?1
+                "#,
+                [consumed_pairing.id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(consumed_shape.0, Some(consumed.consumed_at.timestamp()));
+        assert!(consumed_shape.1.is_none());
+        assert_eq!(consumed_shape.2, Some(consumed_worker.id.to_string()));
+        assert_eq!(consumed_shape.3, 2);
+
+        let ready_worker = node();
+        let ready_pairing = store.create_pairing_for(Some(ready_worker.id)).unwrap();
+        let ready_credential = random_secret();
+        let ready_digest = secret_hash(&ready_credential);
+        store
+            .consume_pairing(
+                &ready_pairing.code,
+                ready_pairing.id,
+                ready_pairing.intended_node_id,
+                &ready_digest,
+                &ready_worker,
+            )
+            .unwrap();
+        store
+            .acknowledge_pairing(
+                &ready_credential,
+                ready_pairing.id,
+                ready_worker.id,
+                &ready_digest,
+            )
+            .unwrap();
+        assert!(matches!(
+            store.preauthorize_pairing(&ready_pairing.code),
+            Err(StoreError::PairingUnavailable)
+        ));
+        assert!(matches!(
+            store.consume_pairing(
+                &ready_pairing.code,
+                ready_pairing.id,
+                ready_pairing.intended_node_id,
+                &ready_digest,
+                &ready_worker,
+            ),
+            Err(StoreError::PairingUnavailable)
+        ));
+    }
+
+    #[test]
     fn pairing_status_distinguishes_pending_expired_and_revoked() {
         let store = Store::in_memory().unwrap();
         let pending = store.create_pairing().unwrap();
@@ -9378,6 +11239,764 @@ mod tests {
             store.get_pairing_status(pending.id).unwrap().phase,
             PairingPhaseV1::Revoked
         );
+    }
+
+    #[test]
+    fn pending_pairing_failure_is_bounded_idempotent_and_blocks_enrollment() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let pairing = store.create_pairing_for(Some(worker.id)).unwrap();
+
+        store
+            .fail_pairing(pairing.id, PairingFailureCodeV1::WorkerInstallFailed)
+            .unwrap();
+        let first = store.get_pairing_status(pairing.id).unwrap();
+        assert_eq!(first.phase, PairingPhaseV1::Failed);
+        assert_eq!(
+            first.failure_code,
+            Some(PairingFailureCodeV1::WorkerInstallFailed)
+        );
+        let first_failed_at = first.failed_at.unwrap();
+
+        store
+            .fail_pairing(pairing.id, PairingFailureCodeV1::WorkerInstallFailed)
+            .unwrap();
+        assert_eq!(
+            store.get_pairing_status(pairing.id).unwrap().failed_at,
+            Some(first_failed_at)
+        );
+        assert!(matches!(
+            store.fail_pairing(pairing.id, PairingFailureCodeV1::WorkerPairingFailed),
+            Err(StoreError::PairingFailureMismatch)
+        ));
+        assert!(matches!(
+            store.preauthorize_pairing(&pairing.code),
+            Err(StoreError::PairingUnavailable)
+        ));
+
+        let credential = random_secret();
+        assert!(matches!(
+            store.consume_pairing(
+                &pairing.code,
+                pairing.id,
+                pairing.intended_node_id,
+                &secret_hash(&credential),
+                &worker,
+            ),
+            Err(StoreError::PairingUnavailable)
+        ));
+
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE pairings SET expires_at = ?1 WHERE id = ?2",
+                params![
+                    (Utc::now() - chrono::Duration::seconds(1)).timestamp(),
+                    pairing.id.to_string()
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            store.get_pairing_status(pairing.id).unwrap().phase,
+            PairingPhaseV1::Failed
+        );
+    }
+
+    #[test]
+    fn failed_idempotent_pairing_cannot_reexport_its_bundle() {
+        let store = Store::in_memory().unwrap();
+        let operation = "desktop-add-computer:failed-replay";
+        let intended = Uuid::new_v4();
+        let issued = store
+            .create_pairing_idempotent(
+                operation,
+                Some(intended),
+                "https://192.0.2.10:47832",
+                "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n",
+            )
+            .unwrap();
+        store
+            .fail_pairing(issued.pairing.id, PairingFailureCodeV1::ProvisioningFailed)
+            .unwrap();
+        assert!(matches!(
+            store.create_pairing_idempotent(
+                operation,
+                Some(intended),
+                "https://listener-changed.invalid:47832",
+                "different certificate",
+            ),
+            Err(StoreError::PairingIdempotencyFinalized {
+                phase: PairingPhaseV1::Failed
+            })
+        ));
+    }
+
+    #[test]
+    fn pairing_failure_rejects_every_other_terminal_phase() {
+        let store = Store::in_memory().unwrap();
+
+        let expired = store.create_pairing().unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE pairings SET expires_at = ?1 WHERE id = ?2",
+                params![
+                    (Utc::now() - chrono::Duration::seconds(1)).timestamp(),
+                    expired.id.to_string()
+                ],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.fail_pairing(expired.id, PairingFailureCodeV1::ProvisioningFailed),
+            Err(StoreError::PairingFailureFinalized {
+                phase: PairingPhaseV1::Expired
+            })
+        ));
+
+        let revoked = store.create_pairing().unwrap();
+        store.revoke_pairing(revoked.id).unwrap();
+        assert!(matches!(
+            store.fail_pairing(revoked.id, PairingFailureCodeV1::ProvisioningFailed),
+            Err(StoreError::PairingFailureFinalized {
+                phase: PairingPhaseV1::Revoked
+            })
+        ));
+
+        let worker = node();
+        let consumed = store.create_pairing_for(Some(worker.id)).unwrap();
+        let credential = random_secret();
+        let digest = secret_hash(&credential);
+        store
+            .consume_pairing(
+                &consumed.code,
+                consumed.id,
+                consumed.intended_node_id,
+                &digest,
+                &worker,
+            )
+            .unwrap();
+        assert!(matches!(
+            store.fail_pairing(consumed.id, PairingFailureCodeV1::WorkerPairingFailed),
+            Err(StoreError::PairingFailureFinalized {
+                phase: PairingPhaseV1::Consumed
+            })
+        ));
+        store
+            .acknowledge_pairing(&credential, consumed.id, worker.id, &digest)
+            .unwrap();
+        assert!(matches!(
+            store.fail_pairing(consumed.id, PairingFailureCodeV1::WorkerHealthCheckFailed),
+            Err(StoreError::PairingFailureFinalized {
+                phase: PairingPhaseV1::Ready
+            })
+        ));
+    }
+
+    #[test]
+    fn revoking_failed_pairing_retains_failure_evidence_but_hides_failed_phase() {
+        let store = Store::in_memory().unwrap();
+        let pairing = store.create_pairing().unwrap();
+        store
+            .fail_pairing(pairing.id, PairingFailureCodeV1::WorkerHealthCheckFailed)
+            .unwrap();
+        let failed = store.get_pairing_status(pairing.id).unwrap();
+
+        store.revoke_pairing(pairing.id).unwrap();
+        let revoked = store.get_pairing_status(pairing.id).unwrap();
+        assert_eq!(revoked.phase, PairingPhaseV1::Revoked);
+        assert_eq!(revoked.failed_at, failed.failed_at);
+        assert_eq!(revoked.failure_code, failed.failure_code);
+        assert!(matches!(
+            store.fail_pairing(pairing.id, PairingFailureCodeV1::WorkerHealthCheckFailed),
+            Err(StoreError::PairingFailureFinalized {
+                phase: PairingPhaseV1::Revoked
+            })
+        ));
+    }
+
+    #[test]
+    fn pairing_failure_corruption_fails_closed() {
+        let store = Store::in_memory().unwrap();
+        let pairing = store.create_pairing().unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE pairings SET failed_at = ?1 WHERE id = ?2",
+                params![Utc::now().timestamp(), pairing.id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.get_pairing_status(pairing.id),
+            Err(StoreError::InvalidPairingFailureState)
+        ));
+        assert!(matches!(
+            store.fail_pairing(pairing.id, PairingFailureCodeV1::ProvisioningFailed),
+            Err(StoreError::InvalidPairingFailureState)
+        ));
+
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE pairings SET failure_code = 'unbounded_failure' WHERE id = ?1",
+                [pairing.id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.get_pairing_status(pairing.id),
+            Err(StoreError::InvalidPairingFailureState)
+        ));
+    }
+
+    #[test]
+    fn corrupted_consumed_failure_cannot_authorize_or_acknowledge() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let pairing = store.create_pairing_for(Some(worker.id)).unwrap();
+        let credential = random_secret();
+        let digest = secret_hash(&credential);
+        store
+            .consume_pairing(
+                &pairing.code,
+                pairing.id,
+                pairing.intended_node_id,
+                &digest,
+                &worker,
+            )
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                r#"
+                UPDATE pairings SET failed_at = ?1, failure_code = 'worker_pairing_failed'
+                WHERE id = ?2
+                "#,
+                params![Utc::now().timestamp(), pairing.id.to_string()],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.preauthorize_pairing_ack(&credential),
+            Err(StoreError::PairingAcknowledgementUnavailable)
+        ));
+        assert!(matches!(
+            store.acknowledge_pairing(&credential, pairing.id, worker.id, &digest),
+            Err(StoreError::PairingAcknowledgementUnavailable)
+        ));
+    }
+
+    #[test]
+    fn extra_pairing_credentials_cannot_authenticate_report_or_schedule() {
+        type CapabilityState = (
+            Option<i64>,
+            i64,
+            String,
+            String,
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<i64>,
+        );
+
+        #[derive(Clone, Copy)]
+        enum ExtraKind {
+            Staged,
+            Revoked,
+            Misbound,
+        }
+
+        impl ExtraKind {
+            fn label(self) -> &'static str {
+                match self {
+                    Self::Staged => "staged",
+                    Self::Revoked => "revoked",
+                    Self::Misbound => "misbound",
+                }
+            }
+        }
+
+        fn capability_state(
+            store: &Store,
+            pairing_id: Uuid,
+            credential_hash: &str,
+            extra_id: Uuid,
+        ) -> CapabilityState {
+            store
+                .connection()
+                .unwrap()
+                .query_row(
+                    r#"
+                    SELECT
+                        wc.last_used_at,
+                        n.revision,
+                        i.document,
+                        t.document,
+                        t.received_at,
+                        p.used_at,
+                        p.acknowledged_at,
+                        p.revoked_at,
+                        p.failed_at,
+                        p.failure_code,
+                        (
+                            SELECT extra.last_used_at FROM worker_credentials extra
+                            WHERE extra.id = ?3
+                        )
+                    FROM worker_credentials wc
+                    JOIN pairings p ON p.id = wc.pairing_id
+                    JOIN nodes n ON n.id = wc.node_id
+                    JOIN node_inventories i ON i.node_id = n.id
+                    JOIN node_telemetry t ON t.node_id = n.id
+                    WHERE wc.pairing_id = ?1 AND wc.credential_hash = ?2
+                    "#,
+                    params![
+                        pairing_id.to_string(),
+                        credential_hash,
+                        extra_id.to_string()
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<i64>>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, Option<i64>>(5)?,
+                            row.get::<_, Option<i64>>(6)?,
+                            row.get::<_, Option<i64>>(7)?,
+                            row.get::<_, Option<i64>>(8)?,
+                            row.get::<_, Option<String>>(9)?,
+                            row.get::<_, Option<i64>>(10)?,
+                        ))
+                    },
+                )
+                .unwrap()
+        }
+
+        for kind in [ExtraKind::Staged, ExtraKind::Revoked, ExtraKind::Misbound] {
+            let store = Store::in_memory().unwrap();
+            let worker = node();
+            let paired = pair_worker(&store, &worker);
+            let boot_id = Uuid::new_v4();
+            store
+                .record_node_report(&paired.credential, &node_report(&worker, boot_id, 1))
+                .unwrap();
+            assert!(store.create_plan(&job(), &Scheduler::default()).is_ok());
+
+            let credential_hash = secret_hash(&paired.credential);
+            store
+                .connection()
+                .unwrap()
+                .execute(
+                    "UPDATE worker_credentials SET last_used_at = 123 WHERE credential_hash = ?1",
+                    [&credential_hash],
+                )
+                .unwrap();
+
+            let extra_id = Uuid::new_v4();
+            let now = Utc::now().timestamp();
+            let (extra_node_id, activated_at, revoked_at) = match kind {
+                ExtraKind::Staged => (worker.id, None, None),
+                ExtraKind::Revoked => (worker.id, Some(now), Some(now)),
+                ExtraKind::Misbound => (Uuid::new_v4(), None, None),
+            };
+            store
+                .connection()
+                .unwrap()
+                .execute(
+                    r#"
+                    INSERT INTO worker_credentials(
+                        id, pairing_id, node_id, credential_hash, created_at,
+                        activated_at, last_used_at, revoked_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7)
+                    "#,
+                    params![
+                        extra_id.to_string(),
+                        paired.pairing_id.to_string(),
+                        extra_node_id.to_string(),
+                        secret_hash(&format!("capability-extra-{}", kind.label())),
+                        now,
+                        activated_at,
+                        revoked_at,
+                    ],
+                )
+                .unwrap();
+
+            let before = capability_state(&store, paired.pairing_id, &credential_hash, extra_id);
+            assert_eq!(before.0, Some(123));
+            assert!(before.10.is_none());
+
+            assert!(matches!(
+                store.authenticate_worker(&paired.credential),
+                Err(StoreError::WorkerUnauthorized)
+            ));
+            assert!(matches!(
+                store.record_node_report(&paired.credential, &node_report(&worker, boot_id, 2),),
+                Err(StoreError::WorkerUnauthorized)
+            ));
+            assert!(matches!(
+                store.create_plan(&job(), &Scheduler::default()),
+                Err(StoreError::Schedule(ScheduleError::NoEligibleNodes { .. }))
+            ));
+            assert!(matches!(
+                store.get_pairing_status(paired.pairing_id),
+                Err(StoreError::InvalidPairingFailureState)
+            ));
+            assert_eq!(
+                capability_state(&store, paired.pairing_id, &credential_hash, extra_id,),
+                before,
+                "{} extra mutated capability state",
+                kind.label()
+            );
+        }
+    }
+
+    #[test]
+    fn failed_pairing_credential_cannot_authenticate_report_schedule_or_migrate() {
+        let store = Store::in_memory().unwrap();
+        let worker = node();
+        let paired = pair_worker(&store, &worker);
+        store
+            .record_node_report(&paired.credential, &node_report(&worker, Uuid::new_v4(), 1))
+            .unwrap();
+        assert!(store.create_plan(&job(), &Scheduler::default()).is_ok());
+        let last_used_before_failure = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT last_used_at FROM worker_credentials WHERE pairing_id = ?1",
+                [paired.pairing_id.to_string()],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .unwrap();
+
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                r#"
+                UPDATE pairings
+                SET failed_at = ?1, failure_code = 'worker_health_check_failed'
+                WHERE id = ?2
+                "#,
+                params![Utc::now().timestamp(), paired.pairing_id.to_string()],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.authenticate_worker(&paired.credential),
+            Err(StoreError::WorkerUnauthorized)
+        ));
+        assert!(matches!(
+            store.record_node_report(&paired.credential, &node_report(&worker, Uuid::new_v4(), 2)),
+            Err(StoreError::WorkerUnauthorized)
+        ));
+        assert!(matches!(
+            store.create_plan(&job(), &Scheduler::default()),
+            Err(StoreError::Schedule(ScheduleError::NoEligibleNodes { .. }))
+        ));
+        let last_used_after_failure = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT last_used_at FROM worker_credentials WHERE pairing_id = ?1",
+                [paired.pairing_id.to_string()],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .unwrap();
+        assert_eq!(last_used_after_failure, last_used_before_failure);
+        assert!(matches!(
+            store.get_pairing_status(paired.pairing_id),
+            Err(StoreError::InvalidPairingFailureState)
+        ));
+        let mut connection = store.connection().unwrap();
+        assert!(matches!(
+            migrate_pairing_failure_schema(&mut connection),
+            Err(StoreError::InvalidPairingFailureState)
+        ));
+    }
+
+    #[test]
+    fn corrupt_nominal_pending_pairing_with_node_or_credential_is_not_mutated() {
+        let store = Store::in_memory().unwrap();
+        let node_bound = store.create_pairing().unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE pairings SET node_id = ?1 WHERE id = ?2",
+                params![Uuid::new_v4().to_string(), node_bound.id.to_string()],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.fail_pairing(node_bound.id, PairingFailureCodeV1::WorkerPairingFailed),
+            Err(StoreError::InvalidPairingFailureState)
+        ));
+        let node_bound_failure = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT failed_at, failure_code FROM pairings WHERE id = ?1",
+                [node_bound.id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(node_bound_failure, (None, None));
+
+        let credential_bound = store.create_pairing().unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                r#"
+                INSERT INTO worker_credentials(
+                    id, pairing_id, node_id, credential_hash, created_at,
+                    activated_at, last_used_at, revoked_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL)
+                "#,
+                params![
+                    Uuid::new_v4().to_string(),
+                    credential_bound.id.to_string(),
+                    credential_bound.intended_node_id.to_string(),
+                    secret_hash("staged-corrupt-pending-credential"),
+                    Utc::now().timestamp(),
+                ],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.fail_pairing(
+                credential_bound.id,
+                PairingFailureCodeV1::WorkerInstallFailed
+            ),
+            Err(StoreError::InvalidPairingFailureState)
+        ));
+        let credential_bound_failure = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT failed_at, failure_code FROM pairings WHERE id = ?1",
+                [credential_bound.id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(credential_bound_failure, (None, None));
+    }
+
+    #[test]
+    fn failed_pairing_with_only_staged_credential_fails_runtime_and_migration_validation() {
+        let store = Store::in_memory().unwrap();
+        let pairing = store.create_pairing().unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                r#"
+                INSERT INTO worker_credentials(
+                    id, pairing_id, node_id, credential_hash, created_at,
+                    activated_at, last_used_at, revoked_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL)
+                "#,
+                params![
+                    Uuid::new_v4().to_string(),
+                    pairing.id.to_string(),
+                    pairing.intended_node_id.to_string(),
+                    secret_hash("staged-corrupt-failed-credential"),
+                    Utc::now().timestamp(),
+                ],
+            )
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                r#"
+                UPDATE pairings
+                SET failed_at = ?1, failure_code = 'provisioning_failed'
+                WHERE id = ?2
+                "#,
+                params![Utc::now().timestamp(), pairing.id.to_string()],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.get_pairing_status(pairing.id),
+            Err(StoreError::InvalidPairingFailureState)
+        ));
+        let mut connection = store.connection().unwrap();
+        assert!(matches!(
+            migrate_pairing_failure_schema(&mut connection),
+            Err(StoreError::InvalidPairingFailureState)
+        ));
+    }
+
+    #[test]
+    fn partial_pairing_failure_schema_is_rejected() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE pairings (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    code_hash TEXT UNIQUE NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    used_at INTEGER,
+                    acknowledged_at INTEGER,
+                    revoked_at INTEGER,
+                    node_id TEXT,
+                    intended_node_id TEXT,
+                    failed_at INTEGER
+                );
+                "#,
+            )
+            .unwrap();
+        assert!(matches!(
+            Store::from_connection(
+                connection,
+                std::env::temp_dir().join(format!("cyc-partial-failure-{}", Uuid::new_v4()))
+            ),
+            Err(StoreError::InvalidPairingFailureState)
+        ));
+    }
+
+    #[test]
+    fn unknown_pairing_failure_code_blocks_database_migration() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE pairings (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    code_hash TEXT UNIQUE NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    used_at INTEGER,
+                    acknowledged_at INTEGER,
+                    revoked_at INTEGER,
+                    node_id TEXT,
+                    intended_node_id TEXT,
+                    failed_at INTEGER,
+                    failure_code TEXT
+                );
+                "#,
+            )
+            .unwrap();
+        let pairing_id = Uuid::new_v4();
+        let intended_node_id = Uuid::new_v4();
+        connection
+            .execute(
+                r#"
+                INSERT INTO pairings(
+                    id, code_hash, created_at, expires_at, intended_node_id,
+                    failed_at, failure_code
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?3, 'unbounded_failure')
+                "#,
+                params![
+                    pairing_id.to_string(),
+                    secret_hash("migration-corruption"),
+                    Utc::now().timestamp(),
+                    (Utc::now() + chrono::Duration::minutes(10)).timestamp(),
+                    intended_node_id.to_string(),
+                ],
+            )
+            .unwrap();
+        assert!(matches!(
+            Store::from_connection(
+                connection,
+                std::env::temp_dir().join(format!("cyc-invalid-failure-{}", Uuid::new_v4()))
+            ),
+            Err(StoreError::InvalidPairingFailureState)
+        ));
+    }
+
+    #[test]
+    fn consume_and_failure_race_has_exactly_one_terminal_winner() {
+        let directory = test_directory("pairing-failure-race");
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("controller.db");
+        let first_store = Store::from_connection(
+            Connection::open(&database).unwrap(),
+            directory.join("first-objects"),
+        )
+        .unwrap();
+        let second_store = Store::from_connection(
+            Connection::open(&database).unwrap(),
+            directory.join("second-objects"),
+        )
+        .unwrap();
+        let worker = node();
+        let pairing = first_store.create_pairing_for(Some(worker.id)).unwrap();
+        let pairing_id = pairing.id;
+        let intended_node_id = pairing.intended_node_id;
+        let pairing_code = pairing.code.clone();
+        let credential = random_secret();
+        let digest = secret_hash(&credential);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let consume_barrier = barrier.clone();
+        let consume_worker = worker.clone();
+        let consume = std::thread::spawn(move || {
+            consume_barrier.wait();
+            first_store.consume_pairing(
+                &pairing_code,
+                pairing_id,
+                intended_node_id,
+                &digest,
+                &consume_worker,
+            )
+        });
+        let fail_barrier = barrier.clone();
+        let failure = std::thread::spawn(move || {
+            fail_barrier.wait();
+            second_store.fail_pairing(pairing_id, PairingFailureCodeV1::WorkerPairingFailed)
+        });
+        barrier.wait();
+        let consume = consume.join().unwrap();
+        let failure = failure.join().unwrap();
+
+        assert_ne!(consume.is_ok(), failure.is_ok());
+        let verification = Store::from_connection(
+            Connection::open(&database).unwrap(),
+            directory.join("verification-objects"),
+        )
+        .unwrap();
+        match verification.get_pairing_status(pairing_id).unwrap().phase {
+            PairingPhaseV1::Consumed => {
+                assert!(consume.is_ok());
+                assert!(matches!(
+                    failure,
+                    Err(StoreError::PairingFailureFinalized {
+                        phase: PairingPhaseV1::Consumed
+                    })
+                ));
+            }
+            PairingPhaseV1::Failed => {
+                assert!(failure.is_ok());
+                assert!(matches!(consume, Err(StoreError::PairingUnavailable)));
+            }
+            phase => panic!("unexpected pairing race phase: {phase:?}"),
+        }
+        drop(verification);
+        drop(pairing);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
