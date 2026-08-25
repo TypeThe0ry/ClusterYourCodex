@@ -2147,6 +2147,75 @@ function Get-CycPrivateNetworkCandidates {
     return @($candidates)
 }
 
+function Get-CycFallbackNetworkConfigurations {
+    # The NetTCPIP PowerShell module is absent on some stripped-down Windows
+    # images (including the GitHub Windows packaging runner).  Keep discovery
+    # fail-closed, but use the .NET networking surface as an equivalent
+    # read-only source instead of making a valid private-LAN install depend on
+    # one optional cmdlet module.
+    $configurations = New-Object System.Collections.Generic.List[object]
+    foreach ($adapter in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+        if ($adapter.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) {
+            continue
+        }
+        try { $properties = $adapter.GetIPProperties() } catch { continue }
+        $ipv4Properties = $null
+        $ipv6Properties = $null
+        try { $ipv4Properties = $properties.GetIPv4Properties() } catch { }
+        try { $ipv6Properties = $properties.GetIPv6Properties() } catch { }
+        $interfaceIndex = 0
+        if ($ipv4Properties) {
+            $interfaceIndex = [int]$ipv4Properties.Index
+        } elseif ($ipv6Properties) {
+            $interfaceIndex = [int]$ipv6Properties.Index
+        }
+        if ($interfaceIndex -lt 1) { continue }
+
+        $ipv4Addresses = @($properties.UnicastAddresses | Where-Object {
+            $_.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork
+        } | ForEach-Object {
+            [PSCustomObject]@{
+                IPAddress = [string]$_.Address
+                AddressState = 'Preferred'
+                SkipAsSource = $false
+            }
+        })
+        $ipv6Addresses = @($properties.UnicastAddresses | Where-Object {
+            $_.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6
+        } | ForEach-Object {
+            [PSCustomObject]@{
+                IPAddress = [string]$_.Address
+                AddressState = 'Preferred'
+                SkipAsSource = $false
+            }
+        })
+        if ($ipv4Addresses.Count -eq 0 -and $ipv6Addresses.Count -eq 0) { continue }
+
+        $ipv4Gateway = @($properties.GatewayAddresses | Where-Object {
+            $_.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork
+        } | Select-Object -First 1 | ForEach-Object {
+            [PSCustomObject]@{ NextHop = [string]$_.Address }
+        })
+        $ipv6Gateway = @($properties.GatewayAddresses | Where-Object {
+            $_.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6
+        } | Select-Object -First 1 | ForEach-Object {
+            [PSCustomObject]@{ NextHop = [string]$_.Address }
+        })
+        $metric = [int]::MaxValue
+        $configurations.Add([PSCustomObject]@{
+            InterfaceIndex = $interfaceIndex
+            NetAdapter = [PSCustomObject]@{ Status = 'Up'; ifIndex = $interfaceIndex }
+            IPv4DefaultGateway = if ($ipv4Gateway.Count -gt 0) { $ipv4Gateway[0] } else { $null }
+            IPv6DefaultGateway = if ($ipv6Gateway.Count -gt 0) { $ipv6Gateway[0] } else { $null }
+            NetIPv4Interface = [PSCustomObject]@{ InterfaceMetric = $metric }
+            NetIPv6Interface = [PSCustomObject]@{ InterfaceMetric = $metric }
+            IPv4Address = $ipv4Addresses
+            IPv6Address = $ipv6Addresses
+        })
+    }
+    return @($configurations.ToArray())
+}
+
 function New-CycManagedWorkerNetworkPlan {
     param(
         [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$InterfaceIndex,
@@ -2312,8 +2381,12 @@ function New-CycDiscoveredManagedWorkerNetworkPlan {
         throw 'An IP-literal WorkerPublicHost must be an assigned RFC1918 or ULA address.'
     }
     if ($null -eq $Configurations) {
-        try { $Configurations = @(Get-NetIPConfiguration -Detailed -ErrorAction Stop) } catch {
-            throw 'Windows private-LAN discovery requires the NetTCPIP Get-NetIPConfiguration cmdlet.'
+        $netIpConfiguration = Get-Command -Name 'Get-NetIPConfiguration' -CommandType Cmdlet -ErrorAction SilentlyContinue
+        if ($netIpConfiguration) {
+            try { $Configurations = @(Get-NetIPConfiguration -Detailed -ErrorAction Stop) } catch { $Configurations = $null }
+        }
+        if ($null -eq $Configurations) {
+            $Configurations = @(Get-CycFallbackNetworkConfigurations)
         }
     }
     $candidates = @(Get-CycPrivateNetworkCandidates -Configurations @($Configurations))
