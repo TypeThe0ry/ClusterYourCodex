@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clusteryourcodex.dev/schemas/enrollment.v1.json",
+  "title": "ClusterYourCodex enrollment API schema bundle",
+  "$comment": "Select the named contract under $defs. PairingStatusV1 and PairingStatusErrorV1 are deliberately non-secret polling documents.",
+  "oneOf": [
+    { "$ref": "#/$defs/createPairingRequestV1" },
+    { "$ref": "#/$defs/enrollmentBundleV1" },
+    { "$ref": "#/$defs/pairingStatusV1" },
+    { "$ref": "#/$defs/pairingStatusErrorV1" }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "not": { "const": "00000000-0000-0000-0000-000000000000" }
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time",
+      "minLength": 20,
+      "maxLength": 35
+    },
+    "workerUrl": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 9,
+      "maxLength": 2048,
+      "pattern": "^https://[^\\s\\u0000-\\u001F\\u007F]+$"
+    },
+    "certificatePem": {
+      "type": "string",
+      "minLength": 58,
+      "maxLength": 131072,
+      "pattern": "^-----BEGIN CERTIFICATE-----\\r?\\n[A-Za-z0-9+/=]+(?:\\r?\\n[A-Za-z0-9+/=]+)*\\r?\\n-----END CERTIFICATE-----\\r?\\n?$"
+    },
+    "pairingCode": {
+      "type": "string",
+      "minLength": 32,
+      "maxLength": 512,
+      "pattern": "^[!-~]{32,512}$"
+    },
+    "pairingPhaseV1": {
+      "enum": ["pending", "consumed", "ready", "expired", "revoked", "failed"]
+    },
+    "pairingFailureCodeV1": {
+      "enum": [
+        "provisioning_failed",
+        "worker_install_failed",
+        "worker_pairing_failed",
+        "worker_health_check_failed"
+      ]
+    },
+    "createPairingRequestV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "intendedNodeId": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "enrollmentBundleV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "pairingId",
+        "controllerId",
+        "intendedNodeId",
+        "workerUrl",
+        "certificatePem",
+        "pairingCode",
+        "createdAt",
+        "expiresAt"
+      ],
+      "properties": {
+        "apiVersion": { "const": "cyc.dev/enrollment/v1" },
+        "pairingId": { "$ref": "#/$defs/uuid" },
+        "controllerId": { "$ref": "#/$defs/uuid" },
+        "intendedNodeId": { "$ref": "#/$defs/uuid" },
+        "workerUrl": { "$ref": "#/$defs/workerUrl" },
+        "certificatePem": { "$ref": "#/$defs/certificatePem" },
+        "pairingCode": { "$ref": "#/$defs/pairingCode" },
+        "createdAt": { "$ref": "#/$defs/dateTime" },
+        "expiresAt": { "$ref": "#/$defs/dateTime" }
+      }
+    },
+    "pairingStatusErrorV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": { "$ref": "#/$defs/pairingFailureCodeV1" },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$",
+          "$comment": "The Rust contract additionally applies this limit to UTF-8 bytes."
+        },
+        "retryable": { "type": "boolean" }
+      }
+    },
+    "pairingStatusV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "pairingId",
+        "intendedNodeId",
+        "phase",
+        "createdAt",
+        "expiresAt",
+        "ready"
+      ],
+      "properties": {
+        "apiVersion": { "const": "cyc.dev/enrollment/v1" },
+        "pairingId": { "$ref": "#/$defs/uuid" },
+        "intendedNodeId": { "$ref": "#/$defs/uuid" },
+        "nodeId": { "$ref": "#/$defs/uuid" },
+        "phase": { "$ref": "#/$defs/pairingPhaseV1" },
+        "createdAt": { "$ref": "#/$defs/dateTime" },
+        "expiresAt": { "$ref": "#/$defs/dateTime" },
+        "consumedAt": { "$ref": "#/$defs/dateTime" },
+        "revokedAt": { "$ref": "#/$defs/dateTime" },
+        "ready": { "type": "boolean" },
+        "error": { "$ref": "#/$defs/pairingStatusErrorV1" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "phase": { "const": "ready" } },
+            "required": ["phase"]
+          },
+          "then": {
+            "properties": { "ready": { "const": true } },
+            "required": ["nodeId", "consumedAt"]
+          },
+          "else": {
+            "properties": { "ready": { "const": false } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "phase": { "const": "failed" } },
+            "required": ["phase"]
+          },
+          "then": { "required": ["error"] },
+          "else": { "not": { "required": ["error"] } }
+        },
+        {
+          "if": {
+            "properties": { "phase": { "const": "consumed" } },
+            "required": ["phase"]
+          },
+          "then": { "required": ["nodeId", "consumedAt"] }
+        },
+        {
+          "if": {
+            "properties": { "phase": { "const": "revoked" } },
+            "required": ["phase"]
+          },
+          "then": { "required": ["revokedAt"] }
+        }
+      ],
+      "$comment": "PairingStatusV1::validate additionally requires ready nodeId to equal intendedNodeId and expiresAt to be later than createdAt."
+    }
+  }
+}
