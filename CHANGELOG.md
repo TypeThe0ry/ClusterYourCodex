@@ -7,6 +7,18 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.4] - 2026-08-25
+
+### Fixed
+
+- macOS x64 and arm64 release runners now provision and verify Homebrew
+  OpenSSL 3 before generating Ed25519-signed Worker Kits; both macOS jobs in
+  the `v0.1.0-preview.3` release workflow had failed closed on the runner's
+  non-OpenSSL-3 default command.
+- The release signing-boundary regression script now runs under both
+  PowerShell 7 and Windows PowerShell 5.1 and verifies the macOS OpenSSL 3
+  prerequisite explicitly.
+
 ## [0.1.0-preview.3] - 2026-08-25
 
 ### Added
@@ -61,6 +73,7 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.3...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.4...HEAD
+[0.1.0-preview.4]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.3...v0.1.0-preview.4
 [0.1.0-preview.3]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.2...v0.1.0-preview.3
 [0.1.0-preview.2]: https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.2

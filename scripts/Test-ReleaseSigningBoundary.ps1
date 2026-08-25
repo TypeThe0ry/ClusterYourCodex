@@ -1,10 +1,13 @@
 [CmdletBinding()]
 param(
-    [string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot)
+    [string]$RepositoryRoot
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+    $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+}
 
 $root = [IO.Path]::GetFullPath($RepositoryRoot)
 $workflowPath = Join-Path $root '.github\workflows\release.yml'
@@ -12,6 +15,9 @@ $readmePath = Join-Path $root 'packaging\worker-kits\README.md'
 $workflow = [IO.File]::ReadAllText($workflowPath)
 $readme = [IO.File]::ReadAllText($readmePath)
 $lines = [IO.File]::ReadAllLines($workflowPath)
+$workerKitBuilder = [IO.File]::ReadAllText(
+    (Join-Path $root 'packaging\worker-kits\New-WorkerKit.ps1')
+)
 
 if ($workflow -notmatch "github\.ref_type\s*\}\}\s*'\s*-cne\s*'tag'" -or
     $workflow -notmatch 'IsNullOrWhiteSpace\(\[string\]\$env:CYC_SOURCE_TAG\)') {
@@ -24,7 +30,7 @@ if ($workflow -notmatch 'workflow_dispatch') {
 $secretNeedle = 'secrets.CYC_WORKER_KIT_SIGNING_KEY_PEM_B64'
 $secretLines = @(
     for ($index = 0; $index -lt $lines.Length; $index++) {
-        if ($lines[$index].Contains($secretNeedle, [StringComparison]::Ordinal)) {
+        if ($lines[$index].IndexOf($secretNeedle, [StringComparison]::Ordinal) -ge 0) {
             $index
         }
     }
@@ -72,6 +78,21 @@ if ($consumerJobs.Count -ne 2 -or
     -not $consumerJobs.Contains('rust-artifacts') -or
     -not $consumerJobs.Contains('linux-arm64-worker-kit')) {
     throw "Unexpected production signing-key consumer set: $($consumerJobNames -join ', ')."
+}
+
+foreach ($needle in @(
+    'Provision OpenSSL 3 for macOS Worker Kit signing',
+    'brew --prefix openssl@3',
+    '$GITHUB_PATH',
+    'grep -Eq ''^OpenSSL 3\.'''
+)) {
+    if ($workflow.IndexOf($needle, [StringComparison]::Ordinal) -lt 0) {
+        throw 'macOS release jobs do not provision and verify Homebrew OpenSSL 3 before Worker Kit signing.'
+    }
+}
+if ($workerKitBuilder -notmatch '/opt/homebrew/opt/openssl@3/bin/openssl' -or
+    $workerKitBuilder -notmatch '/usr/local/opt/openssl@3/bin/openssl') {
+    throw 'Worker Kit signing does not probe both standard Homebrew OpenSSL 3 keg paths.'
 }
 
 if ($readme -notmatch 'production-signing` environment secret' -or

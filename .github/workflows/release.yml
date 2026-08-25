@@ -153,6 +153,18 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: release-preview-${{ matrix.target }}
+      - name: Provision OpenSSL 3 for macOS Worker Kit signing
+        if: runner.os == 'macOS' && matrix.include_worker == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! brew list --versions openssl@3 >/dev/null 2>&1; then
+            brew install openssl@3
+          fi
+          openssl_prefix="$(brew --prefix openssl@3)"
+          test -x "$openssl_prefix/bin/openssl"
+          "$openssl_prefix/bin/openssl" version | grep -Eq '^OpenSSL 3\.'
+          printf '%s\n' "$openssl_prefix/bin" >> "$GITHUB_PATH"
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint full Rust workspace

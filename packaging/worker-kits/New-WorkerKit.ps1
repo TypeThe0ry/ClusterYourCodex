@@ -53,6 +53,8 @@ function Resolve-OpenSsl {
         }
     }
     foreach ($candidate in @(
+        '/opt/homebrew/opt/openssl@3/bin/openssl',
+        '/usr/local/opt/openssl@3/bin/openssl',
         'C:\Program Files\Git\usr\bin\openssl.exe',
         'C:\Program Files\OpenSSL-Win64\bin\openssl.exe',
         'C:\Program Files\OpenSSL\bin\openssl.exe'
