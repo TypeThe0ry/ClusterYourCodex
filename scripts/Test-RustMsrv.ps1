@@ -29,18 +29,43 @@ function Get-CycManifestRustVersion {
 function Get-CycResolvedMaximumRustVersion {
     param([Parameter(Mandatory = $true)][string]$ManifestPath)
 
-    $stderrPath = [IO.Path]::GetTempFileName()
+    $cargoCommand = Get-Command cargo -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1
+    if ($null -eq $cargoCommand -or [string]::IsNullOrWhiteSpace([string]$cargoCommand.Path)) {
+        throw 'cargo executable was not found.'
+    }
+
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = [string]$cargoCommand.Path
+    $start.Arguments = 'metadata --locked --format-version 1 --color never --manifest-path Cargo.toml'
+    $start.WorkingDirectory = [IO.Path]::GetDirectoryName($ManifestPath)
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $start.StandardErrorEncoding = [Text.Encoding]::UTF8
+    $start.EnvironmentVariables['CARGO_TERM_COLOR'] = 'never'
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $start
     try {
-        $metadataText = & cargo metadata --locked --format-version 1 --color never --manifest-path $ManifestPath 2> $stderrPath
-        $metadataExitCode = $LASTEXITCODE
-        $metadataStderr = [IO.File]::ReadAllText($stderrPath)
+        if (-not $process.Start()) {
+            throw "cargo metadata could not be started for $ManifestPath."
+        }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $metadataExitCode = $process.ExitCode
+        $metadataText = $stdoutTask.Result
+        $metadataStderr = $stderrTask.Result
     } finally {
-        Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+        $process.Dispose()
     }
     if ($metadataExitCode -ne 0) {
         throw "cargo metadata failed for ${ManifestPath}:`n$metadataStderr"
     }
-    $metadata = ($metadataText -join [Environment]::NewLine) | ConvertFrom-Json
+    $metadata = $metadataText | ConvertFrom-Json
     $requirements = @(
         $metadata.packages |
             Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.rust_version) } |
