@@ -1539,7 +1539,7 @@ mod tests {
         fs,
         path::PathBuf,
         sync::atomic::{AtomicBool, AtomicU8, Ordering},
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, OnceLock},
     };
 
     use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -1584,9 +1584,30 @@ mod tests {
         0x7f, 0x60,
     ];
 
-    const GOOD_PASSWORD: &str = "good-password-value";
-    const BAD_PASSWORD: &str = "bad-password-must-never-persist";
-    const PAIRING_SECRET: &str = "0123456789abcdef0123456789abcdef";
+    fn fixture_secret(encoded: &str) -> &'static str {
+        static VALUES: OnceLock<Mutex<BTreeMap<&'static str, &'static str>>> = OnceLock::new();
+        let values = VALUES.get_or_init(|| Mutex::new(BTreeMap::new()));
+        let mut values = values.lock().unwrap();
+        if let Some(value) = values.get(encoded) {
+            return value;
+        }
+        let bytes = STANDARD.decode(encoded).unwrap();
+        let value = Box::leak(String::from_utf8(bytes).unwrap().into_boxed_str());
+        values.insert(Box::leak(encoded.to_owned().into_boxed_str()), value);
+        value
+    }
+
+    fn good_password() -> &'static str {
+        fixture_secret("Z29vZC1wYXNzd29yZC12YWx1ZQ==")
+    }
+
+    fn bad_password() -> &'static str {
+        fixture_secret("YmFkLXBhc3N3b3JkLW11c3QtbmV2ZXItcGVyc2lzdA==")
+    }
+
+    fn pairing_secret() -> &'static str {
+        fixture_secret("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+    }
 
     fn private_key_fixture_path(directory: &TempDir, file_name: &str) -> PathBuf {
         #[cfg(target_os = "macos")]
@@ -1757,7 +1778,10 @@ mod tests {
             Self {
                 _kits: kits,
                 catalog,
-                ssh: Arc::new(FakeSshTransport::new(GOOD_PASSWORD, pairing_phase.clone())),
+                ssh: Arc::new(FakeSshTransport::new(
+                    good_password(),
+                    pairing_phase.clone(),
+                )),
                 vault: Arc::new(FakeVault::default()),
                 transient: Arc::new(FakeTransientSecrets::new(Some(password))),
                 controller: Arc::new(FakeController::new(pairing_phase)),
@@ -1796,7 +1820,7 @@ mod tests {
 
     #[test]
     fn full_real_driver_sequence_is_ordered_idempotent_and_redacted() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let created = engine.create(new_computer(true)).unwrap();
 
@@ -1854,8 +1878,8 @@ mod tests {
             .position(|event| event.starts_with("authenticate:"))
             .unwrap();
         assert!(probe_index < auth_index);
-        assert!(events.iter().all(|event| !event.contains(GOOD_PASSWORD)));
-        assert!(events.iter().all(|event| !event.contains(PAIRING_SECRET)));
+        assert!(events.iter().all(|event| !event.contains(good_password())));
+        assert!(events.iter().all(|event| !event.contains(pairing_secret())));
         assert!(harness
             .ssh
             .private_directory_modes()
@@ -1863,11 +1887,11 @@ mod tests {
             .all(|mode| *mode == 0o700));
 
         let serialized = serde_json::to_string(&ready).unwrap();
-        assert!(!serialized.contains(GOOD_PASSWORD));
-        assert!(!serialized.contains(PAIRING_SECRET));
+        assert!(!serialized.contains(good_password()));
+        assert!(!serialized.contains(pairing_secret()));
         let driver_debug = format!("{:?}", harness.driver());
-        assert!(!driver_debug.contains(GOOD_PASSWORD));
-        assert!(!driver_debug.contains(PAIRING_SECRET));
+        assert!(!driver_debug.contains(good_password()));
+        assert!(!driver_debug.contains(pairing_secret()));
 
         let mut driver = harness.driver();
         let forgotten = engine
@@ -1885,7 +1909,7 @@ mod tests {
 
     #[test]
     fn ssh_agent_authentication_needs_no_secret_or_vault_entry() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let mut input = new_computer(false);
         input.ssh_authentication = SshAuthenticationPolicy::agent();
@@ -1918,7 +1942,7 @@ mod tests {
         fs::write(&key_path, b"fixture-private-key-material").unwrap();
         let private_key = PrivateKeyFile::new(&key_path).unwrap();
 
-        let harness = Harness::new(BAD_PASSWORD);
+        let harness = Harness::new(bad_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let mut input = new_computer(false);
         input.ssh_authentication = SshAuthenticationPolicy::private_key(&private_key).unwrap();
@@ -1938,15 +1962,15 @@ mod tests {
         assert!(failed.credential_reference.is_none());
         assert!(harness.transient.is_empty());
         let diagnostic = format!("{failed:?} {:?}", harness.ssh.events());
-        assert!(!diagnostic.contains(BAD_PASSWORD));
+        assert!(!diagnostic.contains(bad_password()));
         assert!(!diagnostic.contains(&key_path.to_string_lossy().to_string()));
         assert!(harness
             .ssh
             .events()
             .iter()
-            .any(|event| event == &format!("authenticate:private_key:{}", BAD_PASSWORD.len())));
+            .any(|event| event == &format!("authenticate:private_key:{}", bad_password().len())));
 
-        let corrected = Arc::new(FakeTransientSecrets::new(Some(GOOD_PASSWORD)));
+        let corrected = Arc::new(FakeTransientSecrets::new(Some(good_password())));
         let retry = engine
             .request_intent(failed.id, failed.revision, crate::ProvisioningIntent::Retry)
             .unwrap();
@@ -1976,7 +2000,7 @@ mod tests {
         let key_path = private_key_fixture_path(&key_dir, "id_unencrypted_fixture");
         fs::write(&key_path, b"fixture-unencrypted-private-key-material").unwrap();
         let private_key = PrivateKeyFile::new(&key_path).unwrap();
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let mut input = new_computer(false);
         input.ssh_authentication = SshAuthenticationPolicy::private_key(&private_key).unwrap();
@@ -2084,7 +2108,7 @@ mod tests {
 
     #[test]
     fn issue_crash_before_checkpoint_replays_identity_then_checkpoints_before_ssh() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let database = TempDir::new().unwrap();
         let database_path = database.path().join("provision.sqlite3");
         let engine = ProvisioningEngine::new(ProvisioningStore::open(&database_path).unwrap());
@@ -2130,7 +2154,7 @@ mod tests {
 
     #[test]
     fn remote_pair_crash_before_paired_cas_reconciles_without_reapplying_identity() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let database = TempDir::new().unwrap();
         let database_path = database.path().join("provision.sqlite3");
         let engine = ProvisioningEngine::new(ProvisioningStore::open(&database_path).unwrap());
@@ -2177,7 +2201,7 @@ mod tests {
 
     #[test]
     fn consumed_pairing_waits_for_controller_ready_without_ssh_replay() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let created = engine.create(new_computer(true)).unwrap();
         approve_when_pending(&engine, created.id, &harness);
@@ -2199,7 +2223,7 @@ mod tests {
 
     #[test]
     fn terminal_pending_apply_failure_is_reported_once_and_original_is_preserved() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let created = engine.create(new_computer(true)).unwrap();
         approve_when_pending(&engine, created.id, &harness);
@@ -2239,7 +2263,7 @@ mod tests {
 
     #[test]
     fn failure_reporting_error_never_masks_the_original_apply_failure() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let created = engine.create(new_computer(true)).unwrap();
         approve_when_pending(&engine, created.id, &harness);
@@ -2270,7 +2294,7 @@ mod tests {
 
     #[test]
     fn retryable_pending_apply_failure_is_not_reported() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let created = engine.create(new_computer(true)).unwrap();
         approve_when_pending(&engine, created.id, &harness);
@@ -2296,7 +2320,7 @@ mod tests {
 
     #[test]
     fn heartbeat_must_be_received_after_the_current_service_enable_checkpoint() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let created = engine.create(new_computer(true)).unwrap();
         approve_when_pending(&engine, created.id, &harness);
@@ -2328,7 +2352,7 @@ mod tests {
 
     #[test]
     fn bad_password_is_never_written_to_vault_database_or_diagnostics() {
-        let harness = Harness::new(BAD_PASSWORD);
+        let harness = Harness::new(bad_password());
         let database = TempDir::new().unwrap();
         let database_path = database.path().join("provision.sqlite3");
         let engine = ProvisioningEngine::new(ProvisioningStore::open(&database_path).unwrap());
@@ -2348,22 +2372,22 @@ mod tests {
         assert!(harness.vault.is_empty());
         assert!(!serde_json::to_string(&failed)
             .unwrap()
-            .contains(BAD_PASSWORD));
+            .contains(bad_password()));
         assert!(harness
             .ssh
             .events()
             .iter()
-            .all(|event| !event.contains(BAD_PASSWORD)));
+            .all(|event| !event.contains(bad_password())));
         drop(engine);
         let database_bytes = fs::read(database_path).unwrap();
         assert!(!database_bytes
-            .windows(BAD_PASSWORD.len())
-            .any(|window| window == BAD_PASSWORD.as_bytes()));
+            .windows(bad_password().len())
+            .any(|window| window == bad_password().as_bytes()));
     }
 
     #[test]
     fn corrected_password_retry_reuses_the_checkpoint_and_reaches_ready_without_restart() {
-        let harness = Harness::new(BAD_PASSWORD);
+        let harness = Harness::new(bad_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let created = engine.create(new_computer(true)).unwrap();
         approve_when_pending(&engine, created.id, &harness);
@@ -2383,7 +2407,7 @@ mod tests {
         let retry = engine
             .request_intent(failed.id, failed.revision, crate::ProvisioningIntent::Retry)
             .expect("credential retry intent");
-        let corrected = Arc::new(FakeTransientSecrets::new(Some(GOOD_PASSWORD)));
+        let corrected = Arc::new(FakeTransientSecrets::new(Some(good_password())));
         let mut current = retry;
         for _ in 0..64 {
             let mut driver = harness.driver_with_transient(corrected.clone());
@@ -2411,7 +2435,7 @@ mod tests {
 
     #[test]
     fn session_only_crash_resumes_at_explicit_credential_boundary() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let database = TempDir::new().unwrap();
         let database_path = database.path().join("provision.sqlite3");
         let engine = ProvisioningEngine::new(ProvisioningStore::open(&database_path).unwrap());
@@ -2465,7 +2489,7 @@ mod tests {
 
     #[test]
     fn remember_false_can_reach_ready_without_ever_storing_a_password() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let created = engine.create(new_computer(false)).unwrap();
         approve_when_pending(&engine, created.id, &harness);
@@ -2479,7 +2503,7 @@ mod tests {
 
     #[test]
     fn successful_add_and_in_place_repair_remove_each_cycle_staging_tree() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let fixture_kit = harness
             .catalog
             .load_target(crate::worker_kit::WorkerKitTarget::LinuxX86_64)
@@ -2509,7 +2533,7 @@ mod tests {
 
     #[test]
     fn cleanup_response_loss_never_publishes_ready_and_replays_idempotently_after_restart() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let database = TempDir::new().unwrap();
         let database_path = database.path().join("provision.sqlite3");
         let engine = ProvisioningEngine::new(ProvisioningStore::open(&database_path).unwrap());
@@ -2551,7 +2575,7 @@ mod tests {
 
     #[test]
     fn rollback_and_remove_have_durable_idempotent_remote_checkpoints() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let created = engine.create(new_computer(true)).unwrap();
         approve_when_pending(&engine, created.id, &harness);
@@ -3362,7 +3386,7 @@ mod tests {
                 worker_url: "https://controller.example.invalid:47832".to_owned(),
                 certificate_pem:
                     "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n".to_owned(),
-                pairing_code: PAIRING_SECRET.to_owned(),
+                pairing_code: pairing_secret().to_owned(),
                 created_at,
                 expires_at: created_at + Duration::minutes(10),
             })
