@@ -24,6 +24,15 @@ param(
 
     [string]$WorkerPublicHost,
 
+    [string]$WorkerBindHost,
+
+    [ValidateRange(0, 2147483647)]
+    [int]$WorkerInterfaceIndex = 0,
+
+    [string]$WorkerControllerHostName,
+
+    [string[]]$WorkerPrivateAddress,
+
     [ValidateRange(1, 65535)]
     [int]$WorkerListenPort = 47832,
 
@@ -88,6 +97,8 @@ $script:FirewallRuleGroup = 'ClusterYourCodex'
 $script:FirewallRuleDescription = 'ClusterYourCodex owned managed-worker TLS listener'
 $script:FirewallReceiptSchema = 'cyc.dev/windows-firewall-receipt/v1'
 $script:FirewallLifecycleName = 'external-elevated-helper'
+$script:ManagedWorkerNetworkPlanSchema = 'cyc.dev/windows-managed-worker-network/v1'
+$script:ManagedWorkerIdentityVersion = 'managed-worker-v2'
 $script:UninstallRegistryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ClusterYourCodex'
 $script:RequiredExecutables = @('ClusterYourCodex.exe', 'cyc-controller.exe', 'cyc.exe')
 $script:AgentsBeginMarker = '<!-- CLUSTERYOURCODEX-MANAGED:BEGIN -->'
@@ -1984,36 +1995,494 @@ function Assert-CycManifestInitiatorBinding {
     }
 }
 
-function Get-PreferredWorkerPublicHost {
-    param([string]$RequestedHost)
-    $hostValue = if ([string]::IsNullOrWhiteSpace($RequestedHost)) { $null } else { $RequestedHost.Trim() }
-    if (-not $hostValue) {
-        try {
-            $configurations = @(Get-NetIPConfiguration -ErrorAction Stop | Where-Object {
-                $_.NetAdapter.Status -eq 'Up' -and $_.IPv4Address
-            })
-            $withGateway = @($configurations | Where-Object IPv4DefaultGateway)
-            $selected = @($withGateway + $configurations | Select-Object -Unique | Select-Object -First 1)
-            if ($selected.Count -gt 0) {
-                $hostValue = [string]$selected[0].IPv4Address.IPAddress
-            }
-        } catch {
-            # A minimal Windows image may not expose NetTCPIP. DNS hostname is
-            # the deterministic fallback and is encoded into the certificate SAN.
+function ConvertTo-CycCanonicalHost {
+    param(
+        [Parameter(Mandatory = $true)][string]$HostValue,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    if ($HostValue.Length -gt 255 -or $HostValue -match '[\x00-\x1f\x7f]' -or
+        -not $HostValue.IsNormalized([Text.NormalizationForm]::FormC)) {
+        throw "$Label is not a portable DNS name or IP literal."
+    }
+    $value = $HostValue.Trim([char[]]@(' '))
+    if ([string]::IsNullOrWhiteSpace($value) -or $value -cmatch '[^\x20-\x7e]') {
+        throw "$Label is not a portable DNS name or IP literal."
+    }
+    $parsedAddress = $null
+    if ([System.Net.IPAddress]::TryParse($value, [ref]$parsedAddress)) {
+        if ($value.Contains('%') -or $parsedAddress.IsIPv4MappedToIPv6) {
+            throw "$Label must not use a scoped or IPv4-mapped IPv6 literal."
+        }
+        return $parsedAddress.ToString().ToLowerInvariant()
+    }
+
+    if ($value.EndsWith('.', [System.StringComparison]::Ordinal)) {
+        $value = $value.Substring(0, $value.Length - 1)
+    }
+    if ([string]::IsNullOrWhiteSpace($value) -or $value.Length -gt 253 -or
+        $value.EndsWith('.', [System.StringComparison]::Ordinal)) {
+        throw "$Label is not a portable DNS name or IP literal."
+    }
+    foreach ($dnsLabel in @($value.Split('.'))) {
+        if ($dnsLabel.Length -lt 1 -or $dnsLabel.Length -gt 63 -or
+            $dnsLabel -cnotmatch '^(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,61}[A-Za-z0-9])$') {
+            throw "$Label is not a portable DNS name or IP literal."
         }
     }
-    if (-not $hostValue) {
-        $hostValue = [System.Net.Dns]::GetHostName()
+    return $value.ToLowerInvariant()
+}
+
+function ConvertTo-CycCanonicalIpAddress {
+    param(
+        [Parameter(Mandatory = $true)][string]$Address,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $canonical = ConvertTo-CycCanonicalHost -HostValue $Address -Label $Label
+    $parsedAddress = $null
+    if (-not [System.Net.IPAddress]::TryParse($canonical, [ref]$parsedAddress)) {
+        throw "$Label must be an IP literal."
     }
-    if ($hostValue.Contains('"') -or $hostValue.Contains("`r") -or $hostValue.Contains("`n") -or
-        $hostValue.Contains('/') -or $hostValue.Contains('\') -or $hostValue.Contains('@')) {
-        throw 'WorkerPublicHost contains characters that are not valid in a host name.'
+    return $parsedAddress.ToString().ToLowerInvariant()
+}
+
+function Test-CycPrivateLanAddress {
+    param([Parameter(Mandatory = $true)][string]$Address)
+    $parsedAddress = $null
+    if (-not [System.Net.IPAddress]::TryParse($Address, [ref]$parsedAddress)) { return $false }
+    $bytes = $parsedAddress.GetAddressBytes()
+    if ($parsedAddress.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+        return $bytes[0] -eq 10 -or
+            ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) -or
+            ($bytes[0] -eq 192 -and $bytes[1] -eq 168)
     }
-    $kind = [Uri]::CheckHostName($hostValue)
-    if ($kind -eq [UriHostNameType]::Unknown) {
-        throw "WorkerPublicHost is not a valid DNS name or IP address: $hostValue"
+    if ($parsedAddress.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+        return ($bytes[0] -band 0xfe) -eq 0xfc
     }
-    return $hostValue
+    return $false
+}
+
+function Get-CycSortedUniqueHosts {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Hosts)
+    $values = New-Object System.Collections.Generic.List[string]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $hostIndex = 0
+    foreach ($hostValue in $Hosts) {
+        $canonical = ConvertTo-CycCanonicalHost `
+            -HostValue ([string]$hostValue) `
+            -Label "Identity host at index $hostIndex"
+        if ($seen.Add($canonical)) { [void]$values.Add($canonical) }
+        $hostIndex++
+    }
+    $values.Sort([System.StringComparer]::Ordinal)
+    return ,$values.ToArray()
+}
+
+function Get-CycNetworkConfigurationProperty {
+    param(
+        [Parameter(Mandatory = $true)]$Object,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    if ($Object -and $Object.PSObject.Properties[$Name]) { return $Object.$Name }
+    return $null
+}
+
+function Get-CycNetworkInterfaceMetric {
+    param([Parameter(Mandatory = $true)]$Configuration)
+    $metrics = @()
+    foreach ($interfaceProperty in @('NetIPv4Interface', 'NetIPv6Interface')) {
+        $interface = Get-CycNetworkConfigurationProperty -Object $Configuration -Name $interfaceProperty
+        if ($interface -and $interface.PSObject.Properties['InterfaceMetric']) {
+            $candidate = 0
+            if ([int]::TryParse([string]$interface.InterfaceMetric, [ref]$candidate) -and $candidate -ge 0) {
+                $metrics += $candidate
+            }
+        }
+    }
+    if ($metrics.Count -eq 0) { return [int]::MaxValue }
+    return [int](($metrics | Measure-Object -Minimum).Minimum)
+}
+
+function Get-CycPrivateNetworkCandidates {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Configurations)
+    $candidates = @()
+    foreach ($configuration in $Configurations) {
+        $adapter = Get-CycNetworkConfigurationProperty -Object $configuration -Name 'NetAdapter'
+        $status = if ($adapter) { [string](Get-CycNetworkConfigurationProperty -Object $adapter -Name 'Status') } else { '' }
+        if ($status -cne 'Up') { continue }
+        $interfaceIndex = 0
+        $rawInterfaceIndex = Get-CycNetworkConfigurationProperty -Object $configuration -Name 'InterfaceIndex'
+        if ($null -eq $rawInterfaceIndex -and $adapter) {
+            $rawInterfaceIndex = Get-CycNetworkConfigurationProperty -Object $adapter -Name 'ifIndex'
+        }
+        if (-not [int]::TryParse([string]$rawInterfaceIndex, [ref]$interfaceIndex) -or $interfaceIndex -lt 1) {
+            continue
+        }
+        $hasDefaultGateway = $null -ne (Get-CycNetworkConfigurationProperty -Object $configuration -Name 'IPv4DefaultGateway') -or
+            $null -ne (Get-CycNetworkConfigurationProperty -Object $configuration -Name 'IPv6DefaultGateway')
+        $metric = Get-CycNetworkInterfaceMetric -Configuration $configuration
+        foreach ($propertyName in @('IPv4Address', 'IPv6Address')) {
+            foreach ($addressRecord in @(Get-CycNetworkConfigurationProperty -Object $configuration -Name $propertyName)) {
+                if (-not $addressRecord) { continue }
+                $addressState = [string](Get-CycNetworkConfigurationProperty -Object $addressRecord -Name 'AddressState')
+                if ($addressState -notin @('Preferred', 'Deprecated')) {
+                    continue
+                }
+                $skipAsSource = Get-CycNetworkConfigurationProperty -Object $addressRecord -Name 'SkipAsSource'
+                if (-not ($skipAsSource -is [bool]) -or [bool]$skipAsSource) { continue }
+                $rawAddress = [string](Get-CycNetworkConfigurationProperty -Object $addressRecord -Name 'IPAddress')
+                if ([string]::IsNullOrWhiteSpace($rawAddress)) { continue }
+                try { $canonicalAddress = ConvertTo-CycCanonicalIpAddress -Address $rawAddress -Label 'LAN address' } catch { continue }
+                if (-not (Test-CycPrivateLanAddress -Address $canonicalAddress)) { continue }
+                $parsedAddress = [System.Net.IPAddress]::Parse($canonicalAddress)
+                $candidates += [PSCustomObject]@{
+                    interfaceIndex = $interfaceIndex
+                    defaultRank = if ($hasDefaultGateway) { 0 } else { 1 }
+                    interfaceMetric = $metric
+                    familyRank = if ($parsedAddress.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { 0 } else { 1 }
+                    address = $canonicalAddress
+                }
+            }
+        }
+    }
+    return @($candidates)
+}
+
+function Get-CycFallbackNetworkConfigurations {
+    # The NetTCPIP PowerShell module is absent on some stripped-down Windows
+    # images (including the GitHub Windows packaging runner).  Keep discovery
+    # fail-closed, but use the .NET networking surface as an equivalent
+    # read-only source instead of making a valid private-LAN install depend on
+    # one optional cmdlet module.
+    $configurations = New-Object System.Collections.Generic.List[object]
+    foreach ($adapter in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+        if ($adapter.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) {
+            continue
+        }
+        try { $properties = $adapter.GetIPProperties() } catch { continue }
+        $ipv4Properties = $null
+        $ipv6Properties = $null
+        try { $ipv4Properties = $properties.GetIPv4Properties() } catch { }
+        try { $ipv6Properties = $properties.GetIPv6Properties() } catch { }
+        $interfaceIndex = 0
+        if ($ipv4Properties) {
+            $interfaceIndex = [int]$ipv4Properties.Index
+        } elseif ($ipv6Properties) {
+            $interfaceIndex = [int]$ipv6Properties.Index
+        }
+        if ($interfaceIndex -lt 1) { continue }
+
+        $ipv4Addresses = @($properties.UnicastAddresses | Where-Object {
+            $_.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork
+        } | ForEach-Object {
+            [PSCustomObject]@{
+                IPAddress = [string]$_.Address
+                AddressState = 'Preferred'
+                SkipAsSource = $false
+            }
+        })
+        $ipv6Addresses = @($properties.UnicastAddresses | Where-Object {
+            $_.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6
+        } | ForEach-Object {
+            [PSCustomObject]@{
+                IPAddress = [string]$_.Address
+                AddressState = 'Preferred'
+                SkipAsSource = $false
+            }
+        })
+        if ($ipv4Addresses.Count -eq 0 -and $ipv6Addresses.Count -eq 0) { continue }
+
+        $ipv4Gateway = @($properties.GatewayAddresses | Where-Object {
+            $_.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork
+        } | Select-Object -First 1 | ForEach-Object {
+            [PSCustomObject]@{ NextHop = [string]$_.Address }
+        })
+        $ipv6Gateway = @($properties.GatewayAddresses | Where-Object {
+            $_.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6
+        } | Select-Object -First 1 | ForEach-Object {
+            [PSCustomObject]@{ NextHop = [string]$_.Address }
+        })
+        $metric = [int]::MaxValue
+        $configurations.Add([PSCustomObject]@{
+            InterfaceIndex = $interfaceIndex
+            NetAdapter = [PSCustomObject]@{ Status = 'Up'; ifIndex = $interfaceIndex }
+            IPv4DefaultGateway = if ($ipv4Gateway.Count -gt 0) { $ipv4Gateway[0] } else { $null }
+            IPv6DefaultGateway = if ($ipv6Gateway.Count -gt 0) { $ipv6Gateway[0] } else { $null }
+            NetIPv4Interface = [PSCustomObject]@{ InterfaceMetric = $metric }
+            NetIPv6Interface = [PSCustomObject]@{ InterfaceMetric = $metric }
+            IPv4Address = $ipv4Addresses
+            IPv6Address = $ipv6Addresses
+        })
+    }
+    return @($configurations.ToArray())
+}
+
+function New-CycManagedWorkerNetworkPlan {
+    param(
+        [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$InterfaceIndex,
+        [Parameter(Mandatory = $true)][string]$BindHost,
+        [Parameter(Mandatory = $true)][string]$PublicHost,
+        [Parameter(Mandatory = $true)][string]$ControllerHostName,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$PrivateAddresses,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$ListenPort
+    )
+    $canonicalBindHost = ConvertTo-CycCanonicalIpAddress -Address $BindHost -Label 'WorkerBindHost'
+    if (-not (Test-CycPrivateLanAddress -Address $canonicalBindHost)) {
+        throw 'WorkerBindHost must be an RFC1918 IPv4 or ULA IPv6 address.'
+    }
+    $canonicalPublicHost = ConvertTo-CycCanonicalHost -HostValue $PublicHost -Label 'WorkerPublicHost'
+    $publicAddress = $null
+    if ([System.Net.IPAddress]::TryParse($canonicalPublicHost, [ref]$publicAddress) -and
+        -not [string]::Equals($canonicalPublicHost, $canonicalBindHost, [System.StringComparison]::Ordinal)) {
+        throw 'An IP-literal WorkerPublicHost must exactly match WorkerBindHost.'
+    }
+    $canonicalControllerHostName = ConvertTo-CycCanonicalHost `
+        -HostValue $ControllerHostName `
+        -Label 'Controller host name'
+    $controllerAddress = $null
+    if ([System.Net.IPAddress]::TryParse($canonicalControllerHostName, [ref]$controllerAddress)) {
+        throw 'Controller host name must be a portable DNS hostname.'
+    }
+    [string[]]$canonicalPrivateAddresses = Get-CycSortedUniqueHosts -Hosts @($PrivateAddresses)
+    if ($canonicalPrivateAddresses.Count -lt 1) {
+        throw 'The selected interface has no RFC1918 or ULA address.'
+    }
+    foreach ($privateAddress in $canonicalPrivateAddresses) {
+        $parsedPrivateAddress = $null
+        if (-not [System.Net.IPAddress]::TryParse($privateAddress, [ref]$parsedPrivateAddress) -or
+            -not (Test-CycPrivateLanAddress -Address $privateAddress)) {
+            throw 'WorkerPrivateAddress contains a non-private or non-IP value.'
+        }
+    }
+    if ($canonicalPrivateAddresses -cnotcontains $canonicalBindHost) {
+        throw 'WorkerBindHost is not part of the selected interface private-address set.'
+    }
+    [string[]]$identityHosts = Get-CycSortedUniqueHosts -Hosts @(
+        $canonicalPrivateAddresses + @('127.0.0.1', '::1', $canonicalControllerHostName, $canonicalPublicHost)
+    )
+    if ($identityHosts.Count -lt 4 -or $identityHosts.Count -gt 32) {
+        throw 'The immutable controller identity SAN set must contain between 4 and 32 hosts.'
+    }
+    return [PSCustomObject][ordered]@{
+        schemaVersion = $script:ManagedWorkerNetworkPlanSchema
+        identityVersion = $script:ManagedWorkerIdentityVersion
+        selectedInterfaceIndex = $InterfaceIndex
+        controllerHostName = $canonicalControllerHostName
+        bindHost = $canonicalBindHost
+        publicHost = $canonicalPublicHost
+        listenPort = $ListenPort
+        privateAddresses = [object[]]$canonicalPrivateAddresses
+        identityHosts = [object[]]$identityHosts
+    }
+}
+
+function Assert-CycManagedWorkerNetworkPlan {
+    param([Parameter(Mandatory = $true)]$NetworkPlan)
+    [string[]]$expectedProperties = @(
+        'bindHost', 'controllerHostName', 'identityHosts', 'identityVersion', 'listenPort',
+        'privateAddresses', 'publicHost', 'schemaVersion', 'selectedInterfaceIndex'
+    )
+    [string[]]$actualProperties = @($NetworkPlan.PSObject.Properties.Name)
+    [Array]::Sort($expectedProperties, [System.StringComparer]::Ordinal)
+    [Array]::Sort($actualProperties, [System.StringComparer]::Ordinal)
+    $interfaceIndexValue = $NetworkPlan.selectedInterfaceIndex
+    $listenPortValue = $NetworkPlan.listenPort
+    if ([string]::Join(',', $actualProperties) -cne [string]::Join(',', $expectedProperties) -or
+        [string]$NetworkPlan.schemaVersion -cne $script:ManagedWorkerNetworkPlanSchema -or
+        [string]$NetworkPlan.identityVersion -cne $script:ManagedWorkerIdentityVersion -or
+        -not ($NetworkPlan.schemaVersion -is [string]) -or
+        -not ($NetworkPlan.identityVersion -is [string]) -or
+        -not ($NetworkPlan.bindHost -is [string]) -or
+        -not ($NetworkPlan.publicHost -is [string]) -or
+        -not ($NetworkPlan.controllerHostName -is [string]) -or
+        -not ($interfaceIndexValue -is [int] -or $interfaceIndexValue -is [long]) -or
+        -not ($listenPortValue -is [int] -or $listenPortValue -is [long]) -or
+        -not ($NetworkPlan.privateAddresses -is [System.Array]) -or
+        -not ($NetworkPlan.identityHosts -is [System.Array])) {
+        throw 'Managed-worker network plan is malformed or unsupported.'
+    }
+    $normalized = New-CycManagedWorkerNetworkPlan `
+        -InterfaceIndex ([int]$NetworkPlan.selectedInterfaceIndex) `
+        -BindHost ([string]$NetworkPlan.bindHost) `
+        -PublicHost ([string]$NetworkPlan.publicHost) `
+        -ControllerHostName ([string]$NetworkPlan.controllerHostName) `
+        -PrivateAddresses @($NetworkPlan.privateAddresses | ForEach-Object { [string]$_ }) `
+        -ListenPort ([int]$NetworkPlan.listenPort)
+    if ([string]$NetworkPlan.bindHost -cne [string]$normalized.bindHost -or
+        [string]$NetworkPlan.publicHost -cne [string]$normalized.publicHost -or
+        [string]$NetworkPlan.controllerHostName -cne [string]$normalized.controllerHostName) {
+        throw 'Managed-worker network plan hosts are not canonical.'
+    }
+    [string[]]$rawPrivateAddresses = @($NetworkPlan.privateAddresses | ForEach-Object { [string]$_ })
+    [string[]]$reportedPrivateAddresses = @(
+        $rawPrivateAddresses | ForEach-Object {
+            ConvertTo-CycCanonicalIpAddress -Address ([string]$_) -Label 'WorkerPrivateAddress'
+        }
+    )
+    [Array]::Sort($reportedPrivateAddresses, [System.StringComparer]::Ordinal)
+    if ([string]::Join("`n", $rawPrivateAddresses) -cne [string]::Join("`n", $reportedPrivateAddresses) -or
+        $reportedPrivateAddresses.Count -ne @($normalized.privateAddresses).Count -or
+        [string]::Join("`n", $reportedPrivateAddresses) -cne
+            [string]::Join("`n", @($normalized.privateAddresses))) {
+        throw 'Managed-worker network plan private-address set is not exact.'
+    }
+    [string[]]$rawIdentityHosts = @($NetworkPlan.identityHosts | ForEach-Object { [string]$_ })
+    [string[]]$reportedIdentityHosts = Get-CycSortedUniqueHosts -Hosts @(
+        $rawIdentityHosts
+    )
+    if ([string]::Join("`n", $rawIdentityHosts) -cne [string]::Join("`n", $reportedIdentityHosts) -or
+        $reportedIdentityHosts.Count -ne @($NetworkPlan.identityHosts).Count -or
+        [string]::Join("`n", $reportedIdentityHosts) -cne [string]::Join("`n", @($normalized.identityHosts))) {
+        throw 'Managed-worker network plan identity SAN set is not exact.'
+    }
+    return $normalized
+}
+
+function Get-CycReusableManagedWorkerNetworkPlan {
+    param([AllowNull()]$Manifest)
+    if (-not $Manifest) {
+        return $null
+    }
+    if (-not $Manifest.PSObject.Properties['managedWorker'] -or
+        -not $Manifest.managedWorker.PSObject.Properties['enabled'] -or
+        -not ($Manifest.managedWorker.enabled -is [bool])) {
+        throw 'Installed manifest managed-worker state is malformed.'
+    }
+    if (-not [bool]$Manifest.managedWorker.enabled) { return $null }
+    if (-not $Manifest.managedWorker.PSObject.Properties['networkPlan']) {
+        if ([string]$Manifest.productVersion -cmatch '^0\.1\.0-preview\.[123]$') {
+            # preview.1-preview.3 used a wildcard listener and a one-host identity
+            # under data\tls. The v1 network plan intentionally migrates into a
+            # separate identity directory so core rollback can restore that exact
+            # predecessor without any in-place certificate rotation.
+            return $null
+        }
+        throw 'Installed managed-worker state is missing its immutable network plan.'
+    }
+    return Assert-CycManagedWorkerNetworkPlan -NetworkPlan $Manifest.managedWorker.networkPlan
+}
+
+function New-CycDiscoveredManagedWorkerNetworkPlan {
+    param(
+        [string]$RequestedPublicHost,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$ListenPort,
+        [AllowNull()][object[]]$Configurations
+    )
+    $controllerHostName = ConvertTo-CycCanonicalHost `
+        -HostValue ([System.Net.Dns]::GetHostName()) `
+        -Label 'Controller host name'
+    $requestedHost = if ([string]::IsNullOrWhiteSpace($RequestedPublicHost)) {
+        $null
+    } else {
+        ConvertTo-CycCanonicalHost -HostValue $RequestedPublicHost -Label 'WorkerPublicHost'
+    }
+    $requestedAddress = $null
+    if ($requestedHost -and [System.Net.IPAddress]::TryParse($requestedHost, [ref]$requestedAddress) -and
+        -not (Test-CycPrivateLanAddress -Address $requestedHost)) {
+        throw 'An IP-literal WorkerPublicHost must be an assigned RFC1918 or ULA address.'
+    }
+    if ($null -eq $Configurations) {
+        $netIpConfiguration = Get-Command -Name 'Get-NetIPConfiguration' -CommandType Cmdlet -ErrorAction SilentlyContinue
+        if ($netIpConfiguration) {
+            try { $Configurations = @(Get-NetIPConfiguration -Detailed -ErrorAction Stop) } catch { $Configurations = $null }
+        }
+        if ($null -eq $Configurations) {
+            $Configurations = @(Get-CycFallbackNetworkConfigurations)
+        }
+    }
+    $candidates = @(Get-CycPrivateNetworkCandidates -Configurations @($Configurations))
+    if ($candidates.Count -eq 0) {
+        throw 'No active RFC1918 IPv4 or ULA IPv6 interface is available for the managed-worker listener.'
+    }
+    if ($requestedAddress) {
+        $requestedCandidates = @($candidates | Where-Object { [string]$_.address -ceq $requestedHost })
+        if ($requestedCandidates.Count -eq 0) {
+            throw 'WorkerPublicHost is not assigned to an active private-LAN interface.'
+        }
+        $selectedInterfaceIndex = [int](@($requestedCandidates | Sort-Object `
+            @{ Expression = 'defaultRank'; Ascending = $true },
+            @{ Expression = 'interfaceMetric'; Ascending = $true },
+            @{ Expression = 'interfaceIndex'; Ascending = $true } | Select-Object -First 1)[0].interfaceIndex)
+    } else {
+        $selectedInterfaceIndex = [int](@($candidates | Sort-Object `
+            @{ Expression = 'defaultRank'; Ascending = $true },
+            @{ Expression = 'interfaceMetric'; Ascending = $true },
+            @{ Expression = 'interfaceIndex'; Ascending = $true },
+            @{ Expression = 'familyRank'; Ascending = $true },
+            @{ Expression = 'address'; Ascending = $true } | Select-Object -First 1)[0].interfaceIndex)
+    }
+    $selectedCandidates = @($candidates | Where-Object { [int]$_.interfaceIndex -eq $selectedInterfaceIndex })
+    [string[]]$privateAddresses = Get-CycSortedUniqueHosts -Hosts @(
+        $selectedCandidates | ForEach-Object { [string]$_.address }
+    )
+    $bindHost = if ($requestedAddress) {
+        $requestedHost
+    } else {
+        [string](@($selectedCandidates | Sort-Object `
+            @{ Expression = 'familyRank'; Ascending = $true },
+            @{ Expression = 'address'; Ascending = $true } | Select-Object -First 1)[0].address)
+    }
+    $publicHost = if ($requestedHost) { $requestedHost } else { $bindHost }
+    return New-CycManagedWorkerNetworkPlan `
+        -InterfaceIndex $selectedInterfaceIndex `
+        -BindHost $bindHost `
+        -PublicHost $publicHost `
+        -ControllerHostName $controllerHostName `
+        -PrivateAddresses $privateAddresses `
+        -ListenPort $ListenPort
+}
+
+function Resolve-CycManagedWorkerNetworkPlan {
+    param(
+        [AllowNull()]$ExistingManifest,
+        [string]$RequestedPublicHost,
+        [string]$ExplicitBindHost,
+        [ValidateRange(0, 2147483647)][int]$ExplicitInterfaceIndex,
+        [string]$ExplicitControllerHostName,
+        [AllowNull()][string[]]$ExplicitPrivateAddresses,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$ListenPort
+    )
+    $reusable = Get-CycReusableManagedWorkerNetworkPlan -Manifest $ExistingManifest
+    $explicitPrivateAddressCount = 0
+    foreach ($unusedPrivateAddress in @($ExplicitPrivateAddresses)) { $explicitPrivateAddressCount++ }
+    $hasExplicit = -not [string]::IsNullOrWhiteSpace($ExplicitBindHost) -or
+        $ExplicitInterfaceIndex -ne 0 -or
+        -not [string]::IsNullOrWhiteSpace($ExplicitControllerHostName) -or
+        $explicitPrivateAddressCount -gt 0
+    $explicit = $null
+    if ($hasExplicit) {
+        if ([string]::IsNullOrWhiteSpace($ExplicitBindHost) -or
+            $ExplicitInterfaceIndex -lt 1 -or
+            [string]::IsNullOrWhiteSpace($ExplicitControllerHostName) -or
+            $explicitPrivateAddressCount -lt 1 -or
+            [string]::IsNullOrWhiteSpace($RequestedPublicHost)) {
+            throw 'Explicit managed-worker network-plan fields must be supplied together.'
+        }
+        $explicit = New-CycManagedWorkerNetworkPlan `
+            -InterfaceIndex $ExplicitInterfaceIndex `
+            -BindHost $ExplicitBindHost `
+            -PublicHost $RequestedPublicHost `
+            -ControllerHostName $ExplicitControllerHostName `
+            -PrivateAddresses $ExplicitPrivateAddresses `
+            -ListenPort $ListenPort
+    }
+    if ($reusable) {
+        if ($explicit) {
+            $reusedJson = $reusable | ConvertTo-Json -Depth 6 -Compress
+            $explicitJson = $explicit | ConvertTo-Json -Depth 6 -Compress
+            if ($reusedJson -cne $explicitJson) {
+                throw 'Repair attempted to replace the immutable managed-worker network plan.'
+            }
+        } elseif (-not [string]::IsNullOrWhiteSpace($RequestedPublicHost) -and
+            (ConvertTo-CycCanonicalHost -HostValue $RequestedPublicHost -Label 'WorkerPublicHost') -cne
+                [string]$reusable.publicHost) {
+            throw 'Repair attempted to replace the immutable WorkerPublicHost.'
+        }
+        return $reusable
+    }
+    if ($explicit) { return $explicit }
+    return New-CycDiscoveredManagedWorkerNetworkPlan `
+        -RequestedPublicHost $RequestedPublicHost `
+        -ListenPort $ListenPort
 }
 
 function ConvertTo-WorkerPublicOrigin {
@@ -2027,6 +2496,17 @@ function ConvertTo-WorkerPublicOrigin {
         $HostName
     }
     return "https://${urlHost}:$Port"
+}
+
+function ConvertTo-CycSocketAddress {
+    param(
+        [Parameter(Mandatory = $true)][string]$HostName,
+        [Parameter(Mandatory = $true)][int]$Port
+    )
+    $socketHost = if ([Uri]::CheckHostName($HostName) -eq [UriHostNameType]::IPv6) {
+        "[$HostName]"
+    } else { $HostName }
+    return "${socketHost}:$Port"
 }
 
 function Get-CycFirewallRuleName {
@@ -2045,10 +2525,15 @@ function Get-InstallPlan {
         [switch]$SkipCodexIntegration,
         [string]$CodexHome,
         [string]$WorkerPublicHost,
+        [string]$WorkerBindHost,
+        [ValidateRange(0, 2147483647)][int]$WorkerInterfaceIndex = 0,
+        [string]$WorkerControllerHostName,
+        [AllowNull()][string[]]$WorkerPrivateAddress,
         [ValidateRange(1, 65535)][int]$WorkerListenPort = 47832,
         [switch]$DisableManagedWorkerListener,
         [switch]$SkipFirewall,
         [switch]$DeferFirewall,
+        [AllowNull()]$ExistingManifest,
         [string]$InitiatingSid,
         [string]$InitiatingProfile,
         [string]$InitiatingLocalAppData,
@@ -2177,18 +2662,32 @@ function Get-InstallPlan {
         $FirewallRequestSha256 -cnotmatch '^[0-9a-f]{64}$') {
         throw 'Deferred firewall lifecycle request digest is invalid.'
     }
-    $publicHost = if ($managedWorkerEnabled) {
-        Get-PreferredWorkerPublicHost -RequestedHost $WorkerPublicHost
+    $networkPlan = if ($managedWorkerEnabled) {
+        Resolve-CycManagedWorkerNetworkPlan `
+            -ExistingManifest $ExistingManifest `
+            -RequestedPublicHost $WorkerPublicHost `
+            -ExplicitBindHost $WorkerBindHost `
+            -ExplicitInterfaceIndex $WorkerInterfaceIndex `
+            -ExplicitControllerHostName $WorkerControllerHostName `
+            -ExplicitPrivateAddresses $WorkerPrivateAddress `
+            -ListenPort $WorkerListenPort
     } else { $null }
+    $publicHost = if ($networkPlan) { [string]$networkPlan.publicHost } else { $null }
+    $resolvedWorkerListenPort = if ($networkPlan) { [int]$networkPlan.listenPort } else { $WorkerListenPort }
     $workerPublicUrl = if ($managedWorkerEnabled) {
-        ConvertTo-WorkerPublicOrigin -HostName $publicHost -Port $WorkerListenPort
+        ConvertTo-WorkerPublicOrigin -HostName $publicHost -Port $resolvedWorkerListenPort
     } else { $null }
-    $tlsDirectory = Join-Path $data 'tls'
+    $tlsRoot = Join-Path $data 'tls'
+    $tlsDirectory = Join-Path $tlsRoot $script:ManagedWorkerIdentityVersion
     $tlsCertificate = Join-Path $tlsDirectory 'controller.crt.pem'
     $tlsPrivateKey = Join-Path $tlsDirectory 'controller.key.pem'
+    $legacyTlsCertificate = Join-Path $tlsRoot 'controller.crt.pem'
+    $legacyTlsPrivateKey = Join-Path $tlsRoot 'controller.key.pem'
     $controllerArguments = '--bind 127.0.0.1:47831 --database "' + $controllerDatabase + '" --token-file "' + $controllerTokenFile + '"'
     if ($managedWorkerEnabled) {
-        $controllerArguments += ' --worker-bind 0.0.0.0:' + $WorkerListenPort
+        $controllerArguments += ' --worker-bind ' + (ConvertTo-CycSocketAddress `
+            -HostName ([string]$networkPlan.bindHost) `
+            -Port $resolvedWorkerListenPort)
         $controllerArguments += ' --worker-public-url "' + $workerPublicUrl + '"'
         $controllerArguments += ' --worker-cert "' + $tlsCertificate + '"'
         $controllerArguments += ' --worker-key "' + $tlsPrivateKey + '"'
@@ -2244,12 +2743,19 @@ function Get-InstallPlan {
         workerConfig = $workerConfigPath
         managedWorker = [PSCustomObject]@{
             enabled = $managedWorkerEnabled
+            networkPlan = $networkPlan
+            identityVersion = if ($networkPlan) { [string]$networkPlan.identityVersion } else { $null }
+            identityHosts = if ($networkPlan) { [object[]]@($networkPlan.identityHosts) } else { [object[]]@() }
+            bindHost = if ($networkPlan) { [string]$networkPlan.bindHost } else { $null }
             publicHost = $publicHost
             publicUrl = $workerPublicUrl
-            listenPort = $WorkerListenPort
+            listenPort = $resolvedWorkerListenPort
+            tlsRoot = $tlsRoot
             tlsDirectory = $tlsDirectory
             certificatePath = $tlsCertificate
             privateKeyPath = $tlsPrivateKey
+            legacyTlsCertificatePath = $legacyTlsCertificate
+            legacyTlsPrivateKeyPath = $legacyTlsPrivateKey
             identityCli = Join-Path $install 'cyc.exe'
             firewall = [PSCustomObject]@{
                 enabled = $firewallDesired
@@ -2262,7 +2768,7 @@ function Get-InstallPlan {
                 transactionId = if ($firewallDesired) { $FirewallTransactionId } else { $null }
                 requestSha256 = if ($firewallDesired) { $FirewallRequestSha256 } else { $null }
                 program = $controllerAction.executable
-                port = $WorkerListenPort
+                port = $resolvedWorkerListenPort
                 profile = 'Private'
                 remoteAddress = 'LocalSubnet'
                 protocol = 'TCP'
@@ -2527,31 +3033,12 @@ function Resolve-CycIdentityReportedPath {
     return Resolve-NormalizedPath $candidate
 }
 
-function Test-CycIdentityHostEquivalent {
-    param(
-        [Parameter(Mandatory = $true)][string]$ReportedHost,
-        [Parameter(Mandatory = $true)][string]$ExpectedHost
-    )
-    $reportedIp = $null
-    $expectedIp = $null
-    $reportedIsIp = [System.Net.IPAddress]::TryParse($ReportedHost, [ref]$reportedIp)
-    $expectedIsIp = [System.Net.IPAddress]::TryParse($ExpectedHost, [ref]$expectedIp)
-    if ($reportedIsIp -or $expectedIsIp) {
-        return $reportedIsIp -and $expectedIsIp -and $reportedIp.Equals($expectedIp)
-    }
-    return [string]::Equals(
-        $ReportedHost.TrimEnd('.'),
-        $ExpectedHost.TrimEnd('.'),
-        [System.StringComparison]::OrdinalIgnoreCase
-    )
-}
-
 function Assert-CycIdentityMetadata {
     param(
         [Parameter(Mandatory = $true)][AllowNull()]$Metadata,
         [Parameter(Mandatory = $true)][string]$ExpectedCertificatePath,
         [Parameter(Mandatory = $true)][string]$ExpectedPrivateKeyPath,
-        [Parameter(Mandatory = $true)][string]$ExpectedHost,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ExpectedHosts,
         [Parameter(Mandatory = $true)][ValidateSet('init', 'verify')][string]$Operation
     )
     if ($null -eq $Metadata) {
@@ -2605,12 +3092,14 @@ function Assert-CycIdentityMetadata {
     if ($fingerprint -cnotmatch '^[0-9a-f]{64}$') {
         throw "Controller TLS identity $Operation omitted its safe fingerprint."
     }
-    $subjectAltNames = @($Metadata.subjectAltNames | ForEach-Object { [string]$_ })
-    $expectedSan = @($subjectAltNames | Where-Object {
-        Test-CycIdentityHostEquivalent -ReportedHost $_ -ExpectedHost $ExpectedHost
-    })
-    if ($subjectAltNames.Count -lt 1 -or $expectedSan.Count -ne 1) {
-        throw "Controller TLS identity $Operation did not bind the expected host."
+    [string[]]$subjectAltNames = @($Metadata.subjectAltNames | ForEach-Object { [string]$_ })
+    [string[]]$canonicalSubjectAltNames = Get-CycSortedUniqueHosts -Hosts $subjectAltNames
+    [string[]]$canonicalExpectedHosts = Get-CycSortedUniqueHosts -Hosts @($ExpectedHosts)
+    if ($subjectAltNames.Count -ne $canonicalSubjectAltNames.Count -or
+        $canonicalExpectedHosts.Count -lt 1 -or
+        [string]::Join("`n", $canonicalSubjectAltNames) -cne
+            [string]::Join("`n", $canonicalExpectedHosts)) {
+        throw "Controller TLS identity $Operation did not bind the exact immutable SAN set."
     }
     return $fingerprint
 }
@@ -2618,14 +3107,46 @@ function Assert-CycIdentityMetadata {
 function Ensure-CycTlsIdentity {
     param([Parameter(Mandatory = $true)]$Plan)
     if (-not $Plan.managedWorker.enabled) {
-        return [PSCustomObject]@{ enabled = $false; created = $false; fingerprint = $null }
+        return [PSCustomObject]@{
+            enabled = $false
+            created = $false
+            fingerprint = $null
+            identityVersion = $null
+            legacyIdentityPreserved = $false
+            migratedFromLegacy = $false
+        }
     }
     $certificatePath = Resolve-NormalizedPath $Plan.managedWorker.certificatePath
     $privateKeyPath = Resolve-NormalizedPath $Plan.managedWorker.privateKeyPath
+    $tlsRoot = Resolve-NormalizedPath $Plan.managedWorker.tlsRoot
     $tlsDirectory = Resolve-NormalizedPath $Plan.managedWorker.tlsDirectory
-    [void](Assert-ChildPath -Root $Plan.dataRoot -Candidate $tlsDirectory)
+    $legacyCertificatePath = Resolve-NormalizedPath $Plan.managedWorker.legacyTlsCertificatePath
+    $legacyPrivateKeyPath = Resolve-NormalizedPath $Plan.managedWorker.legacyTlsPrivateKeyPath
+    [void](Assert-ChildPath -Root $Plan.dataRoot -Candidate $tlsRoot)
+    [void](Assert-ChildPath -Root $tlsRoot -Candidate $tlsDirectory)
     [void](Assert-ChildPath -Root $tlsDirectory -Candidate $certificatePath)
     [void](Assert-ChildPath -Root $tlsDirectory -Candidate $privateKeyPath)
+    [void](Assert-ChildPath -Root $tlsRoot -Candidate $legacyCertificatePath)
+    [void](Assert-ChildPath -Root $tlsRoot -Candidate $legacyPrivateKeyPath)
+    [string[]]$identityHosts = @($Plan.managedWorker.networkPlan.identityHosts | ForEach-Object { [string]$_ })
+    [string[]]$canonicalIdentityHosts = Get-CycSortedUniqueHosts -Hosts $identityHosts
+    if ($identityHosts.Count -ne $canonicalIdentityHosts.Count -or
+        [string]::Join("`n", $identityHosts) -cne [string]::Join("`n", $canonicalIdentityHosts)) {
+        throw 'Managed-worker identity hosts do not match the canonical immutable network plan.'
+    }
+
+    $legacyCertificateExists = Test-Path -LiteralPath $legacyCertificatePath -PathType Leaf
+    $legacyPrivateKeyExists = Test-Path -LiteralPath $legacyPrivateKeyPath -PathType Leaf
+    if ((Test-Path -LiteralPath $legacyCertificatePath) -and -not $legacyCertificateExists) {
+        throw 'Legacy controller TLS certificate path is not a regular file.'
+    }
+    if ((Test-Path -LiteralPath $legacyPrivateKeyPath) -and -not $legacyPrivateKeyExists) {
+        throw 'Legacy controller TLS private-key path is not a regular file.'
+    }
+    if ($legacyCertificateExists -xor $legacyPrivateKeyExists) {
+        throw 'Legacy controller TLS identity is incomplete; refusing an implicit migration.'
+    }
+    $legacyIdentityPreserved = $legacyCertificateExists -and $legacyPrivateKeyExists
     $certificateExists = Test-Path -LiteralPath $certificatePath -PathType Leaf
     $privateKeyExists = Test-Path -LiteralPath $privateKeyPath -PathType Leaf
     if ((Test-Path -LiteralPath $certificatePath) -and -not $certificateExists) {
@@ -2638,24 +3159,26 @@ function Ensure-CycTlsIdentity {
         throw 'Controller TLS identity is incomplete; refusing an implicit certificate rotation.'
     }
 
+    [void](New-Item -ItemType Directory -Path $tlsRoot -Force)
+    Set-PrivateDirectoryAcl -Path $tlsRoot
     [void](New-Item -ItemType Directory -Path $tlsDirectory -Force)
     Set-PrivateDirectoryAcl -Path $tlsDirectory
     $created = $false
     try {
         if (-not $certificateExists) {
+            [string[]]$initArguments = @('identity', 'init', '--output-dir', $tlsDirectory)
+            foreach ($identityHost in $canonicalIdentityHosts) {
+                $initArguments += @('--host', $identityHost)
+            }
             $result = Invoke-CycIdentityCommand `
                 -Executable $Plan.managedWorker.identityCli `
-                -Arguments @(
-                    'identity', 'init',
-                    '--output-dir', $tlsDirectory,
-                    '--host', [string]$Plan.managedWorker.publicHost
-                )
+                -Arguments $initArguments
             $created = $true
             [void](Assert-CycIdentityMetadata `
                 -Metadata $result `
                 -ExpectedCertificatePath $certificatePath `
                 -ExpectedPrivateKeyPath $privateKeyPath `
-                -ExpectedHost ([string]$Plan.managedWorker.publicHost) `
+                -ExpectedHosts $canonicalIdentityHosts `
                 -Operation init)
         }
         if (-not (Test-Path -LiteralPath $certificatePath -PathType Leaf) -or
@@ -2663,25 +3186,31 @@ function Ensure-CycTlsIdentity {
             throw 'Controller TLS identity files were not created atomically.'
         }
         Set-PrivateDirectoryAcl -Path $tlsDirectory
+        [string[]]$verifyArguments = @(
+            'identity', 'verify',
+            '--certificate', $certificatePath,
+            '--private-key', $privateKeyPath
+        )
+        foreach ($identityHost in $canonicalIdentityHosts) {
+            $verifyArguments += @('--host', $identityHost)
+        }
+        $verifyArguments += '--json'
         $verification = Invoke-CycIdentityCommand `
             -Executable $Plan.managedWorker.identityCli `
-            -Arguments @(
-                'identity', 'verify',
-                '--certificate', $certificatePath,
-                '--private-key', $privateKeyPath,
-                '--host', [string]$Plan.managedWorker.publicHost,
-                '--json'
-            )
+            -Arguments $verifyArguments
         $fingerprint = Assert-CycIdentityMetadata `
             -Metadata $verification `
             -ExpectedCertificatePath $certificatePath `
             -ExpectedPrivateKeyPath $privateKeyPath `
-            -ExpectedHost ([string]$Plan.managedWorker.publicHost) `
+            -ExpectedHosts $canonicalIdentityHosts `
             -Operation verify
         return [PSCustomObject]@{
             enabled = $true
             created = $created
             fingerprint = $fingerprint
+            identityVersion = [string]$Plan.managedWorker.identityVersion
+            legacyIdentityPreserved = $legacyIdentityPreserved
+            migratedFromLegacy = $created -and $legacyIdentityPreserved
         }
     } catch {
         $failure = $_
@@ -2689,6 +3218,13 @@ function Ensure-CycTlsIdentity {
             foreach ($path in @($privateKeyPath, $certificatePath)) {
                 if (Test-Path -LiteralPath $path -PathType Leaf) {
                     Remove-Item -LiteralPath $path -Force
+                }
+            }
+            if (Test-Path -LiteralPath $tlsDirectory -PathType Container) {
+                $tlsDirectoryItem = Get-Item -LiteralPath $tlsDirectory -Force
+                if (-not (Test-ReparsePoint $tlsDirectoryItem) -and
+                    -not (Get-ChildItem -LiteralPath $tlsDirectory -Force | Select-Object -First 1)) {
+                    Remove-Item -LiteralPath $tlsDirectory -Force
                 }
             }
         }
@@ -2706,6 +3242,15 @@ function Remove-NewCycTlsIdentity {
         $owned = Assert-ChildPath -Root $Plan.managedWorker.tlsDirectory -Candidate $path
         if (Test-Path -LiteralPath $owned -PathType Leaf) {
             Remove-Item -LiteralPath $owned -Force
+        }
+    }
+    $versionDirectory = Resolve-NormalizedPath $Plan.managedWorker.tlsDirectory
+    [void](Assert-ChildPath -Root $Plan.managedWorker.tlsRoot -Candidate $versionDirectory)
+    if (Test-Path -LiteralPath $versionDirectory -PathType Container) {
+        $versionItem = Get-Item -LiteralPath $versionDirectory -Force
+        if (-not (Test-ReparsePoint $versionItem) -and
+            -not (Get-ChildItem -LiteralPath $versionDirectory -Force | Select-Object -First 1)) {
+            Remove-Item -LiteralPath $versionDirectory -Force
         }
     }
 }
@@ -3200,7 +3745,12 @@ function Wait-CycManagedWorkerListenerReady {
         $stream = $null
         try {
             $client = New-Object System.Net.Sockets.TcpClient
-            $async = $client.BeginConnect('127.0.0.1', [int]$ManagedWorker.listenPort, $null, $null)
+            $async = $client.BeginConnect(
+                [string]$ManagedWorker.bindHost,
+                [int]$ManagedWorker.listenPort,
+                $null,
+                $null
+            )
             if (-not $async.AsyncWaitHandle.WaitOne(1000)) {
                 throw 'TLS listener connect timed out.'
             }
@@ -3961,12 +4511,41 @@ function Write-InstallManifest {
         tasks = @($Plan.tasks | Where-Object enabled | ForEach-Object { $_.name })
         managedWorker = [ordered]@{
             enabled = $Plan.managedWorker.enabled
+            networkPlan = if ($Plan.managedWorker.enabled) {
+                [ordered]@{
+                    schemaVersion = [string]$Plan.managedWorker.networkPlan.schemaVersion
+                    identityVersion = [string]$Plan.managedWorker.networkPlan.identityVersion
+                    selectedInterfaceIndex = [int]$Plan.managedWorker.networkPlan.selectedInterfaceIndex
+                    controllerHostName = [string]$Plan.managedWorker.networkPlan.controllerHostName
+                    bindHost = [string]$Plan.managedWorker.networkPlan.bindHost
+                    publicHost = [string]$Plan.managedWorker.networkPlan.publicHost
+                    listenPort = [int]$Plan.managedWorker.networkPlan.listenPort
+                    privateAddresses = [object[]]@($Plan.managedWorker.networkPlan.privateAddresses)
+                    identityHosts = [object[]]@($Plan.managedWorker.networkPlan.identityHosts)
+                }
+            } else { $null }
+            identityVersion = $Plan.managedWorker.identityVersion
+            identityHosts = [object[]]@($Plan.managedWorker.identityHosts)
+            bindHost = $Plan.managedWorker.bindHost
             publicHost = $Plan.managedWorker.publicHost
             publicUrl = $Plan.managedWorker.publicUrl
             listenPort = $Plan.managedWorker.listenPort
+            tlsDirectory = $Plan.managedWorker.tlsDirectory
             certificatePath = $Plan.managedWorker.certificatePath
             privateKeyPath = $Plan.managedWorker.privateKeyPath
             certificateFingerprint = if ($TlsIdentityResult) { $TlsIdentityResult.fingerprint } else { $null }
+            legacyIdentityPreserved = if ($TlsIdentityResult) {
+                [bool](Get-CycObjectProperty `
+                    -Object $TlsIdentityResult `
+                    -Name 'legacyIdentityPreserved' `
+                    -Default $false)
+            } else { $false }
+            migratedFromLegacy = if ($TlsIdentityResult) {
+                [bool](Get-CycObjectProperty `
+                    -Object $TlsIdentityResult `
+                    -Name 'migratedFromLegacy' `
+                    -Default $false)
+            } else { $false }
             firewall = [ordered]@{
                 enabled = $Plan.managedWorker.firewall.enabled
                 name = $Plan.managedWorker.firewall.name
@@ -5205,19 +5784,46 @@ function Invoke-ClusterYourCodexBootstrap {
         }
         return Invoke-Uninstall -InstallRoot $InstallRoot -DataRoot $DataRoot
     }
+    $resolvedInstallRoot = Resolve-NormalizedPath $InstallRoot
+    $resolvedDataRoot = Resolve-NormalizedPath $DataRoot
+    $existingManifest = Read-InstallManifest `
+        -ManifestPath (Join-Path $resolvedDataRoot '.installer\install-manifest.json')
+    if ($existingManifest -and
+        (-not [string]::Equals(
+                (Resolve-NormalizedPath ([string]$existingManifest.installRoot)),
+                $resolvedInstallRoot,
+                [System.StringComparison]::OrdinalIgnoreCase
+            ) -or
+         -not [string]::Equals(
+                (Resolve-NormalizedPath ([string]$existingManifest.dataRoot)),
+                $resolvedDataRoot,
+                [System.StringComparison]::OrdinalIgnoreCase
+            ))) {
+        throw 'Installed manifest roots do not match the requested lifecycle roots.'
+    }
+    [string[]]$workerPrivateAddressValues = @(
+        @($WorkerPrivateAddress) | ForEach-Object {
+            @(([string]$_).Split(',')) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        }
+    )
     $plan = Get-InstallPlan `
         -BundleRoot $BundleRoot `
-        -InstallRoot $InstallRoot `
-        -DataRoot $DataRoot `
+        -InstallRoot $resolvedInstallRoot `
+        -DataRoot $resolvedDataRoot `
         -EnableWorker:$EnableWorker `
         -WorkerConfig $WorkerConfig `
         -SkipCodexIntegration:$SkipCodexIntegration `
         -CodexHome $CodexHome `
         -WorkerPublicHost $WorkerPublicHost `
+        -WorkerBindHost $WorkerBindHost `
+        -WorkerInterfaceIndex $WorkerInterfaceIndex `
+        -WorkerControllerHostName $WorkerControllerHostName `
+        -WorkerPrivateAddress $workerPrivateAddressValues `
         -WorkerListenPort $WorkerListenPort `
         -DisableManagedWorkerListener:$DisableManagedWorkerListener `
         -SkipFirewall:$SkipFirewall `
         -DeferFirewall:$DeferFirewall `
+        -ExistingManifest $existingManifest `
         -InitiatingSid $InitiatingSid `
         -InitiatingProfile $InitiatingProfile `
         -InitiatingLocalAppData $InitiatingLocalAppData `

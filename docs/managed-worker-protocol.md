@@ -69,15 +69,41 @@ post-hardened and verified before startup completes.
 
 ### Minimal private-LAN bring-up
 
-The certificate SAN must match the host in `--worker-public-url`. The preview
-accepts an explicitly provisioned, self-signed end-entity certificate; keep the
-private key in a separate file. Controller startup rejects reparse points,
-requires the data/key directories and private-file DACLs to be a protected
-exact allowlist for the current user and SYSTEM, and will not
-repair-and-trust pre-existing token, database, sidecar, or object-store state
-from a weak namespace. Use the current user's data directory rather than an
-ad-hoc shared `ProgramData` path. For an IP-based controller on Windows (using
-the OpenSSL shipped with Git, or another current OpenSSL):
+The Windows installer produces one
+`cyc.dev/windows-managed-worker-network/v1` plan before requesting elevation.
+It considers only `Up` interfaces and source-eligible RFC1918 IPv4 or ULA IPv6
+addresses. Selection is deterministic: default gateway, interface metric,
+interface index, IPv4 before IPv6, then canonical address order. The plan
+records the selected interface index, controller hostname, exact bind/public
+host and port, every selected-interface private address, identity version, and
+the exact SAN set. The SAN set is the canonical union of `127.0.0.1`, `::1`,
+controller hostname, public host, and all selected private addresses.
+
+The managed listener binds only the selected private address. It never binds a
+wildcard, loopback, link-local, or public address. The firewall remains one
+program-and-port-bound inbound TCP rule restricted to `Private` and
+`LocalSubnet`. Readiness connects to the bind host but authenticates the public
+host. Controller startup repeats the private-bind, public-IP equality, and
+exact-port checks as defense in depth.
+
+PlanOnly, firewall coordination, and the per-user core propagate the exact
+typed plan; they do not independently rediscover an interface. Once installed,
+Repair reuses the manifest plan exactly and fails closed on replacement,
+missing current state, malformed arrays, or a different SAN set. The current
+identity lives below the versioned `tls/managed-worker-v2` directory. A
+complete legacy prerelease identity in the old `tls` root is left untouched
+while a new identity is created; rollback removes only that new versioned
+identity. A partial legacy pair is rejected.
+
+The certificate SAN must exactly match the planned set and therefore includes
+the host in `--worker-public-url`. The preview accepts an explicitly
+provisioned, self-signed end-entity certificate; keep the private key in a
+separate file. Controller startup rejects reparse points, requires the data/key
+directories and private-file DACLs to be a protected exact allowlist for the
+current user and SYSTEM, and will not repair-and-trust pre-existing token,
+database, sidecar, or object-store state from a weak namespace. Use the current
+user's data directory rather than an ad-hoc shared `ProgramData` path. A manual
+IP-based Windows bring-up equivalent to the installer contract is:
 
 ```powershell
 $Data = Join-Path $env:LOCALAPPDATA 'ClusterYourCodex'
@@ -109,27 +135,35 @@ function Set-CycPrivateAcl([string]$Path, [switch]$Directory) {
   }
 }
 
-New-Item -ItemType Directory -Force -Path $Data, "$Data\tls" | Out-Null
+$LanAddress = '192.168.1.10' # assigned RFC1918 address on the selected interface
+$ControllerHostName = [Net.Dns]::GetHostName().ToLowerInvariant()
+$Tls = Join-Path $Data 'tls\managed-worker-v2'
+New-Item -ItemType Directory -Force -Path $Data, $Tls | Out-Null
 Set-CycPrivateAcl $Data -Directory
-Set-CycPrivateAcl "$Data\tls" -Directory
-openssl req -x509 -newkey rsa:3072 -nodes -days 365 `
-  -keyout "$Data\tls\controller.key" `
-  -out "$Data\tls\controller.crt" `
-  -subj '/CN=192.168.1.10' `
-  -addext 'subjectAltName=IP:192.168.1.10' `
-  -addext 'basicConstraints=critical,CA:FALSE' `
-  -addext 'keyUsage=critical,digitalSignature,keyEncipherment' `
-  -addext 'extendedKeyUsage=serverAuth'
-Set-CycPrivateAcl "$Data\tls\controller.key"
+Set-CycPrivateAcl $Tls -Directory
+.\cyc.exe identity init --output-dir $Tls `
+  --host 127.0.0.1 `
+  --host ::1 `
+  --host $ControllerHostName `
+  --host $LanAddress
+Set-CycPrivateAcl "$Tls\controller.key.pem"
+.\cyc.exe identity verify `
+  --certificate "$Tls\controller.crt.pem" `
+  --private-key "$Tls\controller.key.pem" `
+  --host 127.0.0.1 `
+  --host ::1 `
+  --host $ControllerHostName `
+  --host $LanAddress `
+  --json
 
 .\cyc-controller.exe `
   --bind 127.0.0.1:47831 `
   --database "$Data\controller.db" `
   --token-file "$Data\controller.token" `
-  --worker-bind 0.0.0.0:47832 `
-  --worker-public-url https://192.168.1.10:47832 `
-  --worker-cert "$Data\tls\controller.crt" `
-  --worker-key "$Data\tls\controller.key"
+  --worker-bind "${LanAddress}:47832" `
+  --worker-public-url "https://${LanAddress}:47832" `
+  --worker-cert "$Tls\controller.crt.pem" `
+  --worker-key "$Tls\controller.key.pem"
 ```
 
 In a second controller terminal, create a one-time file. The CLI writes only

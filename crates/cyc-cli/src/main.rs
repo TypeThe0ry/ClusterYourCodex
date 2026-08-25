@@ -604,7 +604,7 @@ enum IdentityCommands {
     Init {
         #[arg(long)]
         output_dir: PathBuf,
-        /// DNS name or IP SAN. Repeat to include more than one host.
+        /// DNS name or IP SAN. Repeat for an exact set of 1 to 32 hosts.
         #[arg(long, required = true)]
         host: Vec<String>,
     },
@@ -614,8 +614,9 @@ enum IdentityCommands {
         certificate: PathBuf,
         #[arg(long)]
         private_key: PathBuf,
-        #[arg(long)]
-        host: String,
+        /// Exact DNS name or IP SAN set expected in the certificate. Repeat for each host.
+        #[arg(long, required = true)]
+        host: Vec<String>,
         /// Emit safe machine-readable metadata (the default CLI output format).
         #[arg(long)]
         json: bool,
@@ -1631,9 +1632,18 @@ mod tests {
             "/private/controller/controller.key.pem",
             "--host",
             "192.0.2.10",
+            "--host",
+            "controller.example.test",
             "--json",
         ]);
-        assert!(verify.is_ok());
+        let verify = verify.unwrap();
+        let Commands::Identity {
+            command: IdentityCommands::Verify { host, .. },
+        } = verify.command
+        else {
+            panic!("expected identity verify command");
+        };
+        assert_eq!(host, ["192.0.2.10", "controller.example.test"]);
     }
 
     #[test]

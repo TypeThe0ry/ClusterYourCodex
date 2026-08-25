@@ -83,6 +83,8 @@ export interface ProvisioningHostKey {
 export interface ProvisioningFailure {
   code: string;
   retryable: boolean;
+  /** Local fixed copy derived from the validated code; never controller-provided text. */
+  message: string;
 }
 
 export interface ProvisioningInventory {
@@ -172,7 +174,7 @@ function provisioningErrorCopy(code: string): string {
     private_key_invalid: "The private-key file is unavailable or failed native path-safety validation.",
     SSH_PRIVATE_KEY_INVALID: "The configured private-key file failed native path-safety validation.",
     SSH_PRIVATE_KEY_UNAVAILABLE: "The configured private-key file is unavailable. Restore it, then retry.",
-    SSH_PRIVATE_KEY_REJECTED: "SSH rejected the private key or its passphrase. Enter the passphrase and retry.",
+    SSH_PRIVATE_KEY_REJECTED: "SSH rejected the private-key authentication attempt. Enter the required unlock secret and retry.",
     SSH_AGENT_UNAVAILABLE: "The native SSH agent is unavailable. Start or unlock it, then retry.",
     SSH_AGENT_REJECTED: "SSH rejected every identity offered by the native SSH agent.",
     SSH_AUTH_METHOD_UNSUPPORTED: "The selected SSH authentication method is unavailable in this build.",
@@ -183,6 +185,11 @@ function provisioningErrorCopy(code: string): string {
     operation_unavailable: "This action is not valid at the current checkpoint.",
     drive_limit_reached: "Provisioning paused after its bounded work window. Continue to resume.",
     automatic_advance_deadline: "Automatic controller polling reached its ten-minute deadline. Retry to continue.",
+    PAIRING_PROVISIONING_FAILED: "Provisioning stopped before the worker completed secure enrollment.",
+    PAIRING_WORKER_INSTALL_FAILED: "The worker installation could not be completed before enrollment.",
+    PAIRING_WORKER_PAIRING_FAILED: "The worker could not complete secure controller pairing.",
+    PAIRING_WORKER_HEALTH_CHECK_FAILED: "The worker did not pass its controller health check.",
+    PAIRING_EXPIRED: "The enrollment window expired. Roll back this setup before starting a fresh pairing.",
   };
   return messages[code] ?? "The provisioning operation failed.";
 }
@@ -195,6 +202,14 @@ function stringField(value: Record<string, unknown>, key: string): string {
   const result = value[key];
   if (typeof result !== "string" || result.length === 0) throw new ProvisioningClientError("invalid_response");
   return result;
+}
+
+function failureCodeField(value: Record<string, unknown>): string {
+  const code = stringField(value, "code");
+  if (code.length > 64 || !/^[A-Z0-9_.-]+$/.test(code)) {
+    throw new ProvisioningClientError("invalid_response");
+  }
+  return code;
 }
 
 function optionalString(value: Record<string, unknown>, key: string): string | undefined {
@@ -304,7 +319,16 @@ export function parseProvisioningComputer(value: unknown): ProvisioningComputer 
   let failure: ProvisioningFailure | undefined;
   if (value.failure !== undefined && value.failure !== null) {
     if (!isObject(value.failure) || typeof value.failure.retryable !== "boolean") throw new ProvisioningClientError("invalid_response");
-    failure = { code: stringField(value.failure, "code"), retryable: value.failure.retryable };
+    const keys = Object.keys(value.failure).sort();
+    if (keys.length !== 2 || keys[0] !== "code" || keys[1] !== "retryable") {
+      throw new ProvisioningClientError("invalid_response");
+    }
+    const code = failureCodeField(value.failure);
+    failure = {
+      code,
+      retryable: value.failure.retryable,
+      message: provisioningErrorCopy(code),
+    };
   }
   if ((state === "failed") !== Boolean(failure)) throw new ProvisioningClientError("invalid_response");
   if (state === "failed" && ["SSH_AUTH_REJECTED", "SSH_PRIVATE_KEY_REJECTED"].includes(failure?.code ?? "")) {

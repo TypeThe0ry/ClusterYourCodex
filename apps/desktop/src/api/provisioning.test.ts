@@ -366,6 +366,64 @@ describe("durable provisioning recovery and actions", () => {
     expect(actionsForProvisioning(ready)).toEqual(["forget_ssh_password", "repair", "remove"]);
   });
 
+  it("maps terminal pairing failures to fixed local copy without a retry action", async () => {
+    const cases = [
+      ["PAIRING_PROVISIONING_FAILED", "Provisioning stopped before the worker completed secure enrollment."],
+      ["PAIRING_WORKER_INSTALL_FAILED", "The worker installation could not be completed before enrollment."],
+      ["PAIRING_WORKER_PAIRING_FAILED", "The worker could not complete secure controller pairing."],
+      ["PAIRING_WORKER_HEALTH_CHECK_FAILED", "The worker did not pass its controller health check."],
+    ] as const;
+    const provisioningList = vi.fn(async () => cases.map(([code], index) => record({
+      id: `7f26f4f4-5bdd-4d39-84d4-d1b94c16cc${index.toString().padStart(2, "0")}`,
+      state: "failed",
+      step: "enrollment_issued",
+      attention: "intent",
+      failure: { code, retryable: false },
+    })));
+    vi.stubGlobal("window", { __CLUSTER_YOUR_CODEX__: { provisioningList } });
+
+    const computers = await provisioningClient.list();
+
+    expect(computers).toHaveLength(cases.length);
+    computers.forEach((computer, index) => {
+      expect(computer.failure).toEqual({
+        code: cases[index]![0],
+        retryable: false,
+        message: cases[index]![1],
+      });
+      expect(actionsForProvisioning(computer)).toEqual(["rollback", "remove"]);
+    });
+  });
+
+  it("rejects malformed or injected native failure fields", async () => {
+    for (const code of ["lowercase", "PAIRING FAILED", "PAIRING/FAILED", "故障", "X".repeat(65)]) {
+      const provisioningList = vi.fn(async () => [record({
+        state: "failed",
+        step: "enrollment_issued",
+        attention: "intent",
+        failure: { code, retryable: false },
+      })]);
+      vi.stubGlobal("window", { __CLUSTER_YOUR_CODEX__: { provisioningList } });
+      await expect(provisioningClient.list()).rejects.toMatchObject({ code: "invalid_response" });
+    }
+
+    const secretMarker = "controller-secret-marker";
+    const provisioningList = vi.fn(async () => [record({
+      state: "failed",
+      step: "enrollment_issued",
+      attention: "intent",
+      failure: {
+        code: "PAIRING_WORKER_PAIRING_FAILED",
+        retryable: false,
+        message: secretMarker,
+      },
+    })]);
+    vi.stubGlobal("window", { __CLUSTER_YOUR_CODEX__: { provisioningList } });
+    const failure = await provisioningClient.list().catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "invalid_response" });
+    expect(JSON.stringify(failure)).not.toContain(secretMarker);
+  });
+
   it("keeps agent and private-key policies non-secret and disables password-vault actions", async () => {
     const provisioningList = vi.fn(async () => [
       record({

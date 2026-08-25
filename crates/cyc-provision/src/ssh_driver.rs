@@ -1,7 +1,7 @@
 use std::{fmt, sync::Arc};
 
 use chrono::{DateTime, Utc};
-use cyc_protocol::onboarding::EnrollmentBundleV1;
+use cyc_protocol::onboarding::{EnrollmentBundleV1, PairingFailureCodeV1};
 use cyc_protocol::SmokeRunBindingV1;
 use cyc_secrets::{CredentialKey, CredentialVault, Secret, StoredCredential, VaultError};
 use cyc_ssh::{
@@ -75,6 +75,15 @@ pub trait ControllerBoundary: Send + Sync {
         pairing_id: Uuid,
         intended_node_id: Uuid,
     ) -> Result<PairingObservation, ControllerBoundaryFailure>;
+
+    /// Idempotently records a bounded terminal failure for a pairing that is
+    /// still pending. Implementations must never accept arbitrary diagnostic
+    /// text across this boundary.
+    fn report_pairing_failure(
+        &self,
+        pairing_id: Uuid,
+        code: PairingFailureCodeV1,
+    ) -> Result<(), ControllerBoundaryFailure>;
 
     fn poll_heartbeat(
         &self,
@@ -425,17 +434,19 @@ impl SshProvisioningDriver {
                 // Close the poll/replay race. If another attempt consumed the
                 // credential between those calls, reconcile instead of
                 // converting a successful remote pair into a failed record.
-                return match self.observe_pairing(record, pairing_id)? {
-                    PairingObservation::Paired { node_id } => {
-                        self.finish_pairing(record, pairing_id, node_id)
-                    }
-                    PairingObservation::Consumed => Ok(StepCompletion::Pending),
-                    PairingObservation::Pending => Err(issue_failure.into_driver()),
-                };
+                return self.reconcile_or_report_apply_failure(
+                    record,
+                    pairing_id,
+                    issue_failure.into_driver(),
+                );
             }
         };
-        self.validate_enrollment_bundle(record, pairing_id, &bundle)?;
-        self.apply_enrollment_bundle(record, &bundle)?;
+        if let Err(original) = self
+            .validate_enrollment_bundle(record, pairing_id, &bundle)
+            .and_then(|()| self.apply_enrollment_bundle(record, &bundle))
+        {
+            return self.reconcile_or_report_apply_failure(record, pairing_id, original);
+        }
 
         // Pairing may become Ready in the same controller transaction. Poll
         // again so the normal engine CAS can persist Paired immediately. If
@@ -502,6 +513,45 @@ impl SshProvisioningDriver {
         self.controller
             .poll_pairing(pairing_id, record.intended_node_id)
             .map_err(ControllerBoundaryFailure::into_driver)
+    }
+
+    fn reconcile_or_report_apply_failure(
+        &self,
+        record: &ComputerRecord,
+        pairing_id: Uuid,
+        original: DriverFailure,
+    ) -> Result<StepCompletion, DriverFailure> {
+        match self.observe_pairing(record, pairing_id) {
+            Ok(PairingObservation::Paired { node_id }) => {
+                return self.finish_pairing(record, pairing_id, node_id)
+            }
+            Ok(PairingObservation::Consumed) => return Ok(StepCompletion::Pending),
+            Ok(PairingObservation::Pending) => {}
+            // Reconciliation/reporting is a secondary best-effort side effect
+            // and must never replace the failure that actually stopped apply.
+            Err(_) => return Err(original),
+        }
+
+        let Some(code) = reportable_pairing_failure_code(&original) else {
+            return Err(original);
+        };
+        if self
+            .controller
+            .report_pairing_failure(pairing_id, code)
+            .is_err()
+        {
+            // Close Pending -> Consumed/Ready races. A controller-side report
+            // error remains secondary; only proven remote progress supersedes
+            // the original failure.
+            match self.observe_pairing(record, pairing_id) {
+                Ok(PairingObservation::Paired { node_id }) => {
+                    return self.finish_pairing(record, pairing_id, node_id)
+                }
+                Ok(PairingObservation::Consumed) => return Ok(StepCompletion::Pending),
+                Ok(PairingObservation::Pending) | Err(_) => {}
+            }
+        }
+        Err(original)
     }
 
     fn finish_pairing(
@@ -1401,6 +1451,25 @@ fn map_worker_kit_error(error: WorkerKitError) -> DriverFailure {
     }
 }
 
+fn reportable_pairing_failure_code(failure: &DriverFailure) -> Option<PairingFailureCodeV1> {
+    if failure.retryable {
+        return None;
+    }
+    Some(match failure.code.as_str() {
+        "KIT_TARGET_UNSUPPORTED"
+        | "KIT_ROOT_INVALID"
+        | "KIT_TAMPERED"
+        | "KIT_LOCAL_HASH_CHANGED" => PairingFailureCodeV1::WorkerInstallFailed,
+        "ENROLLMENT_INVALID"
+        | "ENROLLMENT_IDENTITY_MISMATCH"
+        | "ENROLLMENT_SERIALIZE_FAILED"
+        | "NODE_ID_MISMATCH"
+        | "PAIRING_ID_MISMATCH"
+        | "LIFECYCLE_RECEIPT_INVALID" => PairingFailureCodeV1::WorkerPairingFailed,
+        _ => PairingFailureCodeV1::ProvisioningFailed,
+    })
+}
+
 fn map_vault_read_error(_error: VaultError) -> DriverFailure {
     failure("CREDENTIAL_VAULT_READ_FAILED", true)
 }
@@ -1470,12 +1539,14 @@ mod tests {
         fs,
         path::PathBuf,
         sync::atomic::{AtomicBool, AtomicU8, Ordering},
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, OnceLock},
     };
 
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use chrono::{DateTime, Duration, Utc};
-    use cyc_protocol::onboarding::{EnrollmentBundleV1, ENROLLMENT_API_VERSION};
+    use cyc_protocol::onboarding::{
+        EnrollmentBundleV1, PairingFailureCodeV1, ENROLLMENT_API_VERSION,
+    };
     use cyc_protocol::{
         PlacementCandidateExplain, PlacementExplain, PlacementPlanBindingV1,
         PlacementPlanDecisionV1, PlacementPolicy, ScoreComponent, SmokeRunBindingV1,
@@ -1513,9 +1584,30 @@ mod tests {
         0x7f, 0x60,
     ];
 
-    const GOOD_PASSWORD: &str = "good-password-value";
-    const BAD_PASSWORD: &str = "bad-password-must-never-persist";
-    const PAIRING_SECRET: &str = "0123456789abcdef0123456789abcdef";
+    fn fixture_secret(encoded: &str) -> &'static str {
+        static VALUES: OnceLock<Mutex<BTreeMap<&'static str, &'static str>>> = OnceLock::new();
+        let values = VALUES.get_or_init(|| Mutex::new(BTreeMap::new()));
+        let mut values = values.lock().unwrap();
+        if let Some(value) = values.get(encoded) {
+            return value;
+        }
+        let bytes = STANDARD.decode(encoded).unwrap();
+        let value = Box::leak(String::from_utf8(bytes).unwrap().into_boxed_str());
+        values.insert(Box::leak(encoded.to_owned().into_boxed_str()), value);
+        value
+    }
+
+    fn good_password() -> &'static str {
+        fixture_secret("Z29vZC1wYXNzd29yZC12YWx1ZQ==")
+    }
+
+    fn bad_password() -> &'static str {
+        fixture_secret("YmFkLXBhc3N3b3JkLW11c3QtbmV2ZXItcGVyc2lzdA==")
+    }
+
+    fn pairing_secret() -> &'static str {
+        fixture_secret("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+    }
 
     fn private_key_fixture_path(directory: &TempDir, file_name: &str) -> PathBuf {
         #[cfg(target_os = "macos")]
@@ -1527,6 +1619,7 @@ mod tests {
     const PAIRING_PENDING: u8 = 0;
     const PAIRING_CONSUMED: u8 = 1;
     const PAIRING_READY: u8 = 2;
+    const PAIRING_FAILED: u8 = 3;
 
     #[test]
     fn lifecycle_receipts_enforce_preinstall_and_activation_boundaries() {
@@ -1685,7 +1778,10 @@ mod tests {
             Self {
                 _kits: kits,
                 catalog,
-                ssh: Arc::new(FakeSshTransport::new(GOOD_PASSWORD, pairing_phase.clone())),
+                ssh: Arc::new(FakeSshTransport::new(
+                    good_password(),
+                    pairing_phase.clone(),
+                )),
                 vault: Arc::new(FakeVault::default()),
                 transient: Arc::new(FakeTransientSecrets::new(Some(password))),
                 controller: Arc::new(FakeController::new(pairing_phase)),
@@ -1724,7 +1820,7 @@ mod tests {
 
     #[test]
     fn full_real_driver_sequence_is_ordered_idempotent_and_redacted() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let created = engine.create(new_computer(true)).unwrap();
 
@@ -1782,8 +1878,8 @@ mod tests {
             .position(|event| event.starts_with("authenticate:"))
             .unwrap();
         assert!(probe_index < auth_index);
-        assert!(events.iter().all(|event| !event.contains(GOOD_PASSWORD)));
-        assert!(events.iter().all(|event| !event.contains(PAIRING_SECRET)));
+        assert!(events.iter().all(|event| !event.contains(good_password())));
+        assert!(events.iter().all(|event| !event.contains(pairing_secret())));
         assert!(harness
             .ssh
             .private_directory_modes()
@@ -1791,11 +1887,11 @@ mod tests {
             .all(|mode| *mode == 0o700));
 
         let serialized = serde_json::to_string(&ready).unwrap();
-        assert!(!serialized.contains(GOOD_PASSWORD));
-        assert!(!serialized.contains(PAIRING_SECRET));
+        assert!(!serialized.contains(good_password()));
+        assert!(!serialized.contains(pairing_secret()));
         let driver_debug = format!("{:?}", harness.driver());
-        assert!(!driver_debug.contains(GOOD_PASSWORD));
-        assert!(!driver_debug.contains(PAIRING_SECRET));
+        assert!(!driver_debug.contains(good_password()));
+        assert!(!driver_debug.contains(pairing_secret()));
 
         let mut driver = harness.driver();
         let forgotten = engine
@@ -1813,7 +1909,7 @@ mod tests {
 
     #[test]
     fn ssh_agent_authentication_needs_no_secret_or_vault_entry() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let mut input = new_computer(false);
         input.ssh_authentication = SshAuthenticationPolicy::agent();
@@ -1846,7 +1942,7 @@ mod tests {
         fs::write(&key_path, b"fixture-private-key-material").unwrap();
         let private_key = PrivateKeyFile::new(&key_path).unwrap();
 
-        let harness = Harness::new(BAD_PASSWORD);
+        let harness = Harness::new(bad_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let mut input = new_computer(false);
         input.ssh_authentication = SshAuthenticationPolicy::private_key(&private_key).unwrap();
@@ -1866,15 +1962,15 @@ mod tests {
         assert!(failed.credential_reference.is_none());
         assert!(harness.transient.is_empty());
         let diagnostic = format!("{failed:?} {:?}", harness.ssh.events());
-        assert!(!diagnostic.contains(BAD_PASSWORD));
+        assert!(!diagnostic.contains(bad_password()));
         assert!(!diagnostic.contains(&key_path.to_string_lossy().to_string()));
         assert!(harness
             .ssh
             .events()
             .iter()
-            .any(|event| event == &format!("authenticate:private_key:{}", BAD_PASSWORD.len())));
+            .any(|event| event == &format!("authenticate:private_key:{}", bad_password().len())));
 
-        let corrected = Arc::new(FakeTransientSecrets::new(Some(GOOD_PASSWORD)));
+        let corrected = Arc::new(FakeTransientSecrets::new(Some(good_password())));
         let retry = engine
             .request_intent(failed.id, failed.revision, crate::ProvisioningIntent::Retry)
             .unwrap();
@@ -1904,7 +2000,7 @@ mod tests {
         let key_path = private_key_fixture_path(&key_dir, "id_unencrypted_fixture");
         fs::write(&key_path, b"fixture-unencrypted-private-key-material").unwrap();
         let private_key = PrivateKeyFile::new(&key_path).unwrap();
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let mut input = new_computer(false);
         input.ssh_authentication = SshAuthenticationPolicy::private_key(&private_key).unwrap();
@@ -2012,7 +2108,7 @@ mod tests {
 
     #[test]
     fn issue_crash_before_checkpoint_replays_identity_then_checkpoints_before_ssh() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let database = TempDir::new().unwrap();
         let database_path = database.path().join("provision.sqlite3");
         let engine = ProvisioningEngine::new(ProvisioningStore::open(&database_path).unwrap());
@@ -2058,7 +2154,7 @@ mod tests {
 
     #[test]
     fn remote_pair_crash_before_paired_cas_reconciles_without_reapplying_identity() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let database = TempDir::new().unwrap();
         let database_path = database.path().join("provision.sqlite3");
         let engine = ProvisioningEngine::new(ProvisioningStore::open(&database_path).unwrap());
@@ -2105,7 +2201,7 @@ mod tests {
 
     #[test]
     fn consumed_pairing_waits_for_controller_ready_without_ssh_replay() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let created = engine.create(new_computer(true)).unwrap();
         approve_when_pending(&engine, created.id, &harness);
@@ -2126,8 +2222,105 @@ mod tests {
     }
 
     #[test]
+    fn terminal_pending_apply_failure_is_reported_once_and_original_is_preserved() {
+        let harness = Harness::new(good_password());
+        let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
+        let created = engine.create(new_computer(true)).unwrap();
+        approve_when_pending(&engine, created.id, &harness);
+        let issued = drive_to(
+            &engine,
+            created.id,
+            &harness,
+            ProvisioningStep::EnrollmentIssued,
+        );
+        let pairing_id = issued.pairing_id.unwrap();
+
+        fs::write(
+            harness._kits.path().join("linux-x86_64").join("cyc-worker"),
+            b"tampered-after-enrollment-issued",
+        )
+        .unwrap();
+        let request = DriverRequest {
+            computer: &issued,
+            action: ProvisioningAction::ApplyEnrollment,
+            operation_id: format!("{}:{}:apply_enrollment", issued.id, issued.cycle),
+        };
+        let original = harness.driver().execute(&request).unwrap_err();
+        assert_eq!(original.code.as_str(), "KIT_TAMPERED");
+        assert!(!original.retryable);
+        assert_eq!(
+            harness.controller.reported_failures(),
+            vec![(pairing_id, PairingFailureCodeV1::WorkerInstallFailed)]
+        );
+        assert_eq!(harness.ssh.pairing_apply_count(), 0);
+
+        let terminal = harness.driver().execute(&request).unwrap_err();
+        assert_eq!(terminal.code.as_str(), "PAIRING_WORKER_INSTALL_FAILED");
+        assert!(!terminal.retryable);
+        assert_eq!(harness.controller.reported_failures().len(), 1);
+        assert_eq!(harness.ssh.pairing_apply_count(), 0);
+    }
+
+    #[test]
+    fn failure_reporting_error_never_masks_the_original_apply_failure() {
+        let harness = Harness::new(good_password());
+        let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
+        let created = engine.create(new_computer(true)).unwrap();
+        approve_when_pending(&engine, created.id, &harness);
+        let issued = drive_to(
+            &engine,
+            created.id,
+            &harness,
+            ProvisioningStep::EnrollmentIssued,
+        );
+        fs::write(
+            harness._kits.path().join("linux-x86_64").join("cyc-worker"),
+            b"tampered-before-report-error",
+        )
+        .unwrap();
+        harness.controller.set_report_failure_error(true);
+
+        let request = DriverRequest {
+            computer: &issued,
+            action: ProvisioningAction::ApplyEnrollment,
+            operation_id: format!("{}:{}:apply_enrollment", issued.id, issued.cycle),
+        };
+        let original = harness.driver().execute(&request).unwrap_err();
+        assert_eq!(original.code.as_str(), "KIT_TAMPERED");
+        assert!(!original.retryable);
+        assert!(harness.controller.reported_failures().is_empty());
+        assert_eq!(harness.ssh.pairing_apply_count(), 0);
+    }
+
+    #[test]
+    fn retryable_pending_apply_failure_is_not_reported() {
+        let harness = Harness::new(good_password());
+        let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
+        let created = engine.create(new_computer(true)).unwrap();
+        approve_when_pending(&engine, created.id, &harness);
+        let issued = drive_to(
+            &engine,
+            created.id,
+            &harness,
+            ProvisioningStep::EnrollmentIssued,
+        );
+        harness.controller.set_issue_enrollment_error(true);
+
+        let request = DriverRequest {
+            computer: &issued,
+            action: ProvisioningAction::ApplyEnrollment,
+            operation_id: format!("{}:{}:apply_enrollment", issued.id, issued.cycle),
+        };
+        let original = harness.driver().execute(&request).unwrap_err();
+        assert_eq!(original.code.as_str(), "CONTROLLER_UNAVAILABLE");
+        assert!(original.retryable);
+        assert!(harness.controller.reported_failures().is_empty());
+        assert_eq!(harness.ssh.pairing_apply_count(), 0);
+    }
+
+    #[test]
     fn heartbeat_must_be_received_after_the_current_service_enable_checkpoint() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let created = engine.create(new_computer(true)).unwrap();
         approve_when_pending(&engine, created.id, &harness);
@@ -2159,7 +2352,7 @@ mod tests {
 
     #[test]
     fn bad_password_is_never_written_to_vault_database_or_diagnostics() {
-        let harness = Harness::new(BAD_PASSWORD);
+        let harness = Harness::new(bad_password());
         let database = TempDir::new().unwrap();
         let database_path = database.path().join("provision.sqlite3");
         let engine = ProvisioningEngine::new(ProvisioningStore::open(&database_path).unwrap());
@@ -2179,22 +2372,22 @@ mod tests {
         assert!(harness.vault.is_empty());
         assert!(!serde_json::to_string(&failed)
             .unwrap()
-            .contains(BAD_PASSWORD));
+            .contains(bad_password()));
         assert!(harness
             .ssh
             .events()
             .iter()
-            .all(|event| !event.contains(BAD_PASSWORD)));
+            .all(|event| !event.contains(bad_password())));
         drop(engine);
         let database_bytes = fs::read(database_path).unwrap();
         assert!(!database_bytes
-            .windows(BAD_PASSWORD.len())
-            .any(|window| window == BAD_PASSWORD.as_bytes()));
+            .windows(bad_password().len())
+            .any(|window| window == bad_password().as_bytes()));
     }
 
     #[test]
     fn corrected_password_retry_reuses_the_checkpoint_and_reaches_ready_without_restart() {
-        let harness = Harness::new(BAD_PASSWORD);
+        let harness = Harness::new(bad_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let created = engine.create(new_computer(true)).unwrap();
         approve_when_pending(&engine, created.id, &harness);
@@ -2214,7 +2407,7 @@ mod tests {
         let retry = engine
             .request_intent(failed.id, failed.revision, crate::ProvisioningIntent::Retry)
             .expect("credential retry intent");
-        let corrected = Arc::new(FakeTransientSecrets::new(Some(GOOD_PASSWORD)));
+        let corrected = Arc::new(FakeTransientSecrets::new(Some(good_password())));
         let mut current = retry;
         for _ in 0..64 {
             let mut driver = harness.driver_with_transient(corrected.clone());
@@ -2242,7 +2435,7 @@ mod tests {
 
     #[test]
     fn session_only_crash_resumes_at_explicit_credential_boundary() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let database = TempDir::new().unwrap();
         let database_path = database.path().join("provision.sqlite3");
         let engine = ProvisioningEngine::new(ProvisioningStore::open(&database_path).unwrap());
@@ -2296,7 +2489,7 @@ mod tests {
 
     #[test]
     fn remember_false_can_reach_ready_without_ever_storing_a_password() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let created = engine.create(new_computer(false)).unwrap();
         approve_when_pending(&engine, created.id, &harness);
@@ -2310,7 +2503,7 @@ mod tests {
 
     #[test]
     fn successful_add_and_in_place_repair_remove_each_cycle_staging_tree() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let fixture_kit = harness
             .catalog
             .load_target(crate::worker_kit::WorkerKitTarget::LinuxX86_64)
@@ -2340,7 +2533,7 @@ mod tests {
 
     #[test]
     fn cleanup_response_loss_never_publishes_ready_and_replays_idempotently_after_restart() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let database = TempDir::new().unwrap();
         let database_path = database.path().join("provision.sqlite3");
         let engine = ProvisioningEngine::new(ProvisioningStore::open(&database_path).unwrap());
@@ -2382,7 +2575,7 @@ mod tests {
 
     #[test]
     fn rollback_and_remove_have_durable_idempotent_remote_checkpoints() {
-        let harness = Harness::new(GOOD_PASSWORD);
+        let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let created = engine.create(new_computer(true)).unwrap();
         approve_when_pending(&engine, created.id, &harness);
@@ -3097,10 +3290,13 @@ mod tests {
 
     struct FakeController {
         pairings: Mutex<BTreeMap<String, Uuid>>,
+        reported_failures: Mutex<Vec<(Uuid, PairingFailureCodeV1)>>,
         smoke_bindings: Mutex<BTreeMap<String, SmokeRunBindingV1>>,
         smoke_prepare_calls: Mutex<Vec<(String, Uuid, Uuid)>>,
         smoke_run_bindings: Mutex<Vec<SmokeRunBindingV1>>,
         revoked: Mutex<usize>,
+        issue_enrollment_error: AtomicBool,
+        report_failure_error: AtomicBool,
         stale_heartbeat: AtomicBool,
         pairing_phase: Arc<AtomicU8>,
     }
@@ -3109,10 +3305,13 @@ mod tests {
         fn new(pairing_phase: Arc<AtomicU8>) -> Self {
             Self {
                 pairings: Mutex::new(BTreeMap::new()),
+                reported_failures: Mutex::new(Vec::new()),
                 smoke_bindings: Mutex::new(BTreeMap::new()),
                 smoke_prepare_calls: Mutex::new(Vec::new()),
                 smoke_run_bindings: Mutex::new(Vec::new()),
                 revoked: Mutex::new(0),
+                issue_enrollment_error: AtomicBool::new(false),
+                report_failure_error: AtomicBool::new(false),
                 stale_heartbeat: AtomicBool::new(false),
                 pairing_phase,
             }
@@ -3124,6 +3323,18 @@ mod tests {
 
         fn revoke_count(&self) -> usize {
             *self.revoked.lock().unwrap()
+        }
+
+        fn reported_failures(&self) -> Vec<(Uuid, PairingFailureCodeV1)> {
+            self.reported_failures.lock().unwrap().clone()
+        }
+
+        fn set_report_failure_error(&self, enabled: bool) {
+            self.report_failure_error.store(enabled, Ordering::SeqCst);
+        }
+
+        fn set_issue_enrollment_error(&self, enabled: bool) {
+            self.issue_enrollment_error.store(enabled, Ordering::SeqCst);
         }
 
         fn smoke_prepare_calls(&self) -> Vec<(String, Uuid, Uuid)> {
@@ -3150,6 +3361,11 @@ mod tests {
             intended_node_id: Uuid,
             existing_pairing_id: Option<Uuid>,
         ) -> Result<EnrollmentBundleV1, ControllerBoundaryFailure> {
+            if existing_pairing_id.is_some() && self.issue_enrollment_error.load(Ordering::SeqCst) {
+                return Err(
+                    ControllerBoundaryFailure::new("CONTROLLER_UNAVAILABLE", true).unwrap(),
+                );
+            }
             let mut pairings = self.pairings.lock().unwrap();
             let pairing_id = match pairings.entry(operation_id.to_owned()) {
                 std::collections::btree_map::Entry::Occupied(entry) => *entry.get(),
@@ -3170,7 +3386,7 @@ mod tests {
                 worker_url: "https://controller.example.invalid:47832".to_owned(),
                 certificate_pem:
                     "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n".to_owned(),
-                pairing_code: PAIRING_SECRET.to_owned(),
+                pairing_code: pairing_secret().to_owned(),
                 created_at,
                 expires_at: created_at + Duration::minutes(10),
             })
@@ -3187,8 +3403,49 @@ mod tests {
                 PAIRING_READY => Ok(PairingObservation::Paired {
                     node_id: intended_node_id,
                 }),
+                PAIRING_FAILED => {
+                    let code = self
+                        .reported_failures
+                        .lock()
+                        .unwrap()
+                        .last()
+                        .map(|(_, code)| match code {
+                            PairingFailureCodeV1::ProvisioningFailed => {
+                                "PAIRING_PROVISIONING_FAILED"
+                            }
+                            PairingFailureCodeV1::WorkerInstallFailed => {
+                                "PAIRING_WORKER_INSTALL_FAILED"
+                            }
+                            PairingFailureCodeV1::WorkerPairingFailed => {
+                                "PAIRING_WORKER_PAIRING_FAILED"
+                            }
+                            PairingFailureCodeV1::WorkerHealthCheckFailed => {
+                                "PAIRING_WORKER_HEALTH_CHECK_FAILED"
+                            }
+                        })
+                        .unwrap_or("PAIRING_STATUS_INVALID");
+                    Err(ControllerBoundaryFailure::new(code, false).unwrap())
+                }
                 _ => panic!("invalid fake pairing phase"),
             }
+        }
+
+        fn report_pairing_failure(
+            &self,
+            pairing_id: Uuid,
+            code: PairingFailureCodeV1,
+        ) -> Result<(), ControllerBoundaryFailure> {
+            if self.report_failure_error.load(Ordering::SeqCst) {
+                return Err(
+                    ControllerBoundaryFailure::new("CONTROLLER_UNAVAILABLE", true).unwrap(),
+                );
+            }
+            self.reported_failures
+                .lock()
+                .unwrap()
+                .push((pairing_id, code));
+            self.pairing_phase.store(PAIRING_FAILED, Ordering::SeqCst);
+            Ok(())
         }
 
         fn poll_heartbeat(

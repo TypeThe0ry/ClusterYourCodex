@@ -996,7 +996,9 @@ impl From<StoreError> for WorkerApiError {
             StoreError::InvalidManagedNode => Self::invalid_request(),
             StoreError::InvalidPairingOperationKey
             | StoreError::PairingIdempotencyMismatch
-            | StoreError::PairingIdempotencyFinalized { .. } => Self::new(
+            | StoreError::PairingIdempotencyFinalized { .. }
+            | StoreError::PairingFailureMismatch
+            | StoreError::PairingFailureFinalized { .. } => Self::new(
                 StatusCode::CONFLICT,
                 "controller_conflict",
                 "controller pairing state conflicts with this worker request",
@@ -1017,6 +1019,7 @@ impl From<StoreError> for WorkerApiError {
             | StoreError::NodeIdentityMismatch
             | StoreError::InvalidPlanBinding
             | StoreError::InvalidFleetRevision
+            | StoreError::InvalidPairingFailureState
             | StoreError::Identifier(_)
             | StoreError::Timestamp
             | StoreError::Poisoned

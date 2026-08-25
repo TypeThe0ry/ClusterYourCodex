@@ -234,7 +234,7 @@ cyc_package_extraction_failed:
   Goto cyc_install_finalize
 
 cyc_package_extraction_complete:
-  DetailPrint "Validating package for the initiating user; only the firewall step will request UAC..."
+  DetailPrint "Validating package and freezing one private-LAN listener plan; only the firewall step will request UAC..."
   ClearErrors
   ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$CycMappedDrive\p\Invoke-ClusterYourCodexLifecycle.ps1" -Action Install -BundleRoot "$CycMappedDrive\p\payload" -PackageRoot "$CycMappedDrive\p" -PackageManifest "$CycMappedDrive\p\preview-manifest.json" -PackageExecutable "$EXEPATH" ${CYC_SIGNATURE_ARGUMENT} -NoLaunch' $0
   IfErrors cyc_lifecycle_launch_failed cyc_lifecycle_finished

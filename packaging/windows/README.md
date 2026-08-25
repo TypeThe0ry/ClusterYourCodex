@@ -146,14 +146,36 @@ controller before SSH staging; preview staging preserves the already signed
 five-file kit byte-for-byte.
 
 The ZIP and `ClusterYourCodex-Setup.exe` contain the same self-contained Windows
-developer preview. Installation creates or verifies a non-rotating controller
-TLS identity, starts the loopback API plus the managed-worker TLS listener,
-adds one product-owned inbound TCP rule restricted to the Private profile and
-`LocalSubnet`, installs the GUI/CLI/Worker Kits/Codex integration, and registers
-a per-user uninstaller in Windows Apps & Features. Repair preserves the TLS
-identity; an incomplete or mismatched identity fails closed rather than
-silently rotating it. Uninstall preserves controller/worker data unless
-`-PurgeData` is explicitly supplied.
+developer preview. Installation discovers one active private-LAN interface,
+persists a versioned immutable network plan, creates or verifies the matching
+non-rotating controller TLS identity, starts the loopback API plus one explicit
+RFC1918/ULA managed-worker listener, adds one product-owned inbound TCP rule
+restricted to the Private profile and `LocalSubnet`, installs the
+GUI/CLI/Worker Kits/Codex integration, and registers a per-user uninstaller in
+Windows Apps & Features. The listener never binds `0.0.0.0`, `::`, loopback,
+link-local, or a public IP. The controller independently rejects those binds,
+an IP-literal public origin that differs from the bind, and a public-origin
+port that differs from the listener port.
+
+The persisted `cyc.dev/windows-managed-worker-network/v1` plan records the
+selected interface index, controller hostname, exact bind/public host and
+port, all RFC1918/ULA addresses on that interface, and the exact certificate
+SAN set. Automatic selection is deterministic: active interface with a
+default gateway first, then interface metric and index; the bind prefers IPv4
+and then canonical address order. The SAN set is the canonical union of IPv4
+loopback, IPv6 loopback, controller hostname, public host, and every selected
+private address. Readiness connects to the explicit bind while TLS authenticates
+the public host.
+
+PlanOnly, the unelevated coordinator, and the per-user core pass the same typed
+plan without rediscovery. Repair reuses it exactly and rejects replacement or
+malformed plan state. Identities live under
+`%LOCALAPPDATA%\ClusterYourCodex\tls\managed-worker-v2`; migration from the
+legacy prerelease `tls\controller.*.pem` pair creates the new versioned identity
+without modifying the predecessor, so rollback can restore the old task and
+files. A partial legacy or current identity fails closed. Repair preserves both
+the immutable plan and versioned identity bytes. Uninstall preserves
+controller/worker data unless `-PurgeData` is explicitly supplied.
 
 The coordinator durably records `prepared -> firewallApplied -> coreApplied ->
 complete`. The helper snapshots only the exact product rule, applies and

@@ -13,6 +13,7 @@ mod smoke;
 mod ssh_driver;
 mod store;
 mod worker_kit;
+mod worker_kit_export;
 
 pub use discovery::{DiscoveryError, RemotePlatform};
 pub use engine::{
@@ -33,3 +34,7 @@ pub use ssh_driver::{
 };
 pub use store::{ProvisioningStore, StoreError};
 pub use worker_kit::{WorkerKit, WorkerKitCatalog, WorkerKitError, WorkerKitTarget};
+pub use worker_kit_export::{
+    EnrollmentSecret, WorkerKitCleanupReceipt, WorkerKitExportError, WorkerKitExportReceipt,
+    WorkerKitExporter,
+};

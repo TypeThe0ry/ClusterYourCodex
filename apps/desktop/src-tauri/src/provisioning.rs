@@ -10,7 +10,10 @@ use chrono::{DateTime, SecondsFormat, Utc};
 #[cfg(test)]
 use cyc_protocol::CapacityPolicy;
 use cyc_protocol::{
-    onboarding::{EnrollmentBundleV1, PairingPhaseV1, PairingStatusV1},
+    onboarding::{
+        EnrollmentBundleV1, PairingFailureCodeV1, PairingPhaseV1, PairingStatusErrorV1,
+        PairingStatusV1,
+    },
     JobKind, Node, NodeConfig, SmokeRunBindingV1,
 };
 use cyc_provision::{
@@ -552,6 +555,12 @@ struct NodeConfigUpdate<'a> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReportPairingFailureRequest {
+    code: PairingFailureCodeV1,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ResourcePolicyLabel {
     cpu_limit_percent: Option<u8>,
     maximum_parallel_jobs: Option<u16>,
@@ -859,23 +868,21 @@ impl ControllerBoundary for HttpControllerBoundary {
             .send()
             .map_err(|_| controller_failure("CONTROLLER_UNAVAILABLE", true))?;
         let status: PairingStatusV1 = self.decode(response)?;
-        status
-            .validate()
-            .map_err(|_| controller_failure("PAIRING_STATUS_INVALID", false))?;
-        if status.pairing_id != pairing_id || status.intended_node_id != intended_node_id {
-            return Err(controller_failure("PAIRING_ID_MISMATCH", false));
-        }
-        match status.phase {
-            PairingPhaseV1::Pending => Ok(PairingObservation::Pending),
-            PairingPhaseV1::Consumed => Ok(PairingObservation::Consumed),
-            PairingPhaseV1::Ready => status
-                .node_id
-                .map(|node_id| PairingObservation::Paired { node_id })
-                .ok_or_else(|| controller_failure("PAIRING_STATUS_INVALID", false)),
-            PairingPhaseV1::Expired => Err(controller_failure("PAIRING_EXPIRED", true)),
-            PairingPhaseV1::Revoked => Err(controller_failure("PAIRING_REVOKED", false)),
-            PairingPhaseV1::Failed => Err(controller_failure("PAIRING_FAILED", false)),
-        }
+        pairing_observation_from_status(status, pairing_id, intended_node_id)
+    }
+
+    fn report_pairing_failure(
+        &self,
+        pairing_id: Uuid,
+        code: PairingFailureCodeV1,
+    ) -> Result<(), ControllerBoundaryFailure> {
+        let response = self
+            .request(Method::PUT, &format!("/v1/pairings/{pairing_id}/failure"))?
+            .header(CONTENT_TYPE, "application/json")
+            .json(&ReportPairingFailureRequest { code })
+            .send()
+            .map_err(|_| controller_failure("CONTROLLER_UNAVAILABLE", true))?;
+        self.send_empty(response)
     }
 
     fn poll_heartbeat(
@@ -935,6 +942,63 @@ impl ControllerBoundary for HttpControllerBoundary {
             .map_err(|_| controller_failure("CONTROLLER_UNAVAILABLE", true))?;
         self.send_empty(response)
     }
+}
+
+fn pairing_observation_from_status(
+    status: PairingStatusV1,
+    pairing_id: Uuid,
+    intended_node_id: Uuid,
+) -> Result<PairingObservation, ControllerBoundaryFailure> {
+    status
+        .validate()
+        .map_err(|_| controller_failure("PAIRING_STATUS_INVALID", false))?;
+    if status.pairing_id != pairing_id || status.intended_node_id != intended_node_id {
+        return Err(controller_failure("PAIRING_ID_MISMATCH", false));
+    }
+    match status.phase {
+        PairingPhaseV1::Pending => Ok(PairingObservation::Pending),
+        PairingPhaseV1::Consumed => Ok(PairingObservation::Consumed),
+        PairingPhaseV1::Ready => status
+            .node_id
+            .map(|node_id| PairingObservation::Paired { node_id })
+            .ok_or_else(|| controller_failure("PAIRING_STATUS_INVALID", false)),
+        PairingPhaseV1::Expired => Err(controller_failure("PAIRING_EXPIRED", false)),
+        PairingPhaseV1::Revoked => Err(controller_failure("PAIRING_REVOKED", false)),
+        PairingPhaseV1::Failed => {
+            if status.node_id.is_some()
+                || status.consumed_at.is_some()
+                || status.revoked_at.is_some()
+                || status.ready
+            {
+                return Err(controller_failure("PAIRING_STATUS_INVALID", false));
+            }
+            let failure = pairing_status_failure(
+                status
+                    .error
+                    .as_ref()
+                    .ok_or_else(|| controller_failure("PAIRING_STATUS_INVALID", false))?,
+            )?;
+            Err(failure)
+        }
+    }
+}
+
+fn pairing_status_failure(
+    error: &PairingStatusErrorV1,
+) -> Result<ControllerBoundaryFailure, ControllerBoundaryFailure> {
+    error
+        .validate()
+        .map_err(|_| controller_failure("PAIRING_STATUS_INVALID", false))?;
+    if error.retryable {
+        return Err(controller_failure("PAIRING_STATUS_INVALID", false));
+    }
+    let code = match error.code {
+        PairingFailureCodeV1::ProvisioningFailed => "PAIRING_PROVISIONING_FAILED",
+        PairingFailureCodeV1::WorkerInstallFailed => "PAIRING_WORKER_INSTALL_FAILED",
+        PairingFailureCodeV1::WorkerPairingFailed => "PAIRING_WORKER_PAIRING_FAILED",
+        PairingFailureCodeV1::WorkerHealthCheckFailed => "PAIRING_WORKER_HEALTH_CHECK_FAILED",
+    };
+    Ok(controller_failure(code, false))
 }
 
 fn controller_failure(code: &str, retryable: bool) -> ControllerBoundaryFailure {
@@ -1674,6 +1738,125 @@ mod tests {
         });
         assert_eq!(terminal.code.as_str(), "SMOKE_BINDING_MISMATCH");
         assert!(!terminal.retryable);
+    }
+
+    #[test]
+    fn pairing_status_failure_codes_are_bounded_and_terminal() {
+        let cases = [
+            (
+                PairingFailureCodeV1::ProvisioningFailed,
+                "PAIRING_PROVISIONING_FAILED",
+            ),
+            (
+                PairingFailureCodeV1::WorkerInstallFailed,
+                "PAIRING_WORKER_INSTALL_FAILED",
+            ),
+            (
+                PairingFailureCodeV1::WorkerPairingFailed,
+                "PAIRING_WORKER_PAIRING_FAILED",
+            ),
+            (
+                PairingFailureCodeV1::WorkerHealthCheckFailed,
+                "PAIRING_WORKER_HEALTH_CHECK_FAILED",
+            ),
+        ];
+        for (code, expected) in cases {
+            let failure = pairing_status_failure(&PairingStatusErrorV1 {
+                code,
+                message: "Canonical controller failure".to_owned(),
+                retryable: false,
+            })
+            .unwrap();
+            assert_eq!(failure.code.as_str(), expected);
+            assert!(!failure.retryable);
+        }
+    }
+
+    #[test]
+    fn retryable_pairing_failed_status_is_rejected_and_expired_is_terminal() {
+        let pairing_id = Uuid::new_v4();
+        let intended_node_id = Uuid::new_v4();
+        let created_at = Utc::now();
+        let failed = PairingStatusV1 {
+            api_version: "cyc.dev/enrollment/v1".to_owned(),
+            pairing_id,
+            intended_node_id,
+            node_id: None,
+            phase: PairingPhaseV1::Failed,
+            created_at,
+            expires_at: created_at + chrono::Duration::minutes(10),
+            consumed_at: None,
+            revoked_at: None,
+            ready: false,
+            error: Some(PairingStatusErrorV1 {
+                code: PairingFailureCodeV1::WorkerPairingFailed,
+                message: "Canonical controller failure".to_owned(),
+                retryable: true,
+            }),
+        };
+        let invalid =
+            pairing_observation_from_status(failed, pairing_id, intended_node_id).unwrap_err();
+        assert_eq!(invalid.code.as_str(), "PAIRING_STATUS_INVALID");
+        assert!(!invalid.retryable);
+
+        let expired = PairingStatusV1 {
+            api_version: "cyc.dev/enrollment/v1".to_owned(),
+            pairing_id,
+            intended_node_id,
+            node_id: None,
+            phase: PairingPhaseV1::Expired,
+            created_at,
+            expires_at: created_at + chrono::Duration::minutes(10),
+            consumed_at: None,
+            revoked_at: None,
+            ready: false,
+            error: None,
+        };
+        let terminal =
+            pairing_observation_from_status(expired, pairing_id, intended_node_id).unwrap_err();
+        assert_eq!(terminal.code.as_str(), "PAIRING_EXPIRED");
+        assert!(!terminal.retryable);
+    }
+
+    #[test]
+    fn failed_pairing_rejects_consumed_or_ready_evidence() {
+        let pairing_id = Uuid::new_v4();
+        let intended_node_id = Uuid::new_v4();
+        let created_at = Utc::now();
+        let failed = PairingStatusV1 {
+            api_version: "cyc.dev/enrollment/v1".to_owned(),
+            pairing_id,
+            intended_node_id,
+            node_id: Some(intended_node_id),
+            phase: PairingPhaseV1::Failed,
+            created_at,
+            expires_at: created_at + chrono::Duration::minutes(10),
+            consumed_at: Some(created_at),
+            revoked_at: None,
+            ready: false,
+            error: Some(PairingStatusErrorV1 {
+                code: PairingFailureCodeV1::WorkerPairingFailed,
+                message: "Canonical controller failure".to_owned(),
+                retryable: false,
+            }),
+        };
+        let invalid =
+            pairing_observation_from_status(failed, pairing_id, intended_node_id).unwrap_err();
+        assert_eq!(invalid.code.as_str(), "PAIRING_STATUS_INVALID");
+        assert!(!invalid.retryable);
+    }
+
+    #[test]
+    fn pairing_failure_report_body_contains_only_the_code() {
+        let wire = serde_json::to_value(ReportPairingFailureRequest {
+            code: PairingFailureCodeV1::WorkerPairingFailed,
+        })
+        .unwrap();
+        assert_eq!(wire, serde_json::json!({ "code": "worker_pairing_failed" }));
+        let text = wire.to_string();
+        for forbidden in ["message", "retryable", "detail", "secret", "token"] {
+            assert!(!text.contains(forbidden));
+        }
     }
 
     struct CheckpointDriver;
