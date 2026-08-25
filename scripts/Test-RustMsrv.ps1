@@ -29,9 +29,16 @@ function Get-CycManifestRustVersion {
 function Get-CycResolvedMaximumRustVersion {
     param([Parameter(Mandatory = $true)][string]$ManifestPath)
 
-    $metadataText = & cargo metadata --locked --format-version 1 --manifest-path $ManifestPath 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "cargo metadata failed for ${ManifestPath}:`n$($metadataText -join [Environment]::NewLine)"
+    $stderrPath = [IO.Path]::GetTempFileName()
+    try {
+        $metadataText = & cargo metadata --locked --format-version 1 --color never --manifest-path $ManifestPath 2> $stderrPath
+        $metadataExitCode = $LASTEXITCODE
+        $metadataStderr = [IO.File]::ReadAllText($stderrPath)
+    } finally {
+        Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+    }
+    if ($metadataExitCode -ne 0) {
+        throw "cargo metadata failed for ${ManifestPath}:`n$metadataStderr"
     }
     $metadata = ($metadataText -join [Environment]::NewLine) | ConvertFrom-Json
     $requirements = @(

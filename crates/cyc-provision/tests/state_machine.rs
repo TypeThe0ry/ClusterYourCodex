@@ -82,7 +82,11 @@ fn idempotent_create_rejects_identity_reuse_with_changed_input() {
 #[test]
 fn authentication_policy_is_durable_redacted_and_legacy_defaults_to_password() {
     let temp = TempDir::new().expect("tempdir");
-    let key_path = temp.path().join("id_fixture");
+    #[cfg(target_os = "macos")]
+    let key_root = fs::canonicalize(temp.path()).expect("canonical tempdir");
+    #[cfg(not(target_os = "macos"))]
+    let key_root = temp.path().to_path_buf();
+    let key_path = key_root.join("id_fixture");
     fs::write(&key_path, b"fixture-private-key-material").expect("key fixture");
     let private_key = PrivateKeyFile::new(&key_path).expect("validated key fixture");
     let mut input = new_computer();
