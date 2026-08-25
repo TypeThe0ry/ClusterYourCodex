@@ -6,7 +6,9 @@ use reqwest::header::{HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{State, WebviewUrl, WebviewWindowBuilder};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -25,6 +27,94 @@ use provisioning::{
     ProvisioningInitializationError, ProvisioningManager, ProvisioningOperationResult,
     PublicProvisioningError, RevisionRequest, SecretActionRequest, StartComputerRequest,
 };
+
+#[derive(Clone)]
+struct ManagedControllerProxy {
+    proxy: Option<ControllerProxy>,
+    unavailable_code: &'static str,
+}
+
+impl ManagedControllerProxy {
+    fn from_result(result: Result<ControllerProxy, InternalProxyError>) -> Self {
+        match result {
+            Ok(proxy) => Self {
+                proxy: Some(proxy),
+                unavailable_code: "controller_unavailable",
+            },
+            Err(error) => Self {
+                proxy: None,
+                unavailable_code: PublicProxyError::from(error).code,
+            },
+        }
+    }
+
+    fn unavailable(code: &'static str) -> Self {
+        Self {
+            proxy: None,
+            unavailable_code: code,
+        }
+    }
+
+    fn proxy(&self) -> Result<ControllerProxy, PublicProxyError> {
+        self.proxy.clone().ok_or(PublicProxyError {
+            code: self.unavailable_code,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct ManagedIntegration {
+    manager: Option<IntegrationManager>,
+}
+
+impl ManagedIntegration {
+    fn from_result(result: Result<IntegrationManager, integration::IntegrationError>) -> Self {
+        Self {
+            manager: result.ok(),
+        }
+    }
+
+    fn unavailable() -> Self {
+        Self { manager: None }
+    }
+
+    fn manager(&self) -> Result<IntegrationManager, PublicIntegrationError> {
+        self.manager.clone().ok_or_else(|| {
+            PublicIntegrationError::from(integration::IntegrationError::DataUnavailable)
+        })
+    }
+}
+
+#[derive(Clone)]
+struct ManagedFullRunCheck {
+    manager: Option<FullRunCheckManager>,
+}
+
+impl ManagedFullRunCheck {
+    fn from_result(
+        result: Result<FullRunCheckManager, full_run::FullRunInitializationError>,
+    ) -> Self {
+        Self {
+            manager: result.ok(),
+        }
+    }
+
+    fn unavailable() -> Self {
+        Self { manager: None }
+    }
+
+    fn manager(&self) -> Result<FullRunCheckManager, PublicFullRunCheckError> {
+        self.manager
+            .clone()
+            .ok_or_else(PublicFullRunCheckError::operation_unavailable)
+    }
+
+    fn progress(&self) -> Option<FullRunCheckResult> {
+        self.manager
+            .as_ref()
+            .and_then(FullRunCheckManager::progress)
+    }
+}
 
 #[derive(Clone)]
 struct ManagedProvisioning {
@@ -46,6 +136,13 @@ impl ManagedProvisioning {
         }
     }
 
+    fn unavailable(code: &'static str) -> Self {
+        Self {
+            manager: None,
+            unavailable_code: code,
+        }
+    }
+
     fn manager(&self) -> Result<ProvisioningManager, PublicProvisioningError> {
         self.manager.clone().ok_or_else(|| {
             PublicProvisioningError::initialization_unavailable(self.unavailable_code)
@@ -61,6 +158,33 @@ const MAX_RENDERER_TIMEOUT: Duration = Duration::from_secs(8);
 // attempt ends first. The per-request timeout is also reduced to the absolute
 // renderer deadline after any Tauri queue delay.
 const NATIVE_PROXY_TIMEOUT: Duration = Duration::from_secs(7);
+const MAIN_WINDOW_LABEL: &str = "main";
+const TRAY_ID: &str = "clusteryourcodex";
+const TRAY_SHOW_MENU_ID: &str = "tray-show";
+const TRAY_QUIT_MENU_ID: &str = "tray-quit";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrayMenuAction {
+    Show,
+    Quit,
+    Ignore,
+}
+
+fn tray_menu_action(id: &str) -> TrayMenuAction {
+    match id {
+        TRAY_SHOW_MENU_ID => TrayMenuAction::Show,
+        TRAY_QUIT_MENU_ID => TrayMenuAction::Quit,
+        _ => TrayMenuAction::Ignore,
+    }
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
 
 // The renderer gets exactly one narrow bridge. It never receives a base URL,
 // token path, bearer token, or header injection primitive.
@@ -401,16 +525,17 @@ fn unix_epoch_millis() -> Result<u64, InternalProxyError> {
 #[tauri::command]
 async fn controller_request(
     request: ControllerRequest,
-    proxy: State<'_, ControllerProxy>,
+    proxy: State<'_, ManagedControllerProxy>,
 ) -> Result<ControllerResponse, PublicProxyError> {
+    let proxy = proxy.inner().proxy()?;
     proxy.execute(request).await.map_err(Into::into)
 }
 
 #[tauri::command]
 async fn integration_status(
-    manager: State<'_, IntegrationManager>,
+    manager: State<'_, ManagedIntegration>,
 ) -> Result<IntegrationStatus, PublicIntegrationError> {
-    let manager = manager.inner().clone();
+    let manager = manager.inner().manager()?;
     tauri::async_runtime::spawn_blocking(move || manager.status())
         .await
         .map_err(|_| {
@@ -421,9 +546,9 @@ async fn integration_status(
 
 #[tauri::command]
 async fn install_or_repair_integration(
-    manager: State<'_, IntegrationManager>,
+    manager: State<'_, ManagedIntegration>,
 ) -> Result<IntegrationActionResult, PublicIntegrationError> {
-    let manager = manager.inner().clone();
+    let manager = manager.inner().manager()?;
     tauri::async_runtime::spawn_blocking(move || manager.install_or_repair())
         .await
         .map_err(|_| {
@@ -434,9 +559,9 @@ async fn install_or_repair_integration(
 
 #[tauri::command]
 async fn integration_self_test(
-    manager: State<'_, IntegrationManager>,
+    manager: State<'_, ManagedIntegration>,
 ) -> Result<IntegrationSelfTestResult, PublicIntegrationError> {
-    let manager = manager.inner().clone();
+    let manager = manager.inner().manager()?;
     tauri::async_runtime::spawn_blocking(move || manager.self_test())
         .await
         .map_err(|_| {
@@ -447,18 +572,21 @@ async fn integration_self_test(
 
 #[tauri::command]
 async fn full_run_check(
-    manager: State<'_, FullRunCheckManager>,
-    integration: State<'_, IntegrationManager>,
+    manager: State<'_, ManagedFullRunCheck>,
+    integration: State<'_, ManagedIntegration>,
 ) -> Result<FullRunCheckResult, PublicFullRunCheckError> {
-    let manager = manager.inner().clone();
-    let integration = integration.inner().clone();
+    let manager = manager.inner().manager()?;
+    let integration = integration
+        .inner()
+        .manager()
+        .map_err(|_| PublicFullRunCheckError::operation_unavailable())?;
     tauri::async_runtime::spawn_blocking(move || manager.run(&integration))
         .await
         .map_err(|_| PublicFullRunCheckError::operation_unavailable())?
 }
 
 #[tauri::command]
-fn full_run_check_status(manager: State<'_, FullRunCheckManager>) -> Option<FullRunCheckResult> {
+fn full_run_check_status(manager: State<'_, ManagedFullRunCheck>) -> Option<FullRunCheckResult> {
     manager.progress()
 }
 
@@ -729,28 +857,65 @@ fn trusted_navigation(url: &tauri::Url) -> bool {
         && url.port() == Some(1420)
 }
 
-pub fn run() {
-    let token_file = default_token_file().expect("platform data directory must be available");
-    let data_root = token_file
-        .parent()
-        .expect("controller token must have a data directory")
-        .to_path_buf();
-    let proxy =
-        ControllerProxy::new(token_file.clone()).expect("native controller proxy must initialize");
-    let integration = IntegrationManager::new(token_file.clone())
-        .expect("native Codex integration manager must initialize");
-    let full_run = FullRunCheckManager::new(token_file.clone())
-        .expect("native Full Run Check manager must initialize");
+struct DesktopManagers {
+    proxy: ManagedControllerProxy,
+    integration: ManagedIntegration,
+    full_run: ManagedFullRunCheck,
+    provisioning: ManagedProvisioning,
+}
+
+impl DesktopManagers {
+    fn unavailable() -> Self {
+        Self {
+            proxy: ManagedControllerProxy::unavailable("controller_auth_unavailable"),
+            integration: ManagedIntegration::unavailable(),
+            full_run: ManagedFullRunCheck::unavailable(),
+            provisioning: ManagedProvisioning::unavailable("provisioning_store_unavailable"),
+        }
+    }
+}
+
+fn initialize_desktop_managers() -> DesktopManagers {
+    let Ok(token_file) = default_token_file() else {
+        // The renderer still starts and receives stable, secret-free error
+        // codes from every native command. This keeps Diagnostics/Repair
+        // reachable when the platform data directory is damaged or absent.
+        return DesktopManagers::unavailable();
+    };
+    let Some(data_root) = token_file.parent().map(Path::to_path_buf) else {
+        return DesktopManagers::unavailable();
+    };
+
+    let proxy = ManagedControllerProxy::from_result(ControllerProxy::new(token_file.clone()));
+    let integration = ManagedIntegration::from_result(IntegrationManager::new(token_file.clone()));
+    let full_run = ManagedFullRunCheck::from_result(FullRunCheckManager::new(token_file.clone()));
     // Missing or damaged worker kits disable only Add Computer. The controller,
     // plugin repair, diagnostics, and Full Run pages must still start so the
     // installation can be repaired in place.
     let provisioning =
         ManagedProvisioning::from_result(ProvisioningManager::new(&data_root, token_file));
+
+    DesktopManagers {
+        proxy,
+        integration,
+        full_run,
+        provisioning,
+    }
+}
+
+pub fn run() -> Result<(), tauri::Error> {
+    let managers = initialize_desktop_managers();
+    // Register single-instance first, before state or any other plugin. A
+    // second launch restores the existing close-to-tray window instead of
+    // starting a duplicate native proxy or provisioning manager.
     tauri::Builder::default()
-        .manage(proxy)
-        .manage(integration)
-        .manage(full_run)
-        .manage(provisioning)
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
+        .manage(managers.proxy)
+        .manage(managers.integration)
+        .manage(managers.full_run)
+        .manage(managers.provisioning)
         .invoke_handler(tauri::generate_handler![
             controller_request,
             integration_status,
@@ -770,8 +935,32 @@ pub fn run() {
             provisioning_remove,
             provisioning_forget_ssh_password
         ])
+        .on_menu_event(|app, event| match tray_menu_action(event.id().as_ref()) {
+            TrayMenuAction::Show => show_main_window(app),
+            TrayMenuAction::Quit => app.exit(0),
+            TrayMenuAction::Ignore => {}
+        })
+        .on_tray_icon_event(|app, event| match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                ..
+            }
+            | TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } if event.id().as_ref() == TRAY_ID => show_main_window(app),
+            _ => {}
+        })
+        .on_window_event(|window, event| {
+            if window.label() == MAIN_WINDOW_LABEL {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+            WebviewWindowBuilder::new(app, MAIN_WINDOW_LABEL, WebviewUrl::App("index.html".into()))
                 .title("ClusterYourCodex")
                 .inner_size(1240.0, 820.0)
                 .min_inner_size(960.0, 640.0)
@@ -779,15 +968,39 @@ pub fn run() {
                 .initialization_script(BRIDGE_INITIALIZATION_SCRIPT)
                 .on_navigation(trusted_navigation)
                 .build()?;
+
+            let show_item = MenuItem::with_id(
+                app,
+                TRAY_SHOW_MENU_ID,
+                "Open ClusterYourCodex",
+                true,
+                None::<&str>,
+            )?;
+            let quit_item = MenuItem::with_id(app, TRAY_QUIT_MENU_ID, "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let mut tray = TrayIconBuilder::with_id(TRAY_ID)
+                .tooltip("ClusterYourCodex")
+                .show_menu_on_left_click(false)
+                .menu(&menu);
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.build(app)?;
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("ClusterYourCodex desktop host failed");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn expected_error<T, E>(result: Result<T, E>) -> E {
+        match result {
+            Err(error) => error,
+            Ok(_) => panic!("expected an error"),
+        }
+    }
 
     #[test]
     fn route_allowlist_has_no_generic_url_or_admin_surface() {
@@ -985,6 +1198,47 @@ mod tests {
     }
 
     #[test]
+    fn missing_platform_data_root_degrades_all_managers_without_panicking() {
+        assert!(fixed_data_root(None, None, None).is_err());
+        let managers = DesktopManagers::unavailable();
+
+        let proxy = serde_json::to_value(expected_error(managers.proxy.proxy())).unwrap();
+        assert_eq!(proxy["code"], "controller_auth_unavailable");
+
+        let integration =
+            serde_json::to_value(expected_error(managers.integration.manager())).unwrap();
+        assert_eq!(integration["code"], "integration_data_unavailable");
+        assert_eq!(integration["retryable"], false);
+
+        let full_run = serde_json::to_value(expected_error(managers.full_run.manager())).unwrap();
+        assert_eq!(full_run["code"], "full_run_check_unavailable");
+        assert!(managers.full_run.progress().is_none());
+
+        let provisioning =
+            serde_json::to_value(expected_error(managers.provisioning.manager())).unwrap();
+        assert_eq!(provisioning["code"], "provisioning_store_unavailable");
+        assert_eq!(provisioning["retryable"], false);
+    }
+
+    #[test]
+    fn individual_native_manager_initialization_failures_are_fail_closed() {
+        let proxy = ManagedControllerProxy::from_result(Err(InternalProxyError::ClientSetup));
+        let proxy = serde_json::to_value(expected_error(proxy.proxy())).unwrap();
+        assert_eq!(proxy["code"], "controller_unavailable");
+
+        let integration =
+            ManagedIntegration::from_result(Err(integration::IntegrationError::DataUnavailable));
+        let integration = serde_json::to_value(expected_error(integration.manager())).unwrap();
+        assert_eq!(integration["code"], "integration_data_unavailable");
+
+        let full_run = ManagedFullRunCheck::from_result(Err(
+            full_run::FullRunInitializationError::ControllerClient,
+        ));
+        let full_run = serde_json::to_value(expected_error(full_run.manager())).unwrap();
+        assert_eq!(full_run["code"], "full_run_check_unavailable");
+    }
+
+    #[test]
     fn navigation_accepts_only_exact_packaged_origins() {
         for raw in ["tauri://localhost/", "http://tauri.localhost/index.html"] {
             let url = tauri::Url::parse(raw).unwrap();
@@ -1005,5 +1259,14 @@ mod tests {
     #[test]
     fn native_deadline_precedes_renderer_deadline() {
         assert!(NATIVE_PROXY_TIMEOUT < MAX_RENDERER_TIMEOUT);
+    }
+
+    #[test]
+    fn tray_menu_ids_are_fail_closed_and_stable() {
+        assert_eq!(tray_menu_action(TRAY_SHOW_MENU_ID), TrayMenuAction::Show);
+        assert_eq!(tray_menu_action(TRAY_QUIT_MENU_ID), TrayMenuAction::Quit);
+        for unknown in ["", "show", "quit", "tray-admin", "tray-show/../quit"] {
+            assert_eq!(tray_menu_action(unknown), TrayMenuAction::Ignore);
+        }
     }
 }

@@ -6,6 +6,7 @@ node_modules/
 dist/
 .vite/
 .tauri/
+apps/desktop/src-tauri/gen/
 .edge-smoke-profile/
 *.tsbuildinfo
 vite.config.js

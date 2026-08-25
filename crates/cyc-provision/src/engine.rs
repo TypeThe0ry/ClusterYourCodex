@@ -8,7 +8,8 @@ use uuid::Uuid;
 use crate::{
     ComputerRecord, CredentialState, DiscoveredComputer, FailureCode, NewComputer,
     PinnedHostKeyRecord, ProvisioningIntent, ProvisioningState, ProvisioningStep,
-    ProvisioningStore, RecordValidationError, StoreError, COMPUTER_RECORD_FORMAT_VERSION,
+    ProvisioningStore, RecordValidationError, SshAuthenticationMethod, StoreError,
+    COMPUTER_RECORD_FORMAT_VERSION,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -113,8 +114,9 @@ pub enum StepCompletion {
 }
 
 /// A driver request contains only durable non-secret state. Concrete Tauri
-/// drivers retain the transient password or fetch it from `cyc-secrets` rather
-/// than putting it in this request.
+/// drivers retain the transient password/private-key passphrase or fetch a
+/// remembered password from `cyc-secrets` rather than putting it in this
+/// request. SSH-agent authentication carries no secret.
 #[derive(Debug)]
 pub struct DriverRequest<'a> {
     pub computer: &'a ComputerRecord,
@@ -243,6 +245,7 @@ impl ProvisioningEngine {
                 if existing.intended_node_id != intended_node_id
                     || existing.display_name != input.display_name
                     || existing.endpoint != input.endpoint
+                    || existing.ssh_authentication != input.ssh_authentication
                     || existing.configuration != input.configuration
                     || existing.credential_policy.remember_requested != input.remember_credential
                 {
@@ -383,6 +386,11 @@ impl ProvisioningEngine {
         if !matches!(record.state, ProvisioningState::Ready) {
             return Err(ProvisioningError::InvalidOperation(
                 "forget credential requires ready",
+            ));
+        }
+        if record.ssh_authentication.method() != SshAuthenticationMethod::Password {
+            return Err(ProvisioningError::InvalidOperation(
+                "forget credential requires password authentication",
             ));
         }
         let request = driver_request(
@@ -592,7 +600,10 @@ impl ProvisioningEngine {
         // not a generic retry.  Drop the stale vault reference in the same
         // CAS as the failed checkpoint so a corrected password supplied on
         // Retry is the only credential eligible for the next SSH attempt.
-        if failure.code.as_str() == "SSH_AUTH_REJECTED" {
+        if matches!(
+            failure.code.as_str(),
+            "SSH_AUTH_REJECTED" | "SSH_PRIVATE_KEY_REJECTED"
+        ) {
             record.credential_policy.state = CredentialState::Pending;
             record.credential_reference = None;
         }

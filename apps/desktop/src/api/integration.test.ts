@@ -351,6 +351,32 @@ describe("IntegrationClient", () => {
     expect(String(error)).not.toContain("must-not-leak");
   });
 
+  it("turns rollback failures into an explicit repair action without exposing diagnostics", async () => {
+    vi.stubGlobal("window", {
+      __CLUSTER_YOUR_CODEX__: {
+        installOrRepairIntegration: vi.fn(async () => {
+          throw {
+            code: "repair_required",
+            retryable: false,
+            repair_required: true,
+            diagnostic: "marketplace_rollback_failed",
+            primary_failure: "marketplace_install_failed",
+            rollback_failure: "remove_replacement",
+            internal_path: "C:\\must-not-leak",
+          };
+        }),
+      },
+    });
+    const error = await new IntegrationClient().installOrRepair().catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      code: "repair_required",
+      retryable: false,
+      message: "Codex integration rollback was incomplete. Run Setup Repair before retrying",
+    });
+    expect(String(error)).not.toContain("marketplace_rollback_failed");
+    expect(String(error)).not.toContain("must-not-leak");
+  });
+
   it("rejects a Full Run PASS without downloaded proof evidence", async () => {
     vi.stubGlobal("window", {
       __CLUSTER_YOUR_CODEX__: {

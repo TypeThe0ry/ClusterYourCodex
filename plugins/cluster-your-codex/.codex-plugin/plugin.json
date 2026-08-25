@@ -1,6 +1,6 @@
 {
   "name": "cluster-your-codex",
-  "version": "0.1.0",
+  "version": "0.1.0-preview.3",
   "description": "Let Codex inspect, plan, and run work across computers connected to the local ClusterYourCodex controller.",
   "author": {
     "name": "ClusterYourCodex"

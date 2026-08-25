@@ -20,7 +20,6 @@ cyc-protocol = { path = "../cyc-protocol" }
 cyc-scheduler = { path = "../cyc-scheduler" }
 rusqlite.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pemfile = "2.2"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"

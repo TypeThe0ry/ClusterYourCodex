@@ -20,7 +20,6 @@ globset = "0.4"
 hex = "0.4"
 reqwest.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-rustls-pemfile = "2.2"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"

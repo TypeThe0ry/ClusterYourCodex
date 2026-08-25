@@ -778,6 +778,7 @@ function publicError(error: unknown): IntegrationApiError {
     marketplace_install_failed: "The local ClusterYourCodex marketplace could not be registered",
     plugin_install_failed: "The ClusterYourCodex plugin could not be installed",
     integration_state_unavailable: "Integration health state could not be saved",
+    repair_required: "Codex integration rollback was incomplete. Run Setup Repair before retrying",
     integration_self_test_failed: "The plugin connection check could not be completed",
     integration_busy_retryable: "Another Codex integration operation is still finishing; retry shortly",
     full_run_check_busy: "A Full Run Check is already in progress",

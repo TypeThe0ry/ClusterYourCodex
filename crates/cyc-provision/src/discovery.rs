@@ -13,6 +13,7 @@ const MAX_VALUE_BYTES: usize = 512;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemotePlatform {
     Linux,
+    Macos,
     Windows,
 }
 
@@ -21,6 +22,7 @@ impl RemotePlatform {
     pub fn operating_system(self) -> &'static str {
         match self {
             Self::Linux => "linux",
+            Self::Macos => "macos",
             Self::Windows => "windows",
         }
     }
@@ -28,6 +30,7 @@ impl RemotePlatform {
     pub(crate) fn discovery_file_name(self) -> &'static str {
         match self {
             Self::Linux => "cyc-discovery.sh",
+            Self::Macos => "cyc-discovery-macos.sh",
             Self::Windows => "cyc-discovery.ps1",
         }
     }
@@ -35,6 +38,7 @@ impl RemotePlatform {
     pub(crate) fn discovery_script(self) -> &'static [u8] {
         match self {
             Self::Linux => LINUX_DISCOVERY_SCRIPT.as_bytes(),
+            Self::Macos => MACOS_DISCOVERY_SCRIPT.as_bytes(),
             Self::Windows => WINDOWS_DISCOVERY_SCRIPT.as_bytes(),
         }
     }
@@ -216,6 +220,8 @@ const LINUX_DISCOVERY_SCRIPT: &str = r#"#!/bin/sh
 set -eu
 umask 077
 export LC_ALL=C
+[ "${1:-}" != "--" ] || shift
+[ "$(uname -s 2>/dev/null || true)" = "Linux" ] || exit 3
 workspace="${1:-${HOME:-/tmp}}"
 b64() { printf '%s' "$1" | base64 | tr -d '\r\n'; }
 one_line() { printf '%s' "$1" | tr '\r\n' '  ' | cut -c1-512; }
@@ -265,6 +271,56 @@ if command -v nvidia-smi >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; 
     printf 'gpu=%s|%s|%s\n' "$(b64 "$(one_line "$name")")" "$(b64 "$(one_line "$uuid")")" "$((memory_mib * 1024 * 1024))"
   done
 fi
+"#;
+
+const MACOS_DISCOVERY_SCRIPT: &str = r#"#!/bin/sh
+set -eu
+umask 077
+export LC_ALL=C
+[ "${1:-}" != "--" ] || shift
+[ "$(uname -s 2>/dev/null || true)" = "Darwin" ] || exit 3
+workspace="${1:-${HOME:-/tmp}}"
+b64() { printf '%s' "$1" | base64 | tr -d '\r\n'; }
+one_line() { printf '%s' "$1" | tr '\r\n' '  ' | cut -c1-512; }
+architecture="$(uname -m 2>/dev/null || true)"
+case "$architecture" in
+  x86_64|amd64) architecture=x86_64 ;;
+  arm64|aarch64) architecture=aarch64 ;;
+  *) architecture=unsupported ;;
+esac
+hostname_value="$(hostname 2>/dev/null || uname -n)"
+cpu_model="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
+[ -n "$cpu_model" ] || cpu_model="$(sysctl -n hw.model 2>/dev/null || true)"
+[ -n "$cpu_model" ] || cpu_model="unknown-cpu"
+logical_cpu_count="$(sysctl -n hw.logicalcpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')"
+case "$logical_cpu_count" in ''|*[!0-9]*|0) logical_cpu_count=1 ;; esac
+memory_bytes="$(sysctl -n hw.memsize 2>/dev/null || printf '0')"
+case "$memory_bytes" in ''|*[!0-9]*) memory_bytes=0 ;; esac
+workspace_free_bytes="$(df -Pk "$workspace" 2>/dev/null | awk 'NR==2{printf "%.0f", $4 * 1024}' || true)"
+case "$workspace_free_bytes" in ''|*[!0-9]*) workspace_free_bytes=0 ;; esac
+printf 'CYC_DISCOVERY_V1\n'
+printf 'hostname=%s\n' "$(b64 "$(one_line "$hostname_value")")"
+printf 'operating_system=macos\n'
+printf 'architecture=%s\n' "$architecture"
+printf 'cpu_model=%s\n' "$(b64 "$(one_line "$cpu_model")")"
+printf 'logical_cpu_count=%s\n' "$logical_cpu_count"
+printf 'memory_bytes=%s\n' "$memory_bytes"
+printf 'workspace_free_bytes=%s\n' "$workspace_free_bytes"
+tool_version() {
+  tool="$1"
+  command -v "$tool" >/dev/null 2>&1 || return 0
+  version=present
+  timeout_tool=''
+  if command -v timeout >/dev/null 2>&1; then timeout_tool=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then timeout_tool=gtimeout
+  fi
+  if [ -n "$timeout_tool" ]; then
+    observed="$($timeout_tool 2 "$tool" --version 2>/dev/null | head -n 1 || true)"
+    [ -z "$observed" ] || version="$observed"
+  fi
+  printf 'tool=%s|%s\n' "$(b64 "$tool")" "$(b64 "$(one_line "$version")")"
+}
+for tool in git cargo rustc docker cmake ninja node python3 xcrun swift; do tool_version "$tool"; done
 "#;
 
 const WINDOWS_DISCOVERY_SCRIPT: &str = r#"param([string]$WorkspaceRoot = '')
@@ -349,6 +405,43 @@ mod tests {
         assert_eq!(inventory.cpu_model, "Fixture CPU");
         assert_eq!(inventory.gpu_devices.len(), 1);
         assert_eq!(inventory.toolchains["cargo"], "cargo 1.90.0");
+    }
+
+    #[test]
+    fn macos_inventory_is_platform_bound_and_supports_both_release_architectures() {
+        for architecture in ["x86_64", "aarch64"] {
+            let payload = format!(
+                "CYC_DISCOVERY_V1\nhostname={}\noperating_system=macos\narchitecture={architecture}\ncpu_model={}\nlogical_cpu_count=10\nmemory_bytes=17179869184\nworkspace_free_bytes=999\ntool={}|{}\n",
+                b64("mac-worker"),
+                b64("Apple CPU"),
+                b64("xcrun"),
+                b64("present"),
+            );
+            let inventory = parse_discovery(payload.as_bytes(), RemotePlatform::Macos).unwrap();
+            assert_eq!(inventory.operating_system, "macos");
+            assert_eq!(inventory.architecture, architecture);
+            assert_eq!(inventory.toolchains["xcrun"], "present");
+            assert_eq!(
+                parse_discovery(payload.as_bytes(), RemotePlatform::Linux),
+                Err(DiscoveryError::PlatformMismatch)
+            );
+        }
+    }
+
+    #[test]
+    fn platform_scripts_are_distinct_and_fail_closed_on_the_wrong_kernel() {
+        assert_eq!(RemotePlatform::Macos.operating_system(), "macos");
+        assert_eq!(
+            RemotePlatform::Macos.discovery_file_name(),
+            "cyc-discovery-macos.sh"
+        );
+        let linux = std::str::from_utf8(RemotePlatform::Linux.discovery_script()).unwrap();
+        let macos = std::str::from_utf8(RemotePlatform::Macos.discovery_script()).unwrap();
+        assert!(linux.contains("= \"Linux\" ] || exit 3"));
+        assert!(macos.contains("= \"Darwin\" ] || exit 3"));
+        assert!(macos.contains("operating_system=macos"));
+        assert!(macos.contains("sysctl -n hw.memsize"));
+        assert!(macos.contains("df -Pk \"$workspace\""));
     }
 
     #[test]

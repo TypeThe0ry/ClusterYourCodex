@@ -1,13 +1,14 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    path::{Component, Path},
 };
 
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
 use cyc_protocol::SmokeRunBindingV1;
 use cyc_secrets::CredentialReference;
-use cyc_ssh::HostKey;
+use cyc_ssh::{HostKey, PrivateKeyFile};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 use uuid::Uuid;
@@ -20,6 +21,7 @@ const MAX_TOOLCHAINS: usize = 128;
 const MAX_GPU_DEVICES: usize = 32;
 const MAX_FAILURE_CODE_BYTES: usize = 64;
 const MAX_WORKSPACE_BYTES: usize = 4 * 1024;
+const MAX_PRIVATE_KEY_PATH_BYTES: usize = 16 * 1024;
 
 /// Current durable JSON format for [`ComputerRecord`].
 pub const COMPUTER_RECORD_FORMAT_VERSION: u32 = 2;
@@ -31,6 +33,142 @@ const fn legacy_computer_record_format_version() -> u32 {
 
 fn default_true() -> bool {
     true
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshAuthenticationMethod {
+    #[default]
+    Password,
+    Agent,
+    PrivateKey,
+}
+
+impl SshAuthenticationMethod {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Password => "password",
+            Self::Agent => "agent",
+            Self::PrivateKey => "private_key",
+        }
+    }
+}
+
+/// Durable, non-secret SSH authentication policy.
+///
+/// A private-key path is persisted so repair/restart can select the same local
+/// identity, but is deliberately redacted from `Debug`. Passwords and key
+/// passphrases never enter this value. A path supplied by a new request and
+/// every authentication-time use must pass [`PrivateKeyFile`] validation.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SshAuthenticationPolicy {
+    #[serde(default)]
+    method: SshAuthenticationMethod,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    private_key_path: Option<String>,
+}
+
+impl Default for SshAuthenticationPolicy {
+    fn default() -> Self {
+        Self::password()
+    }
+}
+
+impl fmt::Debug for SshAuthenticationPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SshAuthenticationPolicy")
+            .field("method", &self.method)
+            .field("private_key_configured", &self.private_key_path.is_some())
+            .finish()
+    }
+}
+
+impl SshAuthenticationPolicy {
+    #[must_use]
+    pub const fn password() -> Self {
+        Self {
+            method: SshAuthenticationMethod::Password,
+            private_key_path: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn agent() -> Self {
+        Self {
+            method: SshAuthenticationMethod::Agent,
+            private_key_path: None,
+        }
+    }
+
+    pub fn private_key(private_key: &PrivateKeyFile) -> Result<Self, RecordValidationError> {
+        let path = private_key
+            .as_path()
+            .to_str()
+            .ok_or(RecordValidationError::InvalidAuthenticationPolicy)?;
+        let value = Self {
+            method: SshAuthenticationMethod::PrivateKey,
+            private_key_path: Some(path.to_owned()),
+        };
+        value.validate_durable()?;
+        Ok(value)
+    }
+
+    #[must_use]
+    pub const fn method(&self) -> SshAuthenticationMethod {
+        self.method
+    }
+
+    #[must_use]
+    pub fn private_key_configured(&self) -> bool {
+        self.private_key_path.is_some()
+    }
+
+    /// Reconstructs and strictly revalidates the private-key file immediately
+    /// before authentication. Errors never include the underlying path.
+    pub fn private_key_file(&self) -> Result<PrivateKeyFile, RecordValidationError> {
+        if self.method != SshAuthenticationMethod::PrivateKey {
+            return Err(RecordValidationError::InvalidAuthenticationPolicy);
+        }
+        let path = self
+            .private_key_path
+            .as_deref()
+            .ok_or(RecordValidationError::InvalidAuthenticationPolicy)?;
+        PrivateKeyFile::new(path).map_err(|_| RecordValidationError::InvalidAuthenticationPolicy)
+    }
+
+    fn validate_for_new(&self) -> Result<(), RecordValidationError> {
+        self.validate_durable()?;
+        if self.method == SshAuthenticationMethod::PrivateKey {
+            self.private_key_file()?;
+        }
+        Ok(())
+    }
+
+    fn validate_durable(&self) -> Result<(), RecordValidationError> {
+        match (self.method, self.private_key_path.as_deref()) {
+            (SshAuthenticationMethod::Password | SshAuthenticationMethod::Agent, None) => Ok(()),
+            (SshAuthenticationMethod::PrivateKey, Some(path))
+                if is_durable_private_key_path(path) =>
+            {
+                Ok(())
+            }
+            _ => Err(RecordValidationError::InvalidAuthenticationPolicy),
+        }
+    }
+}
+
+fn is_durable_private_key_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && value.len() <= MAX_PRIVATE_KEY_PATH_BYTES
+        && !value.contains(['\0', '\r', '\n'])
+        && path.is_absolute()
+        && !path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,6 +353,8 @@ impl ComputerEndpoint {
 pub struct NewComputer {
     pub display_name: String,
     pub endpoint: ComputerEndpoint,
+    #[serde(default)]
+    pub ssh_authentication: SshAuthenticationPolicy,
     #[serde(default = "default_true")]
     pub remember_credential: bool,
     #[serde(default)]
@@ -229,6 +369,7 @@ impl NewComputer {
         let value = Self {
             display_name: display_name.into(),
             endpoint,
+            ssh_authentication: SshAuthenticationPolicy::default(),
             remember_credential: true,
             configuration: ComputerConfiguration::default(),
         };
@@ -239,6 +380,12 @@ impl NewComputer {
     pub fn validate(&self) -> Result<(), RecordValidationError> {
         validate_text("displayName", &self.display_name, MAX_DISPLAY_NAME_BYTES)?;
         self.endpoint.validate()?;
+        self.ssh_authentication.validate_for_new()?;
+        if self.ssh_authentication.method() != SshAuthenticationMethod::Password
+            && self.remember_credential
+        {
+            return Err(RecordValidationError::InvalidAuthenticationPolicy);
+        }
         self.configuration.validate()
     }
 }
@@ -558,6 +705,8 @@ pub struct ComputerRecord {
     pub id: Uuid,
     pub display_name: String,
     pub endpoint: ComputerEndpoint,
+    #[serde(default)]
+    pub ssh_authentication: SshAuthenticationPolicy,
     pub state: ProvisioningState,
     pub intent: ProvisioningIntent,
     #[serde(default)]
@@ -606,6 +755,7 @@ impl ComputerRecord {
             id,
             display_name: input.display_name,
             endpoint: input.endpoint,
+            ssh_authentication: input.ssh_authentication,
             state: ProvisioningState::Draft,
             intent: ProvisioningIntent::Continue,
             teardown_completed: false,
@@ -648,6 +798,14 @@ impl ComputerRecord {
         }
         validate_text("displayName", &self.display_name, MAX_DISPLAY_NAME_BYTES)?;
         self.endpoint.validate()?;
+        self.ssh_authentication.validate_durable()?;
+        if self.ssh_authentication.method() != SshAuthenticationMethod::Password
+            && (self.credential_policy.remember_requested
+                || self.credential_reference.is_some()
+                || self.credential_policy.state == CredentialState::Stored)
+        {
+            return Err(RecordValidationError::InvalidAuthenticationPolicy);
+        }
         if self.updated_at < self.created_at {
             return Err(RecordValidationError::InvalidTimestamp);
         }
@@ -893,6 +1051,8 @@ pub enum RecordValidationError {
     InvalidIntent,
     #[error("credential policy state is inconsistent with the record")]
     InvalidCredentialState,
+    #[error("SSH authentication policy is invalid")]
+    InvalidAuthenticationPolicy,
     #[error("teardown checkpoint is inconsistent with the current intent")]
     InvalidTeardownCheckpoint,
     #[error("unsupported provisioning record format version")]

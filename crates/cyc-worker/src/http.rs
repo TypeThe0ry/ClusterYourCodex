@@ -1,4 +1,3 @@
-use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -24,7 +23,7 @@ use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use reqwest::{Client, Response, StatusCode, Url};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::WebPkiServerVerifier;
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::pki_types::{pem::PemObject, CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, RootCertStore, SignatureScheme};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -863,16 +862,21 @@ fn build_tls_client(certificate_pem: &str) -> Result<Client> {
 }
 
 fn parse_single_certificate(certificate_pem: &str) -> Result<CertificateDer<'static>> {
-    let mut reader = Cursor::new(certificate_pem.as_bytes());
-    let items = rustls_pemfile::read_all(&mut reader)
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .context("parse enrollment certificatePem")?;
-    let [rustls_pemfile::Item::X509Certificate(certificate)] = items.as_slice() else {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+    let trimmed = certificate_pem.trim();
+    if !trimmed.starts_with(BEGIN)
+        || !trimmed.ends_with(END)
+        || trimmed.matches(BEGIN).count() != 1
+        || trimmed.matches(END).count() != 1
+        || trimmed.matches("-----BEGIN ").count() != 1
+        || trimmed.matches("-----END ").count() != 1
+    {
         bail!(
             "enrollment certificatePem must contain exactly one certificate and no other PEM items"
         );
-    };
-    Ok(certificate.clone())
+    }
+    CertificateDer::from_pem_slice(trimmed.as_bytes()).context("parse enrollment certificatePem")
 }
 
 #[derive(Debug)]

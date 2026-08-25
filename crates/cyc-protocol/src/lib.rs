@@ -31,8 +31,8 @@ pub use cleanup::{
 
 pub use node_state::{
     BatteryTelemetry, CapacityPolicy, ContainmentBackend, ContainmentInventory, GpuInventory,
-    GpuTelemetry, NodeAvailability, NodeConfig, NodeDesiredState, NodeInventory, NodeMergeView,
-    NodeStateError, NodeTelemetry, PowerSource,
+    GpuTelemetry, HostileIsolationBackend, HostileIsolationInventory, NodeAvailability, NodeConfig,
+    NodeDesiredState, NodeInventory, NodeMergeView, NodeStateError, NodeTelemetry, PowerSource,
 };
 pub use placement_binding::{
     PlacementBindingError, PlacementPlanBindingV1, PlacementPlanDecisionV1, SmokeRunBindingV1,

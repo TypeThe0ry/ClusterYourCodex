@@ -106,13 +106,24 @@ truthfully labelled preview rather than a signed cross-user elevation claim.
   `[CYC-LINUX-USER-SYSTEMD-UNAVAILABLE]`; root `--scope auto` uses system scope.
   A linger setting enabled by the failed preflight is rolled back when the
   subsequent user-bus probe cannot connect.
-- The macOS x64 and arm64 previews are portable controller/CLI archives. They
-  contain `cyc-controller` and `cyc`, but deliberately omit `cyc-worker`.
-  Managed execution on macOS remains fail-closed until a containment backend
-  can prove that the complete process tree has terminated.
+- Linux's opt-in dedicated-execution-identity/cgroup-v2 hostile-isolation
+  mechanism passed an internal native P1 test. Independent review still
+  requires additional escape, identity, resource, and reconciliation proofs,
+  so release binaries reject configured hostile execution, report it unready,
+  and publish no hostile scheduling capability. The ordinary worker lifecycle
+  remains a trusted single-user executor, not a hostile or multi-tenant sandbox.
+- The macOS x64 and arm64 portable previews contain `cyc-controller`,
+  `cyc-worker`, and `cyc`. Release packaging also produces publisher-signed,
+  exact-five-file macOS Worker Kits containing `cyc-worker`,
+  `install-worker.sh`, `worker-kit.json`, `worker-kit.sig`, and `SHA256SUMS`.
+  The lifecycle script uses the macOS LaunchAgent/Application Support/Logs
+  contract, but managed execution remains `runtimeGated=true`,
+  `containmentReady=false`, and `liveReady=false` until a containment backend
+  and native live acceptance prove complete process-tree termination.
 - A future standalone Linux GUI installer may reuse the Worker Kit's systemd
-  lifecycle and XDG state contract. Future macOS lifecycle packaging is
-  expected to use a LaunchAgent and Application Support/Logs directories.
+  lifecycle and XDG state contract. A future standalone macOS GUI installer may
+  reuse the now-packaged Worker Kit lifecycle; the lifecycle itself does not
+  make managed execution ready.
 - The same controller protocol, data ownership, rollback, and evidence rules
   remain the cross-platform contract; an archive does not claim that a future
   service lifecycle is already implemented.
@@ -205,8 +216,11 @@ TLS identity, or worker state. Success exits zero and writes exactly one compact
 JSON object (at most 4096 UTF-8 bytes) to stdout:
 
 ```json
-{"schemaVersion":"cyc.dev/codex-integration-receipt/v1","status":"installed","pluginId":"cluster-your-codex@clusteryourcodex","pluginVersion":"0.1.0","agentsBlockSha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","payloadCatalogSha256":"1111111111111111111111111111111111111111111111111111111111111111","buildCatalogSha256":"2222222222222222222222222222222222222222222222222222222222222222","installManifestSha256":"3333333333333333333333333333333333333333333333333333333333333333","agentsFileSha256":"4444444444444444444444444444444444444444444444444444444444444444","agentsExternalSha256":"5555555555555555555555555555555555555555555555555555555555555555","agentsOwnedRangeSha256":"6666666666666666666666666666666666666666666666666666666666666666"}
+{"schemaVersion":"cyc.dev/codex-integration-receipt/v1","status":"installed","pluginId":"cluster-your-codex@clusteryourcodex","pluginVersion":"<product-version>","agentsBlockSha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","payloadCatalogSha256":"1111111111111111111111111111111111111111111111111111111111111111","buildCatalogSha256":"2222222222222222222222222222222222222222222222222222222222222222","installManifestSha256":"3333333333333333333333333333333333333333333333333333333333333333","agentsFileSha256":"4444444444444444444444444444444444444444444444444444444444444444","agentsExternalSha256":"5555555555555555555555555555555555555555555555555555555555555555","agentsOwnedRangeSha256":"6666666666666666666666666666666666666666666666666666666666666666"}
 ```
+
+`<product-version>` above means the exact value from the repository `VERSION`
+and installed manifest; it is not a literal runtime value.
 
 `status` is `installed`, `repaired`, or `unchanged`. Failure exits nonzero,
 keeps stdout empty, writes one bounded error line to stderr, and performs no
@@ -234,7 +248,9 @@ overwrite the active-runtime receipt.
 
 Install, upgrade, repair, and uninstall record only non-secret owned resources
 and hashes. Uninstall removes those exact resources and preserves user data by
-default. `-PurgeData` is the explicit destructive option.
+default. `-PurgeData` is the explicit destructive option. The presence of an
+upgrade transaction path is not supported `N-1 -> N` evidence; cross-version
+upgrade, interrupted rollback, and downgrade policy remain acceptance gates.
 
 The release workflow builds and publishes a code-unsigned developer-preview
 `ClusterYourCodex-Setup.exe` with NSIS from the exact manifest-bound Windows
@@ -242,35 +258,39 @@ payload. It is a one-click preview installer, not a signed GA release. GA still
 requires Authenticode signing of Setup and the firewall-only helper, plus
 post-sign signature and payload verification.
 The absence of Authenticode does not make managed Worker Kits unsigned: every
-Windows/Linux Worker Kit has a detached Ed25519 publisher signature over its
-canonical manifest. Controller pins and verifies the repository public key
-before SSH staging; the remote lifecycle then binds the exact uploaded bytes
-through upload/readback SHA-256, the exact five-file set, the four-entry
-`SHA256SUMS`, signature envelope, key id, and manifest digest. The remote shell
-does not independently implement Ed25519.
+Windows/Linux/macOS Worker Kit has a detached Ed25519 publisher signature over
+its canonical manifest. Controller/release packaging pins and verifies the
+repository public key; the lifecycle binds the exact bytes through SHA-256, the
+exact five-file set, the four-entry `SHA256SUMS`, signature envelope, key id,
+and manifest digest. The remote shell does not independently implement
+Ed25519. A signed macOS kit remains runtime-gated; payload authenticity is not
+containment or live-execution evidence.
 
 ## Published developer-preview set
 
-The release workflow publishes the following preview archives:
+The release workflow publishes the following preview assets:
 
 | Artifact suffix | Contents | Current use |
 | --- | --- | --- |
 | `windows-x64-preview.zip` | `cyc-controller.exe`, `cyc-worker.exe`, `cyc.exe` | Portable native controller/worker/CLI preview |
 | `linux-x64-preview.tar.gz` | `cyc-controller`, `cyc-worker`, `cyc` | Portable native controller/worker/CLI preview |
-| `macos-x64-preview.tar.gz` | `cyc-controller`, `cyc` | Native Intel controller/CLI preview; worker omitted |
-| `macos-arm64-preview.tar.gz` | `cyc-controller`, `cyc` | Native Apple Silicon controller/CLI preview; worker omitted |
+| `macos-x64-preview.tar.gz` | `cyc-controller`, `cyc-worker`, `cyc`, signed Worker Kit | Native Intel portable preview; managed execution runtime-gated |
+| `macos-arm64-preview.tar.gz` | `cyc-controller`, `cyc-worker`, `cyc`, signed Worker Kit | Native Apple Silicon portable preview; managed execution runtime-gated |
+| `worker-kit-macos-x64-preview.tar.gz` | Exact-five signed macOS x64 Worker Kit | Lifecycle/package validation only; containment/live readiness false |
+| `worker-kit-macos-arm64-preview.tar.gz` | Exact-five signed macOS arm64 Worker Kit | Lifecycle/package validation only; containment/live readiness false |
 | `integration-preview.zip` | Compiled renderer and Codex marketplace/plugin | Integration assets only; no native application or installer |
-| `windows-x64-self-contained-preview.zip` | GUI, controller, worker, CLI, bootstrap, Codex integration, private Node runtime | Windows-first extracted bootstrap preview |
+| `windows-x64-self-contained-preview.zip` | GUI, controller, worker, CLI, bootstrap, Codex integration, private Node runtime, five managed Worker Kits | Windows-first extracted bootstrap preview |
 | `ClusterYourCodex-Setup.exe` | NSIS wrapper embedding the exact self-contained Windows preview payload | Unsigned one-click developer-preview Setup; GA signing gate remains open |
 
-Every platform/integration archive contains `PREVIEW-NOTICE.md`,
-`platform-status.json`, and `release-manifest.json`. Each archive also has an
-adjacent SHA-256 sidecar. `ClusterYourCodex-Setup.exe` also has an adjacent
+Every portable platform/integration archive, excluding the standalone Worker
+Kit tarballs, contains `PREVIEW-NOTICE.md`, `platform-status.json`, and
+`release-manifest.json`. Every primary asset in the table has an adjacent
 SHA-256 sidecar. The release-index job downloads all producer artifacts,
-verifies all seven sidecars against the downloaded bytes, rejects missing
-or duplicate expected assets, and emits a combined `SHA256SUMS` plus
-`release-index.json`. A tagged draft prerelease depends on that index job and
-publishes only its verified assembled output.
+requires and verifies exactly nine producer sidecars, rejects missing or
+duplicate expected assets, and generates a CycloneDX 1.6 release-asset SBOM
+with its own sidecar, a combined `SHA256SUMS`, and `release-index.json` plus its
+sidecar. A tagged draft prerelease depends on that index job and publishes only
+its verified assembled output.
 
 All native Rust release jobs run full-workspace `cargo fmt`, `cargo clippy`, and
 `cargo test` before their release build. Windows, Linux, macOS Intel, and macOS
@@ -280,13 +300,16 @@ binary format and architecture, verifies Unix executable bits, and runs native
 The self-contained Windows job also checks the GUI PE architecture and reruns
 the Windows bootstrap lifecycle tests before creating its archive.
 
-These are code-unsigned and unattested developer previews. The workflow produces an
-unsigned one-click NSIS Setup but does not claim code signing, Apple
-notarization, an SBOM, provenance/attestations, automatic update support, or a
-stable-release support policy. Checksums and JSON inventories establish byte identity within
-the workflow output; they are not a substitute for those missing release
-controls. Worker-kit publisher signatures authenticate the worker payload
-manifest, but are not Authenticode, archive provenance, or an attestation.
+These remain code-unsigned developer previews. Tagged prerelease runs generate
+a CycloneDX 1.6 **release-asset inventory** SBOM and use GitHub artifact build
+provenance for the final `release-assets/*`; the release index records
+`unattested=false` only after complete attestation evidence exists. Manual
+`workflow_dispatch` artifacts remain explicitly `unattested=true`. These
+controls do not claim Authenticode, Apple signing/notarization, a full
+dependency/payload SBOM, third-party notices, independent post-download
+provenance verification, automatic update support, or stable-release support.
+Worker-kit publisher signatures authenticate the worker payload manifest, but
+are not Authenticode or a hostile-execution/containment claim.
 Windows/Linux managed workers execute trusted jobs as the worker OS
 account and are not hostile-workload or multi-tenant sandboxes. See
 [`managed-worker-protocol.md`](managed-worker-protocol.md) for the execution and

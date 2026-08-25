@@ -11,10 +11,103 @@ permissions:
 
 env:
   CYC_REF_NAME: ${{ github.ref_name }}
+  CYC_RELEASE_CHANNEL: prerelease
+  CYC_SOURCE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
 
 jobs:
+  release-identity:
+    name: Fail-closed prerelease identity gate
+    runs-on: windows-latest
+    outputs:
+      product_version: ${{ steps.identity.outputs.product_version }}
+      release_channel: ${{ steps.identity.outputs.release_channel }}
+      source_tag: ${{ steps.identity.outputs.source_tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Verify every remote GitHub Action is commit-pinned
+        shell: pwsh
+        run: ./scripts/Test-GitHubActionPins.ps1
+      - name: Verify exact-tag production signing boundary
+        shell: pwsh
+        run: ./scripts/Test-ReleaseSigningBoundary.ps1
+      - id: identity
+        name: Require strict prerelease VERSION and exact vVERSION tag
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ('${{ github.ref_type }}' -cne 'tag' -or
+              [string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)) {
+            throw 'Release runs, including workflow_dispatch, must originate from an exact tag.'
+          }
+          $arguments = @{
+            RepositoryRoot = $PWD
+            RequirePrerelease = $true
+            Json = $true
+          }
+          if (-not [string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)) {
+            $arguments.SourceTag = [string]$env:CYC_SOURCE_TAG
+          }
+          $identity = (& ./scripts/Test-VersionConsistency.ps1 @arguments) | ConvertFrom-Json
+          if ([string]$identity.releaseChannel -cne 'prerelease') {
+            throw 'This workflow is prerelease-only; stable releases require a separate GA gate.'
+          }
+          "product_version=$([string]$identity.productVersion)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          'release_channel=prerelease' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "source_tag=$([string]$identity.sourceTag)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+  msrv:
+    name: Minimum supported Rust 1.88.0 (${{ matrix.graph }})
+    needs: [release-identity]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - graph: workspace
+            os: ubuntu-latest
+          - graph: desktop
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0 action implementation
+        with:
+          toolchain: 1.88.0
+      - name: Assert exact MSRV toolchain
+        shell: pwsh
+        run: |
+          $actual = (& rustc --version).Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)[1]
+          if ($actual -cne '1.88.0') { throw "Expected rustc 1.88.0, got $actual" }
+      - name: Assert declared MSRV covers both locked dependency graphs
+        shell: pwsh
+        run: ./scripts/Test-RustMsrv.ps1
+      - name: Check the locked workspace at MSRV
+        if: matrix.graph == 'workspace'
+        run: cargo check --workspace --locked
+      - name: Check the locked Windows desktop host at MSRV
+        if: matrix.graph == 'desktop'
+        run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+
+  signing-key-protection:
+    name: Signing-key private-file protection (${{ matrix.os }})
+    needs: [release-identity]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Verify private signing-key file protection
+        shell: pwsh
+        run: ./scripts/Test-WorkerKitSigningKeyProtection.ps1
+
   rust-artifacts:
     name: ${{ matrix.name }} portable preview
+    needs: [release-identity, signing-key-protection]
+    if: github.ref_type == 'tag' && needs.release-identity.outputs.source_tag != ''
+    environment: production-signing
+    env:
+      CYC_PRODUCT_VERSION: ${{ needs.release-identity.outputs.product_version }}
     strategy:
       fail-fast: false
       matrix:
@@ -42,7 +135,7 @@ jobs:
             platform: macos
             native_arch: x86_64
             suffix: ""
-            include_worker: "false"
+            include_worker: "true"
           - name: macOS arm64
             os: macos-15
             target: aarch64-apple-darwin
@@ -50,14 +143,14 @@ jobs:
             platform: macos
             native_arch: arm64
             suffix: ""
-            include_worker: "false"
+            include_worker: "true"
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: release-preview-${{ matrix.target }}
       - name: Check formatting
@@ -97,8 +190,11 @@ jobs:
             if ($machine -ne 0x8664) {
               throw "$name is not an AMD64 PE executable (machine=0x$($machine.ToString('x4')))."
             }
-            & $path --version
-            if ($LASTEXITCODE -ne 0) { throw "$name --version failed." }
+            $versionOutput = ((& $path --version) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or
+                $versionOutput -cnotmatch (" " + [regex]::Escape($env:CYC_PRODUCT_VERSION) + '$')) {
+              throw "$name --version did not report product VERSION $env:CYC_PRODUCT_VERSION (observed: $versionOutput)."
+            }
             & $path --help | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "$name --help failed." }
           }
@@ -114,7 +210,8 @@ jobs:
             test -x "$path"
             file "$path" | grep -Eq 'ELF 64-bit.*x86-64'
             readelf -h "$path" | grep -Eq 'Machine:[[:space:]]+Advanced Micro Devices X86-64'
-            "$path" --version
+            version_output="$("$path" --version)"
+            [[ "$version_output" == *" $CYC_PRODUCT_VERSION" ]]
             "$path" --help >/dev/null
           done
       - name: Verify macOS binaries, executable bits, and native smoke
@@ -123,7 +220,11 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$(uname -m)" == "${{ matrix.native_arch }}" ]]
-          for name in cyc-controller cyc; do
+          binary_names=(cyc-controller cyc)
+          if [[ '${{ matrix.include_worker }}' == 'true' ]]; then
+            binary_names=(cyc-controller cyc-worker cyc)
+          fi
+          for name in "${binary_names[@]}"; do
             path="target/${{ matrix.target }}/release/$name"
             test -f "$path"
             test -x "$path"
@@ -133,7 +234,8 @@ jobs:
               *" ${{ matrix.native_arch }} "*) ;;
               *) echo "Unexpected Mach-O architectures for $name: $archs" >&2; exit 1 ;;
             esac
-            "$path" --version
+            version_output="$("$path" --version)"
+            [[ "$version_output" == *" $CYC_PRODUCT_VERSION" ]]
             "$path" --help >/dev/null
           done
       - name: Materialize worker-kit publisher key
@@ -146,16 +248,8 @@ jobs:
           if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SIGNING_KEY_PEM_B64)) {
             throw 'CYC_WORKER_KIT_SIGNING_KEY_PEM_B64 is required; unsigned worker kits are forbidden.'
           }
-          try {
-            $bytes = [Convert]::FromBase64String([string]$env:CYC_SIGNING_KEY_PEM_B64)
-          } catch {
-            throw 'CYC_WORKER_KIT_SIGNING_KEY_PEM_B64 is not valid Base64.'
-          }
-          if ($bytes.Length -lt 64 -or $bytes.Length -gt 65536) {
-            throw 'Worker-kit signing key length is invalid.'
-          }
           $path = Join-Path $env:RUNNER_TEMP "cyc-worker-kit-signing-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-${{ matrix.label }}.pem"
-          [IO.File]::WriteAllBytes($path, $bytes)
+          & ./scripts/Materialize-WorkerKitSigningKey.ps1 -OutputPath $path
           "CYC_WORKER_KIT_SIGNING_KEY_PATH=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Stage portable developer-preview archive
         shell: pwsh
@@ -183,10 +277,17 @@ jobs:
           }
 
           if ('${{ matrix.include_worker }}' -eq 'true') {
-            $workerKitTarget = if ('${{ matrix.platform }}' -eq 'windows') {
-              'windows-x86_64'
-            } else {
-              'linux-x86_64'
+            $workerKitTarget = switch ('${{ matrix.platform }}') {
+              'windows' { 'windows-x86_64' }
+              'linux' { 'linux-x86_64' }
+              'macos' {
+                if ('${{ matrix.native_arch }}' -eq 'arm64') {
+                  'macos-aarch64'
+                } else {
+                  'macos-x86_64'
+                }
+              }
+              default { throw 'Unsupported worker-kit platform.' }
             }
             $workerKit = Join-Path $stage 'worker-kit'
             $workerSource = Join-Path $PWD "target/${{ matrix.target }}/release/cyc-worker${{ matrix.suffix }}"
@@ -207,21 +308,26 @@ jobs:
           }
           Copy-Item -LiteralPath README.md, LICENSE -Destination $stage
 
-          $managedState = if ('${{ matrix.include_worker }}' -eq 'true') {
+          $macosRuntimeGated = ('${{ matrix.platform }}' -eq 'macos')
+          $managedState = if ($macosRuntimeGated) {
+            'runtime-gated-containment-unavailable'
+          } elseif ('${{ matrix.include_worker }}' -eq 'true') {
             'developer-preview-enabled-for-trusted-single-user-jobs'
           } else {
             'disabled-worker-omitted'
           }
-          $managedReason = if ('${{ matrix.include_worker }}' -eq 'true') {
+          $managedReason = if ($macosRuntimeGated) {
+            'The exact-five-file signed macOS Worker Kit is packaged for lifecycle validation, but runtimeGated=true and containmentReady=false; live managed execution is not claimed.'
+          } elseif ('${{ matrix.include_worker }}' -eq 'true') {
             'The archive contains cyc-worker. It executes native scripts as the worker account and is not a hostile-workload or multi-tenant sandbox.'
           } else {
-            'The macOS archive is controller/CLI-only. Managed execution fail-closes until macOS has a containment backend that can prove the complete process tree is gone.'
+            'The archive does not contain a managed worker.'
           }
           $notice = @"
           # ClusterYourCodex developer preview
 
-          This is a code-unsigned, unattested portable developer-preview archive, not a stable installer.
-          Included Windows/Linux worker kits carry a controller-verified Ed25519 publisher signature.
+          This is a code-unsigned portable developer-preview archive, not a stable installer.
+          Included Windows/Linux/macOS worker kits carry a controller-verified Ed25519 publisher signature.
 
           Platform: ${{ matrix.platform }}
           Architecture: ${{ matrix.native_arch }}
@@ -230,16 +336,20 @@ jobs:
           $managedReason
 
           Verify the adjacent `.sha256` sidecar or the workflow-level `SHA256SUMS`
-          before extracting. No code-signing, notarization, SBOM, or provenance is
-          claimed by this archive. Windows and Linux archives include an explicit
-          worker-kit lifecycle script with install, repair, uninstall, and rollback
-          support; nothing runs automatically when the archive is extracted.
+          before extracting. Tagged release assets are published only after the
+          release-level CycloneDX SBOM and GitHub build-provenance gate succeeds;
+          manually dispatched artifacts remain explicitly indexed as unattested.
+          Worker kits include an explicit lifecycle script with install, repair,
+          uninstall, and rollback support; nothing runs automatically when extracted.
           "@
           $notice | Set-Content -LiteralPath (Join-Path $stage 'PREVIEW-NOTICE.md') -Encoding UTF8
 
           $platformStatus = [ordered]@{
             schemaVersion = 'cyc.dev/platform-status/v1'
             releaseKind = 'developer-preview'
+            productVersion = [string]$env:CYC_PRODUCT_VERSION
+            releaseChannel = [string]$env:CYC_RELEASE_CHANNEL
+            sourceTag = if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)) { $null } else { [string]$env:CYC_SOURCE_TAG }
             platform = '${{ matrix.platform }}'
             architecture = '${{ matrix.native_arch }}'
             rustTarget = '${{ matrix.target }}'
@@ -251,6 +361,9 @@ jobs:
               workerIncluded = ('${{ matrix.include_worker }}' -eq 'true')
               state = $managedState
               reason = $managedReason
+              runtimeGated = $macosRuntimeGated
+              containmentReady = if ($macosRuntimeGated) { $false } else { $null }
+              liveReady = if ($macosRuntimeGated) { $false } else { $null }
             }
             securityClaims = [ordered]@{
               codeSigned = $false
@@ -273,9 +386,21 @@ jobs:
           $manifest = [ordered]@{
             schemaVersion = 'cyc.dev/release-manifest/v1'
             releaseKind = 'developer-preview'
+            productVersion = [string]$env:CYC_PRODUCT_VERSION
+            releaseChannel = [string]$env:CYC_RELEASE_CHANNEL
+            sourceTag = if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)) { $null } else { [string]$env:CYC_SOURCE_TAG }
             sourceCommit = [string]$env:GITHUB_SHA
             sourceRef = [string]$env:GITHUB_REF
             target = '${{ matrix.target }}'
+            workerKit = if ($macosRuntimeGated) {
+              [ordered]@{
+                target = if ('${{ matrix.native_arch }}' -eq 'arm64') { 'macos-aarch64' } else { 'macos-x86_64' }
+                exactFileCount = 5
+                runtimeGated = $true
+                containmentReady = $false
+                liveReady = $false
+              }
+            } else { $null }
             files = $payloadFiles
           }
           $manifest | ConvertTo-Json -Depth 8 |
@@ -294,6 +419,42 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
           "$hash  $(Split-Path $archive -Leaf)" |
             Set-Content -NoNewline -Encoding ascii "$archive.sha256"
+
+          if ($macosRuntimeGated) {
+            $expectedKitFiles = @(
+              'SHA256SUMS', 'cyc-worker', 'install-worker.sh',
+              'worker-kit.json', 'worker-kit.sig'
+            )
+            $kitItems = @(Get-ChildItem -LiteralPath $workerKit -Force)
+            $kitNames = @($kitItems | ForEach-Object Name)
+            if ($kitItems.Count -ne 5 -or
+                @($kitItems | Where-Object { $_.PSIsContainer }).Count -ne 0) {
+              throw 'macOS Worker Kit must contain exactly five normal files.'
+            }
+            foreach ($expectedKitFile in $expectedKitFiles) {
+              if ($kitNames -cnotcontains $expectedKitFile) {
+                throw "macOS Worker Kit is missing $expectedKitFile."
+              }
+            }
+            $kitManifest = Get-Content -LiteralPath (Join-Path $workerKit 'worker-kit.json') -Raw |
+              ConvertFrom-Json
+            $expectedKitTarget = if ('${{ matrix.native_arch }}' -eq 'arm64') {
+              'macos-aarch64'
+            } else {
+              'macos-x86_64'
+            }
+            if ([string]$kitManifest.target -cne $expectedKitTarget -or
+                [string]$kitManifest.version -cne [string]$env:CYC_PRODUCT_VERSION -or
+                [string]$kitManifest.os -cne 'macos') {
+              throw 'macOS Worker Kit release identity is invalid.'
+            }
+            $kitArchive = Join-Path $archiveRoot "ClusterYourCodex-$safeRef-worker-kit-${{ matrix.label }}-preview.tar.gz"
+            & tar -C $workerKit -czf $kitArchive .
+            if ($LASTEXITCODE -ne 0) { throw 'tar failed to create the standalone macOS Worker Kit.' }
+            $kitHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $kitArchive).Hash.ToLowerInvariant()
+            "$kitHash  $(Split-Path $kitArchive -Leaf)" |
+              Set-Content -NoNewline -Encoding ascii "$kitArchive.sha256"
+          }
       - name: Destroy worker-kit publisher key
         if: always() && matrix.include_worker == 'true'
         shell: pwsh
@@ -301,14 +462,14 @@ jobs:
           if (-not [string]::IsNullOrWhiteSpace([string]$env:CYC_WORKER_KIT_SIGNING_KEY_PATH)) {
             [IO.File]::Delete([string]$env:CYC_WORKER_KIT_SIGNING_KEY_PATH)
           }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ClusterYourCodex-${{ matrix.label }}-preview
           path: release-assets/*
           if-no-files-found: error
       - name: Upload managed worker kit for controller aggregation
         if: matrix.include_worker == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ClusterYourCodex-worker-kit-${{ matrix.label }}
           path: release-stage/*/worker-kit/*
@@ -316,17 +477,21 @@ jobs:
 
   linux-arm64-worker-kit:
     name: Linux arm64 managed worker kit
+    needs: [release-identity, signing-key-protection]
+    if: github.ref_type == 'tag' && needs.release-identity.outputs.source_tag != ''
+    environment: production-signing
     runs-on: ubuntu-latest
     env:
+      CYC_PRODUCT_VERSION: ${{ needs.release-identity.outputs.product_version }}
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
       CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
       AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
         with:
           targets: aarch64-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: release-preview-aarch64-unknown-linux-gnu
       - name: Install Linux arm64 cross linker
@@ -350,16 +515,8 @@ jobs:
           if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SIGNING_KEY_PEM_B64)) {
             throw 'CYC_WORKER_KIT_SIGNING_KEY_PEM_B64 is required; unsigned worker kits are forbidden.'
           }
-          try {
-            $bytes = [Convert]::FromBase64String([string]$env:CYC_SIGNING_KEY_PEM_B64)
-          } catch {
-            throw 'CYC_WORKER_KIT_SIGNING_KEY_PEM_B64 is not valid Base64.'
-          }
-          if ($bytes.Length -lt 64 -or $bytes.Length -gt 65536) {
-            throw 'Worker-kit signing key length is invalid.'
-          }
           $path = Join-Path $env:RUNNER_TEMP "cyc-worker-kit-signing-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-linux-arm64.pem"
-          [IO.File]::WriteAllBytes($path, $bytes)
+          & ./scripts/Materialize-WorkerKitSigningKey.ps1 -OutputPath $path
           "CYC_WORKER_KIT_SIGNING_KEY_PATH=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Verify Linux arm64 worker and stage kit
         shell: pwsh
@@ -394,7 +551,7 @@ jobs:
           if (-not [string]::IsNullOrWhiteSpace([string]$env:CYC_WORKER_KIT_SIGNING_KEY_PATH)) {
             [IO.File]::Delete([string]$env:CYC_WORKER_KIT_SIGNING_KEY_PATH)
           }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ClusterYourCodex-worker-kit-linux-arm64
           path: worker-kit-artifact/*
@@ -402,17 +559,20 @@ jobs:
 
   integration-artifact:
     name: Desktop renderer and Codex plugin preview
+    needs: [release-identity]
+    env:
+      CYC_PRODUCT_VERSION: ${{ needs.release-identity.outputs.product_version }}
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: release-integration-preview
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 11.0.8
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24.19.0
           cache: pnpm
@@ -479,11 +639,16 @@ jobs:
           This archive contains the compiled renderer and Codex marketplace/plugin assets.
           It is not a native desktop application, controller, worker, CLI, or installer.
           The MCP bridge in this archive requires Node.js 20 or newer on PATH.
-          It is code-unsigned and unattested, and does not claim an SBOM or provenance.
+          It is code-unsigned. Tagged release assets are published only after the
+          release-level CycloneDX SBOM and GitHub build-provenance gate succeeds;
+          manually dispatched artifacts remain explicitly indexed as unattested.
           '@ | Set-Content -LiteralPath (Join-Path $stage 'PREVIEW-NOTICE.md') -Encoding UTF8
           [ordered]@{
             schemaVersion = 'cyc.dev/platform-status/v1'
             releaseKind = 'developer-preview'
+            productVersion = [string]$env:CYC_PRODUCT_VERSION
+            releaseChannel = [string]$env:CYC_RELEASE_CHANNEL
+            sourceTag = if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)) { $null } else { [string]$env:CYC_SOURCE_TAG }
             platform = 'integration-assets'
             architecture = 'platform-neutral-renderer-and-plugin'
             portableArchive = $true
@@ -512,6 +677,9 @@ jobs:
           [ordered]@{
             schemaVersion = 'cyc.dev/release-manifest/v1'
             releaseKind = 'developer-preview'
+            productVersion = [string]$env:CYC_PRODUCT_VERSION
+            releaseChannel = [string]$env:CYC_RELEASE_CHANNEL
+            sourceTag = if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)) { $null } else { [string]$env:CYC_SOURCE_TAG }
             sourceCommit = [string]$env:GITHUB_SHA
             sourceRef = [string]$env:GITHUB_REF
             target = 'integration-assets'
@@ -526,7 +694,7 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
           "$hash  $(Split-Path $archive -Leaf)" |
             Set-Content -NoNewline -Encoding ascii "$archive.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ClusterYourCodex-integration-preview
           path: release-assets/*
@@ -534,24 +702,79 @@ jobs:
 
   windows-preview:
     name: Windows x64 self-contained preview
-    needs: [rust-artifacts, linux-arm64-worker-kit]
+    needs: [release-identity, rust-artifacts, linux-arm64-worker-kit]
+    env:
+      CYC_PRODUCT_VERSION: ${{ needs.release-identity.outputs.product_version }}
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Download cross-platform managed worker kits
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: ClusterYourCodex-worker-kit-*
-          path: ${{ runner.temp }}\cyc-managed-worker-kits
+          path: ${{ runner.temp }}\cyc-downloaded-worker-kits
           merge-multiple: false
-      - uses: dtolnay/rust-toolchain@1.98.0
-      - uses: Swatinem/rust-cache@v2
+      - name: Verify all Worker Kits and select the current Windows provisioner set
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $downloaded = Join-Path $env:RUNNER_TEMP 'cyc-downloaded-worker-kits'
+          $selected = Join-Path $env:RUNNER_TEMP 'cyc-managed-worker-kits'
+          $expectedArtifacts = @(
+            'ClusterYourCodex-worker-kit-linux-arm64',
+            'ClusterYourCodex-worker-kit-linux-x64',
+            'ClusterYourCodex-worker-kit-macos-arm64',
+            'ClusterYourCodex-worker-kit-macos-x64',
+            'ClusterYourCodex-worker-kit-windows-x64'
+          )
+          $artifactDirectories = @(Get-ChildItem -LiteralPath $downloaded -Directory -Force)
+          $artifactNames = @($artifactDirectories | ForEach-Object Name)
+          $kitRoots = @{}
+          if ($artifactDirectories.Count -ne $expectedArtifacts.Count) {
+            throw "Expected five Worker Kit artifacts, found $($artifactDirectories.Count)."
+          }
+          foreach ($expectedArtifact in $expectedArtifacts) {
+            if ($artifactNames -cnotcontains $expectedArtifact) {
+              throw "Downloaded Worker Kit set is missing $expectedArtifact."
+            }
+            $artifactRoot = Join-Path $downloaded $expectedArtifact
+            $manifestFiles = @(Get-ChildItem -LiteralPath $artifactRoot -File -Recurse -Filter 'worker-kit.json' -Force)
+            if ($manifestFiles.Count -ne 1) {
+              throw "$expectedArtifact must contain exactly one worker-kit.json."
+            }
+            $kitRoot = $manifestFiles[0].Directory.FullName
+            $items = @(Get-ChildItem -LiteralPath $kitRoot -Force)
+            if ($items.Count -ne 5 -or
+                @($items | Where-Object { $_.PSIsContainer }).Count -ne 0) {
+              throw "$expectedArtifact must contain exactly five normal files."
+            }
+            if (@(Get-ChildItem -LiteralPath $artifactRoot -File -Recurse -Force).Count -ne 5) {
+              throw "$expectedArtifact contains files outside its exact-five-file Worker Kit."
+            }
+            $kitRoots[$expectedArtifact] = $kitRoot
+          }
+
+          New-Item -ItemType Directory -Path $selected -Force | Out-Null
+          foreach ($supportedArtifact in @(
+            'ClusterYourCodex-worker-kit-linux-arm64',
+            'ClusterYourCodex-worker-kit-linux-x64',
+            'ClusterYourCodex-worker-kit-macos-arm64',
+            'ClusterYourCodex-worker-kit-macos-x64',
+            'ClusterYourCodex-worker-kit-windows-x64'
+          )) {
+            Copy-Item `
+              -LiteralPath $kitRoots[$supportedArtifact] `
+              -Destination (Join-Path $selected $supportedArtifact) `
+              -Recurse
+          }
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: windows-self-contained-preview
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 11.0.8
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24.19.0
           cache: pnpm
@@ -621,8 +844,11 @@ jobs:
             }
           }
           foreach ($path in $binaries[0..2]) {
-            & $path --version
-            if ($LASTEXITCODE -ne 0) { throw "$path --version failed." }
+            $versionOutput = ((& $path --version) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or
+                $versionOutput -cnotmatch (" " + [regex]::Escape($env:CYC_PRODUCT_VERSION) + '$')) {
+              throw "$path --version did not report product VERSION $env:CYC_PRODUCT_VERSION (observed: $versionOutput)."
+            }
             & $path --help | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "$path --help failed." }
           }
@@ -726,31 +952,46 @@ jobs:
 
           This self-contained ZIP contains the Windows GUI, controller, local managed
           worker, CLI, per-user bootstrap lifecycle, Codex marketplace/plugin, private
-          Node runtime, and integrity-bound Windows x64/Linux x64/Linux arm64 worker
-          kits for SSH provisioning. It is a developer preview for trusted single-user
-          jobs. Submitted steps execute as the worker account; this is not a
-          hostile-workload sandbox.
+          Node runtime, and integrity-bound Windows x64/Linux x64/Linux arm64/macOS
+          x64/macOS arm64 Worker Kits for SSH provisioning. It is a developer preview
+          for trusted single-user jobs. Submitted steps execute as the worker account;
+          this is not a hostile-workload sandbox. Both macOS kits remain fail-closed
+          with runtimeGated=true and containmentReady=false; live macOS execution is
+          not claimed.
 
           The job also publishes a code-unsigned one-click NSIS Setup.exe built from this
-          exact manifest-bound payload. The ZIP, bootstrap, and Setup.exe are code-unsigned
-          and unattested; no SBOM, provenance, automatic update, or stable-release
-          support is claimed. Managed Worker Kits inside the payload have detached
+          exact manifest-bound payload. The ZIP, bootstrap, and Setup.exe remain
+          code-unsigned; tagged release assets receive a release-level CycloneDX SBOM
+          and GitHub build-provenance attestation, while manually dispatched artifacts
+          remain explicitly indexed as unattested. Automatic update and stable-release
+          support are not claimed. Managed Worker Kits inside the payload have detached
           Ed25519 publisher signatures. The installer registers its own repair-safe uninstaller.
           '@ | Set-Content -LiteralPath (Join-Path $preview 'PREVIEW-NOTICE.md') -Encoding UTF8
           [ordered]@{
             schemaVersion = 'cyc.dev/platform-status/v1'
             releaseKind = 'developer-preview'
+            productVersion = [string]$env:CYC_PRODUCT_VERSION
+            releaseChannel = [string]$env:CYC_RELEASE_CHANNEL
+            sourceTag = if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)) { $null } else { [string]$env:CYC_SOURCE_TAG }
             platform = 'windows'
             architecture = 'x86_64'
             rustTarget = 'x86_64-pc-windows-msvc'
             package = 'self-contained-bootstrap-zip-and-nsis-setup'
             nativeRunner = 'windows-latest'
             binaries = @('ClusterYourCodex.exe', 'cyc-controller.exe', 'cyc-worker.exe', 'cyc.exe')
-            workerKits = @('windows-x86_64', 'linux-x86_64', 'linux-aarch64')
+            workerKits = @(
+              'windows-x86_64', 'linux-x86_64', 'linux-aarch64',
+              'macos-x86_64', 'macos-aarch64'
+            )
             managedExecution = [ordered]@{
               workerIncluded = $true
               state = 'developer-preview-enabled-for-trusted-single-user-jobs'
               containment = 'Windows Job Object with kill-on-close'
+              macosWorkerRuntime = [ordered]@{
+                runtimeGated = $true
+                containmentReady = $false
+                liveReady = $false
+              }
             }
             securityClaims = [ordered]@{
               codeSigned = $false
@@ -777,6 +1018,9 @@ jobs:
           [ordered]@{
             schemaVersion = 'cyc.dev/release-manifest/v1'
             releaseKind = 'developer-preview'
+            productVersion = [string]$env:CYC_PRODUCT_VERSION
+            releaseChannel = [string]$env:CYC_RELEASE_CHANNEL
+            sourceTag = if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)) { $null } else { [string]$env:CYC_SOURCE_TAG }
             sourceCommit = [string]$env:GITHUB_SHA
             sourceRef = [string]$env:GITHUB_REF
             target = 'x86_64-pc-windows-msvc-self-contained'
@@ -922,23 +1166,170 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'silent Setup lifecycle smoke failed' }
       - name: Upload silent Setup diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ClusterYourCodex-windows-setup-silent-diagnostics
           path: ${{ runner.temp }}\ClusterYourCodex-setup-silent-smoke\**
           if-no-files-found: warn
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ClusterYourCodex-windows-x64-self-contained-preview
           path: release-assets/*
           if-no-files-found: error
 
+  windows11-acceptance:
+    name: Clean Windows 11 ARM64 compatibility acceptance (x64 emulation)
+    needs: [release-identity, windows-preview]
+    runs-on: windows-11-arm
+    env:
+      CYC_PRODUCT_VERSION: ${{ needs.release-identity.outputs.product_version }}
+      CYC_DISPOSABLE_WINDOWS: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Download the Windows x64 self-contained preview
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ClusterYourCodex-windows-x64-self-contained-preview
+          path: ${{ runner.temp }}\cyc-windows11-acceptance-artifact
+      - name: Assert clean Windows 11 ARM64 runner and extract x64 preview
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifactRoot = Join-Path $env:RUNNER_TEMP 'cyc-windows11-acceptance-artifact'
+          $diagnosticRoot = Join-Path $env:RUNNER_TEMP 'cyc-windows11-acceptance-diagnostics'
+          $extractRoot = Join-Path $env:RUNNER_TEMP 'cyc-windows11-acceptance-package'
+          New-Item -ItemType Directory -Path $diagnosticRoot -Force | Out-Null
+
+          $os = Get-CimInstance -ClassName Win32_OperatingSystem
+          $computer = Get-CimInstance -ClassName Win32_ComputerSystem
+          $nativeArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          [ordered]@{
+            schemaVersion = 'cyc.dev/windows-compatibility-acceptance/v1'
+            acceptance = 'clean-windows-11-arm64-x64-emulation'
+            productVersion = [string]$env:CYC_PRODUCT_VERSION
+            osCaption = [string]$os.Caption
+            osVersion = [string]$os.Version
+            osBuildNumber = [string]$os.BuildNumber
+            nativeArchitecture = $nativeArchitecture
+            computerSystemType = [string]$computer.SystemType
+            processArchitecture = [string]$env:PROCESSOR_ARCHITECTURE
+            x64Emulation = $true
+            x64Native = $false
+          } | ConvertTo-Json -Depth 4 |
+            Set-Content -LiteralPath (Join-Path $diagnosticRoot 'runner-identity.json') -Encoding UTF8
+
+          if ([string]$os.Caption -notmatch '\bWindows 11\b') {
+            throw "Clean acceptance requires Windows 11; runner reported '$($os.Caption)'."
+          }
+          if ($nativeArchitecture -cne 'Arm64' -or [string]$computer.SystemType -notmatch 'ARM64') {
+            throw "Clean acceptance requires native ARM64 Windows; runtime='$nativeArchitecture', system='$($computer.SystemType)'."
+          }
+
+          $archives = @(Get-ChildItem -LiteralPath $artifactRoot -File -Filter '*-windows-x64-self-contained-preview.zip')
+          if ($archives.Count -ne 1) {
+            throw "Expected exactly one Windows x64 self-contained preview ZIP; found $($archives.Count)."
+          }
+          $archive = $archives[0]
+          $archiveSidecar = "$($archive.FullName).sha256"
+          if (-not (Test-Path -LiteralPath $archiveSidecar -PathType Leaf)) {
+            throw 'Windows preview ZIP SHA-256 sidecar is missing.'
+          }
+          $sidecarText = [System.IO.File]::ReadAllText($archiveSidecar, [System.Text.Encoding]::ASCII).Trim()
+          $sidecarMatch = [regex]::Match($sidecarText, '^(?<sha>[0-9a-f]{64})  (?<name>[^\r\n]+)$')
+          if (-not $sidecarMatch.Success -or $sidecarMatch.Groups['name'].Value -cne $archive.Name) {
+            throw 'Windows preview ZIP SHA-256 sidecar is malformed or names another file.'
+          }
+          $actualArchiveHash = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualArchiveHash -cne $sidecarMatch.Groups['sha'].Value) {
+            throw 'Windows preview ZIP SHA-256 verification failed.'
+          }
+
+          $setups = @(Get-ChildItem -LiteralPath $artifactRoot -File -Filter 'ClusterYourCodex-Setup.exe')
+          if ($setups.Count -ne 1) {
+            throw "Expected exactly one ClusterYourCodex-Setup.exe; found $($setups.Count)."
+          }
+          $setupSidecar = "$($setups[0].FullName).sha256"
+          if (-not (Test-Path -LiteralPath $setupSidecar -PathType Leaf)) {
+            throw 'Setup.exe SHA-256 sidecar is missing.'
+          }
+          $setupSidecarText = [System.IO.File]::ReadAllText($setupSidecar, [System.Text.Encoding]::ASCII).Trim()
+          $setupSidecarMatch = [regex]::Match($setupSidecarText, '^(?<sha>[0-9a-f]{64})  (?<name>[^\r\n]+)$')
+          if (-not $setupSidecarMatch.Success -or $setupSidecarMatch.Groups['name'].Value -cne $setups[0].Name) {
+            throw 'Setup.exe SHA-256 sidecar is malformed or names another file.'
+          }
+          $actualSetupHash = (Get-FileHash -LiteralPath $setups[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSetupHash -cne $setupSidecarMatch.Groups['sha'].Value) {
+            throw 'Setup.exe SHA-256 verification failed.'
+          }
+
+          if (Test-Path -LiteralPath $extractRoot) {
+            throw 'Clean acceptance extraction root unexpectedly exists.'
+          }
+          New-Item -ItemType Directory -Path $extractRoot | Out-Null
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $extractRoot
+          $topLevel = @(Get-ChildItem -LiteralPath $extractRoot -Force)
+          if ($topLevel.Count -ne 1 -or -not $topLevel[0].PSIsContainer) {
+            throw 'Windows preview ZIP must contain exactly one package-root directory.'
+          }
+
+          "CYC_ACCEPTANCE_PACKAGE_ROOT=$($topLevel[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CYC_ACCEPTANCE_SETUP_PATH=$($setups[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CYC_ACCEPTANCE_DIAGNOSTIC_ROOT=$diagnosticRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Run fresh-deployment lifecycle on clean Windows 11 ARM64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          $work = Join-Path $env:CYC_ACCEPTANCE_DIAGNOSTIC_ROOT 'fresh-deployment'
+          & $windowsPowerShell `
+            -NoLogo `
+            -NoProfile `
+            -NonInteractive `
+            -ExecutionPolicy Bypass `
+            -File .\packaging\windows\Test-FreshDeployment.ps1 `
+            -PackageRoot $env:CYC_ACCEPTANCE_PACKAGE_ROOT `
+            -WorkRoot $work `
+            -KeepWorkRoot
+          if ($LASTEXITCODE -ne 0) { throw "Fresh-deployment acceptance failed with exit code $LASTEXITCODE." }
+      - name: Run silent Setup lifecycle on clean Windows 11 ARM64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          $work = Join-Path $env:CYC_ACCEPTANCE_DIAGNOSTIC_ROOT 'setup-silent'
+          & $windowsPowerShell `
+            -NoLogo `
+            -NoProfile `
+            -NonInteractive `
+            -ExecutionPolicy Bypass `
+            -File .\packaging\windows\Test-SetupSilent.ps1 `
+            -SetupPath $env:CYC_ACCEPTANCE_SETUP_PATH `
+            -PackageRoot $env:CYC_ACCEPTANCE_PACKAGE_ROOT `
+            -WorkRoot $work `
+            -DisposableEnvironment `
+            -KeepWorkRoot
+          if ($LASTEXITCODE -ne 0) { throw "Silent Setup acceptance failed with exit code $LASTEXITCODE." }
+      - name: Upload Windows 11 ARM64 compatibility diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ClusterYourCodex-windows11-arm64-compatibility-diagnostics
+          path: ${{ runner.temp }}\cyc-windows11-acceptance-diagnostics\**
+          if-no-files-found: warn
+          retention-days: 14
+
   release-index:
     name: Verify preview sidecars and build release index
-    needs: [rust-artifacts, integration-artifact, windows-preview]
+    needs: [release-identity, msrv, rust-artifacts, integration-artifact, windows-preview, windows11-acceptance]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      CYC_PRODUCT_VERSION: ${{ needs.release-identity.outputs.product_version }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: downloaded-artifacts
       - name: Verify sidecars and assemble indexed release assets
@@ -950,8 +1341,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
           $sidecars = @(Get-ChildItem -LiteralPath $inputRoot -File -Recurse -Filter '*.sha256' |
             Sort-Object FullName)
-          if ($sidecars.Count -ne 7) {
-            throw "Expected seven preview artifact sidecars, found $($sidecars.Count)."
+          if ($sidecars.Count -ne 9) {
+            throw "Expected nine preview artifact sidecars, found $($sidecars.Count)."
           }
 
           $records = New-Object System.Collections.Generic.List[object]
@@ -980,12 +1371,28 @@ jobs:
               throw "SHA-256 mismatch for $archiveName"
             }
             Copy-Item -LiteralPath $archive, $sidecar.FullName -Destination $outputRoot
-            [void]$records.Add([ordered]@{
+            $record = [ordered]@{
               name = $archiveName
               bytes = [long](Get-Item -LiteralPath $archive).Length
               sha256 = $actualHash
               sidecar = "$archiveName.sha256"
-            })
+            }
+            if ($archiveName.EndsWith('-worker-kit-macos-x64-preview.tar.gz', [StringComparison]::Ordinal)) {
+              $record.kind = 'managed-worker-kit'
+              $record.target = 'macos-x86_64'
+              $record.exactFileCount = 5
+              $record.runtimeGated = $true
+              $record.containmentReady = $false
+              $record.liveReady = $false
+            } elseif ($archiveName.EndsWith('-worker-kit-macos-arm64-preview.tar.gz', [StringComparison]::Ordinal)) {
+              $record.kind = 'managed-worker-kit'
+              $record.target = 'macos-aarch64'
+              $record.exactFileCount = 5
+              $record.runtimeGated = $true
+              $record.containmentReady = $false
+              $record.liveReady = $false
+            }
+            [void]$records.Add($record)
           }
 
           $requiredSuffixes = @(
@@ -993,26 +1400,144 @@ jobs:
             '-linux-x64-preview.tar.gz',
             '-macos-x64-preview.tar.gz',
             '-macos-arm64-preview.tar.gz',
+            '-worker-kit-macos-x64-preview.tar.gz',
+            '-worker-kit-macos-arm64-preview.tar.gz',
             '-integration-preview.zip',
             '-windows-x64-self-contained-preview.zip',
             'ClusterYourCodex-Setup.exe'
           )
           foreach ($suffix in $requiredSuffixes) {
-            $matches = @($records | Where-Object { $_.name.EndsWith($suffix, [StringComparison]::Ordinal) })
+            $matches = @($records | Where-Object {
+              $_.name.EndsWith($suffix, [StringComparison]::Ordinal) -and
+              ($suffix.StartsWith('-worker-kit-', [StringComparison]::Ordinal) -or
+                -not $_.name.Contains('-worker-kit-', [StringComparison]::Ordinal))
+            })
             if ($matches.Count -ne 1) {
               throw "Expected exactly one release asset ending in $suffix; found $($matches.Count)."
             }
           }
 
+          $expectedMacosKitFiles = @(
+            'SHA256SUMS', 'cyc-worker', 'install-worker.sh',
+            'worker-kit.json', 'worker-kit.sig'
+          )
+          foreach ($kitSuffix in @(
+            '-worker-kit-macos-x64-preview.tar.gz',
+            '-worker-kit-macos-arm64-preview.tar.gz'
+          )) {
+            $kitRecord = @($records | Where-Object {
+              $_.name.EndsWith($kitSuffix, [StringComparison]::Ordinal)
+            })
+            if ($kitRecord.Count -ne 1) {
+              throw "Expected one standalone macOS Worker Kit ending in $kitSuffix."
+            }
+            $kitArchive = Join-Path $outputRoot $kitRecord[0].name
+            $tarEntries = @(& tar -tzf $kitArchive)
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not inspect standalone macOS Worker Kit $($kitRecord[0].name)."
+            }
+            $normalizedEntries = New-Object System.Collections.Generic.List[string]
+            foreach ($rawEntry in $tarEntries) {
+              $entry = ([string]$rawEntry).Trim().TrimEnd('/')
+              while ($entry.StartsWith('./', [StringComparison]::Ordinal)) {
+                $entry = $entry.Substring(2)
+              }
+              if (-not [string]::IsNullOrWhiteSpace($entry) -and $entry -cne '.') {
+                [void]$normalizedEntries.Add($entry)
+              }
+            }
+            if ($normalizedEntries.Count -ne 5) {
+              throw "Standalone macOS Worker Kit $($kitRecord[0].name) does not contain exactly five files."
+            }
+            foreach ($expectedKitFile in $expectedMacosKitFiles) {
+              if ($normalizedEntries -cnotcontains $expectedKitFile) {
+                throw "Standalone macOS Worker Kit $($kitRecord[0].name) is missing $expectedKitFile."
+              }
+            }
+          }
+
+          $assetRecords = @($records | Sort-Object name)
+          $safeRef = [string]$env:CYC_REF_NAME -replace '[^0-9A-Za-z._-]', '-'
+          if ([string]::IsNullOrWhiteSpace($safeRef)) { $safeRef = 'build' }
+          $sbomName = "ClusterYourCodex-$safeRef-release-assets.cdx.json"
+          $sbomPath = Join-Path $outputRoot $sbomName
+          $rootBomRef = "pkg:github/TypeThe0ry/ClusterYourCodex@$env:CYC_PRODUCT_VERSION"
+          $components = @($assetRecords | ForEach-Object {
+            [ordered]@{
+              type = 'file'
+              'bom-ref' = "urn:clusteryourcodex:release-asset:$($_.sha256):$([Uri]::EscapeDataString([string]$_.name))"
+              name = [string]$_.name
+              version = [string]$env:CYC_PRODUCT_VERSION
+              hashes = @([ordered]@{ alg = 'SHA-256'; content = [string]$_.sha256 })
+              properties = @(
+                [ordered]@{ name = 'clusteryourcodex:bytes'; value = [string]$_.bytes },
+                [ordered]@{ name = 'clusteryourcodex:checksum-sidecar'; value = [string]$_.sidecar }
+              )
+            }
+          })
+          [ordered]@{
+            bomFormat = 'CycloneDX'
+            specVersion = '1.6'
+            serialNumber = "urn:uuid:$([Guid]::NewGuid())"
+            version = 1
+            metadata = [ordered]@{
+              timestamp = [DateTime]::UtcNow.ToString('o')
+              component = [ordered]@{
+                type = 'application'
+                'bom-ref' = $rootBomRef
+                name = 'ClusterYourCodex'
+                version = [string]$env:CYC_PRODUCT_VERSION
+              }
+              properties = @(
+                [ordered]@{ name = 'clusteryourcodex:release-channel'; value = [string]$env:CYC_RELEASE_CHANNEL },
+                [ordered]@{ name = 'clusteryourcodex:source-tag'; value = [string]$env:CYC_SOURCE_TAG },
+                [ordered]@{ name = 'clusteryourcodex:source-commit'; value = [string]$env:GITHUB_SHA },
+                [ordered]@{ name = 'clusteryourcodex:unsigned'; value = 'true' }
+              )
+            }
+            components = $components
+            dependencies = @([ordered]@{
+              ref = $rootBomRef
+              dependsOn = @($components | ForEach-Object { [string]$_.'bom-ref' })
+            })
+          } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $sbomPath -Encoding UTF8
+          $sbomHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sbomPath).Hash.ToLowerInvariant()
+          "$sbomHash  $sbomName" |
+            Set-Content -NoNewline -Encoding ASCII (Join-Path $outputRoot "$sbomName.sha256")
+          [void]$records.Add([ordered]@{
+            name = $sbomName
+            bytes = [long](Get-Item -LiteralPath $sbomPath).Length
+            sha256 = $sbomHash
+            sidecar = "$sbomName.sha256"
+            kind = 'sbom'
+            format = 'CycloneDX'
+            specVersion = '1.6'
+          })
+
           $sortedRecords = @($records | Sort-Object name)
           $indexPath = Join-Path $outputRoot 'release-index.json'
+          $taggedForAttestation = -not [string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)
           [ordered]@{
             schemaVersion = 'cyc.dev/release-index/v1'
             releaseKind = 'developer-preview'
+            productVersion = [string]$env:CYC_PRODUCT_VERSION
+            releaseChannel = [string]$env:CYC_RELEASE_CHANNEL
+            sourceTag = if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)) { $null } else { [string]$env:CYC_SOURCE_TAG }
             sourceCommit = [string]$env:GITHUB_SHA
             sourceRef = [string]$env:GITHUB_REF
             unsigned = $true
-            unattested = $true
+            unattested = -not $taggedForAttestation
+            sbom = [ordered]@{
+              format = 'CycloneDX'
+              specVersion = '1.6'
+              name = $sbomName
+              sha256 = $sbomHash
+            }
+            provenance = [ordered]@{
+              provider = if ($taggedForAttestation) { 'github-artifact-attestations' } else { $null }
+              predicateType = if ($taggedForAttestation) { 'https://slsa.dev/provenance/v1' } else { $null }
+              attested = $taggedForAttestation
+            }
             artifacts = $sortedRecords
           } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $indexPath -Encoding UTF8
           $indexHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $indexPath).Hash.ToLowerInvariant()
@@ -1021,7 +1546,28 @@ jobs:
           $combined = @($sortedRecords | ForEach-Object { "$($_.sha256)  $($_.name)" })
           $combined += "$indexHash  release-index.json"
           $combined | Set-Content -LiteralPath (Join-Path $outputRoot 'SHA256SUMS') -Encoding ASCII
-      - uses: actions/upload-artifact@v4
+      - id: provenance
+        name: Attest every final tagged prerelease asset with GitHub build provenance
+        if: github.ref_type == 'tag' && needs.release-identity.outputs.source_tag != ''
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: release-assets/*
+      - name: Verify tagged provenance evidence exists before publication
+        if: github.ref_type == 'tag' && needs.release-identity.outputs.source_tag != ''
+        shell: pwsh
+        env:
+          CYC_ATTESTATION_ID: ${{ steps.provenance.outputs.attestation-id }}
+          CYC_ATTESTATION_URL: ${{ steps.provenance.outputs.attestation-url }}
+          CYC_ATTESTATION_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace([string]$env:CYC_ATTESTATION_ID) -or
+              [string]::IsNullOrWhiteSpace([string]$env:CYC_ATTESTATION_URL) -or
+              [string]::IsNullOrWhiteSpace([string]$env:CYC_ATTESTATION_BUNDLE) -or
+              -not (Test-Path -LiteralPath $env:CYC_ATTESTATION_BUNDLE -PathType Leaf)) {
+            throw 'GitHub build-provenance attestation did not return complete evidence.'
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ClusterYourCodex-release-index-preview
           path: release-assets/*
@@ -1029,17 +1575,18 @@ jobs:
 
   github-release:
     name: Create tagged draft developer preview
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [release-index]
+    if: github.ref_type == 'tag' && needs.release-identity.outputs.source_tag != ''
+    needs: [release-identity, release-index]
     runs-on: ubuntu-latest
+    environment: production
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ClusterYourCodex-release-index-preview
           path: release-assets
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           draft: true
           prerelease: true

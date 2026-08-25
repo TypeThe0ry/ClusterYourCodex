@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
+use crate::isolation::HostileIsolation;
 use crate::security::sanitized_environment;
 
 static PROCESS_EXECUTION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -358,17 +359,36 @@ async fn run_process_locked(
         .context("capture process-tree containment baseline")
         .map_err(ProcessRunError::confirmed_empty)?;
 
-    let mut command = Command::new(&request.program);
+    let hostile_isolation = HostileIsolation::from_environment(None)
+        .context("load opt-in hostile-workload isolation policy")
+        .map_err(ProcessRunError::confirmed_empty)?;
+    let launch = hostile_isolation
+        .launch_spec(
+            &request.program,
+            &request.arguments,
+            &request.cwd,
+            &request.stdout_path,
+        )
+        .context("prepare hostile-workload launch")
+        .map_err(ProcessRunError::confirmed_empty)?;
+
+    let mut command = Command::new(&launch.program);
     command
-        .args(&request.arguments)
-        .current_dir(&request.cwd)
+        .args(&launch.arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env_clear()
         .envs(sanitized_environment())
         .envs(request.environment.iter().cloned());
+    if !launch.manages_cwd {
+        command.current_dir(&request.cwd);
+    }
     configure_process_group(&mut command).map_err(ProcessRunError::confirmed_empty)?;
+    hostile_isolation
+        .configure_command(&mut command, &request.cwd)
+        .context("configure hostile-workload process identity and external containment")
+        .map_err(ProcessRunError::confirmed_empty)?;
 
     let mut child = match command.spawn().with_context(|| {
         format!(
@@ -379,6 +399,10 @@ async fn run_process_locked(
     }) {
         Ok(child) => child,
         Err(error) => {
+            hostile_isolation
+                .verify_after_process()
+                .context("verify hostile containment after failed spawn")
+                .map_err(ProcessRunError::unconfirmed)?;
             fs::write(&request.stdout_path, b"")
                 .context("create empty stdout log")
                 .map_err(ProcessRunError::confirmed_empty)?;
@@ -494,6 +518,10 @@ async fn run_process_locked(
     } else {
         monitored.reason
     };
+    hostile_isolation
+        .verify_after_process()
+        .context("external hostile-workload containment did not reconcile empty")
+        .map_err(ProcessRunError::unconfirmed)?;
     Ok(ProcessResult {
         exit_code: monitored.status.code(),
         signal: exit_signal(&monitored.status),

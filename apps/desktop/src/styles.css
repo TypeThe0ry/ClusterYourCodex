@@ -616,6 +616,7 @@ button { color: inherit; }
 .form-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 13px; margin: 18px 0 13px; }
 .form-grid label, .advanced-options > label, .computer-wizard fieldset { display: flex; flex-direction: column; gap: 6px; color: #59635c; font-size: 8px; font-weight: 650; }
 .form-grid label.wide { grid-column: 1 / -1; }
+.form-grid .auth-method-note { grid-column: 1 / -1; color: #6f7972; font-size: 8px; line-height: 1.55; }
 .computer-wizard input:not([type="checkbox"]), .computer-wizard select, .credential-resume input[type="password"] { width: 100%; min-height: 37px; padding: 0 10px; color: #26302a; border: 1px solid #dce1dc; border-radius: 8px; outline: 0; background: #fbfcfa; font-size: 10px; }
 .computer-wizard input:focus, .computer-wizard select:focus, .credential-resume input:focus { border-color: #799984; box-shadow: 0 0 0 3px #edf4ef; background: white; }
 .advanced-options { margin-top: 18px; padding: 13px 15px; border: 1px solid #e2e6e1; border-radius: 10px; background: #fafbf9; }

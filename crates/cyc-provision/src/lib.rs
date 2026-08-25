@@ -1,7 +1,8 @@
 //! Durable Add Computer provisioning state for ClusterYourCodex.
 //!
 //! The persisted model contains credential references and public SSH host keys,
-//! never passwords, private keys, enrollment codes, or other secret material.
+//! never passwords, private-key contents/passphrases, enrollment codes, or
+//! other secret material. A redacted, validated local key path may be durable.
 //! Managed smoke preparation persists an immutable placement/job/run binding
 //! before polling, so retries and process restarts cannot silently re-plan.
 
@@ -22,7 +23,8 @@ pub use model::{
     AllowedJobKind, ComputerConfiguration, ComputerEndpoint, ComputerRecord, CredentialPolicy,
     CredentialState, DiscoveredComputer, FailureCode, GpuInventory, NewComputer,
     PinnedHostKeyRecord, ProvisioningIntent, ProvisioningState, ProvisioningStep,
-    RecordValidationError, ResourcePolicy, ServiceScope, COMPUTER_RECORD_FORMAT_VERSION,
+    RecordValidationError, ResourcePolicy, ServiceScope, SshAuthenticationMethod,
+    SshAuthenticationPolicy, COMPUTER_RECORD_FORMAT_VERSION,
 };
 pub use smoke::{canonical_smoke_job_id, canonical_smoke_operation_id};
 pub use ssh_driver::{

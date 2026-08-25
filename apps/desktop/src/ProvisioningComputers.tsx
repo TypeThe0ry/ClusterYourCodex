@@ -3,15 +3,17 @@ import {
   PROVISIONING_STEPS,
   actionsForProvisioning,
   isAutomaticProvisioningCheckpoint,
-  provisioningActionRequiresPassword,
+  provisioningActionRequiresAuthenticationSecret,
   provisioningClient,
   ProvisioningClientError,
   type AllowedJobKind,
   type ProvisioningComputer,
+  type ProvisioningActionInput,
   type ProvisioningOperationResult,
   type ProvisioningStep,
   type ProvisioningUiAction,
   type StartComputerInput,
+  type SshAuthenticationMethod,
 } from "./api/provisioning";
 
 const stepLabels: Record<ProvisioningStep, string> = {
@@ -62,12 +64,21 @@ const jobKindLabels: Record<AllowedJobKind, string> = {
 
 const defaultJobKinds: AllowedJobKind[] = ["build", "test", "compute"];
 
+const authenticationLabels: Record<SshAuthenticationMethod, string> = {
+  password: "Password",
+  agent: "Native SSH agent",
+  private_key: "Private key",
+};
+
 export interface AddForm {
   displayName: string;
   host: string;
   port: string;
   username: string;
+  authenticationMethod: SshAuthenticationMethod;
+  privateKeyPath: string;
   password: string;
+  passphrase: string;
   rememberPassword: boolean;
   serviceScope: "auto" | "user" | "system";
   workspace: string;
@@ -85,7 +96,10 @@ function initialForm(): AddForm {
     host: "",
     port: "22",
     username: "",
+    authenticationMethod: "password",
+    privateKeyPath: "",
     password: "",
+    passphrase: "",
     rememberPassword: true,
     serviceScope: "auto",
     workspace: "",
@@ -102,7 +116,7 @@ export interface ProvisioningModalReset {
   form: AddForm;
   recordId: string;
   intendedNodeId: string;
-  actionPassword: "";
+  actionSecret: "";
   hostKeyConfirmed: false;
 }
 
@@ -123,7 +137,7 @@ export function resetProvisioningModal(
     form: initialForm(),
     recordId: uuid(),
     intendedNodeId: uuid(),
-    actionPassword: "",
+    actionSecret: "",
     hostKeyConfirmed: false,
   };
 }
@@ -146,8 +160,13 @@ export function buildStartComputerInput(
     host: form.host.trim(),
     port: Number(form.port),
     username: form.username.trim(),
-    password: form.password,
-    rememberPassword: form.rememberPassword,
+    authenticationMethod: form.authenticationMethod,
+    privateKeyPath: form.authenticationMethod === "private_key"
+      ? form.privateKeyPath.trim()
+      : undefined,
+    password: form.authenticationMethod === "password" ? form.password : "",
+    passphrase: form.authenticationMethod === "private_key" ? form.passphrase : "",
+    rememberPassword: form.authenticationMethod === "password" && form.rememberPassword,
     advanced: {
       serviceScope: form.serviceScope,
       workspace: form.workspace.trim() || undefined,
@@ -228,13 +247,18 @@ export function provisioningActionLabel(
   computer: ProvisioningComputer,
 ): string {
   if (action === "retry" && computer.attention === "credential") {
-    return "Retry with corrected password";
+    return computer.credential.authenticationMethod === "private_key"
+      ? "Retry private key / passphrase"
+      : "Retry with corrected password";
   }
   if (action !== "continue") return actionLabels[action];
   if (computer.attention === "credential") {
-    if (computer.intent === "rollback") return "Continue rollback with password";
-    if (computer.intent === "remove") return "Continue removal with password";
-    return "Continue setup with password";
+    const secret = computer.credential.authenticationMethod === "private_key"
+      ? "passphrase"
+      : "password";
+    if (computer.intent === "rollback") return `Continue rollback with ${secret}`;
+    if (computer.intent === "remove") return `Continue removal with ${secret}`;
+    return `Continue setup with ${secret}`;
   }
   if (computer.attention === "external") return "Check now";
   return actionLabels[action];
@@ -253,7 +277,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
   const [operation, setOperation] = useState<string>();
   const [error, setError] = useState<ProvisioningClientError>();
   const [hostKeyConfirmed, setHostKeyConfirmed] = useState(false);
-  const [actionPassword, setActionPassword] = useState("");
+  const [actionSecret, setActionSecret] = useState("");
   const [autoTick, setAutoTick] = useState(0);
   const listSequence = useRef(0);
   const lastAppliedList = useRef(0);
@@ -310,7 +334,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
 
   useEffect(() => {
     setHostKeyConfirmed(false);
-    setActionPassword("");
+    setActionSecret("");
   }, [selected?.id, selected?.hostKey?.fingerprint, selected?.revision]);
 
   const applyResult = useCallback((result: ProvisioningOperationResult) => {
@@ -407,7 +431,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
     setForm(reset.form);
     setRecordId(reset.recordId);
     setIntendedNodeId(reset.intendedNodeId);
-    setActionPassword(reset.actionPassword);
+    setActionSecret(reset.actionSecret);
     setHostKeyConfirmed(reset.hostKeyConfirmed);
   }, []);
 
@@ -420,7 +444,9 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
       port < 1 ||
       port > 65535 ||
       !Number.isSafeInteger(priority) ||
-      form.allowedJobKinds.length === 0
+      form.allowedJobKinds.length === 0 ||
+      (form.authenticationMethod === "password" && !form.password) ||
+      (form.authenticationMethod === "private_key" && !form.privateKeyPath.trim())
     ) {
       setError(new ProvisioningClientError("invalid_request"));
       return;
@@ -431,7 +457,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
     setError(undefined);
     // Clear the React-owned copy before the native promise resolves. The API
     // client also clears its request object in a finally block.
-    setForm((current) => ({ ...current, password: "" }));
+    setForm((current) => ({ ...current, password: "", passphrase: "" }));
     try {
       applyResult(await provisioningClient.start(input));
       resetAndCloseWizard();
@@ -439,6 +465,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
       setError(safeError(caught));
     } finally {
       input.password = "";
+      input.passphrase = "";
       mutationEpoch.current += 1;
       setOperation(undefined);
       void refresh(true);
@@ -457,23 +484,28 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
     mutationEpoch.current += 1;
     setOperation(action);
     setError(undefined);
-    const input = {
+    const input: ProvisioningActionInput = {
       id: selected.id,
       revision: selected.revision,
-      ...(actionPassword ? { password: actionPassword } : {}),
+      ...(actionSecret
+        ? selected.credential.authenticationMethod === "private_key"
+          ? { passphrase: actionSecret }
+          : { password: actionSecret }
+        : {}),
     };
-    setActionPassword("");
+    setActionSecret("");
     try {
       applyResult(await provisioningClient[action](input));
     } catch (caught) {
       setError(safeError(caught));
     } finally {
       input.password = "";
+      input.passphrase = "";
       mutationEpoch.current += 1;
       setOperation(undefined);
       void refresh(true);
     }
-  }, [actionPassword, applyResult, refresh, selected]);
+  }, [actionSecret, applyResult, refresh, selected]);
 
   const approveHostKey = useCallback(async () => {
     if (!selected || !hostKeyConfirmed) return;
@@ -540,7 +572,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
           {selected ? (
             <article className="provisioning-detail">
               <header>
-                <div><span className="eyebrow">MANAGED SETUP</span><h3>{selected.displayName}</h3><p>{selected.endpoint.username}@{selected.endpoint.host}:{selected.endpoint.port}</p></div>
+                <div><span className="eyebrow">MANAGED SETUP</span><h3>{selected.displayName}</h3><p>{selected.endpoint.username}@{selected.endpoint.host}:{selected.endpoint.port} · {authenticationLabels[selected.credential.authenticationMethod]}</p></div>
                 <span className={`status-pill provision-${selected.state}`}>{stateLabels[selected.state]}</span>
               </header>
 
@@ -558,12 +590,22 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
 
               {selected.attention === "credential" ? (
                 <section className="credential-resume">
-                  <strong>{selected.failure?.code === "SSH_AUTH_REJECTED" ? "SSH password rejected" : "SSH password required"}</strong>
-                  <p>{selected.failure?.code === "SSH_AUTH_REJECTED"
-                    ? "SSH rejected the attempted or stored credential. Enter the corrected password to retry this same setup record."
-                    : "The session-only secret is no longer available. Enter it again; it is passed directly to the native secret boundary."}</p>
-                  <label>Password<input autoComplete="new-password" onChange={(event) => setActionPassword(event.target.value)} type="password" value={actionPassword} /></label>
-                  <small>The original remember-password policy is durable. A remembered replacement is saved only after SSH accepts it.</small>
+                  <strong>{selected.credential.authenticationMethod === "private_key"
+                    ? selected.failure?.code === "SSH_PRIVATE_KEY_REJECTED"
+                      ? "Private key or passphrase rejected"
+                      : "Private-key passphrase required"
+                    : selected.failure?.code === "SSH_AUTH_REJECTED"
+                      ? "SSH password rejected"
+                      : "SSH password required"}</strong>
+                  <p>{selected.credential.authenticationMethod === "private_key"
+                    ? "Enter the optional private-key passphrase for this retry. After submission, the renderer drops its request reference and the native copy is cleared when the operation settles."
+                    : selected.failure?.code === "SSH_AUTH_REJECTED"
+                      ? "SSH rejected the attempted or stored credential. Enter the corrected password to retry this same setup record."
+                      : "The session-only secret is no longer available. Enter it again; it is passed directly to the native secret boundary."}</p>
+                  <label>{selected.credential.authenticationMethod === "private_key" ? "Private-key passphrase" : "Password"}<input autoComplete="new-password" onChange={(event) => setActionSecret(event.target.value)} type="password" value={actionSecret} /></label>
+                  <small>{selected.credential.authenticationMethod === "private_key"
+                    ? "The key path remains durable, but this passphrase is never stored in the provisioning journal or credential vault."
+                    : "The original remember-password policy is durable. A remembered replacement is saved only after SSH accepts it."}</small>
                 </section>
               ) : null}
 
@@ -589,7 +631,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
                 {actions.filter((action) => action !== "approve_host_key").map((action) => (
                   <button
                     className={action === "remove" ? "button button-danger" : action === "retry" || action === "continue" ? "button button-primary" : "button button-secondary"}
-                    disabled={Boolean(operation) || selectedAutoBusy || (provisioningActionRequiresPassword(action, selected) && !actionPassword)}
+                    disabled={Boolean(operation) || selectedAutoBusy || (provisioningActionRequiresAuthenticationSecret(action, selected) && !actionSecret)}
                     key={action}
                     onClick={() => action === "forget_ssh_password" ? void forgetPassword() : void runAction(action)}
                   >
@@ -608,15 +650,31 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
       {showWizard ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !operation) resetAndCloseWizard(); }}>
           <form className="computer-wizard" onSubmit={(event) => void start(event)}>
-            <header><div><span className="eyebrow">ADD COMPUTER</span><h2>Connect over SSH</h2><p>The password is sent only to the native host and is never persisted in provisioning state.</p></div><button aria-label="Close Add Computer" className="modal-close" disabled={Boolean(operation)} onClick={resetAndCloseWizard} type="button">×</button></header>
+            <header><div><span className="eyebrow">ADD COMPUTER</span><h2>Connect over SSH</h2><p>Choose password, native SSH agent, or a validated local private key. Authentication secrets are passed only to the native host.</p></div><button aria-label="Close Add Computer" className="modal-close" disabled={Boolean(operation)} onClick={resetAndCloseWizard} type="button">×</button></header>
             <div className="form-grid">
               <label className="wide">Display name (optional)<input maxLength={128} onChange={(event) => setForm({ ...form, displayName: event.target.value })} placeholder="Defaults to host until discovery" value={form.displayName} /></label>
               <label className="wide">Host or IP<input autoFocus maxLength={1024} onChange={(event) => setForm({ ...form, host: event.target.value })} required value={form.host} /></label>
               <label>Port<input max={65535} min={1} onChange={(event) => setForm({ ...form, port: event.target.value })} required type="number" value={form.port} /></label>
               <label>SSH user<input maxLength={256} onChange={(event) => setForm({ ...form, username: event.target.value })} required value={form.username} /></label>
-              <label className="wide">SSH password<input autoComplete="new-password" onChange={(event) => setForm({ ...form, password: event.target.value })} required type="password" value={form.password} /></label>
+              <label className="wide">Authentication<select onChange={(event) => {
+                const authenticationMethod = event.target.value as SshAuthenticationMethod;
+                setForm({
+                  ...form,
+                  authenticationMethod,
+                  password: "",
+                  passphrase: "",
+                  privateKeyPath: "",
+                  rememberPassword: authenticationMethod === "password" && form.rememberPassword,
+                });
+              }} value={form.authenticationMethod}><option value="password">Password</option><option value="agent">Native SSH agent</option><option value="private_key">Private key file</option></select></label>
+              {form.authenticationMethod === "password" ? <label className="wide">SSH password<input autoComplete="new-password" onChange={(event) => setForm({ ...form, password: event.target.value })} required type="password" value={form.password} /></label> : null}
+              {form.authenticationMethod === "private_key" ? <>
+                <label className="wide">Private-key path<input autoComplete="off" onChange={(event) => setForm({ ...form, privateKeyPath: event.target.value })} placeholder="C:\\Users\\you\\.ssh\\id_ed25519" required value={form.privateKeyPath} /></label>
+                <label className="wide">Passphrase (optional)<input autoComplete="new-password" onChange={(event) => setForm({ ...form, passphrase: event.target.value })} type="password" value={form.passphrase} /></label>
+              </> : null}
+              {form.authenticationMethod === "agent" ? <small className="wide auth-method-note">ClusterYourCodex will use identities already exposed by the native SSH agent. No secret is requested or stored.</small> : null}
             </div>
-            <label className="check-row"><input checked={form.rememberPassword} onChange={(event) => setForm({ ...form, rememberPassword: event.target.checked })} type="checkbox" /> Remember securely in Windows Credential Manager</label>
+            {form.authenticationMethod === "password" ? <label className="check-row"><input checked={form.rememberPassword} onChange={(event) => setForm({ ...form, rememberPassword: event.target.checked })} type="checkbox" /> Remember securely in Windows Credential Manager</label> : null}
 
             <details className="advanced-options">
               <summary>Advanced options</summary>
@@ -633,7 +691,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
               <small>Routing priority and typed capacity policy are synchronized after pairing and enforced atomically during placement. The current worker containment advertises one safe execution slot.</small>
             </details>
 
-            <footer><button className="button button-secondary" disabled={Boolean(operation)} onClick={resetAndCloseWizard} type="button">Cancel</button><button className="button button-primary" disabled={Boolean(operation) || form.allowedJobKinds.length === 0} type="submit">{operation === "start" ? "Connecting…" : "Connect and inspect"}</button></footer>
+            <footer><button className="button button-secondary" disabled={Boolean(operation)} onClick={resetAndCloseWizard} type="button">Cancel</button><button className="button button-primary" disabled={Boolean(operation) || form.allowedJobKinds.length === 0 || (form.authenticationMethod === "password" && !form.password) || (form.authenticationMethod === "private_key" && !form.privateKeyPath.trim())} type="submit">{operation === "start" ? "Connecting…" : "Connect and inspect"}</button></footer>
           </form>
         </div>
       ) : null}

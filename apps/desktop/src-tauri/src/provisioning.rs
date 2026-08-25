@@ -18,13 +18,14 @@ use cyc_provision::{
     ControllerBoundaryFailure, CredentialState, DriveOutcome, DriverFailure, NewComputer,
     PairingObservation, ProvisioningDriver, ProvisioningEngine, ProvisioningError,
     ProvisioningIntent, ProvisioningState, ProvisioningStore, ResourcePolicy, ServiceScope,
-    SshDriverOptions, SshProvisioningDriver, StepCompletion, StoreError, TransientSecretError,
-    TransientSecretProvider, WorkerKitCatalog, WorkerKitError,
+    SshAuthenticationMethod, SshAuthenticationPolicy, SshDriverOptions, SshProvisioningDriver,
+    StepCompletion, StoreError, TransientSecretError, TransientSecretProvider, WorkerKitCatalog,
+    WorkerKitError,
 };
 #[cfg(not(windows))]
 use cyc_secrets::{CredentialKey, StoredCredential};
 use cyc_secrets::{CredentialVault, Secret, VaultError};
-use cyc_ssh::Ssh2Transport;
+use cyc_ssh::{PrivateKeyFile, Ssh2Transport};
 use reqwest::{
     blocking::{Client as BlockingClient, RequestBuilder, Response as BlockingResponse},
     header::{HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE},
@@ -41,7 +42,7 @@ use super::{
 };
 
 const PROVISIONING_DATABASE: &str = "provisioning-v1.sqlite3";
-const MAX_PASSWORD_BYTES: usize = 16 * 1024;
+const MAX_AUTHENTICATION_SECRET_BYTES: usize = 16 * 1024;
 const MAX_CONTROLLER_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_DRIVE_TRANSITIONS: usize = 32;
 const CONTROLLER_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -165,7 +166,7 @@ impl ProvisioningManager {
     ) -> Result<ProvisioningOperationResult, PublicProvisioningError> {
         let record_id = parse_id(&request.record_id)?;
         let intended_node_id = parse_id(&request.intended_node_id)?;
-        let secret = request.take_secret()?;
+        let (ssh_authentication, secret) = request.take_authentication()?;
         let endpoint = ComputerEndpoint::new(
             std::mem::take(&mut request.host),
             request.port,
@@ -173,7 +174,9 @@ impl ProvisioningManager {
         )?;
         let configuration = std::mem::take(&mut request.advanced).into_configuration()?;
         let mut input = NewComputer::new(std::mem::take(&mut request.display_name), endpoint)?;
-        input.remember_credential = request.remember_password;
+        input.ssh_authentication = ssh_authentication;
+        input.remember_credential = request.remember_password
+            && input.ssh_authentication.method() == SshAuthenticationMethod::Password;
         input.configuration = configuration;
         input.validate()?;
         let record = self
@@ -184,7 +187,9 @@ impl ProvisioningManager {
         // newly supplied password bytes retained in the session map.  Every
         // non-ready checkpoint may still need the secret for an SSH retry.
         if !matches!(record.state, ProvisioningState::Ready) {
-            self.runtime.transient_secrets.insert(record.id, secret)?;
+            if let Some(secret) = secret {
+                self.runtime.transient_secrets.insert(record.id, secret)?;
+            }
         }
         self.drive_bounded(record.id, record.revision)
     }
@@ -300,7 +305,8 @@ impl ProvisioningManager {
         id: Uuid,
         request: &mut SecretActionRequest,
     ) -> Result<(), PublicProvisioningError> {
-        if let Some(secret) = request.take_secret()? {
+        let method = self.runtime.engine.get(id)?.ssh_authentication.method();
+        if let Some(secret) = request.take_secret(method)? {
             self.runtime.transient_secrets.insert(id, secret)?;
         }
         Ok(())
@@ -347,12 +353,14 @@ impl ProvisioningManager {
                 self.view(&record, Some(ProvisioningAttention::External))?,
             ),
             DriveOutcome::Ready(record) => {
+                self.runtime.transient_secrets.clear(record.id);
                 ProvisioningOperationResult::computer("ready", self.view(&record, None)?)
             }
             DriveOutcome::Failed(record) => {
                 ProvisioningOperationResult::computer("failed", self.view(&record, None)?)
             }
             DriveOutcome::RolledBack(record) => {
+                self.runtime.transient_secrets.clear(record.id);
                 ProvisioningOperationResult::computer("rolled_back", self.view(&record, None)?)
             }
             DriveOutcome::Removed { id } => {
@@ -376,7 +384,10 @@ impl ProvisioningManager {
 
     fn durable_attention(&self, record: &ComputerRecord) -> ProvisioningAttention {
         if let ProvisioningState::Failed { code, .. } = &record.state {
-            return if code.as_str() == "SSH_AUTH_REJECTED" {
+            return if matches!(
+                code.as_str(),
+                "SSH_AUTH_REJECTED" | "SSH_PRIVATE_KEY_REJECTED"
+            ) {
                 ProvisioningAttention::Credential
             } else {
                 ProvisioningAttention::Intent
@@ -406,6 +417,7 @@ impl ProvisioningManager {
                 | ProvisioningState::Paired
         );
         if needs_authenticated_ssh
+            && record.ssh_authentication.method() == SshAuthenticationMethod::Password
             && record.credential_policy.state != CredentialState::Stored
             && !self.runtime.transient_secrets.contains(record.id)
         {
@@ -956,22 +968,74 @@ pub struct StartComputerRequest {
     host: String,
     port: u16,
     username: String,
+    #[serde(default)]
+    authentication_method: SshAuthenticationMethodInput,
+    #[serde(default)]
+    private_key_path: String,
+    #[serde(default)]
     password: String,
+    #[serde(default)]
+    passphrase: String,
+    #[serde(default = "default_true")]
     remember_password: bool,
     #[serde(default)]
     advanced: AdvancedOptionsRequest,
 }
 
 impl StartComputerRequest {
-    fn take_secret(&mut self) -> Result<Secret, PublicProvisioningError> {
-        validate_password(&self.password)?;
-        Ok(Secret::from_string(std::mem::take(&mut self.password)))
+    fn take_authentication(
+        &mut self,
+    ) -> Result<(SshAuthenticationPolicy, Option<Secret>), PublicProvisioningError> {
+        match self.authentication_method {
+            SshAuthenticationMethodInput::Password => {
+                if !self.private_key_path.is_empty() || !self.passphrase.is_empty() {
+                    return Err(PublicProvisioningError::new("invalid_request", false));
+                }
+                validate_authentication_secret(&self.password, false)?;
+                Ok((
+                    SshAuthenticationPolicy::password(),
+                    Some(Secret::from_string(std::mem::take(&mut self.password))),
+                ))
+            }
+            SshAuthenticationMethodInput::Agent => {
+                if !self.password.is_empty()
+                    || !self.passphrase.is_empty()
+                    || !self.private_key_path.is_empty()
+                    || self.remember_password
+                {
+                    return Err(PublicProvisioningError::new("invalid_request", false));
+                }
+                Ok((SshAuthenticationPolicy::agent(), None))
+            }
+            SshAuthenticationMethodInput::PrivateKey => {
+                if !self.password.is_empty()
+                    || self.private_key_path.is_empty()
+                    || self.remember_password
+                {
+                    return Err(PublicProvisioningError::new("invalid_request", false));
+                }
+                validate_authentication_secret(&self.passphrase, true)?;
+                let path = std::mem::take(&mut self.private_key_path);
+                let private_key = PrivateKeyFile::new(path)
+                    .map_err(|_| PublicProvisioningError::new("private_key_invalid", false))?;
+                let policy = SshAuthenticationPolicy::private_key(&private_key)
+                    .map_err(|_| PublicProvisioningError::new("private_key_invalid", false))?;
+                let passphrase = if self.passphrase.is_empty() {
+                    None
+                } else {
+                    Some(Secret::from_string(std::mem::take(&mut self.passphrase)))
+                };
+                Ok((policy, passphrase))
+            }
+        }
     }
 }
 
 impl Drop for StartComputerRequest {
     fn drop(&mut self) {
         self.password.zeroize();
+        self.passphrase.zeroize();
+        self.private_key_path.zeroize();
     }
 }
 
@@ -982,24 +1046,61 @@ pub struct SecretActionRequest {
     revision: u64,
     #[serde(default)]
     password: String,
+    #[serde(default)]
+    passphrase: String,
 }
 
 impl SecretActionRequest {
-    fn take_secret(&mut self) -> Result<Option<Secret>, PublicProvisioningError> {
-        if self.password.is_empty() {
+    fn take_secret(
+        &mut self,
+        method: SshAuthenticationMethod,
+    ) -> Result<Option<Secret>, PublicProvisioningError> {
+        let value = match method {
+            SshAuthenticationMethod::Password => {
+                if !self.passphrase.is_empty() {
+                    return Err(PublicProvisioningError::new("invalid_request", false));
+                }
+                &mut self.password
+            }
+            SshAuthenticationMethod::Agent => {
+                if !self.password.is_empty() || !self.passphrase.is_empty() {
+                    return Err(PublicProvisioningError::new("invalid_request", false));
+                }
+                return Ok(None);
+            }
+            SshAuthenticationMethod::PrivateKey => {
+                if !self.password.is_empty() {
+                    return Err(PublicProvisioningError::new("invalid_request", false));
+                }
+                &mut self.passphrase
+            }
+        };
+        if value.is_empty() {
             return Ok(None);
         }
-        validate_password(&self.password)?;
-        Ok(Some(Secret::from_string(std::mem::take(
-            &mut self.password,
-        ))))
+        validate_authentication_secret(value, false)?;
+        Ok(Some(Secret::from_string(std::mem::take(value))))
     }
 }
 
 impl Drop for SecretActionRequest {
     fn drop(&mut self) {
         self.password.zeroize();
+        self.passphrase.zeroize();
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SshAuthenticationMethodInput {
+    #[default]
+    Password,
+    Agent,
+    PrivateKey,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1265,6 +1366,7 @@ impl ProvisioningComputerView {
             }),
             inventory: record.inventory.as_ref().map(InventoryView::from),
             credential: CredentialView {
+                authentication_method: record.ssh_authentication.method().as_str(),
                 remember_requested: record.credential_policy.remember_requested,
                 state: credential_state_name(record.credential_policy.state),
             },
@@ -1310,6 +1412,7 @@ struct HostKeyView {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CredentialView {
+    authentication_method: &'static str,
     remember_requested: bool,
     state: &'static str,
 }
@@ -1484,8 +1587,14 @@ fn parse_id(value: &str) -> Result<Uuid, PublicProvisioningError> {
     Uuid::parse_str(value).map_err(|_| PublicProvisioningError::new("invalid_id", false))
 }
 
-fn validate_password(value: &str) -> Result<(), PublicProvisioningError> {
-    if value.is_empty() || value.len() > MAX_PASSWORD_BYTES || value.contains('\0') {
+fn validate_authentication_secret(
+    value: &str,
+    empty_allowed: bool,
+) -> Result<(), PublicProvisioningError> {
+    if (!empty_allowed && value.is_empty())
+        || value.len() > MAX_AUTHENTICATION_SECRET_BYTES
+        || value.contains('\0')
+    {
         return Err(PublicProvisioningError::new("invalid_request", false));
     }
     Ok(())
@@ -1548,6 +1657,7 @@ mod tests {
     use cyc_ssh::HostKey;
 
     const PASSWORD: &str = "test-password-that-must-not-persist";
+    const PASSPHRASE: &str = "test-private-key-passphrase-must-not-persist";
 
     #[test]
     fn smoke_boundary_preserves_failure_code_and_retryability() {
@@ -1641,6 +1751,51 @@ mod tests {
         start_request_with_identity(Uuid::new_v4(), Uuid::new_v4(), "Build worker")
     }
 
+    fn private_key_request(path: &Path, passphrase: &str) -> StartComputerRequest {
+        serde_json::from_value(serde_json::json!({
+            "recordId": Uuid::new_v4(),
+            "intendedNodeId": Uuid::new_v4(),
+            "displayName": "Key worker",
+            "host": "192.0.2.11",
+            "port": 22,
+            "username": "builder",
+            "authenticationMethod": "private_key",
+            "privateKeyPath": path,
+            "password": "",
+            "passphrase": passphrase,
+            "rememberPassword": false,
+            "advanced": {
+                "serviceScope": "auto",
+                "priority": 0,
+                "allowedJobKinds": ["build", "test"],
+                "allowOnBattery": false
+            }
+        }))
+        .expect("private-key request")
+    }
+
+    fn agent_request() -> StartComputerRequest {
+        serde_json::from_value(serde_json::json!({
+            "recordId": Uuid::new_v4(),
+            "intendedNodeId": Uuid::new_v4(),
+            "displayName": "Agent worker",
+            "host": "192.0.2.12",
+            "port": 22,
+            "username": "builder",
+            "authenticationMethod": "agent",
+            "password": "",
+            "passphrase": "",
+            "rememberPassword": false,
+            "advanced": {
+                "serviceScope": "auto",
+                "priority": 0,
+                "allowedJobKinds": ["build", "test"],
+                "allowOnBattery": false
+            }
+        }))
+        .expect("agent request")
+    }
+
     fn temporary_database(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "cyc-desktop-provision-{name}-{}-{}.sqlite3",
@@ -1656,13 +1811,153 @@ mod tests {
         let result = manager.start(start_request()).expect("start");
         let json = serde_json::to_string(&result).expect("serialize result");
         assert!(!json.contains(PASSWORD));
-        assert!(!json.to_ascii_lowercase().contains("password"));
+        assert!(!json.to_ascii_lowercase().contains("\"password\":"));
         drop(manager);
         let database = std::fs::read(&path).expect("database");
         assert!(!database
             .windows(PASSWORD.len())
             .any(|window| window == PASSWORD.as_bytes()));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn private_key_path_is_native_validated_while_passphrase_stays_transient_and_redacted() {
+        let database = temporary_database("private-key-secret");
+        let key_dir = std::env::temp_dir().join(format!(
+            "cyc-desktop-private-key-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir(&key_dir).expect("key tempdir");
+        let key_path = key_dir.join("id_fixture");
+        std::fs::write(&key_path, b"fixture-private-key-material").expect("key fixture");
+        let manager = manager(&database);
+
+        let result = manager
+            .start(private_key_request(&key_path, PASSPHRASE))
+            .expect("start private-key record");
+        let view = result.computer.as_ref().expect("computer");
+        let id = Uuid::parse_str(&view.id).expect("record id");
+        let record = manager.runtime.engine.get(id).expect("durable record");
+        assert_eq!(
+            record.ssh_authentication.method(),
+            SshAuthenticationMethod::PrivateKey
+        );
+        assert!(!record.credential_policy.remember_requested);
+        let json = serde_json::to_string(&result).expect("public result");
+        assert!(!json.contains(PASSPHRASE));
+        assert!(!json.contains(&key_path.to_string_lossy().to_string()));
+        assert!(!format!("{record:?}").contains(&key_path.to_string_lossy().to_string()));
+        let transient = manager
+            .runtime
+            .transient_secrets
+            .retrieve(id)
+            .expect("transient lookup")
+            .expect("passphrase retained for native operation");
+        assert_eq!(transient.expose_secret(), PASSPHRASE.as_bytes());
+        drop(transient);
+        let bytes = std::fs::read(&database).expect("database");
+        assert!(!bytes
+            .windows(PASSPHRASE.len())
+            .any(|window| window == PASSPHRASE.as_bytes()));
+
+        let invalid_path = key_dir.join("missing-key");
+        let invalid = manager.start(private_key_request(&invalid_path, PASSPHRASE));
+        assert!(matches!(
+            invalid,
+            Err(ref error) if error.code == "private_key_invalid" && !error.retryable
+        ));
+        assert!(!format!("{invalid:?}").contains(&invalid_path.to_string_lossy().to_string()));
+        let _ = std::fs::remove_file(key_path);
+        let _ = std::fs::remove_dir(key_dir);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn agent_policy_accepts_no_secret_and_legacy_request_defaults_to_password() {
+        let database = temporary_database("agent-auth");
+        let manager = manager(&database);
+        let result = manager.start(agent_request()).expect("agent record");
+        let view = result.computer.as_ref().expect("agent view");
+        assert_eq!(view.credential.authentication_method, "agent");
+        assert!(!view.credential.remember_requested);
+        let id = Uuid::parse_str(&view.id).expect("record id");
+        assert!(manager
+            .runtime
+            .transient_secrets
+            .retrieve(id)
+            .expect("transient lookup")
+            .is_none());
+
+        let legacy = start_request();
+        assert!(matches!(
+            legacy.authentication_method,
+            SshAuthenticationMethodInput::Password
+        ));
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn terminal_results_clear_native_transient_authentication_secrets() {
+        let database = temporary_database("ready-secret-clear");
+        let manager = manager(&database);
+        let record = manager
+            .runtime
+            .engine
+            .create(
+                NewComputer::new(
+                    "worker",
+                    ComputerEndpoint::new("192.0.2.20", 22, "builder").expect("endpoint"),
+                )
+                .expect("input"),
+            )
+            .expect("record");
+        manager
+            .runtime
+            .transient_secrets
+            .insert(record.id, Secret::from_string(PASSPHRASE.to_owned()))
+            .expect("insert transient");
+
+        manager
+            .result(DriveOutcome::Ready(record.clone()))
+            .expect("ready result");
+        assert!(manager
+            .runtime
+            .transient_secrets
+            .retrieve(record.id)
+            .expect("retrieve")
+            .is_none());
+
+        manager
+            .runtime
+            .transient_secrets
+            .insert(record.id, Secret::from_string(PASSPHRASE.to_owned()))
+            .expect("insert transient");
+        manager
+            .result(DriveOutcome::RolledBack(record.clone()))
+            .expect("rolled-back result");
+        assert!(manager
+            .runtime
+            .transient_secrets
+            .retrieve(record.id)
+            .expect("retrieve")
+            .is_none());
+
+        manager
+            .runtime
+            .transient_secrets
+            .insert(record.id, Secret::from_string(PASSWORD.to_owned()))
+            .expect("insert transient");
+        manager
+            .result(DriveOutcome::Removed { id: record.id })
+            .expect("removed result");
+        assert!(manager
+            .runtime
+            .transient_secrets
+            .retrieve(record.id)
+            .expect("retrieve")
+            .is_none());
+        let _ = std::fs::remove_file(database);
     }
 
     #[test]

@@ -20,6 +20,7 @@ export type ProvisioningState = ProvisioningStep | "failed";
 export type ProvisioningIntent = "continue" | "resume" | "retry" | "rollback" | "remove";
 export type ProvisioningAttention = "host_key" | "credential" | "external" | "intent" | null;
 export type CredentialState = "pending" | "session_only" | "stored" | "forgotten";
+export type SshAuthenticationMethod = "password" | "agent" | "private_key";
 export type ServiceScope = "auto" | "user" | "system";
 export type AllowedJobKind =
   | "build"
@@ -53,8 +54,13 @@ export interface StartComputerInput {
   host: string;
   port: number;
   username: string;
-  /** Cleared in-place after the native invocation settles. */
+  authenticationMethod: SshAuthenticationMethod;
+  /** Local controller path; validated natively and omitted unless private_key is selected. */
+  privateKeyPath?: string;
+  /** Request references are cleared after invocation; JavaScript cannot guarantee physical zeroization. Password auth only. */
   password: string;
+  /** Request references are cleared after invocation; JavaScript cannot guarantee physical zeroization. Private-key auth only. */
+  passphrase: string;
   rememberPassword: boolean;
   advanced: ProvisioningAdvancedOptions;
 }
@@ -62,8 +68,10 @@ export interface StartComputerInput {
 export interface ProvisioningActionInput {
   id: string;
   revision: number;
-  /** Optional replacement for a lost, rejected, or stale SSH password; cleared in-place. */
+  /** Optional replacement for a lost, rejected, or stale SSH password; request references are cleared after invocation. */
   password?: string;
+  /** Optional private-key passphrase retry; request references are cleared after invocation. */
+  passphrase?: string;
 }
 
 export interface ProvisioningHostKey {
@@ -103,7 +111,11 @@ export interface ProvisioningComputer {
   pairedNodeId?: string;
   hostKey?: ProvisioningHostKey;
   inventory?: ProvisioningInventory;
-  credential: { rememberRequested: boolean; state: CredentialState };
+  credential: {
+    authenticationMethod: SshAuthenticationMethod;
+    rememberRequested: boolean;
+    state: CredentialState;
+  };
   configuration: ProvisioningAdvancedOptions;
   failure?: ProvisioningFailure;
   createdAt: string;
@@ -155,8 +167,15 @@ function provisioningErrorCopy(code: string): string {
     not_found: "The provisioning record no longer exists.",
     revision_conflict: "This computer changed in another operation. Refresh and try again.",
     host_key_mismatch: "The approved host key does not match the key observed by SSH.",
-    credential_required: "Enter the SSH password again to continue.",
+    credential_required: "Enter the SSH authentication secret again to continue.",
     credential_store_unavailable: "Windows Credential Manager is unavailable for this session.",
+    private_key_invalid: "The private-key file is unavailable or failed native path-safety validation.",
+    SSH_PRIVATE_KEY_INVALID: "The configured private-key file failed native path-safety validation.",
+    SSH_PRIVATE_KEY_UNAVAILABLE: "The configured private-key file is unavailable. Restore it, then retry.",
+    SSH_PRIVATE_KEY_REJECTED: "SSH rejected the private key or its passphrase. Enter the passphrase and retry.",
+    SSH_AGENT_UNAVAILABLE: "The native SSH agent is unavailable. Start or unlock it, then retry.",
+    SSH_AGENT_REJECTED: "SSH rejected every identity offered by the native SSH agent.",
+    SSH_AUTH_METHOD_UNSUPPORTED: "The selected SSH authentication method is unavailable in this build.",
     worker_kit_catalog_unavailable: "Managed worker kits are missing or damaged. Repair the desktop installation.",
     controller_unavailable: "The authenticated local controller is unavailable.",
     provisioning_store_unavailable: "The local provisioning database is unavailable.",
@@ -288,12 +307,18 @@ export function parseProvisioningComputer(value: unknown): ProvisioningComputer 
     failure = { code: stringField(value.failure, "code"), retryable: value.failure.retryable };
   }
   if ((state === "failed") !== Boolean(failure)) throw new ProvisioningClientError("invalid_response");
-  if (state === "failed" && failure?.code === "SSH_AUTH_REJECTED") {
-    if (!failure.retryable || attention !== "credential") throw new ProvisioningClientError("invalid_response");
+  if (state === "failed" && ["SSH_AUTH_REJECTED", "SSH_PRIVATE_KEY_REJECTED"].includes(failure?.code ?? "")) {
+    if (failure?.retryable !== true || attention !== "credential") throw new ProvisioningClientError("invalid_response");
   } else if (state === "failed" && attention === "credential") {
     throw new ProvisioningClientError("invalid_response");
   }
   if (typeof value.credential.rememberRequested !== "boolean") throw new ProvisioningClientError("invalid_response");
+  const authenticationMethod = value.credential.authenticationMethod === undefined
+    ? "password"
+    : enumField(value.credential.authenticationMethod, ["password", "agent", "private_key"] as const);
+  if (authenticationMethod !== "password" && value.credential.rememberRequested) {
+    throw new ProvisioningClientError("invalid_response");
+  }
   return {
     id: stringField(value, "id"),
     displayName: stringField(value, "displayName"),
@@ -313,6 +338,7 @@ export function parseProvisioningComputer(value: unknown): ProvisioningComputer 
     hostKey,
     inventory: parseInventory(value.inventory),
     credential: {
+      authenticationMethod,
       rememberRequested: value.credential.rememberRequested,
       state: enumField(value.credential.state, ["pending", "session_only", "stored", "forgotten"] as const),
     },
@@ -353,9 +379,14 @@ function bridge() {
   return result;
 }
 
-function clearPassword(input: { password?: string }, native: { password?: string }): void {
+function clearAuthenticationSecrets(
+  input: { password?: string; passphrase?: string },
+  native: { password?: string; passphrase?: string },
+): void {
   input.password = "";
+  input.passphrase = "";
   native.password = "";
+  native.passphrase = "";
 }
 
 async function secretAction(
@@ -366,19 +397,21 @@ async function secretAction(
     id: input.id,
     revision: input.revision,
     ...(input.password ? { password: input.password } : {}),
+    ...(input.passphrase ? { passphrase: input.passphrase } : {}),
   };
   try {
     return parseOperation(await bridge()[method](native));
   } catch (caught) {
     throw publicError(caught);
   } finally {
-    clearPassword(input, native);
+    clearAuthenticationSecrets(input, native);
   }
 }
 
 export function actionsForProvisioning(computer: ProvisioningComputer): ProvisioningUiAction[] {
   if (computer.state === "ready") {
     return computer.credential.state === "stored"
+      && computer.credential.authenticationMethod === "password"
       ? ["forget_ssh_password", "repair", "remove"]
       : ["repair", "remove"];
   }
@@ -405,13 +438,16 @@ export function actionsForProvisioning(computer: ProvisioningComputer): Provisio
   return ["resume", "rollback", "remove"];
 }
 
-/** A credential-attention checkpoint may expose teardown alternatives, but
- * only the forward retry/continuation consumes the corrected password now. */
-export function provisioningActionRequiresPassword(
+/** A credential-attention checkpoint may expose teardown alternatives. A
+ * password retry always requires a replacement; a private-key retry may omit
+ * the passphrase when the key is unencrypted or the remote authorization was
+ * repaired out of band. */
+export function provisioningActionRequiresAuthenticationSecret(
   action: ProvisioningUiAction,
   computer: ProvisioningComputer,
 ): boolean {
   return computer.attention === "credential"
+    && computer.credential.authenticationMethod === "password"
     && (action === "continue" || action === "retry");
 }
 
@@ -432,7 +468,10 @@ export const provisioningClient = {
       host: input.host,
       port: input.port,
       username: input.username,
-      password: input.password,
+      authenticationMethod: input.authenticationMethod,
+      ...(input.privateKeyPath ? { privateKeyPath: input.privateKeyPath } : {}),
+      ...(input.password ? { password: input.password } : {}),
+      ...(input.passphrase ? { passphrase: input.passphrase } : {}),
       rememberPassword: input.rememberPassword,
       advanced: { ...input.advanced, allowedJobKinds: [...input.advanced.allowedJobKinds] },
     };
@@ -441,7 +480,7 @@ export const provisioningClient = {
     } catch (caught) {
       throw publicError(caught);
     } finally {
-      clearPassword(input, native);
+      clearAuthenticationSecrets(input, native);
     }
   },
 

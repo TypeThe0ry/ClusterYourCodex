@@ -11,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -36,6 +37,7 @@ const AGENTS_BEGIN_MARKER: &str = "<!-- CLUSTERYOURCODEX-MANAGED:BEGIN -->";
 const AGENTS_END_MARKER: &str = "<!-- CLUSTERYOURCODEX-MANAGED:END -->";
 const MAX_CODEX_ONLY_RECEIPT: usize = 4096;
 const MAX_INSTALL_MANIFEST: u64 = 16 * 1024 * 1024;
+const MAX_ATOMIC_STATE_FILE: u64 = 64 * 1024;
 const ACTIVE_RECEIPT_TTL: chrono::Duration = chrono::Duration::seconds(90);
 const ACTIVE_CONTROLLER_VERIFICATION_TTL: chrono::Duration = chrono::Duration::seconds(15);
 const ACTIVE_RECEIPT_CLOCK_SKEW: chrono::Duration = chrono::Duration::seconds(30);
@@ -253,6 +255,134 @@ pub(crate) struct IntegrationSelfTestResult {
 pub(crate) struct PublicIntegrationError {
     code: &'static str,
     retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    primary_failure: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rollback_failure: Option<&'static str>,
+    #[serde(skip_serializing_if = "is_false")]
+    repair_required: bool,
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MarketplaceRollbackStage {
+    RemoveReplacement,
+    RestorePreviousMarketplace,
+    RestorePreviousPlugin,
+}
+
+impl MarketplaceRollbackStage {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::RemoveReplacement => "remove_replacement",
+            Self::RestorePreviousMarketplace => "restore_previous_marketplace",
+            Self::RestorePreviousPlugin => "restore_previous_plugin",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct MarketplaceRollbackError {
+    stage: MarketplaceRollbackStage,
+    cause: Box<IntegrationError>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StateRollbackFailure {
+    BackupRestoreFailed,
+    RecoveryRestoreFailed,
+    UnsafeRecoveryCandidate,
+    AmbiguousRecoveryCandidates,
+}
+
+impl StateRollbackFailure {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::BackupRestoreFailed => "backup_restore_failed",
+            Self::RecoveryRestoreFailed => "recovery_restore_failed",
+            Self::UnsafeRecoveryCandidate => "unsafe_recovery_candidate",
+            Self::AmbiguousRecoveryCandidates => "ambiguous_recovery_candidates",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StateRecoveryLocator {
+    // Deliberately retain only the same-directory leaf name. The caller already
+    // knows the receipt path; keeping an absolute path here would make an
+    // accidental renderer/debug serialization disclose the user's profile.
+    file_name: OsString,
+}
+
+#[derive(Debug)]
+pub(crate) enum RepairFailure {
+    Marketplace {
+        primary: Box<IntegrationError>,
+        rollback: MarketplaceRollbackError,
+    },
+    State {
+        primary: Box<IntegrationError>,
+        rollback: StateRollbackFailure,
+        recovery: Option<StateRecoveryLocator>,
+    },
+}
+
+impl RepairFailure {
+    const fn diagnostic(&self) -> &'static str {
+        match self {
+            Self::Marketplace { .. } => "marketplace_rollback_failed",
+            Self::State {
+                rollback:
+                    StateRollbackFailure::UnsafeRecoveryCandidate
+                    | StateRollbackFailure::AmbiguousRecoveryCandidates,
+                ..
+            } => "state_recovery_blocked",
+            Self::State { .. } => "state_rollback_failed",
+        }
+    }
+
+    fn public_failures(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::Marketplace { primary, rollback } => {
+                (integration_error_code(primary), rollback.stage.code())
+            }
+            Self::State {
+                primary, rollback, ..
+            } => (integration_error_code(primary), rollback.code()),
+        }
+    }
+}
+
+impl std::fmt::Display for RepairFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Marketplace { primary, rollback } => write!(
+                formatter,
+                "primary={primary}; rollback_stage={}; rollback_cause={}",
+                rollback.stage.code(),
+                rollback.cause
+            ),
+            Self::State {
+                primary,
+                rollback,
+                recovery,
+            } => write!(
+                formatter,
+                "primary={primary}; rollback_stage={}; recovery_locator={}",
+                rollback.code(),
+                if recovery.is_some() {
+                    "available"
+                } else {
+                    "none"
+                }
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -277,6 +407,8 @@ pub(crate) enum IntegrationError {
     AgentsIntegrationFailed,
     #[error("integration state could not be persisted")]
     StatePersistenceFailed,
+    #[error("integration repair is required: {0}")]
+    RepairRequired(RepairFailure),
     #[error("the MCP bridge could not be started")]
     McpStartFailed,
     #[error("the MCP bridge self-test failed")]
@@ -285,24 +417,44 @@ pub(crate) enum IntegrationError {
 
 impl From<IntegrationError> for PublicIntegrationError {
     fn from(value: IntegrationError) -> Self {
-        let retryable = matches!(value, IntegrationError::OperationUnavailable);
-        let code = match value {
-            IntegrationError::DataUnavailable => "integration_data_unavailable",
-            IntegrationError::OperationUnavailable => "integration_busy_retryable",
-            IntegrationError::CodexNotFound => "codex_not_found",
-            IntegrationError::CodexInvocationFailed | IntegrationError::CodexOutputInvalid => {
-                "codex_cli_broken"
+        let retryable = matches!(&value, IntegrationError::OperationUnavailable);
+        let (diagnostic, primary_failure, rollback_failure) = match &value {
+            IntegrationError::RepairRequired(failure) => {
+                let (primary, rollback) = failure.public_failures();
+                (Some(failure.diagnostic()), Some(primary), Some(rollback))
             }
-            IntegrationError::PayloadUnavailable => "integration_payload_unavailable",
-            IntegrationError::MarketplaceInstallFailed => "marketplace_install_failed",
-            IntegrationError::PluginInstallFailed => "plugin_install_failed",
-            IntegrationError::AgentsIntegrationFailed => "agents_integration_failed",
-            IntegrationError::StatePersistenceFailed => "integration_state_unavailable",
-            IntegrationError::McpStartFailed | IntegrationError::McpSelfTestFailed => {
-                "integration_self_test_failed"
-            }
+            _ => (None, None, None),
         };
-        Self { code, retryable }
+        let repair_required = diagnostic.is_some();
+        let code = integration_error_code(&value);
+        Self {
+            code,
+            retryable,
+            diagnostic,
+            primary_failure,
+            rollback_failure,
+            repair_required,
+        }
+    }
+}
+
+const fn integration_error_code(value: &IntegrationError) -> &'static str {
+    match value {
+        IntegrationError::DataUnavailable => "integration_data_unavailable",
+        IntegrationError::OperationUnavailable => "integration_busy_retryable",
+        IntegrationError::CodexNotFound => "codex_not_found",
+        IntegrationError::CodexInvocationFailed | IntegrationError::CodexOutputInvalid => {
+            "codex_cli_broken"
+        }
+        IntegrationError::PayloadUnavailable => "integration_payload_unavailable",
+        IntegrationError::MarketplaceInstallFailed => "marketplace_install_failed",
+        IntegrationError::PluginInstallFailed => "plugin_install_failed",
+        IntegrationError::AgentsIntegrationFailed => "agents_integration_failed",
+        IntegrationError::StatePersistenceFailed => "integration_state_unavailable",
+        IntegrationError::RepairRequired(_) => "repair_required",
+        IntegrationError::McpStartFailed | IntegrationError::McpSelfTestFailed => {
+            "integration_self_test_failed"
+        }
     }
 }
 
@@ -368,7 +520,7 @@ struct ProcessOutput {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct HealthReceipt {
     checked_at_ms: u64,
     passed: bool,
@@ -377,7 +529,7 @@ struct HealthReceipt {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RestartReceipt {
     installed_at_ms: u64,
 }
@@ -503,7 +655,158 @@ fn unique_state_suffix() -> String {
     format!("{}-{nanos}-{counter}", std::process::id())
 }
 
-fn write_atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<(), IntegrationError> {
+trait AtomicFileRenamer {
+    fn rename(&mut self, source: &Path, destination: &Path) -> std::io::Result<()>;
+}
+
+struct StdAtomicFileRenamer;
+
+impl AtomicFileRenamer for StdAtomicFileRenamer {
+    fn rename(&mut self, source: &Path, destination: &Path) -> std::io::Result<()> {
+        std::fs::rename(source, destination)
+    }
+}
+
+fn valid_state_backup_suffix(suffix: &str) -> bool {
+    let mut fields = suffix.split('-');
+    let valid_field =
+        |field: &str| !field.is_empty() && field.bytes().all(|byte| byte.is_ascii_digit());
+    valid_field(fields.next().unwrap_or_default())
+        && valid_field(fields.next().unwrap_or_default())
+        && valid_field(fields.next().unwrap_or_default())
+        && fields.next().is_none()
+}
+
+fn state_repair_required(
+    rollback: StateRollbackFailure,
+    recovery: Option<StateRecoveryLocator>,
+) -> IntegrationError {
+    IntegrationError::RepairRequired(RepairFailure::State {
+        primary: Box::new(IntegrationError::StatePersistenceFailed),
+        rollback,
+        recovery,
+    })
+}
+
+fn read_valid_state_backup<T: DeserializeOwned>(path: &Path) -> bool {
+    let Ok(path_metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !is_regular_metadata_without_reparse(&path_metadata)
+        || path_metadata.len() > MAX_ATOMIC_STATE_FILE
+    {
+        return false;
+    }
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let Ok(open_metadata) = file.metadata() else {
+        return false;
+    };
+    if !is_regular_metadata_without_reparse(&open_metadata)
+        || open_metadata.len() != path_metadata.len()
+        || open_metadata.len() > MAX_ATOMIC_STATE_FILE
+    {
+        return false;
+    }
+    let mut bytes = Vec::with_capacity(open_metadata.len() as usize);
+    if (&mut file)
+        .take(MAX_ATOMIC_STATE_FILE + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() as u64 != open_metadata.len()
+    {
+        return false;
+    }
+    let Ok(final_metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    is_regular_metadata_without_reparse(&final_metadata)
+        && final_metadata.len() == open_metadata.len()
+        && serde_json::from_slice::<T>(&bytes).is_ok()
+}
+
+fn recover_atomic_state_backup<T: DeserializeOwned, R: AtomicFileRenamer>(
+    path: &Path,
+    parent: &Path,
+    file_name: &str,
+    renamer: &mut R,
+) -> Result<(), IntegrationError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            return if is_regular_metadata_without_reparse(&metadata) {
+                Ok(())
+            } else {
+                Err(IntegrationError::StatePersistenceFailed)
+            };
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(IntegrationError::StatePersistenceFailed),
+    }
+
+    let backup_prefix = format!(".{file_name}.backup-");
+    let entries =
+        std::fs::read_dir(parent).map_err(|_| IntegrationError::StatePersistenceFailed)?;
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| IntegrationError::StatePersistenceFailed)?;
+        let leaf = entry.file_name();
+        let lossy_leaf = leaf.to_string_lossy();
+        if lossy_leaf.starts_with(&backup_prefix) {
+            candidates.push((leaf, entry.path()));
+        }
+    }
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    if candidates.len() != 1 {
+        return Err(state_repair_required(
+            StateRollbackFailure::AmbiguousRecoveryCandidates,
+            None,
+        ));
+    }
+
+    let (leaf, candidate) = candidates.pop().expect("one candidate was checked above");
+    let Some(leaf_text) = leaf.to_str() else {
+        return Err(state_repair_required(
+            StateRollbackFailure::UnsafeRecoveryCandidate,
+            None,
+        ));
+    };
+    let Some(suffix) = leaf_text.strip_prefix(&backup_prefix) else {
+        return Err(state_repair_required(
+            StateRollbackFailure::UnsafeRecoveryCandidate,
+            None,
+        ));
+    };
+    if !valid_state_backup_suffix(suffix)
+        || candidate.parent() != Some(parent)
+        || !read_valid_state_backup::<T>(&candidate)
+    {
+        return Err(state_repair_required(
+            StateRollbackFailure::UnsafeRecoveryCandidate,
+            None,
+        ));
+    }
+
+    let locator = StateRecoveryLocator { file_name: leaf };
+    renamer.rename(&candidate, path).map_err(|_| {
+        state_repair_required(StateRollbackFailure::RecoveryRestoreFailed, Some(locator))
+    })?;
+    if !read_valid_state_backup::<T>(path) {
+        return Err(state_repair_required(
+            StateRollbackFailure::UnsafeRecoveryCandidate,
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn write_atomic_json_with_renamer<T: Serialize + DeserializeOwned, R: AtomicFileRenamer>(
+    path: &Path,
+    value: &T,
+    renamer: &mut R,
+) -> Result<(), IntegrationError> {
     let parent = path
         .parent()
         .ok_or(IntegrationError::StatePersistenceFailed)?;
@@ -512,6 +815,7 @@ fn write_atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Integra
         .file_name()
         .and_then(OsStr::to_str)
         .ok_or(IntegrationError::StatePersistenceFailed)?;
+    recover_atomic_state_backup::<T, _>(path, parent, file_name, renamer)?;
     let suffix = unique_state_suffix();
     let temporary = parent.join(format!(".{file_name}.tmp-{suffix}"));
     let backup = parent.join(format!(".{file_name}.backup-{suffix}"));
@@ -522,40 +826,56 @@ fn write_atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Integra
         .create_new(true)
         .open(&temporary)
         .map_err(|_| IntegrationError::StatePersistenceFailed)?;
-    let result = (|| {
-        file.write_all(&encoded)
-            .map_err(|_| IntegrationError::StatePersistenceFailed)?;
-        file.sync_all()
-            .map_err(|_| IntegrationError::StatePersistenceFailed)?;
-        drop(file);
-
-        // Unix replaces the destination atomically. Windows does not, so keep a
-        // uniquely named rollback copy rather than deleting the last good state.
-        if std::fs::rename(&temporary, path).is_ok() {
-            return Ok(());
-        }
-        if !path.is_file() {
-            return Err(IntegrationError::StatePersistenceFailed);
-        }
-        std::fs::rename(path, &backup).map_err(|_| IntegrationError::StatePersistenceFailed)?;
-        match std::fs::rename(&temporary, path) {
-            Ok(()) => {
-                let _ = std::fs::remove_file(&backup);
-                Ok(())
-            }
-            Err(_) => {
-                let _ = std::fs::rename(&backup, path);
-                Err(IntegrationError::StatePersistenceFailed)
-            }
-        }
-    })();
-    if result.is_err() {
+    let prepared = file
+        .write_all(&encoded)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| IntegrationError::StatePersistenceFailed);
+    drop(file);
+    if let Err(error) = prepared {
         let _ = std::fs::remove_file(&temporary);
-        if backup.is_file() && !path.is_file() {
-            let _ = std::fs::rename(&backup, path);
-        }
+        return Err(error);
     }
-    result
+
+    // Unix replaces the destination atomically. Windows does not, so keep a
+    // uniquely named rollback copy rather than deleting the last good state.
+    if renamer.rename(&temporary, path).is_ok() {
+        return Ok(());
+    }
+    if !is_regular_file_without_reparse(path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(IntegrationError::StatePersistenceFailed);
+    }
+    if renamer.rename(path, &backup).is_err() {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(IntegrationError::StatePersistenceFailed);
+    }
+    if renamer.rename(&temporary, path).is_ok() {
+        let _ = std::fs::remove_file(&backup);
+        return Ok(());
+    }
+
+    let recovery = StateRecoveryLocator {
+        file_name: backup
+            .file_name()
+            .expect("generated backup has a leaf name")
+            .to_os_string(),
+    };
+    let restore_result = renamer.rename(&backup, path);
+    let _ = std::fs::remove_file(&temporary);
+    if restore_result.is_err() {
+        return Err(state_repair_required(
+            StateRollbackFailure::BackupRestoreFailed,
+            Some(recovery),
+        ));
+    }
+    Err(IntegrationError::StatePersistenceFailed)
+}
+
+fn write_atomic_json<T: Serialize + DeserializeOwned>(
+    path: &Path,
+    value: &T,
+) -> Result<(), IntegrationError> {
+    write_atomic_json_with_renamer(path, value, &mut StdAtomicFileRenamer)
 }
 
 fn is_lower_sha256(value: &str) -> bool {
@@ -1015,10 +1335,11 @@ enum AgentsEncoding {
 }
 
 fn decode_utf16_strict(bytes: &[u8], big_endian: bool) -> Option<String> {
-    if bytes.len() % 2 != 0 {
+    let (pairs, remainder) = bytes.as_chunks::<2>();
+    if !remainder.is_empty() {
         return None;
     }
-    let units = bytes.chunks_exact(2).map(|pair| {
+    let units = pairs.iter().map(|pair| {
         if big_endian {
             u16::from_be_bytes([pair[0], pair[1]])
         } else {
@@ -2324,15 +2645,65 @@ struct MarketplaceSwitch {
 fn restore_marketplace<E: MarketplaceCommandExecutor>(
     executor: &mut E,
     switch: &MarketplaceSwitch,
-) {
+) -> Result<(), MarketplaceRollbackError> {
     if !switch.changed {
-        return;
+        return Ok(());
     }
     // A failed `add` can still have written partial state. Remove the fixed
     // owned name before attempting to put the validated old registration back.
-    let _ = executor.remove_owned();
+    match executor.remove_owned() {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(MarketplaceRollbackError {
+                stage: MarketplaceRollbackStage::RemoveReplacement,
+                cause: Box::new(IntegrationError::MarketplaceInstallFailed),
+            });
+        }
+        Err(cause) => {
+            return Err(MarketplaceRollbackError {
+                stage: MarketplaceRollbackStage::RemoveReplacement,
+                cause: Box::new(cause),
+            });
+        }
+    }
     if let Some(previous) = switch.previous_owned_root.as_deref() {
-        let _ = executor.add_local(previous);
+        match executor.add_local(previous) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(MarketplaceRollbackError {
+                    stage: MarketplaceRollbackStage::RestorePreviousMarketplace,
+                    cause: Box::new(IntegrationError::MarketplaceInstallFailed),
+                });
+            }
+            Err(cause) => {
+                return Err(MarketplaceRollbackError {
+                    stage: MarketplaceRollbackStage::RestorePreviousMarketplace,
+                    cause: Box::new(cause),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn marketplace_repair_required(
+    primary: IntegrationError,
+    rollback: MarketplaceRollbackError,
+) -> IntegrationError {
+    IntegrationError::RepairRequired(RepairFailure::Marketplace {
+        primary: Box::new(primary),
+        rollback,
+    })
+}
+
+fn finish_marketplace_failure<E: MarketplaceCommandExecutor>(
+    primary: IntegrationError,
+    executor: &mut E,
+    switch: &MarketplaceSwitch,
+) -> IntegrationError {
+    match restore_marketplace(executor, switch) {
+        Ok(()) => primary,
+        Err(rollback) => marketplace_repair_required(primary, rollback),
     }
 }
 
@@ -2358,25 +2729,23 @@ fn switch_marketplace<E: MarketplaceCommandExecutor>(
     }
     match executor.add_local(desired) {
         Ok(true) => Ok(switch),
-        Ok(false) => {
-            restore_marketplace(executor, &switch);
-            Err(IntegrationError::MarketplaceInstallFailed)
-        }
-        Err(error) => {
-            restore_marketplace(executor, &switch);
-            Err(error)
-        }
+        Ok(false) => Err(finish_marketplace_failure(
+            IntegrationError::MarketplaceInstallFailed,
+            executor,
+            &switch,
+        )),
+        Err(error) => Err(finish_marketplace_failure(error, executor, &switch)),
     }
 }
 
-fn best_effort_restore_plugin(
+fn restore_plugin_after_failure(
     cli: &Path,
     marketplace: &mut impl MarketplaceCommandExecutor,
     switch: &MarketplaceSwitch,
-) {
-    restore_marketplace(marketplace, switch);
+) -> Result<(), MarketplaceRollbackError> {
+    restore_marketplace(marketplace, switch)?;
     if switch.previous_owned_root.is_some() {
-        let _ = run_process(
+        let output = run_process(
             cli,
             &[
                 OsStr::new("plugin"),
@@ -2385,7 +2754,30 @@ fn best_effort_restore_plugin(
                 OsStr::new("--json"),
             ],
             CODEX_TIMEOUT,
-        );
+        )
+        .map_err(|cause| MarketplaceRollbackError {
+            stage: MarketplaceRollbackStage::RestorePreviousPlugin,
+            cause: Box::new(cause),
+        })?;
+        if !output.status.success() {
+            return Err(MarketplaceRollbackError {
+                stage: MarketplaceRollbackStage::RestorePreviousPlugin,
+                cause: Box::new(IntegrationError::PluginInstallFailed),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn finish_plugin_failure(
+    primary: IntegrationError,
+    cli: &Path,
+    marketplace: &mut impl MarketplaceCommandExecutor,
+    switch: &MarketplaceSwitch,
+) -> IntegrationError {
+    match restore_plugin_after_failure(cli, marketplace, switch) {
+        Ok(()) => primary,
+        Err(rollback) => marketplace_repair_required(primary, rollback),
     }
 }
 
@@ -2448,20 +2840,32 @@ fn install_or_repair(
         ) {
             Ok(output) => output,
             Err(error) => {
-                best_effort_restore_plugin(&cli.path, &mut marketplace, &marketplace_switch);
-                return Err(error);
+                return Err(finish_plugin_failure(
+                    error,
+                    &cli.path,
+                    &mut marketplace,
+                    &marketplace_switch,
+                ));
             }
         };
         if !output.status.success() {
-            best_effort_restore_plugin(&cli.path, &mut marketplace, &marketplace_switch);
-            return Err(IntegrationError::PluginInstallFailed);
+            return Err(finish_plugin_failure(
+                IntegrationError::PluginInstallFailed,
+                &cli.path,
+                &mut marketplace,
+                &marketplace_switch,
+            ));
         }
     }
     let registration = match plugin_registration(&cli.path) {
         Ok(Some(registration)) => registration,
         _ => {
-            best_effort_restore_plugin(&cli.path, &mut marketplace, &marketplace_switch);
-            return Err(IntegrationError::PluginInstallFailed);
+            return Err(finish_plugin_failure(
+                IntegrationError::PluginInstallFailed,
+                &cli.path,
+                &mut marketplace,
+                &marketplace_switch,
+            ));
         }
     };
     if !registration.enabled
@@ -2469,8 +2873,12 @@ fn install_or_repair(
         || !same_path(&registration.source_path, &payload.plugin_root)
         || validate_installed_plugin(&registration).is_none()
     {
-        best_effort_restore_plugin(&cli.path, &mut marketplace, &marketplace_switch);
-        return Err(IntegrationError::PluginInstallFailed);
+        return Err(finish_plugin_failure(
+            IntegrationError::PluginInstallFailed,
+            &cli.path,
+            &mut marketplace,
+            &marketplace_switch,
+        ));
     }
     steps.push(step(
         "plugin",
@@ -2478,14 +2886,23 @@ fn install_or_repair(
         "ClusterYourCodex plugin installed and enabled",
     ));
 
-    let current_integrity = load_verified_install(inner)?;
+    let current_integrity = load_verified_install(inner).map_err(|error| {
+        finish_plugin_failure(error, &cli.path, &mut marketplace, &marketplace_switch)
+    })?;
     if current_integrity.build_catalog_sha256 != initial_integrity.build_catalog_sha256
         || current_integrity.payload_catalog_sha256 != initial_integrity.payload_catalog_sha256
     {
-        best_effort_restore_plugin(&cli.path, &mut marketplace, &marketplace_switch);
-        return Err(IntegrationError::PayloadUnavailable);
+        return Err(finish_plugin_failure(
+            IntegrationError::PayloadUnavailable,
+            &cli.path,
+            &mut marketplace,
+            &marketplace_switch,
+        ));
     }
-    let agents_receipt = integrate_global_agents(inner, &payload.desired_version, &cli.path)?;
+    let agents_receipt = integrate_global_agents(inner, &payload.desired_version, &cli.path)
+        .map_err(|error| {
+            finish_plugin_failure(error, &cli.path, &mut marketplace, &marketplace_switch)
+        })?;
     steps.push(step(
         "global_agents",
         true,
@@ -3860,7 +4277,7 @@ mod tests {
             calls: Vec::new(),
         };
         let switched = switch_marketplace(&mut executor, Some(&previous), &desired).unwrap();
-        restore_marketplace(&mut executor, &switched);
+        restore_marketplace(&mut executor, &switched).unwrap();
         assert_eq!(
             executor.calls,
             vec![
@@ -3872,6 +4289,259 @@ mod tests {
         );
         std::fs::remove_dir_all(previous).unwrap();
         std::fs::remove_dir_all(desired).unwrap();
+    }
+
+    #[test]
+    fn failed_marketplace_add_and_failed_rollback_remove_require_repair() {
+        let previous = fixture_root("marketplace-remove-rollback-failure-previous");
+        write_marketplace_fixture(&previous, "0.0.9");
+        let desired = fixture_root("marketplace-remove-rollback-failure-desired");
+        write_marketplace_fixture(&desired, "0.1.0");
+        let mut executor = FakeMarketplace {
+            remove_results: vec![true, false],
+            add_results: vec![false],
+            calls: Vec::new(),
+        };
+
+        let error = switch_marketplace(&mut executor, Some(&previous), &desired).unwrap_err();
+        match &error {
+            IntegrationError::RepairRequired(RepairFailure::Marketplace { primary, rollback }) => {
+                assert!(matches!(
+                    primary.as_ref(),
+                    IntegrationError::MarketplaceInstallFailed
+                ));
+                assert_eq!(rollback.stage, MarketplaceRollbackStage::RemoveReplacement);
+                assert!(matches!(
+                    rollback.cause.as_ref(),
+                    IntegrationError::MarketplaceInstallFailed
+                ));
+            }
+            other => panic!("expected a structured marketplace repair error, got {other:?}"),
+        }
+        assert_eq!(
+            executor.calls,
+            vec![
+                FakeMarketplaceCall::Remove,
+                FakeMarketplaceCall::Add(desired.clone()),
+                FakeMarketplaceCall::Remove,
+            ]
+        );
+        let public = serde_json::to_value(PublicIntegrationError::from(error)).unwrap();
+        assert_eq!(public["code"], "repair_required");
+        assert_eq!(public["diagnostic"], "marketplace_rollback_failed");
+        assert_eq!(public["primary_failure"], "marketplace_install_failed");
+        assert_eq!(public["rollback_failure"], "remove_replacement");
+        assert_eq!(public["repair_required"], true);
+        assert_eq!(public["retryable"], false);
+        std::fs::remove_dir_all(previous).unwrap();
+        std::fs::remove_dir_all(desired).unwrap();
+    }
+
+    #[test]
+    fn failed_marketplace_add_and_failed_previous_add_require_repair() {
+        let previous = fixture_root("marketplace-add-rollback-failure-previous");
+        write_marketplace_fixture(&previous, "0.0.9");
+        let desired = fixture_root("marketplace-add-rollback-failure-desired");
+        write_marketplace_fixture(&desired, "0.1.0");
+        let canonical_previous = previous.canonicalize().unwrap();
+        let mut executor = FakeMarketplace {
+            remove_results: vec![true, true],
+            add_results: vec![false, false],
+            calls: Vec::new(),
+        };
+
+        let error = switch_marketplace(&mut executor, Some(&previous), &desired).unwrap_err();
+        match &error {
+            IntegrationError::RepairRequired(RepairFailure::Marketplace { primary, rollback }) => {
+                assert!(matches!(
+                    primary.as_ref(),
+                    IntegrationError::MarketplaceInstallFailed
+                ));
+                assert_eq!(
+                    rollback.stage,
+                    MarketplaceRollbackStage::RestorePreviousMarketplace
+                );
+                assert!(matches!(
+                    rollback.cause.as_ref(),
+                    IntegrationError::MarketplaceInstallFailed
+                ));
+            }
+            other => panic!("expected a structured marketplace repair error, got {other:?}"),
+        }
+        assert_eq!(
+            executor.calls,
+            vec![
+                FakeMarketplaceCall::Remove,
+                FakeMarketplaceCall::Add(desired.clone()),
+                FakeMarketplaceCall::Remove,
+                FakeMarketplaceCall::Add(canonical_previous),
+            ]
+        );
+        std::fs::remove_dir_all(previous).unwrap();
+        std::fs::remove_dir_all(desired).unwrap();
+    }
+
+    struct FaultingAtomicRenamer {
+        calls: usize,
+        fail_calls: BTreeSet<usize>,
+    }
+
+    impl AtomicFileRenamer for FaultingAtomicRenamer {
+        fn rename(&mut self, source: &Path, destination: &Path) -> std::io::Result<()> {
+            let call = self.calls;
+            self.calls += 1;
+            if self.fail_calls.contains(&call) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected rename failure",
+                ));
+            }
+            std::fs::rename(source, destination)
+        }
+    }
+
+    #[test]
+    fn atomic_state_restore_failure_preserves_recoverable_backup() {
+        let root = fixture_root("atomic-restore-failure");
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("health-v1.json");
+        write_atomic_json(
+            &target,
+            &HealthReceipt {
+                checked_at_ms: 1,
+                passed: false,
+                failed_check: Some("old".to_owned()),
+            },
+        )
+        .unwrap();
+
+        let mut renamer = FaultingAtomicRenamer {
+            calls: 0,
+            // Fail the direct replacement, the replacement after backup, and
+            // finally the rollback restore. Moving old state to backup succeeds.
+            fail_calls: [0, 2, 3].into_iter().collect(),
+        };
+        let error = write_atomic_json_with_renamer(
+            &target,
+            &HealthReceipt {
+                checked_at_ms: 2,
+                passed: true,
+                failed_check: None,
+            },
+            &mut renamer,
+        )
+        .unwrap_err();
+        let locator = match &error {
+            IntegrationError::RepairRequired(RepairFailure::State {
+                primary,
+                rollback: StateRollbackFailure::BackupRestoreFailed,
+                recovery: Some(locator),
+            }) => {
+                assert!(matches!(
+                    primary.as_ref(),
+                    IntegrationError::StatePersistenceFailed
+                ));
+                locator.clone()
+            }
+            other => panic!("expected a structured state rollback error, got {other:?}"),
+        };
+        assert!(!target.exists());
+        let backup = root.join(&locator.file_name);
+        assert!(is_regular_file_without_reparse(&backup));
+        let public = serde_json::to_value(PublicIntegrationError::from(error)).unwrap();
+        assert_eq!(public["code"], "repair_required");
+        assert_eq!(public["diagnostic"], "state_rollback_failed");
+        assert_eq!(public["primary_failure"], "integration_state_unavailable");
+        assert_eq!(public["rollback_failure"], "backup_restore_failed");
+        assert_eq!(public["repair_required"], true);
+        let public_text = serde_json::to_string(&public).unwrap();
+        assert!(!public_text.contains(&root.to_string_lossy().to_string()));
+        assert!(!public_text.contains(&locator.file_name.to_string_lossy().to_string()));
+
+        // The next normal operation recovers the unique, valid backup before
+        // committing the new receipt, then removes the recovery artifact.
+        write_atomic_json(
+            &target,
+            &HealthReceipt {
+                checked_at_ms: 3,
+                passed: true,
+                failed_check: None,
+            },
+        )
+        .unwrap();
+        let receipt: HealthReceipt = read_small_json(&target).unwrap();
+        assert_eq!(receipt.checked_at_ms, 3);
+        assert!(!backup.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn atomic_state_recovery_rejects_an_unsafe_backup() {
+        let root = fixture_root("atomic-unsafe-backup");
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("health-v1.json");
+        let malicious = root.join(".health-v1.json.backup-1-2-3");
+        std::fs::create_dir(&malicious).unwrap();
+
+        let error = write_atomic_json(
+            &target,
+            &HealthReceipt {
+                checked_at_ms: 1,
+                passed: true,
+                failed_check: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            IntegrationError::RepairRequired(RepairFailure::State {
+                rollback: StateRollbackFailure::UnsafeRecoveryCandidate,
+                recovery: None,
+                ..
+            })
+        ));
+        assert!(!target.exists());
+        assert!(malicious.is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn atomic_state_recovery_rejects_multiple_valid_backups() {
+        let root = fixture_root("atomic-ambiguous-backups");
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("health-v1.json");
+        let encoded = serde_json::to_vec(&HealthReceipt {
+            checked_at_ms: 1,
+            passed: true,
+            failed_check: None,
+        })
+        .unwrap();
+        let first = root.join(".health-v1.json.backup-1-2-3");
+        let second = root.join(".health-v1.json.backup-4-5-6");
+        std::fs::write(&first, &encoded).unwrap();
+        std::fs::write(&second, &encoded).unwrap();
+
+        let error = write_atomic_json(
+            &target,
+            &HealthReceipt {
+                checked_at_ms: 2,
+                passed: true,
+                failed_check: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            IntegrationError::RepairRequired(RepairFailure::State {
+                rollback: StateRollbackFailure::AmbiguousRecoveryCandidates,
+                recovery: None,
+                ..
+            })
+        ));
+        assert!(!target.exists());
+        assert!(first.is_file());
+        assert!(second.is_file());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

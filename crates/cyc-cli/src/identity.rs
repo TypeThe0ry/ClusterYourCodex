@@ -1,12 +1,11 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use rcgen::{CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use rustls::sign::CertifiedKey;
 use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
@@ -210,24 +209,16 @@ fn encoded_ip(bytes: &[u8]) -> Result<IpAddr> {
 
 fn parse_single_certificate(bytes: &[u8]) -> Result<CertificateDer<'static>> {
     require_single_pem_text(bytes, "CERTIFICATE")?;
-    let items = rustls_pemfile::read_all(&mut Cursor::new(bytes))
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .context("parse certificate PEM")?;
-    let [rustls_pemfile::Item::X509Certificate(certificate)] = items.as_slice() else {
-        bail!("certificate file must contain exactly one CERTIFICATE PEM item");
-    };
-    Ok(certificate.clone())
+    CertificateDer::from_pem_slice(bytes).context("parse certificate PEM")
 }
 
 fn parse_single_pkcs8_key(bytes: &[u8]) -> Result<PrivateKeyDer<'static>> {
     require_single_pem_text(bytes, "PRIVATE KEY")?;
-    let items = rustls_pemfile::read_all(&mut Cursor::new(bytes))
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .context("parse private-key PEM")?;
-    let [rustls_pemfile::Item::Pkcs8Key(key)] = items.as_slice() else {
+    let key = PrivateKeyDer::from_pem_slice(bytes).context("parse private-key PEM")?;
+    if !matches!(key, PrivateKeyDer::Pkcs8(_)) {
         bail!("private-key file must contain exactly one unencrypted PKCS#8 PRIVATE KEY PEM item");
-    };
-    Ok(PrivateKeyDer::Pkcs8(key.clone_key()))
+    }
+    Ok(key)
 }
 
 fn require_single_pem_text(bytes: &[u8], label: &str) -> Result<()> {

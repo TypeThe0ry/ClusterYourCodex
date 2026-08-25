@@ -1,14 +1,15 @@
-//! Password-SSH bootstrap transport.
+//! Host-key-pinned SSH bootstrap transport.
 //!
-//! Passwords are borrowed from [`cyc_secrets::Secret`] only at the in-process
-//! authentication call. This crate never constructs password-bearing command
-//! lines, environment variables, or loggable request structures.
+//! Passwords and private-key passphrases are borrowed from
+//! [`cyc_secrets::Secret`] only at the in-process authentication call. This
+//! crate never constructs secret-bearing command lines, environment variables,
+//! persistent request structures, or loggable authentication values.
 
 use std::{
-    fmt,
+    fmt, fs,
     io::{self, Read, Write},
     net::{SocketAddr, TcpStream, ToSocketAddrs},
-    path::Path,
+    path::{Component, Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
@@ -24,6 +25,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_MAX_DOWNLOAD_BYTES: usize = 128 * 1024 * 1024;
 const MAX_HOST_KEY_BYTES: usize = 64 * 1024;
+const MAX_PRIVATE_KEY_PATH_UNITS: usize = 4096;
 
 /// Public connection coordinates. Authentication data is intentionally absent.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -315,6 +317,96 @@ pub struct TransferReceipt {
     pub sha256: String,
 }
 
+/// Authentication mechanisms supported by the transport boundary.
+///
+/// This enum contains no authentication material and is safe to include in a
+/// fixed error code or diagnostic event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthenticationMethod {
+    Password,
+    Agent,
+    PrivateKey,
+}
+
+impl fmt::Display for AuthenticationMethod {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Password => "password",
+            Self::Agent => "agent",
+            Self::PrivateKey => "private-key",
+        })
+    }
+}
+
+/// A validated local private-key file.
+///
+/// Construction and every authentication attempt reject relative or
+/// traversing paths, symbolic links, Windows reparse points, non-regular files,
+/// and paths whose parent chain contains a link/reparse point. The path is
+/// deliberately redacted from `Debug` and all [`SshError`] variants.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PrivateKeyFile {
+    path: PathBuf,
+}
+
+impl PrivateKeyFile {
+    pub fn new(path: impl Into<PathBuf>) -> Result<Self, SshError> {
+        let path = path.into();
+        validate_private_key_path(&path)?;
+        validate_private_key_file(&path)?;
+        Ok(Self { path })
+    }
+
+    /// Returns the already validated path for non-secret configuration state.
+    /// Callers must not assume this replaces the authentication-time safety
+    /// check; [`Ssh2Transport`] validates the file again immediately before use.
+    #[must_use]
+    pub fn as_path(&self) -> &Path {
+        &self.path
+    }
+
+    fn revalidate(&self) -> Result<(), SshError> {
+        validate_private_key_path(&self.path)?;
+        validate_private_key_file(&self.path)
+    }
+}
+
+impl fmt::Debug for PrivateKeyFile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PrivateKeyFile(<redacted>)")
+    }
+}
+
+/// Borrowed authentication input for provisioning and GUI integrations.
+///
+/// It intentionally has no owned secret fields and no serialization support;
+/// password and passphrase material cannot outlive the caller's [`Secret`].
+pub enum SshAuthentication<'a> {
+    Password(&'a Secret),
+    Agent,
+    PrivateKey {
+        private_key: &'a PrivateKeyFile,
+        passphrase: Option<&'a Secret>,
+    },
+}
+
+impl fmt::Debug for SshAuthentication<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Password(_) => formatter.write_str("SshAuthentication::Password(<redacted>)"),
+            Self::Agent => formatter.write_str("SshAuthentication::Agent"),
+            Self::PrivateKey {
+                private_key,
+                passphrase,
+            } => formatter
+                .debug_struct("SshAuthentication::PrivateKey")
+                .field("private_key", private_key)
+                .field("passphrase", &passphrase.map(|_| "<redacted>"))
+                .finish(),
+        }
+    }
+}
+
 /// Injectable SSH boundary for GUI provisioning flows and unit tests.
 pub trait SshTransport: Send + Sync {
     fn probe_host_key(&self, endpoint: &SshEndpoint) -> Result<HostKey, SshError>;
@@ -328,6 +420,62 @@ pub trait SshTransport: Send + Sync {
         username: &str,
         password: &Secret,
     ) -> Result<Box<dyn RemoteSession>, SshError>;
+
+    /// Reconnects, verifies the full pinned host key, then attempts every
+    /// identity exposed by the process' SSH agent. Legacy/mock transports get
+    /// a fixed unsupported error without requiring an implementation change.
+    fn connect_agent(
+        &self,
+        _endpoint: &SshEndpoint,
+        _pinned_host_key: &HostKey,
+        _username: &str,
+    ) -> Result<Box<dyn RemoteSession>, SshError> {
+        Err(SshError::UnsupportedAuthenticationMethod {
+            method: AuthenticationMethod::Agent,
+        })
+    }
+
+    /// Reconnects, verifies the full pinned host key, revalidates the local key
+    /// file, and only then borrows the optional passphrase for libssh2.
+    fn connect_private_key(
+        &self,
+        _endpoint: &SshEndpoint,
+        _pinned_host_key: &HostKey,
+        _username: &str,
+        _private_key: &PrivateKeyFile,
+        _passphrase: Option<&Secret>,
+    ) -> Result<Box<dyn RemoteSession>, SshError> {
+        Err(SshError::UnsupportedAuthenticationMethod {
+            method: AuthenticationMethod::PrivateKey,
+        })
+    }
+
+    /// Safe common dispatch point for provisioning. Authentication values stay
+    /// borrowed and are forwarded directly to the selected method.
+    fn connect_with_authentication(
+        &self,
+        endpoint: &SshEndpoint,
+        pinned_host_key: &HostKey,
+        username: &str,
+        authentication: SshAuthentication<'_>,
+    ) -> Result<Box<dyn RemoteSession>, SshError> {
+        match authentication {
+            SshAuthentication::Password(password) => {
+                self.connect_password(endpoint, pinned_host_key, username, password)
+            }
+            SshAuthentication::Agent => self.connect_agent(endpoint, pinned_host_key, username),
+            SshAuthentication::PrivateKey {
+                private_key,
+                passphrase,
+            } => self.connect_private_key(
+                endpoint,
+                pinned_host_key,
+                username,
+                private_key,
+                passphrase,
+            ),
+        }
+    }
 }
 
 pub trait RemoteSession: Send {
@@ -412,6 +560,15 @@ impl Ssh2Transport {
         let host_key = HostKey::from_ssh2(algorithm, bytes)?;
         Ok((session, host_key))
     }
+
+    fn remote_session(&self, session: Session) -> Box<dyn RemoteSession> {
+        Box::new(Ssh2RemoteSession {
+            session,
+            output_inactivity_timeout: self.io_timeout,
+            maximum_output_bytes: self.maximum_output_bytes,
+            maximum_download_bytes: self.maximum_download_bytes,
+        })
+    }
 }
 
 impl SshTransport for Ssh2Transport {
@@ -426,34 +583,92 @@ impl SshTransport for Ssh2Transport {
         username: &str,
         password: &Secret,
     ) -> Result<Box<dyn RemoteSession>, SshError> {
-        if username.is_empty() || username.contains(['\0', '\r', '\n']) {
-            return Err(SshError::InvalidUsername);
-        }
+        validate_username(username)?;
 
         let (session, actual_host_key) = self.handshake(endpoint)?;
-        if &actual_host_key != pinned_host_key {
-            return Err(SshError::HostKeyMismatch {
-                expected: pinned_host_key.fingerprint().to_owned(),
-                actual: actual_host_key.fingerprint().to_owned(),
-            });
-        }
+        authenticate_after_host_key(&actual_host_key, pinned_host_key, || {
+            let password = password
+                .expose_utf8()
+                .map_err(|_| SshError::PasswordNotUtf8)?;
+            session
+                .userauth_password(username, password)
+                .map_err(|source| SshError::Authentication { source })?;
+            if !session.authenticated() {
+                return Err(SshError::AuthenticationRejected);
+            }
+            Ok(self.remote_session(session))
+        })
+    }
 
-        let password = password
-            .expose_utf8()
-            .map_err(|_| SshError::PasswordNotUtf8)?;
-        session
-            .userauth_password(username, password)
-            .map_err(|source| SshError::Authentication { source })?;
-        if !session.authenticated() {
-            return Err(SshError::AuthenticationRejected);
-        }
+    fn connect_agent(
+        &self,
+        endpoint: &SshEndpoint,
+        pinned_host_key: &HostKey,
+        username: &str,
+    ) -> Result<Box<dyn RemoteSession>, SshError> {
+        validate_username(username)?;
 
-        Ok(Box::new(Ssh2RemoteSession {
-            session,
-            output_inactivity_timeout: self.io_timeout,
-            maximum_output_bytes: self.maximum_output_bytes,
-            maximum_download_bytes: self.maximum_download_bytes,
-        }))
+        let (session, actual_host_key) = self.handshake(endpoint)?;
+        authenticate_after_host_key(&actual_host_key, pinned_host_key, || {
+            let authenticated = {
+                let mut agent = session.agent().map_err(|_| SshError::AgentUnavailable)?;
+                agent.connect().map_err(|_| SshError::AgentUnavailable)?;
+                agent
+                    .list_identities()
+                    .map_err(|_| SshError::AgentAuthenticationFailed)?;
+                let identities = agent
+                    .identities()
+                    .map_err(|_| SshError::AgentAuthenticationFailed)?;
+                if identities.is_empty() {
+                    return Err(SshError::AgentAuthenticationRejected);
+                }
+
+                let mut authenticated = false;
+                for identity in &identities {
+                    if agent.userauth(username, identity).is_ok() && session.authenticated() {
+                        authenticated = true;
+                        break;
+                    }
+                }
+                let _ = agent.disconnect();
+                authenticated
+            };
+
+            if !authenticated {
+                return Err(SshError::AgentAuthenticationRejected);
+            }
+            Ok(self.remote_session(session))
+        })
+    }
+
+    fn connect_private_key(
+        &self,
+        endpoint: &SshEndpoint,
+        pinned_host_key: &HostKey,
+        username: &str,
+        private_key: &PrivateKeyFile,
+        passphrase: Option<&Secret>,
+    ) -> Result<Box<dyn RemoteSession>, SshError> {
+        validate_username(username)?;
+
+        let (session, actual_host_key) = self.handshake(endpoint)?;
+        authenticate_after_host_key(&actual_host_key, pinned_host_key, || {
+            // Recheck after the network identity is pinned. A caller may keep a
+            // validated path for a long-lived GUI form, but auth never trusts
+            // that stale validation result.
+            private_key.revalidate()?;
+            let passphrase = passphrase
+                .map(Secret::expose_utf8)
+                .transpose()
+                .map_err(|_| SshError::PrivateKeyPassphraseNotUtf8)?;
+            session
+                .userauth_pubkey_file(username, None, private_key.as_path(), passphrase)
+                .map_err(|_| SshError::PrivateKeyAuthenticationFailed)?;
+            if !session.authenticated() {
+                return Err(SshError::PrivateKeyAuthenticationRejected);
+            }
+            Ok(self.remote_session(session))
+        })
     }
 }
 
@@ -695,6 +910,108 @@ fn drain_available(
     }
 }
 
+fn validate_username(username: &str) -> Result<(), SshError> {
+    if username.is_empty() || username.contains(['\0', '\r', '\n']) {
+        return Err(SshError::InvalidUsername);
+    }
+    Ok(())
+}
+
+fn authenticate_after_host_key<T>(
+    actual_host_key: &HostKey,
+    pinned_host_key: &HostKey,
+    authenticate: impl FnOnce() -> Result<T, SshError>,
+) -> Result<T, SshError> {
+    if actual_host_key != pinned_host_key {
+        return Err(SshError::HostKeyMismatch {
+            expected: pinned_host_key.fingerprint().to_owned(),
+            actual: actual_host_key.fingerprint().to_owned(),
+        });
+    }
+    authenticate()
+}
+
+fn validate_private_key_path(path: &Path) -> Result<(), SshError> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err(SshError::InvalidPrivateKeyPath);
+    }
+
+    // Windows drive-rooted paths are accepted. UNC, device namespace and
+    // verbatim paths are rejected so an apparently local key cannot cross a
+    // network/share or device boundary during authentication.
+    #[cfg(windows)]
+    {
+        use std::{os::windows::ffi::OsStrExt, path::Prefix};
+
+        match path.components().next() {
+            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)) => {}
+            _ => return Err(SshError::InvalidPrivateKeyPath),
+        }
+        let mut units = 0usize;
+        for unit in path.as_os_str().encode_wide() {
+            units = units.saturating_add(1);
+            if matches!(unit, 0 | 10 | 13) || units > MAX_PRIVATE_KEY_PATH_UNITS {
+                return Err(SshError::InvalidPrivateKeyPath);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        let bytes = path.as_os_str().as_bytes();
+        if bytes.len() > MAX_PRIVATE_KEY_PATH_UNITS
+            || bytes.iter().any(|byte| matches!(byte, 0 | b'\n' | b'\r'))
+        {
+            return Err(SshError::InvalidPrivateKeyPath);
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        return Err(SshError::PrivateKeyPathValidationUnavailable);
+    }
+
+    Ok(())
+}
+
+fn validate_private_key_file(path: &Path) -> Result<(), SshError> {
+    for (index, ancestor) in path.ancestors().enumerate() {
+        let metadata =
+            fs::symlink_metadata(ancestor).map_err(|_| SshError::PrivateKeyUnavailable)?;
+        if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+            return Err(SshError::UnsafePrivateKeyPath);
+        }
+        if index == 0 {
+            if !metadata.is_file() {
+                return Err(SshError::PrivateKeyNotRegularFile);
+            }
+        } else if !metadata.is_dir() {
+            return Err(SshError::UnsafePrivateKeyPath);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
 fn connect_tcp(endpoint: &SshEndpoint, timeout: Duration) -> Result<TcpStream, SshError> {
     let addresses = (endpoint.host(), endpoint.port())
         .to_socket_addrs()
@@ -781,6 +1098,18 @@ pub enum SshError {
     InvalidUsername,
     #[error("SSH password must be valid UTF-8")]
     PasswordNotUtf8,
+    #[error("SSH private-key passphrase must be valid UTF-8")]
+    PrivateKeyPassphraseNotUtf8,
+    #[error("SSH private-key path is invalid")]
+    InvalidPrivateKeyPath,
+    #[error("SSH private-key path safety validation is unavailable on this platform")]
+    PrivateKeyPathValidationUnavailable,
+    #[error("SSH private-key file is unavailable")]
+    PrivateKeyUnavailable,
+    #[error("SSH private-key path contains a link or reparse point")]
+    UnsafePrivateKeyPath,
+    #[error("SSH private-key path is not a regular file")]
+    PrivateKeyNotRegularFile,
     #[error("remote path is invalid")]
     InvalidRemotePath,
     #[error("remote command argument is invalid")]
@@ -795,6 +1124,8 @@ pub enum SshError {
     UnsupportedHostKeyAlgorithm,
     #[error("SSH host key changed (expected {expected}, received {actual})")]
     HostKeyMismatch { expected: String, actual: String },
+    #[error("SSH {method} authentication is unsupported by this transport")]
+    UnsupportedAuthenticationMethod { method: AuthenticationMethod },
     #[error("SSH password authentication failed")]
     Authentication {
         #[source]
@@ -802,6 +1133,16 @@ pub enum SshError {
     },
     #[error("SSH server rejected password authentication")]
     AuthenticationRejected,
+    #[error("SSH agent is unavailable")]
+    AgentUnavailable,
+    #[error("SSH agent authentication failed")]
+    AgentAuthenticationFailed,
+    #[error("SSH server rejected all SSH-agent identities")]
+    AgentAuthenticationRejected,
+    #[error("SSH private-key authentication failed")]
+    PrivateKeyAuthenticationFailed,
+    #[error("SSH server rejected private-key authentication")]
+    PrivateKeyAuthenticationRejected,
     #[error("{stream} exceeded the {maximum_bytes}-byte safety limit")]
     OutputLimitExceeded {
         stream: &'static str,
@@ -820,15 +1161,20 @@ pub enum SshError {
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::Cell,
+        fs,
         io::{self, Read},
+        path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
 
     use cyc_secrets::Secret;
+    use uuid::Uuid;
 
     use super::{
-        CommandArgument, CommandOutput, FixedCommand, HostKey, RemotePath, RemoteSession,
-        SshEndpoint, SshError, SshTransport, TransferReceipt,
+        AuthenticationMethod, CommandArgument, CommandOutput, FixedCommand, HostKey,
+        PrivateKeyFile, RemotePath, RemoteSession, SshAuthentication, SshEndpoint, SshError,
+        SshTransport, TransferReceipt,
     };
 
     #[test]
@@ -894,6 +1240,182 @@ mod tests {
     }
 
     #[test]
+    fn host_key_mismatch_precedes_every_authentication_attempt() {
+        let expected = HostKey::from_parts("ssh-ed25519", vec![1, 2, 3]).expect("expected key");
+        let actual = HostKey::from_parts("ssh-ed25519", vec![4, 5, 6]).expect("actual key");
+        let attempted = Cell::new(false);
+
+        let error = super::authenticate_after_host_key(&actual, &expected, || {
+            attempted.set(true);
+            Ok(())
+        })
+        .expect_err("mismatched host key must fail");
+
+        assert!(!attempted.get());
+        assert!(matches!(error, SshError::HostKeyMismatch { .. }));
+    }
+
+    #[test]
+    fn username_validation_rejects_nul_and_line_breaks() {
+        assert!(matches!(
+            super::validate_username("worker\0admin"),
+            Err(SshError::InvalidUsername)
+        ));
+        assert!(matches!(
+            super::validate_username("worker\nadmin"),
+            Err(SshError::InvalidUsername)
+        ));
+        assert!(matches!(
+            super::validate_username("worker\radmin"),
+            Err(SshError::InvalidUsername)
+        ));
+        assert!(super::validate_username("worker").is_ok());
+    }
+
+    #[test]
+    fn private_key_path_is_absolute_regular_and_debug_redacted() {
+        let temp = TemporaryDirectory::new();
+        let key_path = temp.path().join("id_secret_name");
+        fs::write(&key_path, b"private-key-fixture").expect("write key fixture");
+        let key = PrivateKeyFile::new(&key_path).expect("validated key");
+
+        let debug = format!("{key:?}");
+        assert_eq!(debug, "PrivateKeyFile(<redacted>)");
+        assert!(!debug.contains("id_secret_name"));
+        assert_eq!(key.as_path(), key_path);
+
+        assert!(matches!(
+            PrivateKeyFile::new("relative/id_key"),
+            Err(SshError::InvalidPrivateKeyPath)
+        ));
+        let invalid_control_path = temp.path().join("id\nkey");
+        let error = PrivateKeyFile::new(&invalid_control_path).expect_err("newline path");
+        assert!(matches!(error, SshError::InvalidPrivateKeyPath));
+        assert!(!format!("{error:?}").contains("id\nkey"));
+        assert!(matches!(
+            PrivateKeyFile::new(temp.path()),
+            Err(SshError::PrivateKeyNotRegularFile)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_key_path_rejects_symlinks_and_symlinked_parents() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TemporaryDirectory::new();
+        let real_directory = temp.path().join("real");
+        fs::create_dir(&real_directory).expect("real directory");
+        let key_path = real_directory.join("id_key");
+        fs::write(&key_path, b"private-key-fixture").expect("write key fixture");
+
+        let key_link = temp.path().join("id_link");
+        symlink(&key_path, &key_link).expect("key symlink");
+        assert!(matches!(
+            PrivateKeyFile::new(&key_link),
+            Err(SshError::UnsafePrivateKeyPath)
+        ));
+
+        let directory_link = temp.path().join("linked-parent");
+        symlink(&real_directory, &directory_link).expect("directory symlink");
+        assert!(matches!(
+            PrivateKeyFile::new(directory_link.join("id_key")),
+            Err(SshError::UnsafePrivateKeyPath)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_key_path_rejects_windows_reparse_points_when_available() {
+        use std::os::windows::fs::symlink_file;
+
+        let temp = TemporaryDirectory::new();
+        let key_path = temp.path().join("id_key");
+        fs::write(&key_path, b"private-key-fixture").expect("write key fixture");
+        let key_link = temp.path().join("id_link");
+        match symlink_file(&key_path, &key_link) {
+            Ok(()) => assert!(matches!(
+                PrivateKeyFile::new(&key_link),
+                Err(SshError::UnsafePrivateKeyPath)
+            )),
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    || error.raw_os_error() == Some(1314) =>
+            {
+                // Some non-elevated Windows builders cannot create a reparse
+                // point. Production rejection is still compiled and covered
+                // by the metadata predicate on capable builders.
+            }
+            Err(error) => panic!("create key symlink: {error}"),
+        }
+    }
+
+    #[test]
+    fn legacy_transport_defaults_new_methods_to_fixed_unsupported_errors() {
+        let temp = TemporaryDirectory::new();
+        let key_path = temp.path().join("id_key");
+        fs::write(&key_path, b"private-key-fixture").expect("write key fixture");
+        let key = PrivateKeyFile::new(key_path).expect("validated key");
+        let transport = MockTransport::new();
+        let endpoint = SshEndpoint::with_default_port("worker.local").expect("endpoint");
+        let pinned = transport.probe_host_key(&endpoint).expect("probe");
+
+        assert!(matches!(
+            transport.connect_agent(&endpoint, &pinned, "worker"),
+            Err(SshError::UnsupportedAuthenticationMethod {
+                method: AuthenticationMethod::Agent
+            })
+        ));
+        assert!(matches!(
+            transport.connect_private_key(&endpoint, &pinned, "worker", &key, None),
+            Err(SshError::UnsupportedAuthenticationMethod {
+                method: AuthenticationMethod::PrivateKey
+            })
+        ));
+    }
+
+    #[test]
+    fn borrowed_authentication_dispatch_redacts_and_does_not_persist_secrets() {
+        let temp = TemporaryDirectory::new();
+        let key_path = temp.path().join("id_sensitive_name");
+        fs::write(&key_path, b"private-key-fixture").expect("write key fixture");
+        let key = PrivateKeyFile::new(&key_path).expect("validated key");
+        let passphrase = Secret::from_string("ephemeral-passphrase".to_owned());
+        let authentication = SshAuthentication::PrivateKey {
+            private_key: &key,
+            passphrase: Some(&passphrase),
+        };
+        let debug = format!("{authentication:?}");
+        assert!(!debug.contains("ephemeral-passphrase"));
+        assert!(!debug.contains("id_sensitive_name"));
+        assert!(debug.contains("<redacted>"));
+
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let transport = AuthenticationBoundaryTransport {
+            host_key: HostKey::from_parts("ssh-ed25519", vec![9, 8, 7]).expect("key"),
+            observed: Arc::clone(&observed),
+        };
+        let endpoint = SshEndpoint::with_default_port("worker.local").expect("endpoint");
+        let pinned = transport.probe_host_key(&endpoint).expect("probe");
+        transport
+            .connect_with_authentication(&endpoint, &pinned, "worker", authentication)
+            .expect("private-key dispatch");
+        transport
+            .connect_with_authentication(&endpoint, &pinned, "worker", SshAuthentication::Agent)
+            .expect("agent dispatch");
+
+        assert_eq!(
+            *observed.lock().expect("observation lock"),
+            vec![
+                AuthenticationObservation::PrivateKey {
+                    passphrase_bytes: Some(20)
+                },
+                AuthenticationObservation::Agent
+            ]
+        );
+    }
+
+    #[test]
     fn output_pump_interleaves_large_stdout_and_stderr() {
         // Each side is larger than a typical SSH channel receive window. The
         // fake streams only permit one side to read at a time, so a sequential
@@ -949,6 +1471,102 @@ mod tests {
     struct MockTransport {
         host_key: HostKey,
         seen_password_len: Arc<Mutex<Option<usize>>>,
+    }
+
+    impl MockTransport {
+        fn new() -> Self {
+            Self {
+                host_key: HostKey::from_parts("ssh-ed25519", vec![1, 2, 3]).expect("key"),
+                seen_password_len: Arc::new(Mutex::new(None)),
+            }
+        }
+    }
+
+    struct TemporaryDirectory {
+        path: PathBuf,
+    }
+
+    impl TemporaryDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("cyc-ssh-test-{}", Uuid::new_v4()));
+            fs::create_dir(&path).expect("create temporary directory");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TemporaryDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum AuthenticationObservation {
+        Agent,
+        PrivateKey { passphrase_bytes: Option<usize> },
+    }
+
+    struct AuthenticationBoundaryTransport {
+        host_key: HostKey,
+        observed: Arc<Mutex<Vec<AuthenticationObservation>>>,
+    }
+
+    impl SshTransport for AuthenticationBoundaryTransport {
+        fn probe_host_key(&self, _endpoint: &SshEndpoint) -> Result<HostKey, SshError> {
+            Ok(self.host_key.clone())
+        }
+
+        fn connect_password(
+            &self,
+            _endpoint: &SshEndpoint,
+            pinned_host_key: &HostKey,
+            _username: &str,
+            _password: &Secret,
+        ) -> Result<Box<dyn RemoteSession>, SshError> {
+            super::authenticate_after_host_key(&self.host_key, pinned_host_key, || {
+                Ok(Box::new(MockSession) as Box<dyn RemoteSession>)
+            })
+        }
+
+        fn connect_agent(
+            &self,
+            _endpoint: &SshEndpoint,
+            pinned_host_key: &HostKey,
+            username: &str,
+        ) -> Result<Box<dyn RemoteSession>, SshError> {
+            super::validate_username(username)?;
+            super::authenticate_after_host_key(&self.host_key, pinned_host_key, || {
+                self.observed
+                    .lock()
+                    .expect("observation lock")
+                    .push(AuthenticationObservation::Agent);
+                Ok(Box::new(MockSession) as Box<dyn RemoteSession>)
+            })
+        }
+
+        fn connect_private_key(
+            &self,
+            _endpoint: &SshEndpoint,
+            pinned_host_key: &HostKey,
+            username: &str,
+            private_key: &PrivateKeyFile,
+            passphrase: Option<&Secret>,
+        ) -> Result<Box<dyn RemoteSession>, SshError> {
+            super::validate_username(username)?;
+            super::authenticate_after_host_key(&self.host_key, pinned_host_key, || {
+                private_key.revalidate()?;
+                let passphrase_bytes = passphrase.map(Secret::len);
+                self.observed
+                    .lock()
+                    .expect("observation lock")
+                    .push(AuthenticationObservation::PrivateKey { passphrase_bytes });
+                Ok(Box::new(MockSession) as Box<dyn RemoteSession>)
+            })
+        }
     }
 
     struct AlternatingReader {

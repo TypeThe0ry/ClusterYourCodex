@@ -5,7 +5,7 @@ provisioner after SSH host-key verification and authentication. The current
 release contract uses an Ed25519 detached signature over the canonical
 `worker-kit.json` bytes and binds every kit file into `SHA256SUMS` and the
 parent release manifest. The controller pins the audited public key from
-`crates/cyc-provision/publisher_keys/cyc-release-2026-01.pub` and verifies the
+`crates/cyc-provision/publisher_keys/cyc-release-2026-02.pub` and verifies the
 signature before staging any byte. SSH is only
 the bootstrap, repair, update, and removal transport; normal jobs use the
 managed worker protocol.
@@ -21,14 +21,26 @@ permissions, consumed once, and deleted.
 ./packaging/worker-kits/New-WorkerKit.ps1 `
   -Target windows-x86_64 `
   -WorkerExecutable ./target/release/cyc-worker.exe `
-  -SigningKeyPath C:/private/cyc-release-2026-01.pem `
+  -SigningKeyPath C:/private/cyc-release-2026-02.pem `
   -OutputDirectory ./artifacts/worker-windows-x86_64
 
 ./packaging/worker-kits/New-WorkerKit.ps1 `
   -Target linux-x86_64 `
   -WorkerExecutable ./artifacts/linux-x86_64/cyc-worker `
-  -SigningKeyPath C:/private/cyc-release-2026-01.pem `
+  -SigningKeyPath C:/private/cyc-release-2026-02.pem `
   -OutputDirectory ./artifacts/worker-linux-x86_64
+
+./packaging/worker-kits/New-WorkerKit.ps1 `
+  -Target macos-x86_64 `
+  -WorkerExecutable ./artifacts/macos-x86_64/cyc-worker `
+  -SigningKeyPath C:/private/cyc-release-2026-02.pem `
+  -OutputDirectory ./artifacts/worker-macos-x86_64
+
+./packaging/worker-kits/New-WorkerKit.ps1 `
+  -Target macos-aarch64 `
+  -WorkerExecutable ./artifacts/macos-aarch64/cyc-worker `
+  -SigningKeyPath C:/private/cyc-release-2026-02.pem `
+  -OutputDirectory ./artifacts/worker-macos-aarch64
 ```
 
 The signing key must be an Ed25519 PKCS#8 PEM matching the pinned public key;
@@ -36,6 +48,11 @@ missing, malformed, foreign, or mismatched keys fail closed. Every output
 contains exactly `worker-kit.json`, `worker-kit.sig`, `SHA256SUMS`, one worker
 executable, and the platform lifecycle script. The release pipeline binds the
 complete kit into its parent release manifest.
+
+When `-Version` is omitted, the builder reads the repository-root `VERSION`
+file. That file must be a bounded, normal UTF-8 file containing exactly one
+LF-terminated SemVer-compatible value; missing or malformed version identity
+fails closed. An explicit `-Version` remains available to isolated fixtures.
 
 The remote lifecycle does not depend on an OpenSSL installation. Controller
 loads the exact five local files, verifies the Ed25519 signature and manifest
@@ -50,12 +67,16 @@ performs Ed25519 cryptography itself.
 
 ## Publisher key provisioning and rotation
 
-Production releases require repository secret
+Production releases require the `production-signing` environment secret
 `CYC_WORKER_KIT_SIGNING_KEY_PEM_B64`, containing Base64 of the complete private
 PKCS#8 PEM. The release workflow fails rather than emitting an unsigned kit
 when the secret is absent or invalid, materializes it only as a bounded
-runner-private temporary file, and deletes that file after kit construction.
-The private key must never be committed.
+runner-private temporary file with verified mode `0600` on Unix or a protected
+runner-SID/SYSTEM DACL on Windows, and deletes that file after kit construction.
+The environment requires a reviewer, disables administrator bypass, and
+accepts only `v*` tag deployments; manual runs from branches fail closed before
+any signing job. The private key must never be committed or stored as a
+repository-level secret.
 
 Generate a new pair with `openssl genpkey -algorithm ED25519 -out <private.pem>`.
 Derive the SPKI public key with
@@ -69,9 +90,9 @@ rejected unless their old public key remains explicitly trusted.
 PowerShell rotation skeleton (it never prints the private key):
 
 ```powershell
-$private = 'C:\private\cyc-release-2026-01.pem'
-$der = Join-Path $env:TEMP 'cyc-release-2026-01-public.der'
-$public = 'crates\cyc-provision\publisher_keys\cyc-release-2026-01.pub'
+$private = 'C:\private\cyc-release-2026-02.pem'
+$der = Join-Path $env:TEMP 'cyc-release-2026-02-public.der'
+$public = 'crates\cyc-provision\publisher_keys\cyc-release-2026-02.pub'
 openssl genpkey -algorithm ED25519 -out $private
 openssl pkey -in $private -pubout -outform DER -out $der
 $bytes = [IO.File]::ReadAllBytes($der)
@@ -82,7 +103,7 @@ if ($bytes.Length -ne 44) { throw 'unexpected Ed25519 SPKI encoding' }
   [Text.UTF8Encoding]::new($false)
 )
 [Convert]::ToBase64String([IO.File]::ReadAllBytes($private)) |
-  gh secret set CYC_WORKER_KIT_SIGNING_KEY_PEM_B64
+  gh secret set CYC_WORKER_KIT_SIGNING_KEY_PEM_B64 --env production-signing
 [IO.File]::Delete($der)
 ```
 
@@ -113,6 +134,57 @@ Linux:
 ./install-worker.sh repair --workspace-root /srv/codex-worker
 ./install-worker.sh uninstall
 ```
+
+macOS preview package:
+
+```bash
+# Phase 1 is safe: exact-kit verification plus dormant preinstall.
+./install-worker.sh install \
+  --workspace-root "$HOME/Library/Application Support/ClusterYourCodex/Worker/Data/workspace"
+
+# Phase 2 is safe: consume enrollment and validate config, but stay dormant.
+./install-worker.sh repair \
+  --workspace-root "$HOME/Library/Application Support/ClusterYourCodex/Worker/Data/workspace" \
+  --enrollment /private/enrollment.json --pair-only
+
+# Phase 3 is intentionally gated in prerelease packages. It exits 78 and does
+# not mutate the paired installation or start cyc-worker.
+./install-worker.sh repair
+
+# Removes owned executable/LaunchAgent material while preserving paired data,
+# workspace, and logs by default. It is safe to repeat.
+./install-worker.sh uninstall
+```
+
+The macOS package is generated for both `macos-x86_64` and
+`macos-aarch64`, but **macOS runtime support is not claimed yet**. Native worker
+containment and a live macOS lifecycle test are release gates. Until both are
+complete, the lifecycle has a non-overridable
+`MACOS_WORKER_CONTAINMENT_READY=0` packaging gate. Any invocation that would
+bootstrap or start the LaunchAgent fails before worker, config, manifest, or
+LaunchAgent mutation with exit code `78` and the machine-readable diagnostic:
+
+```text
+[CYC-MACOS-WORKER-CONTAINMENT-UNAVAILABLE]
+```
+
+Safe enrollment-free preinstall, integrity verification, `--pair-only`,
+status validation, uninstall, and rollback remain available. The macOS
+lifecycle re-verifies the exact five-file package and its canonical Ed25519
+signature before preinstall or pairing; this preview implementation requires
+Python 3.8+ for that pure-software verifier and fails closed with
+`[CYC-MACOS-PYTHON-REQUIRED]` when it is unavailable.
+
+The current-user LaunchAgent foundation is
+`~/Library/LaunchAgents/dev.clusteryourcodex.worker.plist`. Its future enabled
+state uses `launchctl bootstrap`, `kickstart`, `print`, and `bootout`; program
+data and workspace live below
+`~/Library/Application Support/ClusterYourCodex/Worker`, while stdout/stderr
+logs live below `~/Library/Logs/ClusterYourCodex/Worker`. System scope is
+rejected with exit code `78` and
+`[CYC-MACOS-LAUNCHAGENT-USER-SCOPE-REQUIRED]`. The plist/start wrapper exists
+so the post-containment lifecycle does not require a product fork, but the
+hard gate makes it unreachable in current prereleases.
 
 For a non-root invocation, `--scope auto` selects a user systemd unit. Before
 the service phase mutates the worker, config, manifest, or unit, the installer

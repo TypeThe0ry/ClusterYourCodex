@@ -17,10 +17,11 @@ use cyc_provision::{
     DiscoveredComputer, DriveOutcome, DriverFailure, DriverRequest, GpuInventory, NewComputer,
     PinnedHostKeyRecord, ProvisioningAction, ProvisioningDriver, ProvisioningEngine,
     ProvisioningError, ProvisioningIntent, ProvisioningState, ProvisioningStep, ProvisioningStore,
-    ServiceScope, StepCompletion, StoreError, COMPUTER_RECORD_FORMAT_VERSION,
+    ServiceScope, SshAuthenticationMethod, SshAuthenticationPolicy, StepCompletion, StoreError,
+    COMPUTER_RECORD_FORMAT_VERSION,
 };
 use cyc_secrets::{CredentialKey, Secret};
-use cyc_ssh::HostKey;
+use cyc_ssh::{HostKey, PrivateKeyFile};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -64,11 +65,82 @@ fn idempotent_create_rejects_identity_reuse_with_changed_input() {
         engine.create_idempotent(new_computer(), record_id, Uuid::new_v4()),
         Err(ProvisioningError::IdempotencyConflict)
     ));
+    let mut changed_authentication = new_computer();
+    changed_authentication.ssh_authentication = SshAuthenticationPolicy::agent();
+    changed_authentication.remember_credential = false;
+    assert!(matches!(
+        engine.create_idempotent(changed_authentication, record_id, intended_node_id),
+        Err(ProvisioningError::IdempotencyConflict)
+    ));
     assert!(matches!(
         engine.create_idempotent(new_computer(), Uuid::nil(), intended_node_id),
         Err(ProvisioningError::InvalidIdentity)
     ));
     assert_eq!(engine.list().expect("list records").len(), 1);
+}
+
+#[test]
+fn authentication_policy_is_durable_redacted_and_legacy_defaults_to_password() {
+    let temp = TempDir::new().expect("tempdir");
+    let key_path = temp.path().join("id_fixture");
+    fs::write(&key_path, b"fixture-private-key-material").expect("key fixture");
+    let private_key = PrivateKeyFile::new(&key_path).expect("validated key fixture");
+    let mut input = new_computer();
+    input.ssh_authentication =
+        SshAuthenticationPolicy::private_key(&private_key).expect("private-key policy");
+    input.remember_credential = false;
+
+    let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().expect("store"));
+    let record = engine.create(input).expect("private-key record");
+    assert_eq!(
+        record.ssh_authentication.method(),
+        SshAuthenticationMethod::PrivateKey
+    );
+    assert!(record.ssh_authentication.private_key_configured());
+    assert!(!format!("{record:?}").contains(&key_path.to_string_lossy().to_string()));
+    let value = serde_json::to_value(&record).expect("record value");
+    assert_eq!(
+        value.pointer("/sshAuthentication/privateKeyPath"),
+        Some(&serde_json::Value::String(
+            key_path.to_string_lossy().to_string()
+        ))
+    );
+    let json = serde_json::to_string(&value).expect("serialize record");
+    assert!(!json.to_ascii_lowercase().contains("passphrase"));
+
+    let mut legacy = value;
+    legacy
+        .as_object_mut()
+        .expect("record object")
+        .remove("sshAuthentication");
+    let decoded: cyc_provision::ComputerRecord =
+        serde_json::from_value(legacy).expect("legacy record");
+    assert_eq!(
+        decoded.ssh_authentication.method(),
+        SshAuthenticationMethod::Password
+    );
+}
+
+#[test]
+fn remember_policy_is_rejected_for_agent_and_private_key_authentication() {
+    let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().expect("store"));
+    let mut agent = new_computer();
+    agent.ssh_authentication = SshAuthenticationPolicy::agent();
+    assert!(matches!(
+        engine.create(agent),
+        Err(ProvisioningError::Validation(_))
+    ));
+
+    let mut valid_agent = new_computer();
+    valid_agent.ssh_authentication = SshAuthenticationPolicy::agent();
+    valid_agent.remember_credential = false;
+    let created = engine.create(valid_agent).expect("agent policy");
+    assert_eq!(
+        created.ssh_authentication.method(),
+        SshAuthenticationMethod::Agent
+    );
+    assert!(!created.credential_policy.remember_requested);
+    assert!(created.credential_reference.is_none());
 }
 
 #[test]

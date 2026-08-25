@@ -2963,15 +2963,16 @@ fn artifact_proof_matches(bytes: &[u8]) -> bool {
     }
 
     let utf16 = bytes.strip_prefix(&[0xff, 0xfe]).unwrap_or(bytes);
-    if utf16.is_empty() || utf16.len() % 2 != 0 {
+    let (pairs, remainder) = utf16.as_chunks::<2>();
+    if pairs.is_empty() || !remainder.is_empty() {
         return false;
     }
     // Without a BOM only accept an unmistakable ASCII-shaped UTF-16LE stream.
-    if !bytes.starts_with(&[0xff, 0xfe]) && !utf16.chunks_exact(2).all(|pair| pair[1] == 0) {
+    if !bytes.starts_with(&[0xff, 0xfe]) && !pairs.iter().all(|pair| pair[1] == 0) {
         return false;
     }
-    let units = utf16
-        .chunks_exact(2)
+    let units = pairs
+        .iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect::<Vec<_>>();
     String::from_utf16(&units).is_ok_and(|text| artifact_proof_text_matches(&text))

@@ -1135,6 +1135,9 @@ Assert-SetupSilent (Test-Path -LiteralPath $packagePayload -PathType Container) 
 Assert-SetupSilent (Test-Path -LiteralPath $packageCoordinator -PathType Leaf) 'matching lifecycle coordinator exists'
 $previewManifest = Read-SetupSilentJson -Path $packageManifest -MaximumBytes 8MB
 Assert-SetupSilent ([string]$previewManifest.schemaVersion -ceq $script:PreviewManifestSchema) 'matching preview manifest schema is current'
+Assert-SetupSilent ([string]$previewManifest.productVersion -match '^[0-9]+\.[0-9]+\.[0-9]+-(preview|alpha|beta|rc)\.[0-9]+$') 'preview manifest carries a strict prerelease product version'
+Assert-SetupSilent ([string]$previewManifest.releaseChannel -ceq 'prerelease') 'preview manifest release channel remains prerelease'
+Assert-SetupSilent ($null -eq $previewManifest.sourceTag -or [string]$previewManifest.sourceTag -ceq "v$($previewManifest.productVersion)") 'preview manifest source tag is absent or exactly vPRODUCT_VERSION'
 $expectedPackageManifestSha256 = (Get-FileHash -LiteralPath $packageManifest -Algorithm SHA256).Hash.ToLowerInvariant()
 
 $taskBefore = @(Get-SetupSilentTaskSnapshot)

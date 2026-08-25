@@ -1,9 +1,12 @@
 # Managed worker execution contract
 
-Status: execution contract for the Windows-first developer preview. Windows and
-Linux preview archives contain the managed worker for trusted, single-user
-jobs. The published macOS archives are controller/CLI-only and intentionally
-omit the worker while macOS process containment remains fail-closed.
+Status: execution contract for the Windows-first developer preview. Windows,
+Linux, and macOS preview archives contain the managed-worker binary or a signed
+Worker Kit. Windows/Linux execution remains limited to trusted, single-user
+jobs. The packaged macOS x64/arm64 Worker Kits are lifecycle artifacts only:
+managed execution remains `runtimeGated=true`, `containmentReady=false`, and
+`liveReady=false` until its process-containment and native acceptance gates
+pass.
 
 ## Trust boundary
 
@@ -389,14 +392,20 @@ Cancellation semantics are explicit:
   cancellation evidence;
 - a stale state version returns conflict instead of overwriting newer state.
 
-Windows execution uses a Job Object with kill-on-close. Linux requires
-`PR_SET_CHILD_SUBREAPER` before claiming work, combines a dedicated process
-group with PID/start-time descendant tracking, and fails closed when it cannot
-confirm that every descendant (including a `setsid` escape) is gone. A worker
-built from source on macOS can pair and probe, but refuses to claim executable
-work until a platform containment backend can provide the same proof. The
-published macOS developer-preview archives omit `cyc-worker` entirely so their
-contents match that controller/CLI-only status.
+Windows trusted-job execution uses a Job Object with kill-on-close. Linux
+requires `PR_SET_CHILD_SUBREAPER` before claiming work, combines a dedicated
+process group with PID/start-time descendant tracking, and fails closed when it
+cannot confirm that every descendant (including a `setsid` escape) is gone.
+These lifecycle mechanisms are not hostile-workload guards. The opt-in Linux
+dedicated-identity/cgroup-v2 mechanism has passed an internal native P1 test,
+but it remains production-gated while issue #5's cgroup-escape, identity,
+resource, and reconciliation proof set is completed. A Windows hostile-workload
+external guard is not implemented. All three platforms report hostile readiness
+as false, publish no hostile scheduling capability, and reject configured
+hostile execution before launch. A packaged macOS worker can pair and probe,
+but refuses to claim executable work until a platform containment backend can
+provide the same proof. Packaging and signature validation do not change that
+runtime gate.
 
 ## Evidence gate
 
@@ -433,6 +442,7 @@ cross-node acceptance run:
 5. a Windows controller executes exact-SHA jobs on a Windows worker and a Linux
    worker, then retrieves logs and a SHA-verified artifact;
 6. failure and cancellation are exercised end to end;
-7. macOS compiles and passes platform unit tests, without claiming a live macOS
-   run until one is actually performed; published macOS archives remain
-   controller/CLI-only in the meantime.
+7. macOS compiles, passes platform/unit packaging checks, and produces signed
+   exact-five-file x64/arm64 Worker Kits without claiming a live macOS run;
+   packaged workers remain runtime-gated until containment and live acceptance
+   are actually proven.

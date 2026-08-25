@@ -38,7 +38,7 @@ export interface ClusterYourCodexDesktopBridge {
   fullRunCheck: () => Promise<unknown>;
   /** Poll the latest native Full Run snapshot without waiting for the operation lock. */
   fullRunCheckStatus: () => Promise<unknown>;
-  /** Create one durable password-SSH provisioning record. */
+  /** Create one durable SSH provisioning record (password, agent, or private key). */
   provisioningStart: (request: unknown) => Promise<unknown>;
   /** Recover every durable provisioning record after a desktop restart. */
   provisioningList: () => Promise<unknown>;
@@ -46,7 +46,7 @@ export interface ClusterYourCodexDesktopBridge {
   provisioningGet: (request: { id: string }) => Promise<unknown>;
   /** Approve exactly the host key fingerprint previously observed by the native driver. */
   provisioningApproveHostKey: (request: { id: string; revision: number; fingerprint: string }) => Promise<unknown>;
-  /** Continue a checkpoint, optionally supplying a new transient SSH password. */
+  /** Continue a checkpoint, optionally supplying a transient password or key passphrase. */
   provisioningContinue: (request: unknown) => Promise<unknown>;
   provisioningResume: (request: unknown) => Promise<unknown>;
   provisioningRetry: (request: unknown) => Promise<unknown>;

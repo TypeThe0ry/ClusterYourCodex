@@ -12,11 +12,11 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-preview.3"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/TypeThe0ry/ClusterYourCodex"
-rust-version = "1.82"
+rust-version = "1.88.0"
 
 [workspace.dependencies]
 anyhow = "1.0"

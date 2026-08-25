@@ -199,6 +199,119 @@ pub enum ContainmentBackend {
     Unsupported,
 }
 
+/// Opt-in hostile-workload isolation backend.  This is deliberately separate
+/// from [`ContainmentBackend`]: the latter proves that a trusted same-user
+/// process tree is gone, while this capability also requires a dedicated
+/// execution identity, state/credential separation, and restart-time external
+/// reconciliation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostileIsolationBackend {
+    #[default]
+    Disabled,
+    LinuxCgroupV2DedicatedIdentity,
+    WindowsJobObjectExternalGuard,
+    MacosExternalReconciliation,
+    Unsupported,
+}
+
+/// Secret-free hostile-workload capability advertised by a worker.  `ready`
+/// is intentionally fail-closed: it may be true only after every protection
+/// below is active and restart reconciliation has produced a valid receipt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostileIsolationInventory {
+    #[serde(default)]
+    pub opt_in: bool,
+    #[serde(default)]
+    pub ready: bool,
+    #[serde(default)]
+    pub backend: HostileIsolationBackend,
+    #[serde(default)]
+    pub dedicated_identity: bool,
+    #[serde(default)]
+    pub external_reconciliation: bool,
+    #[serde(default)]
+    pub protected_guard_state: bool,
+    #[serde(default)]
+    pub worker_state_isolated: bool,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+}
+
+impl Default for HostileIsolationInventory {
+    fn default() -> Self {
+        Self {
+            opt_in: false,
+            ready: false,
+            backend: HostileIsolationBackend::Disabled,
+            dedicated_identity: false,
+            external_reconciliation: false,
+            protected_guard_state: false,
+            worker_state_isolated: false,
+            reason_code: None,
+        }
+    }
+}
+
+impl HostileIsolationInventory {
+    fn validate(&self) -> Result<(), NodeStateError> {
+        if self.reason_code.as_ref().is_some_and(|reason| {
+            reason.trim().is_empty()
+                || reason.chars().count() > 128
+                || reason.chars().any(char::is_control)
+        }) {
+            return Err(NodeStateError::InvalidInventory(
+                "hostile isolation reasonCode is invalid",
+            ));
+        }
+
+        if !self.opt_in {
+            if self.ready
+                || self.backend != HostileIsolationBackend::Disabled
+                || self.dedicated_identity
+                || self.external_reconciliation
+                || self.protected_guard_state
+                || self.worker_state_isolated
+                || self.reason_code.is_some()
+            {
+                return Err(NodeStateError::InvalidInventory(
+                    "disabled hostile isolation must use conservative defaults",
+                ));
+            }
+            return Ok(());
+        }
+
+        if self.backend == HostileIsolationBackend::Disabled {
+            return Err(NodeStateError::InvalidInventory(
+                "opt-in hostile isolation must identify a backend",
+            ));
+        }
+        if self.ready
+            && (!self.dedicated_identity
+                || !self.external_reconciliation
+                || !self.protected_guard_state
+                || !self.worker_state_isolated
+                || self.reason_code.is_some()
+                || matches!(
+                    self.backend,
+                    HostileIsolationBackend::MacosExternalReconciliation
+                        | HostileIsolationBackend::Unsupported
+                ))
+        {
+            return Err(NodeStateError::InvalidInventory(
+                "ready hostile isolation is missing a required protection",
+            ));
+        }
+        if !self.ready && self.reason_code.is_none() {
+            return Err(NodeStateError::InvalidInventory(
+                "unready hostile isolation must provide a reasonCode",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Static containment capability. P0 deliberately advertises one safe slot;
 /// this prevents policy configuration from enabling unsafe multi-run execution.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -210,6 +323,8 @@ pub struct ContainmentInventory {
     pub version: String,
     #[serde(default = "default_max_concurrent_jobs")]
     pub max_safe_slots: u32,
+    #[serde(default)]
+    pub hostile_isolation: HostileIsolationInventory,
 }
 
 impl Default for ContainmentInventory {
@@ -218,6 +333,7 @@ impl Default for ContainmentInventory {
             backend: ContainmentBackend::Legacy,
             version: default_unknown(),
             max_safe_slots: 1,
+            hostile_isolation: HostileIsolationInventory::default(),
         }
     }
 }
@@ -344,6 +460,7 @@ impl NodeInventory {
                 "containment must identify the current one-slot backend",
             ));
         }
+        self.containment.hostile_isolation.validate()?;
         Ok(())
     }
 }
@@ -848,6 +965,10 @@ mod tests {
         assert_eq!(inventory.cpu_model, "unknown");
         assert_eq!(inventory.protocol_version, PROTOCOL_VERSION);
         assert_eq!(inventory.containment.max_safe_slots, 1);
+        assert_eq!(
+            inventory.containment.hostile_isolation,
+            HostileIsolationInventory::default()
+        );
 
         let mut telemetry = serde_json::to_value(NodeTelemetry::from_node(&node, now)).unwrap();
         let telemetry_object = telemetry.as_object_mut().unwrap();
@@ -873,6 +994,68 @@ mod tests {
         assert!(telemetry.boot_id.is_nil());
         assert_eq!(telemetry.sequence, 0);
         assert_eq!(telemetry.power_source, PowerSource::Unknown);
+    }
+
+    #[test]
+    fn hostile_isolation_capability_is_strict_and_secret_free() {
+        let mut inventory = NodeInventory::from_node(&node());
+        inventory.containment.hostile_isolation = HostileIsolationInventory {
+            opt_in: true,
+            ready: true,
+            backend: HostileIsolationBackend::LinuxCgroupV2DedicatedIdentity,
+            dedicated_identity: true,
+            external_reconciliation: true,
+            protected_guard_state: true,
+            worker_state_isolated: true,
+            reason_code: None,
+        };
+        inventory.validate().unwrap();
+        let json = serde_json::to_string(&inventory.containment.hostile_isolation).unwrap();
+        for forbidden in ["uid", "gid", "sid", "path", "password", "token", "secret"] {
+            assert!(
+                !json.to_ascii_lowercase().contains(forbidden),
+                "hostile capability leaked implementation detail `{forbidden}`: {json}"
+            );
+        }
+
+        inventory
+            .containment
+            .hostile_isolation
+            .worker_state_isolated = false;
+        assert!(matches!(
+            inventory.validate(),
+            Err(NodeStateError::InvalidInventory(
+                "ready hostile isolation is missing a required protection"
+            ))
+        ));
+
+        inventory.containment.hostile_isolation = HostileIsolationInventory {
+            opt_in: true,
+            ready: false,
+            backend: HostileIsolationBackend::MacosExternalReconciliation,
+            dedicated_identity: true,
+            external_reconciliation: true,
+            protected_guard_state: true,
+            worker_state_isolated: true,
+            reason_code: Some("containment_backend_unavailable".to_owned()),
+        };
+        inventory.validate().unwrap();
+    }
+
+    #[test]
+    fn legacy_containment_without_hostile_inventory_decodes_fail_closed() {
+        let mut encoded = serde_json::to_value(NodeInventory::from_node(&node())).unwrap();
+        encoded["containment"]
+            .as_object_mut()
+            .unwrap()
+            .remove("hostileIsolation");
+
+        let decoded: NodeInventory = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            decoded.containment.hostile_isolation,
+            HostileIsolationInventory::default()
+        );
+        decoded.validate().unwrap();
     }
 
     #[test]

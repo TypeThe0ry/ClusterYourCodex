@@ -8,6 +8,7 @@ param(
     [Parameter(Mandatory = $true)][string]$NodeExecutable,
     [Parameter(Mandatory = $true)][string]$NodeLicense,
     [string]$WorkerKitsRoot,
+    [string]$SourceTag = [string]$env:CYC_SOURCE_TAG,
     [Parameter(Mandatory = $true)][string]$OutputRoot
 )
 
@@ -112,7 +113,8 @@ function Assert-ValidMcpDeploy {
 function Copy-ValidatedWorkerKits {
     param(
         [Parameter(Mandatory = $true)][string]$SourceRoot,
-        [Parameter(Mandatory = $true)][string]$DestinationRoot
+        [Parameter(Mandatory = $true)][string]$DestinationRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedVersion
     )
 
     $sourceRootPath = Resolve-FullPath $SourceRoot
@@ -129,7 +131,17 @@ function Copy-ValidatedWorkerKits {
         }
     }
 
-    $expectedTargets = @('windows-x86_64', 'linux-x86_64', 'linux-aarch64')
+    # Ship every generated platform kit in the controller payload. macOS
+    # lifecycle activation remains independently fail-closed by both the
+    # provisioner and installer containment gates, but users must still be
+    # able to export, verify, preinstall, pair, repair, and uninstall the kit.
+    $expectedTargets = @(
+        'windows-x86_64',
+        'linux-x86_64',
+        'linux-aarch64',
+        'macos-x86_64',
+        'macos-aarch64'
+    )
     $records = New-Object System.Collections.Generic.List[object]
     $seenTargets = @{}
     $manifests = @(Get-ChildItem -LiteralPath $sourceRootPath -File -Recurse -Filter 'worker-kit.json' -Force)
@@ -138,6 +150,9 @@ function Copy-ValidatedWorkerKits {
         $manifest = Get-Content -LiteralPath $manifestFile.FullName -Raw | ConvertFrom-Json
         if ([string]$manifest.schemaVersion -cne 'cyc.dev/worker-kit/v1') {
             throw "Unsupported worker-kit manifest schema: $($manifestFile.FullName)"
+        }
+        if ([string]$manifest.version -cne $ExpectedVersion) {
+            throw "Worker kit '$($manifestFile.FullName)' version does not match product VERSION $ExpectedVersion."
         }
         $target = [string]$manifest.target
         if ($expectedTargets -cnotcontains $target) {
@@ -196,7 +211,7 @@ function Copy-ValidatedWorkerKits {
         if (@($signature.PSObject.Properties).Count -ne 6 -or
             [string]$signature.schemaVersion -cne 'cyc.dev/worker-kit-signature/v1' -or
             [string]$signature.algorithm -cne 'Ed25519' -or
-            [string]$signature.keyId -cne 'cyc-release-2026-01' -or
+            [string]$signature.keyId -cne 'cyc-release-2026-02' -or
             [string]$signature.signedObject -cne 'worker-kit.json' -or
             [string]$signature.manifestSha256 -cne $checksums['worker-kit.json'] -or
             [string]$signature.signature -cnotmatch '^[A-Za-z0-9+/]{86}==$') {
@@ -245,6 +260,20 @@ function Copy-ValidatedWorkerKits {
 }
 
 $repo = Resolve-FullPath $RepositoryRoot
+$versionCheckArguments = @{
+    RepositoryRoot = $repo
+    RequirePrerelease = $true
+    SkipNegativeTests = $true
+    Json = $true
+}
+if (-not [string]::IsNullOrWhiteSpace($SourceTag)) {
+    $versionCheckArguments.SourceTag = $SourceTag.Trim()
+}
+$releaseIdentity = (& (Join-Path $repo 'scripts\Test-VersionConsistency.ps1') @versionCheckArguments) |
+    ConvertFrom-Json
+$productVersion = [string]$releaseIdentity.productVersion
+$releaseChannel = [string]$releaseIdentity.releaseChannel
+$sourceTagValue = if ($null -eq $releaseIdentity.sourceTag) { $null } else { [string]$releaseIdentity.sourceTag }
 $rootTarget = Resolve-FullPath $RootCargoTarget
 $desktopTarget = Resolve-FullPath $DesktopCargoTarget
 $mcpDeploy = Resolve-FullPath $McpDeployRoot
@@ -354,7 +383,8 @@ $workerKitRecords = @()
 if (-not [string]::IsNullOrWhiteSpace($WorkerKitsRoot)) {
     $workerKitRecords = @(Copy-ValidatedWorkerKits `
         -SourceRoot $WorkerKitsRoot `
-        -DestinationRoot (Join-Path $payload 'worker-kits'))
+        -DestinationRoot (Join-Path $payload 'worker-kits') `
+        -ExpectedVersion $productVersion)
 }
 
 $files = @(Get-ChildItem -LiteralPath $output -File -Recurse -Force | Sort-Object FullName)
@@ -368,6 +398,9 @@ $records = @($files | ForEach-Object {
 })
 $manifest = [ordered]@{
     schemaVersion = 'cyc.dev/windows-preview/v1'
+    productVersion = $productVersion
+    releaseChannel = $releaseChannel
+    sourceTag = $sourceTagValue
     createdAtUtc = [DateTime]::UtcNow.ToString('o')
     architecture = 'x86_64-pc-windows-msvc'
     nodeVersion = $nodeVersion.Trim()

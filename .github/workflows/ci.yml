@@ -9,17 +9,67 @@ permissions:
   contents: read
 
 jobs:
+  version-identity:
+    name: Product version identity
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Verify every remote GitHub Action is commit-pinned
+        shell: pwsh
+        run: ./scripts/Test-GitHubActionPins.ps1
+      - name: Verify exact-tag production signing boundary
+        shell: pwsh
+        run: ./scripts/Test-ReleaseSigningBoundary.ps1
+      - name: Verify VERSION and every published product surface
+        shell: pwsh
+        run: >-
+          ./scripts/Test-VersionConsistency.ps1
+          -RequirePrerelease
+
+  msrv:
+    name: Minimum supported Rust 1.88.0 (${{ matrix.graph }})
+    needs: [version-identity]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - graph: workspace
+            os: ubuntu-latest
+          - graph: desktop
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0 action implementation
+        with:
+          toolchain: 1.88.0
+      - name: Assert exact MSRV toolchain
+        shell: pwsh
+        run: |
+          $actual = (& rustc --version).Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)[1]
+          if ($actual -cne '1.88.0') { throw "Expected rustc 1.88.0, got $actual" }
+      - name: Assert declared MSRV covers both locked dependency graphs
+        shell: pwsh
+        run: ./scripts/Test-RustMsrv.ps1
+      - name: Check the locked workspace at MSRV
+        if: matrix.graph == 'workspace'
+        run: cargo check --workspace --locked
+      - name: Check the locked Windows desktop host at MSRV
+        if: matrix.graph == 'desktop'
+        run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+
   rust:
     name: Rust (${{ matrix.os }})
+    needs: [version-identity]
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # Worker process-lifecycle fixtures intentionally touch process-global
@@ -28,14 +78,15 @@ jobs:
 
   web:
     name: Desktop, Windows host, and Codex bridge
+    needs: [version-identity]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.0
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 11.0.8
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24.19.0
           cache: pnpm

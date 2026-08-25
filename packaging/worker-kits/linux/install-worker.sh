@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
+# The SSH fixed-command surface invokes POSIX lifecycle scripts as
+# `/bin/sh <script> -- <args>`. Re-enter Bash before any Bash-only syntax and
+# consume the fixed separator so the first lifecycle argument remains action.
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec /bin/bash "$0" "$@"
+fi
 set -euo pipefail
 umask 077
+if [[ "${1:-}" == -- ]]; then shift; fi
 
 SCHEMA='cyc.dev/linux-worker-install/v1'
 KIT_SCHEMA='cyc.dev/worker-kit/v1'
 SIGNATURE_SCHEMA='cyc.dev/worker-kit-signature/v1'
-PUBLISHER_KEY_ID='cyc-release-2026-01'
+PUBLISHER_KEY_ID='cyc-release-2026-02'
 PUBLISHER_PUBLIC_KEY_BASE64='__CYC_PUBLISHER_PUBLIC_KEY_BASE64__'
 SERVICE_NAME='clusteryourcodex-worker.service'
 MARKER_NAME='.clusteryourcodex-worker-owned'
@@ -609,7 +616,7 @@ done
   exit 1
 }
 signature_line="$(cat -- "${bundle_root}/worker-kit.sig")"
-signature_pattern='^\{"schemaVersion":"cyc\.dev/worker-kit-signature/v1","algorithm":"Ed25519","keyId":"cyc-release-2026-01","signedObject":"worker-kit\.json","manifestSha256":"([0-9a-f]{64})","signature":"([A-Za-z0-9+/]{86}==)"\}$'
+signature_pattern='^\{"schemaVersion":"cyc\.dev/worker-kit-signature/v1","algorithm":"Ed25519","keyId":"cyc-release-2026-02","signedObject":"worker-kit\.json","manifestSha256":"([0-9a-f]{64})","signature":"([A-Za-z0-9+/]{86}==)"\}$'
 [[ "$signature_line" =~ $signature_pattern ]] || {
   printf 'Worker-kit publisher signature envelope is invalid.\n' >&2
   exit 1

@@ -31,6 +31,7 @@ use crate::config::{
 };
 use crate::executor::{execute_steps, write_result, StepsOutcome};
 use crate::http::{pairing_terminal_code, HttpLogSink, RunSession, VersionConflict, WorkerClient};
+use crate::isolation::HostileIsolation;
 use crate::process::{
     ensure_process_containment_available, LogBudget, LogSink, ProcessTerminationReason,
     CANCEL_JOB_TIMEOUT, CANCEL_LEASE_LOST, CANCEL_NONE, CANCEL_REQUESTED, CANCEL_TRANSPORT_FAILURE,
@@ -1147,11 +1148,13 @@ pub struct WorkerStatus {
     credential_protected: bool,
     quarantined: bool,
     quarantine_file: Option<PathBuf>,
+    hostile_isolation: cyc_protocol::HostileIsolationInventory,
     probe: cyc_protocol::worker::ProbeReport,
 }
 
 pub fn status(config_path: &Path) -> Result<WorkerStatus> {
     let config = WorkerConfig::load(config_path)?;
+    let hostile_isolation = HostileIsolation::from_environment(Some(config.node_id))?;
     // Reading validates that the protected file exists and has acceptable
     // permissions. The credential value never enters the status object.
     let _credential = config.load_credential()?;
@@ -1169,14 +1172,29 @@ pub fn status(config_path: &Path) -> Result<WorkerStatus> {
         credential_protected: true,
         quarantined,
         quarantine_file: quarantined.then_some(quarantine_file),
+        hostile_isolation: hostile_isolation.inventory(),
         probe: probe_at_or_conservative(&config.workspace_root),
     })
 }
 
 pub async fn run_forever(config_path: &Path) -> Result<()> {
     let config = WorkerConfig::load(config_path)?;
+    let hostile_isolation = HostileIsolation::from_environment(Some(config.node_id))?;
     ensure_protected_directory(&config.workspace_root)
         .context("refuse unprotected worker workspace before run")?;
+    hostile_isolation
+        .validate_worker_boundaries(config_path, &config)
+        .context("hostile-workload isolation gate failed before daemon start")?;
+    // Reconcile outside the job-controlled workspace before inspecting the
+    // in-workspace terminal-ack quarantine. A crash may leave both records;
+    // residual processes are killed first, while the existing ack quarantine
+    // still blocks another claim until its independent recovery completes.
+    hostile_isolation
+        .reconcile_before_claim()
+        .context("reconcile hostile-workload residuals before any claim")?;
+    hostile_isolation
+        .verify_before_claim()
+        .context("hostile-workload reconciliation proof is not claimable")?;
     refuse_containment_quarantine(&config)?;
     ensure_process_containment_available()
         .context("managed execution containment gate failed; refusing to claim work")?;
@@ -1190,7 +1208,7 @@ pub async fn run_forever(config_path: &Path) -> Result<()> {
         client.clone(),
         activity.clone(),
     ));
-    let result = claim_loop(config, client, activity).await;
+    let result = claim_loop(config, client, activity, hostile_isolation).await;
     reporter.abort();
     let _ = reporter.await;
     result
@@ -1200,11 +1218,15 @@ async fn claim_loop(
     config: WorkerConfig,
     client: Arc<WorkerClient>,
     activity: Arc<WorkerActivity>,
+    hostile_isolation: HostileIsolation,
 ) -> Result<()> {
     let mut transient_failures = 0u32;
     loop {
         ensure_protected_directory(&config.workspace_root)
             .context("worker workspace protection changed; refusing another claim")?;
+        hostile_isolation
+            .verify_before_claim()
+            .context("hostile-workload external guard changed; refusing another claim")?;
         // Check on every poll, not only at daemon startup. Any marker entry --
         // including a truncated or malformed record left by a crash -- blocks
         // another claim before a resource probe or controller request can run.
@@ -1214,8 +1236,18 @@ async fn claim_loop(
             active_run_ids: Vec::new(),
         };
         refuse_containment_quarantine(&config)?;
+        hostile_isolation
+            .verify_before_claim()
+            .context("hostile-workload residual appeared before controller claim")?;
         let claim = match client.claim(&request).await {
             Ok(claim) => {
+                // The controller round trip is an attacker-controlled timing
+                // window. Revalidate after the response and before accepting an
+                // assignment so a residual appearing in flight cannot cross the
+                // claim boundary on the strength of the earlier probe.
+                hostile_isolation
+                    .verify_before_claim()
+                    .context("hostile-workload state changed while claiming work")?;
                 transient_failures = 0;
                 claim
             }

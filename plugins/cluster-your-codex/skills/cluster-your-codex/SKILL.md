@@ -46,10 +46,14 @@ transfer/setup cost exceeds its runtime on the current computer.
 2. Create a versioned JobSpec containing an immutable Git revision or sanitized
    snapshot digest, explicit steps, requirements, timeouts, and expected
    artifacts. Never put credentials in the JobSpec.
-3. Call `fleet_plan` before `fleet_submit`. Explain or preserve the controller's
-   selected computer and placement reasons.
-4. Submit the exact planned JobSpec. Keep source-authoring authority on the
-   controller; do not silently replace local source with worker edits.
+3. For automatic placement, call `fleet_plan_submit` with the exact JobSpec so
+   planning, current-telemetry selection, reservation, and submission happen
+   atomically. Use `fleet_plan` alone only when the user asks to preview/explain
+   placement without starting work. Use `fleet_submit` only to bind the exact
+   unchanged JobSpec to an explicit existing plan during manual recovery.
+4. Preserve the controller's selected computer and placement reasons. Keep
+   source-authoring authority on the controller; do not silently replace local
+   source with worker edits.
 5. Poll `fleet_job` to a terminal state. A submitted or started job is not a
    success. Require the native exit code and expected artifact evidence.
 6. Use `fleet_cancel` only for the job owned by the current task. A cancellation

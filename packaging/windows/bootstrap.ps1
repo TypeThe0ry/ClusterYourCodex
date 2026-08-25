@@ -79,6 +79,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
+$script:ProductVersion = '0.1.0-preview.3'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
@@ -1842,6 +1843,20 @@ function Assert-CycPackageManifest {
     if ($manifest.schemaVersion -cne 'cyc.dev/windows-preview/v1') {
         throw 'Unsupported Windows package manifest schema.'
     }
+    $productVersionProperty = $manifest.PSObject.Properties['productVersion']
+    $releaseChannelProperty = $manifest.PSObject.Properties['releaseChannel']
+    $sourceTagProperty = $manifest.PSObject.Properties['sourceTag']
+    if ($null -eq $productVersionProperty -or
+        [string]$productVersionProperty.Value -cne $script:ProductVersion -or
+        $null -eq $releaseChannelProperty -or
+        [string]$releaseChannelProperty.Value -cne 'prerelease' -or
+        $null -eq $sourceTagProperty) {
+        throw 'Windows package manifest release identity is invalid.'
+    }
+    if ($null -ne $sourceTagProperty.Value -and
+        [string]$sourceTagProperty.Value -cne "v$($script:ProductVersion)") {
+        throw 'Windows package manifest source tag does not match the product version.'
+    }
     $entries = @($manifest.files)
     if ($entries.Count -lt 1 -or $entries.Count -gt 20000) {
         throw 'Package manifest contains an invalid number of files.'
@@ -2869,7 +2884,7 @@ function Set-CycUninstallRegistration {
     [void](New-Item -Path $Plan.uninstallRegistration.registryPath -Force)
     $properties = [ordered]@{
         DisplayName = 'ClusterYourCodex'
-        DisplayVersion = '0.1.0'
+        DisplayVersion = $script:ProductVersion
         Publisher = 'TypeThe0ry'
         URLInfoAbout = 'https://github.com/TypeThe0ry/ClusterYourCodex'
         InstallLocation = $Plan.installRoot
@@ -3917,7 +3932,7 @@ function Write-InstallManifest {
     [void](New-Item -ItemType Directory -Path $manifestDirectory -Force)
     $record = [ordered]@{
         schemaVersion = $script:ManifestSchema
-        productVersion = '0.1.0'
+        productVersion = $script:ProductVersion
         installedAtUtc = [DateTime]::UtcNow.ToString('o')
         installRoot = $Plan.installRoot
         dataRoot = $Plan.dataRoot

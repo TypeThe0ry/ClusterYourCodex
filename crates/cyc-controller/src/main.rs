@@ -1,4 +1,3 @@
-use std::io::Cursor;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -6,6 +5,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use cyc_controller::api::AppState;
 use cyc_controller::store::Store;
+use rustls::pki_types::{pem::PemObject, CertificateDer};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -180,12 +180,8 @@ fn single_certificate_pem(input: &str) -> Result<String> {
     {
         bail!("--worker-cert must contain exactly one certificate PEM item");
     }
-    let items = rustls_pemfile::read_all(&mut Cursor::new(trimmed.as_bytes()))
-        .collect::<std::result::Result<Vec<_>, _>>()
+    CertificateDer::from_pem_slice(trimmed.as_bytes())
         .context("failed to parse --worker-cert PEM")?;
-    if !matches!(items.as_slice(), [rustls_pemfile::Item::X509Certificate(_)]) {
-        bail!("--worker-cert must contain exactly one certificate PEM item");
-    }
     Ok(format!("{trimmed}\n"))
 }
 

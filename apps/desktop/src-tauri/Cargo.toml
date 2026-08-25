@@ -1,12 +1,12 @@
 [package]
 name = "clusteryourcodex-desktop-host"
-version = "0.1.0"
+version = "0.1.0-preview.3"
 description = "Security boundary and native host for ClusterYourCodex"
 authors = ["ClusterYourCodex contributors"]
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/TypeThe0ry/ClusterYourCodex"
-rust-version = "1.82"
+rust-version = "1.88.0"
 
 [lib]
 name = "clusteryourcodex_desktop_host"
@@ -30,12 +30,15 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tar = "0.4"
 thiserror = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 zeroize = "1"
 zstd = "0.13"
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "=2.4.3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_SystemInformation", "Win32_System_Threading"] }

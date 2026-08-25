@@ -21,6 +21,7 @@ pub mod artifacts;
 pub mod config;
 pub mod executor;
 pub mod http;
+pub mod isolation;
 pub mod process;
 pub mod runtime;
 pub mod security;
@@ -367,6 +368,7 @@ impl NodeSampler {
         let (mut capabilities, mut tool_versions) = detect_tools();
         capabilities.insert(Capability::new(format!("os.{}", normalized_os_name())));
         capabilities.insert(Capability::new(format!("arch.{}", normalized_arch_name())));
+        add_hostile_isolation_capabilities(&mut capabilities);
         let gpu_samples = probe_nvidia_gpus();
         if !gpu_samples.is_empty() {
             capabilities.insert(Capability::new("gpu.nvidia"));
@@ -447,7 +449,11 @@ impl NodeSampler {
             },
             os: normalized_os(),
             arch: normalized_arch(),
-            capabilities: BTreeSet::new(),
+            capabilities: {
+                let mut capabilities = BTreeSet::new();
+                add_hostile_isolation_capabilities(&mut capabilities);
+                capabilities
+            },
             logical_cpu_cores: 1,
             memory_mib: 1,
             disk_mib: 1,
@@ -631,9 +637,44 @@ fn containment_inventory() -> ContainmentInventory {
     };
     ContainmentInventory {
         backend,
-        version: "v1".to_owned(),
+        version: "v2".to_owned(),
         max_safe_slots: 1,
+        hostile_isolation: isolation::hostile_isolation_inventory(),
     }
+}
+
+fn add_hostile_isolation_capabilities(capabilities: &mut BTreeSet<Capability>) {
+    let inventory = isolation::hostile_isolation_inventory();
+    add_hostile_isolation_capabilities_from_inventory(capabilities, &inventory);
+}
+
+fn add_hostile_isolation_capabilities_from_inventory(
+    capabilities: &mut BTreeSet<Capability>,
+    inventory: &cyc_protocol::HostileIsolationInventory,
+) {
+    if !inventory.opt_in || !inventory.ready {
+        return;
+    }
+    // Scheduler-visible capability strings are emitted only as one ready set.
+    // Configured/unverified state lives exclusively in structured inventory so
+    // even a job requesting the opt-in marker cannot target an unready worker.
+    capabilities.insert(Capability::new("isolation.hostile.opt_in"));
+    let backend = match inventory.backend {
+        cyc_protocol::HostileIsolationBackend::LinuxCgroupV2DedicatedIdentity => {
+            "isolation.hostile.linux_cgroup_v2"
+        }
+        cyc_protocol::HostileIsolationBackend::WindowsJobObjectExternalGuard => {
+            "isolation.hostile.windows_external_guard"
+        }
+        cyc_protocol::HostileIsolationBackend::MacosExternalReconciliation => {
+            "isolation.hostile.macos_external_reconciliation"
+        }
+        cyc_protocol::HostileIsolationBackend::Disabled
+        | cyc_protocol::HostileIsolationBackend::Unsupported => return,
+    };
+    capabilities.insert(Capability::new(backend));
+    capabilities.insert(Capability::new("isolation.hostile.ready"));
+    capabilities.insert(Capability::new("isolation.hostile.worker_state_separated"));
 }
 
 fn available_cpu_cores(logical_cpu_cores: u32, cpu_percent: u8) -> u32 {
@@ -920,6 +961,32 @@ mod tests {
         assert!(!normalized_os_name().is_empty());
         assert!(!normalized_arch_name().is_empty());
         assert_eq!(containment_inventory().max_safe_slots, 1);
+    }
+
+    #[test]
+    fn unready_hostile_backend_has_no_schedulable_backend_capability() {
+        let inventory = cyc_protocol::HostileIsolationInventory {
+            opt_in: true,
+            ready: false,
+            backend: cyc_protocol::HostileIsolationBackend::LinuxCgroupV2DedicatedIdentity,
+            dedicated_identity: false,
+            external_reconciliation: false,
+            protected_guard_state: false,
+            worker_state_isolated: false,
+            reason_code: Some("hostile_isolation_experimental_unverified".to_owned()),
+        };
+        let mut capabilities = BTreeSet::new();
+        add_hostile_isolation_capabilities_from_inventory(&mut capabilities, &inventory);
+        let names = capabilities
+            .iter()
+            .map(Capability::as_str)
+            .collect::<BTreeSet<_>>();
+
+        assert!(names.is_empty());
+        assert!(!names.contains("isolation.hostile.opt_in"));
+        assert!(!names.contains("isolation.hostile.linux_cgroup_v2"));
+        assert!(!names.contains("isolation.hostile.ready"));
+        assert!(!names.contains("isolation.hostile.worker_state_separated"));
     }
 
     #[test]

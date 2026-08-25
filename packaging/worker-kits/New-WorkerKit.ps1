@@ -2,7 +2,13 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('windows-x86_64', 'linux-x86_64', 'linux-aarch64')]
+    [ValidateSet(
+        'windows-x86_64',
+        'linux-x86_64',
+        'linux-aarch64',
+        'macos-x86_64',
+        'macos-aarch64'
+    )]
     [string]$Target,
 
     [Parameter(Mandatory = $true)]
@@ -11,7 +17,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$OutputDirectory,
 
-    [string]$Version = '0.1.0',
+    [string]$Version,
 
     [string]$SigningKeyPath,
 
@@ -89,6 +95,35 @@ if (($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 
 if ($sourceItem.Length -le 0 -or $sourceItem.Length -gt 512MB) {
     throw 'Worker executable size is invalid.'
 }
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $versionFile = Resolve-NormalizedPath (Join-Path $PSScriptRoot '..\..\VERSION')
+    if (-not (Test-Path -LiteralPath $versionFile -PathType Leaf)) {
+        throw 'Repository VERSION is required when -Version is omitted.'
+    }
+    $versionFileItem = Get-Item -LiteralPath $versionFile -Force
+    if (($versionFileItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $versionFileItem.Length -le 0 -or $versionFileItem.Length -gt 256) {
+        throw 'Repository VERSION must be a bounded normal file.'
+    }
+    $versionBytes = [System.IO.File]::ReadAllBytes($versionFile)
+    if ($versionBytes.Length -ge 3 -and
+        $versionBytes[0] -eq 0xEF -and $versionBytes[1] -eq 0xBB -and $versionBytes[2] -eq 0xBF) {
+        throw 'Repository VERSION must be UTF-8 without a byte-order mark.'
+    }
+    try {
+        $versionText = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($versionBytes)
+    } catch {
+        throw 'Repository VERSION is not valid UTF-8.'
+    }
+    if ($versionText.Contains("`0") -or $versionText.Contains("`r")) {
+        throw 'Repository VERSION contains invalid control characters.'
+    }
+    if (-not $versionText.EndsWith("`n", [System.StringComparison]::Ordinal) -or
+        $versionText.Substring(0, $versionText.Length - 1).Contains("`n")) {
+        throw 'Repository VERSION must contain exactly one LF-terminated value.'
+    }
+    $Version = $versionText.Substring(0, $versionText.Length - 1)
+}
 if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$') {
     throw 'Version must be a SemVer-compatible value.'
 }
@@ -97,12 +132,12 @@ if ([string]::IsNullOrWhiteSpace($SigningKeyPath)) {
 }
 if ([string]::IsNullOrWhiteSpace($SigningKeyId)) {
     $SigningKeyId = if ([string]::IsNullOrWhiteSpace([string]$env:CYC_WORKER_KIT_SIGNING_KEY_ID)) {
-        'cyc-release-2026-01'
+        'cyc-release-2026-02'
     } else { [string]$env:CYC_WORKER_KIT_SIGNING_KEY_ID }
 }
 if ([string]::IsNullOrWhiteSpace($TrustedPublicKeyPath)) {
     $TrustedPublicKeyPath = if ([string]::IsNullOrWhiteSpace([string]$env:CYC_WORKER_KIT_TRUSTED_PUBLIC_KEY_PATH)) {
-        Join-Path $PSScriptRoot '..\..\crates\cyc-provision\publisher_keys\cyc-release-2026-01.pub'
+        Join-Path $PSScriptRoot '..\..\crates\cyc-provision\publisher_keys\cyc-release-2026-02.pub'
     } else { [string]$env:CYC_WORKER_KIT_TRUSTED_PUBLIC_KEY_PATH }
 }
 if ($SigningKeyId -notmatch '^[0-9A-Za-z._-]{1,96}$') {
@@ -150,13 +185,20 @@ if (Test-Path -LiteralPath $output) {
     [void](New-Item -ItemType Directory -Path $output)
 }
 
-$platform = if ($Target.StartsWith('windows-', [System.StringComparison]::Ordinal)) { 'windows' } else { 'linux' }
+$platform = if ($Target.StartsWith('windows-', [System.StringComparison]::Ordinal)) {
+    'windows'
+} elseif ($Target.StartsWith('linux-', [System.StringComparison]::Ordinal)) {
+    'linux'
+} else {
+    'macos'
+}
 $architecture = if ($Target.EndsWith('aarch64', [System.StringComparison]::Ordinal)) { 'aarch64' } else { 'x86_64' }
 $binaryName = if ($platform -eq 'windows') { 'cyc-worker.exe' } else { 'cyc-worker' }
-$installerSource = if ($platform -eq 'windows') {
-    Join-Path (Join-Path $PSScriptRoot 'windows') 'Install-Worker.ps1'
-} else {
-    Join-Path (Join-Path $PSScriptRoot 'linux') 'install-worker.sh'
+$installerSource = switch ($platform) {
+    'windows' { Join-Path (Join-Path $PSScriptRoot 'windows') 'Install-Worker.ps1' }
+    'linux' { Join-Path (Join-Path $PSScriptRoot 'linux') 'install-worker.sh' }
+    'macos' { Join-Path (Join-Path $PSScriptRoot 'macos') 'install-worker.sh' }
+    default { throw "Unsupported worker-kit platform: $platform" }
 }
 $installerName = Split-Path -Leaf $installerSource
 if (-not (Test-Path -LiteralPath $installerSource -PathType Leaf)) {

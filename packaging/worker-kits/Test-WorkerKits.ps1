@@ -7,6 +7,7 @@ $ErrorActionPreference = 'Stop'
 
 $windowsInstaller = Join-Path $PSScriptRoot 'windows\Install-Worker.ps1'
 $linuxInstaller = Join-Path $PSScriptRoot 'linux\install-worker.sh'
+$macosInstaller = Join-Path $PSScriptRoot 'macos\install-worker.sh'
 $builder = Join-Path $PSScriptRoot 'New-WorkerKit.ps1'
 foreach ($scriptPath in @($windowsInstaller, $builder)) {
     $tokens = $null
@@ -27,6 +28,8 @@ $bashPath = if (Test-Path -LiteralPath $gitBash -PathType Leaf) {
 if ($bashPath) {
     & $bashPath -n $linuxInstaller
     if ($LASTEXITCODE -ne 0) { throw 'Linux worker installer failed bash -n.' }
+    & $bashPath -n $macosInstaller
+    if ($LASTEXITCODE -ne 0) { throw 'macOS worker installer failed bash -n.' }
 }
 
 $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ('cyc-worker-kit-test-' + [Guid]::NewGuid().ToString('N'))
@@ -55,7 +58,7 @@ try {
         (New-Object System.Text.UTF8Encoding($false))
     )
     $env:CYC_WORKER_KIT_SIGNING_KEY_PATH = $fixturePrivate
-    $env:CYC_WORKER_KIT_SIGNING_KEY_ID = 'cyc-release-2026-01'
+    $env:CYC_WORKER_KIT_SIGNING_KEY_ID = 'cyc-release-2026-02'
     $env:CYC_WORKER_KIT_TRUSTED_PUBLIC_KEY_PATH = $fixturePublicRaw
     $fakeWorker = Join-Path $temporary 'fake-worker.bin'
     [System.IO.File]::WriteAllBytes($fakeWorker, [byte[]](0..255))
@@ -69,7 +72,7 @@ try {
     $signatureEnvelope = Get-Content -LiteralPath (Join-Path $windowsOutput 'worker-kit.sig') -Raw | ConvertFrom-Json
     if ($signatureEnvelope.schemaVersion -ne 'cyc.dev/worker-kit-signature/v1' -or
         $signatureEnvelope.algorithm -ne 'Ed25519' -or
-        $signatureEnvelope.keyId -ne 'cyc-release-2026-01' -or
+        $signatureEnvelope.keyId -ne 'cyc-release-2026-02' -or
         $signatureEnvelope.signedObject -ne 'worker-kit.json') {
         throw 'Worker-kit publisher signature envelope is invalid.'
     }
@@ -83,6 +86,18 @@ try {
     if (($sumNames -join ',') -cne 'cyc-worker.exe,Install-Worker.ps1,worker-kit.json,worker-kit.sig') {
         throw 'Worker-kit checksums do not bind the exact signed file set.'
     }
+    $repositoryVersionPath = Join-Path $PSScriptRoot '..\..\VERSION'
+    $repositoryVersion = [IO.File]::ReadAllText($repositoryVersionPath, [Text.Encoding]::UTF8).TrimEnd("`n")
+    $defaultVersionOutput = Join-Path $temporary 'default-version'
+    $defaultVersionResult = & $builder `
+        -Target linux-x86_64 `
+        -WorkerExecutable $fakeWorker `
+        -OutputDirectory $defaultVersionOutput | ConvertFrom-Json
+    $defaultVersionManifest = Get-Content -LiteralPath (Join-Path $defaultVersionOutput 'worker-kit.json') -Raw | ConvertFrom-Json
+    if ($defaultVersionResult.version -cne $repositoryVersion -or
+        $defaultVersionManifest.version -cne $repositoryVersion) {
+        throw 'Worker-kit omitted -Version does not derive its identity from repository VERSION.'
+    }
     $savedSigningKey = [string]$env:CYC_WORKER_KIT_SIGNING_KEY_PATH
     try {
         $env:CYC_WORKER_KIT_SIGNING_KEY_PATH = ''
@@ -90,7 +105,7 @@ try {
         try {
             $null = & $builder -Target windows-x86_64 -WorkerExecutable $fakeWorker `
                 -OutputDirectory (Join-Path $temporary 'missing-signing-key') `
-                -SigningKeyId 'cyc-release-2026-01' -TrustedPublicKeyPath $fixturePublicRaw
+                -SigningKeyId 'cyc-release-2026-02' -TrustedPublicKeyPath $fixturePublicRaw
         } catch {
             $missingKeyRejected = $true
         }
@@ -105,7 +120,7 @@ try {
     try {
         $null = & $builder -Target windows-x86_64 -WorkerExecutable $fakeWorker `
             -OutputDirectory (Join-Path $temporary 'foreign-signing-key') `
-            -SigningKeyPath $foreignPrivate -SigningKeyId 'cyc-release-2026-01' `
+            -SigningKeyPath $foreignPrivate -SigningKeyId 'cyc-release-2026-02' `
             -TrustedPublicKeyPath $fixturePublicRaw
     } catch {
         $foreignKeyRejected = $true
@@ -408,6 +423,72 @@ internal static class Program
     $linuxManifest = Get-Content -LiteralPath (Join-Path $linuxOutput 'worker-kit.json') -Raw | ConvertFrom-Json
     if ($linuxManifest.os -ne 'linux' -or $linuxManifest.architecture -ne 'aarch64') { throw 'Linux manifest is invalid.' }
 
+    foreach ($macosTarget in @('macos-x86_64', 'macos-aarch64')) {
+        $macosOutput = Join-Path $temporary $macosTarget
+        $macosBuild = & $builder `
+            -Target $macosTarget `
+            -WorkerExecutable $fakeWorker `
+            -OutputDirectory $macosOutput `
+            -Version '0.1.0-test.1' | ConvertFrom-Json
+        if ($macosBuild.target -cne $macosTarget -or $macosBuild.version -cne '0.1.0-test.1') {
+            throw "macOS worker-kit build receipt is invalid for $macosTarget."
+        }
+        $macosManifestPath = Join-Path $macosOutput 'worker-kit.json'
+        $macosManifest = Get-Content -LiteralPath $macosManifestPath -Raw | ConvertFrom-Json
+        $expectedArchitecture = if ($macosTarget.EndsWith('aarch64', [StringComparison]::Ordinal)) { 'aarch64' } else { 'x86_64' }
+        if ($macosManifest.schemaVersion -cne 'cyc.dev/worker-kit/v1' -or
+            $macosManifest.target -cne $macosTarget -or
+            $macosManifest.os -cne 'macos' -or
+            $macosManifest.architecture -cne $expectedArchitecture) {
+            throw "macOS manifest is invalid for $macosTarget."
+        }
+        $macosFiles = @(Get-ChildItem -LiteralPath $macosOutput -Force)
+        $macosFileNames = @($macosFiles | ForEach-Object Name | Sort-Object -CaseSensitive)
+        $expectedMacosFiles = @('cyc-worker', 'install-worker.sh', 'SHA256SUMS', 'worker-kit.json', 'worker-kit.sig') | Sort-Object -CaseSensitive
+        if ($macosFiles.Count -ne 5 -or ($macosFileNames -join ',') -cne ($expectedMacosFiles -join ',') -or
+            @($macosFiles | Where-Object { -not $_.PSIsContainer -and (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) }).Count -ne 0) {
+            throw "macOS kit does not contain the exact five normal files for $macosTarget."
+        }
+        $macosManifestNames = @($macosManifest.files | ForEach-Object path)
+        if (($macosManifestNames -join ',') -cne 'cyc-worker,install-worker.sh') {
+            throw "macOS manifest does not bind the exact payload/lifecycle pair for $macosTarget."
+        }
+        foreach ($entry in $macosManifest.files) {
+            $entryPath = Join-Path $macosOutput ([string]$entry.path)
+            $entryHash = (Get-FileHash -LiteralPath $entryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ([long]$entry.sizeBytes -ne (Get-Item -LiteralPath $entryPath).Length -or
+                [string]$entry.sha256 -cne $entryHash) {
+                throw "macOS manifest payload binding is invalid for $macosTarget/$($entry.path)."
+            }
+        }
+        $macosSumNames = @(Get-Content -LiteralPath (Join-Path $macosOutput 'SHA256SUMS') |
+            ForEach-Object { ($_ -split '  ', 2)[1] })
+        if (($macosSumNames -join ',') -cne 'cyc-worker,install-worker.sh,worker-kit.json,worker-kit.sig') {
+            throw "macOS checksums do not bind the exact four signed-kit inputs for $macosTarget."
+        }
+        foreach ($sumLine in Get-Content -LiteralPath (Join-Path $macosOutput 'SHA256SUMS')) {
+            $parts = $sumLine -split '  ', 2
+            $sumPath = Join-Path $macosOutput $parts[1]
+            if ($parts[0] -cne (Get-FileHash -LiteralPath $sumPath -Algorithm SHA256).Hash.ToLowerInvariant()) {
+                throw "macOS checksum mismatch for $macosTarget/$($parts[1])."
+            }
+        }
+        $macosSignature = Get-Content -LiteralPath (Join-Path $macosOutput 'worker-kit.sig') -Raw | ConvertFrom-Json
+        if ($macosSignature.manifestSha256 -cne (Get-FileHash -LiteralPath $macosManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()) {
+            throw "macOS signature envelope does not bind the manifest for $macosTarget."
+        }
+        $macosRawSignature = Join-Path $temporary ("$macosTarget-signature.raw")
+        [IO.File]::WriteAllBytes($macosRawSignature, [Convert]::FromBase64String([string]$macosSignature.signature))
+        & $openssl pkeyutl -verify -rawin -pubin -inkey $fixturePublicPem `
+            -in $macosManifestPath -sigfile $macosRawSignature
+        if ($LASTEXITCODE -ne 0) { throw "macOS publisher signature did not verify for $macosTarget." }
+        $generatedMacosInstaller = [IO.File]::ReadAllText((Join-Path $macosOutput 'install-worker.sh'))
+        if ($generatedMacosInstaller.Contains('__CYC_PUBLISHER_PUBLIC_KEY_BASE64__') -or
+            -not $generatedMacosInstaller.Contains([IO.File]::ReadAllText($fixturePublicRaw).Trim())) {
+            throw "macOS lifecycle trust root was not materialized exactly once for $macosTarget."
+        }
+    }
+
     if ($bashPath) {
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         $goodWorker = Join-Path $temporary 'fake-linux-worker'
@@ -582,7 +663,7 @@ root_systemctl_lines_after="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log")"
 test "$root_login_lines_before" = "$root_login_lines_after"
 test "$root_systemctl_lines_before" = "$root_systemctl_lines_after"
 
-preinstall="$("$good/install-worker.sh" install --bundle-root "$good")"
+preinstall="$(/bin/sh "$good/install-worker.sh" -- install --bundle-root "$good")"
 printf '%s' "$preinstall" | grep -q '"paired":false'
 worker="$HOME/.local/lib/clusteryourcodex-worker/cyc-worker"
 data="$XDG_DATA_HOME/clusteryourcodex/worker"
@@ -699,11 +780,178 @@ test ! -e "$data"
 '@.TrimStart(), $utf8NoBom)
         & $bashPath $smoke $temporary
         if ($LASTEXITCODE -ne 0) { throw 'Linux worker lifecycle smoke test failed.' }
+
+        $macosGoodKit = Join-Path $temporary 'macos-smoke-good'
+        $macosUpgradeKit = Join-Path $temporary 'macos-smoke-upgrade'
+        $null = & $builder -Target macos-x86_64 -WorkerExecutable $goodWorker -OutputDirectory $macosGoodKit -Version '0.1.0-test.1'
+        $null = & $builder -Target macos-x86_64 -WorkerExecutable $upgradeWorker -OutputDirectory $macosUpgradeKit -Version '0.1.0-test.2'
+        $macosSmoke = Join-Path $temporary 'macos-smoke.sh'
+        [System.IO.File]::WriteAllText($macosSmoke, @'
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cygpath -u "$1")"
+export HOME="$root/macos-home"
+mkdir -p "$HOME" "$root/fake-macos-bin"
+
+export CYC_REAL_PYTHON="$(command -v python)"
+test -n "$CYC_REAL_PYTHON"
+cat >"$root/fake-macos-bin/python3" <<'PYTHON_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+translated=()
+for value in "$@"; do
+  if [[ "$value" == /?/* && -e "$value" ]]; then
+    translated+=("$(cygpath -w "$value")")
+  else
+    translated+=("$value")
+  fi
+done
+exec "$CYC_REAL_PYTHON" "${translated[@]}"
+PYTHON_WRAPPER
+cat >"$root/fake-macos-bin/uname" <<'UNAME_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  -s) printf '%s\n' Darwin ;;
+  -m) printf '%s\n' x86_64 ;;
+  *) printf '%s\n' Darwin ;;
+esac
+UNAME_WRAPPER
+cat >"$root/fake-macos-bin/shasum" <<'SHASUM_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == -a && "${2:-}" == 256 && $# -eq 3 ]] || exit 2
+sha256sum "$3"
+SHASUM_WRAPPER
+chmod +x "$root/fake-macos-bin/python3" "$root/fake-macos-bin/uname" "$root/fake-macos-bin/shasum"
+export PATH="$root/fake-macos-bin:$PATH"
+
+good="$root/macos-smoke-good"
+upgrade="$root/macos-smoke-upgrade"
+chmod +x "$good/cyc-worker" "$good/install-worker.sh" "$upgrade/cyc-worker" "$upgrade/install-worker.sh"
+install_root="$root/macos-install"
+data_root="$root/macos-data"
+workspace_root="$root/macos-workspace"
+logs_root="$root/macos-logs"
+common=(--install-root "$install_root" --data-root "$data_root" --workspace-root "$workspace_root" --logs-root "$logs_root")
+
+# Safe, enrollment-free preinstall is idempotent and remains dormant.
+preinstall="$($good/install-worker.sh install --bundle-root "$good" "${common[@]}")"
+grep -q '"succeeded":true' <<<"$preinstall"
+grep -q '"paired":false' <<<"$preinstall"
+grep -q '"serviceEnabled":false' <<<"$preinstall"
+grep -q '"service":"not_enabled"' <<<"$preinstall"
+test -x "$install_root/cyc-worker"
+test -s "$data_root/install-manifest.json"
+test ! -e "$data_root/config.json"
+test ! -e "$HOME/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
+$good/install-worker.sh install --bundle-root "$good" "${common[@]}" >/dev/null
+
+# PairOnly is explicitly allowed. It may execute pair/status, but it must not
+# create a LaunchAgent or start the long-running worker process.
+printf '%s\n' 'MACOS_ENROLLMENT_SECRET_DO_NOT_LOG' >"$root/macos-enrollment.json"
+pair_only="$($good/install-worker.sh repair --bundle-root "$good" "${common[@]}" \
+  --enrollment "$root/macos-enrollment.json" --pair-only 2>"$root/macos-pair.stderr")"
+grep -q '"paired":true' <<<"$pair_only"
+grep -q '"service":"not_enabled"' <<<"$pair_only"
+grep -q '"serviceEnabled":false' <<<"$pair_only"
+test ! -e "$root/macos-enrollment.json"
+test -s "$data_root/config.json"
+test "$(find "$data_root" -maxdepth 1 -name '*.credential' -type f | wc -l | tr -d '[:space:]')" -eq 1
+test ! -s "$root/macos-pair.stderr"
+! grep -R -q 'MACOS_ENROLLMENT_SECRET_DO_NOT_LOG' "$root"/*.stdout "$root"/*.stderr 2>/dev/null
+test ! -e "$HOME/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
+! pgrep -f -- "$install_root/cyc-worker run" >/dev/null 2>&1
+
+# A service-enabling repair is a machine-recognizable, exit-78 fail-closed
+# boundary and cannot mutate the paired installation.
+baseline_worker="$(shasum -a 256 "$install_root/cyc-worker" | awk '{print $1}')"
+baseline_config="$(shasum -a 256 "$data_root/config.json" | awk '{print $1}')"
+baseline_manifest="$(shasum -a 256 "$data_root/install-manifest.json" | awk '{print $1}')"
+set +e
+$upgrade/install-worker.sh repair --bundle-root "$upgrade" "${common[@]}" \
+  >"$root/macos-gated.stdout" 2>"$root/macos-gated.stderr"
+gated_exit=$?
+set -e
+test "$gated_exit" -eq 78
+grep -q 'CYC-MACOS-WORKER-CONTAINMENT-UNAVAILABLE' "$root/macos-gated.stderr"
+test ! -s "$root/macos-gated.stdout"
+test "$(shasum -a 256 "$install_root/cyc-worker" | awk '{print $1}')" = "$baseline_worker"
+test "$(shasum -a 256 "$data_root/config.json" | awk '{print $1}')" = "$baseline_config"
+test "$(shasum -a 256 "$data_root/install-manifest.json" | awk '{print $1}')" = "$baseline_manifest"
+test ! -e "$HOME/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
+test ! -e "$data_root/.repair-transaction"
+
+# The safe PairOnly transaction rolls all bytes back when pairing fails after
+# credential rotation and leaves no service/process surface behind.
+printf '%s\n' 'MACOS_REPAIR_SECRET_DO_NOT_LOG' >"$root/macos-repair-enrollment.json"
+set +e
+$upgrade/install-worker.sh repair --bundle-root "$upgrade" "${common[@]}" \
+  --enrollment "$root/macos-repair-enrollment.json" --pair-only \
+  --failure-injection after-pair \
+  >"$root/macos-injected.stdout" 2>"$root/macos-injected.stderr"
+injected_exit=$?
+set -e
+test "$injected_exit" -ne 0
+grep -q 'Injected worker repair failure at after-pair' "$root/macos-injected.stderr"
+! grep -q 'MACOS_.*SECRET_DO_NOT_LOG' "$root/macos-injected.stdout" "$root/macos-injected.stderr"
+test "$(shasum -a 256 "$install_root/cyc-worker" | awk '{print $1}')" = "$baseline_worker"
+test "$(shasum -a 256 "$data_root/config.json" | awk '{print $1}')" = "$baseline_config"
+test "$(shasum -a 256 "$data_root/install-manifest.json" | awk '{print $1}')" = "$baseline_manifest"
+test "$(find "$data_root" -maxdepth 1 -name '*.credential' -type f | wc -l | tr -d '[:space:]')" -eq 1
+test ! -e "$data_root/.repair-transaction"
+test ! -e "$HOME/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
+! pgrep -f -- "$install_root/cyc-worker run" >/dev/null 2>&1
+
+# A routine PairOnly repair is idempotent, remains gated, and may atomically
+# refresh the dormant binary without rotating the existing identity.
+credential_before="$(find "$data_root" -maxdepth 1 -name '*.credential' -type f | head -n 1)"
+routine="$($upgrade/install-worker.sh repair --bundle-root "$upgrade" "${common[@]}" --pair-only)"
+grep -q '"paired":true' <<<"$routine"
+grep -q '"serviceEnabled":false' <<<"$routine"
+test "$credential_before" = "$(find "$data_root" -maxdepth 1 -name '*.credential' -type f | head -n 1)"
+test "$(shasum -a 256 "$install_root/cyc-worker" | awk '{print $1}')" != "$baseline_worker"
+test ! -e "$HOME/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
+
+# Uninstall is repeatable and preserves paired data, workspace, and logs by
+# default while removing only installer-owned executable/service material.
+uninstall_one="$($upgrade/install-worker.sh uninstall --bundle-root "$upgrade" "${common[@]}")"
+grep -q '"dataPreserved":true' <<<"$uninstall_one"
+test ! -e "$install_root/cyc-worker"
+test -s "$data_root/config.json"
+test -d "$workspace_root"
+test -d "$logs_root"
+test ! -e "$HOME/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
+uninstall_two="$($upgrade/install-worker.sh uninstall --bundle-root "$upgrade" "${common[@]}")"
+grep -q '"succeeded":true' <<<"$uninstall_two"
+test -s "$data_root/config.json"
+test ! -e "$install_root/cyc-worker"
+
+# Default macOS roots deliberately exercise spaces in Application Support and
+# bind explicit purge to the installer-owned Data, workspace, and Logs roots.
+export HOME="$root/macos-default-home"
+mkdir -p "$HOME"
+$good/install-worker.sh install --bundle-root "$good" >/dev/null
+default_program="$HOME/Library/Application Support/ClusterYourCodex/Worker/Program"
+default_data="$HOME/Library/Application Support/ClusterYourCodex/Worker/Data"
+default_logs="$HOME/Library/Logs/ClusterYourCodex/Worker"
+test -x "$default_program/cyc-worker"
+test -d "$default_data/workspace"
+test -s "$default_data/install-manifest.json"
+test -s "$default_logs/.clusteryourcodex-worker-logs-owned"
+$good/install-worker.sh uninstall --bundle-root "$good" --purge-data >/dev/null
+test ! -e "$default_program/cyc-worker"
+test ! -e "$default_data"
+test ! -e "$default_logs"
+'@.TrimStart(), $utf8NoBom)
+        & $bashPath $macosSmoke $temporary
+        if ($LASTEXITCODE -ne 0) { throw 'macOS worker gated lifecycle fixture failed.' }
     }
 
     foreach ($content in @(
         (Get-Content -LiteralPath $windowsInstaller -Raw),
-        (Get-Content -LiteralPath $linuxInstaller -Raw)
+        (Get-Content -LiteralPath $linuxInstaller -Raw),
+        (Get-Content -LiteralPath $macosInstaller -Raw)
     )) {
         if ($content -match '(?i)sshpass|plink\s+-pw|password-bearing|pairingCode') {
             throw 'Worker lifecycle script contains a forbidden credential transport surface.'
@@ -716,10 +964,57 @@ test ! -e "$data"
         }
     }
     $linuxSource = Get-Content -LiteralPath $linuxInstaller -Raw
-    foreach ($requiredPattern in @('sha256sum --check --strict', 'reject_link_chain', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'after-pair', 'after-service-registration', 'before-manifest-write', 'remove_service', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair')) {
+    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'after-pair', 'after-service-registration', 'before-manifest-write', 'remove_service', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair')) {
         if ($linuxSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "Linux worker installer is missing rollback/integrity guard: $requiredPattern"
         }
+    }
+    $macosSource = Get-Content -LiteralPath $macosInstaller -Raw
+    foreach ($requiredPattern in @(
+        'cyc.dev/macos-worker-install/v1',
+        'cyc.dev/macos-worker-repair-transaction/v1',
+        'exec /bin/bash "$0" "$@"',
+        '== --',
+        'readonly MACOS_WORKER_CONTAINMENT_READY=0',
+        'EXIT_RUNTIME_GATED=78',
+        'CYC-MACOS-WORKER-CONTAINMENT-UNAVAILABLE',
+        'CYC-MACOS-PLATFORM-REQUIRED',
+        'CYC-MACOS-LAUNCHAGENT-USER-SCOPE-REQUIRED',
+        'Library/Application Support/ClusterYourCodex/Worker',
+        'Library/Logs/ClusterYourCodex/Worker',
+        'Library/LaunchAgents',
+        'dev.clusteryourcodex.worker',
+        'launchctl bootstrap',
+        'launchctl bootout',
+        'launchctl kickstart',
+        'launchctl print',
+        'ProgramArguments',
+        'StandardOutPath',
+        'StandardErrorPath',
+        'KeepAlive',
+        'ProcessType',
+        'verify_worker_kit_signature',
+        'SHA256SUMS must contain exactly four signed-kit files',
+        'begin_transaction',
+        'restore_transaction',
+        'after-pair',
+        'after-launchagent-registration',
+        'before-manifest-write',
+        '--pair-only',
+        '--allow-on-battery',
+        '--workspace-root',
+        '--repair',
+        'config_existed_before_pair',
+        'runtimeGated',
+        'containmentReady'
+    )) {
+        if ($macosSource -notmatch [regex]::Escape($requiredPattern)) {
+            throw "macOS worker installer is missing lifecycle/gating guard: $requiredPattern"
+        }
+    }
+    if ($macosSource -match '(?m)^\s*(?:export\s+)?MACOS_WORKER_CONTAINMENT_READY=\$\{' -or
+        $macosSource -match 'CYC_MACOS.*CONTAINMENT.*(?:override|enable)') {
+        throw 'macOS worker containment gate is externally overrideable.'
     }
     Write-Output 'worker-kit packaging tests passed'
 } finally {

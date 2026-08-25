@@ -5,8 +5,8 @@ use cyc_protocol::onboarding::EnrollmentBundleV1;
 use cyc_protocol::SmokeRunBindingV1;
 use cyc_secrets::{CredentialKey, CredentialVault, Secret, StoredCredential, VaultError};
 use cyc_ssh::{
-    CommandArgument, FixedCommand, HostKey, RemotePath, RemoteSession, SshEndpoint, SshError,
-    SshTransport,
+    CommandArgument, FixedCommand, HostKey, PrivateKeyFile, RemotePath, RemoteSession,
+    SshAuthentication, SshEndpoint, SshError, SshTransport,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -16,15 +16,19 @@ use crate::{
     discovery::{parse_discovery, RemotePlatform, MAX_DISCOVERY_OUTPUT_BYTES},
     worker_kit::{sha256_hex, WorkerKit, WorkerKitCatalog, WorkerKitError, WorkerKitTarget},
     ComputerRecord, CredentialState, DriverFailure, DriverRequest, FailureCode,
-    PinnedHostKeyRecord, ProvisioningAction, ProvisioningDriver, ProvisioningStep, StepCompletion,
+    PinnedHostKeyRecord, ProvisioningAction, ProvisioningDriver, ProvisioningStep,
+    SshAuthenticationMethod, StepCompletion,
 };
 
 const CREDENTIAL_NAMESPACE: &str = "ssh-password";
 const MAX_LIFECYCLE_OUTPUT_BYTES: usize = 256 * 1024;
+const MACOS_CONTAINMENT_FAILURE_CODE: &str = "MACOS_WORKER_CONTAINMENT_UNAVAILABLE";
+const MACOS_CONTAINMENT_ERROR_TAG: &[u8] = b"[CYC-MACOS-WORKER-CONTAINMENT-UNAVAILABLE]";
 
-/// Tauri owns the lifetime of user-entered passwords and injects them through
-/// this boundary. Implementations may retain a `Secret` in protected process
-/// memory for a session, but must never expose it as a DTO or log field.
+/// Tauri owns the lifetime of user-entered passwords/private-key passphrases
+/// and injects them through this boundary. Implementations may retain one
+/// `Secret` in protected process memory for a session, but must never expose it
+/// as a DTO or log field. SSH-agent authentication never calls this provider.
 pub trait TransientSecretProvider: Send + Sync {
     fn retrieve(&self, computer_id: Uuid) -> Result<Option<Secret>, TransientSecretError>;
     /// Clears the transient value only when it is still the value that was
@@ -126,7 +130,8 @@ impl ControllerBoundaryFailure {
 
 #[derive(Clone, Debug, Default)]
 pub struct SshDriverOptions {
-    /// `None` probes Linux then Windows with separately uploaded fixed scripts.
+    /// `None` probes Linux, macOS, then Windows with separately uploaded fixed
+    /// scripts. Each POSIX probe verifies its kernel before emitting inventory.
     pub discovery_platform_hint: Option<RemotePlatform>,
 }
 
@@ -139,6 +144,32 @@ enum CredentialSource {
 struct LoadedCredential {
     secret: Secret,
     source: CredentialSource,
+}
+
+enum LoadedAuthentication {
+    Password(LoadedCredential),
+    Agent,
+    PrivateKey {
+        private_key: PrivateKeyFile,
+        passphrase: Option<Secret>,
+    },
+}
+
+impl fmt::Debug for LoadedAuthentication {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Password(_) => formatter.write_str("LoadedAuthentication::Password(<redacted>)"),
+            Self::Agent => formatter.write_str("LoadedAuthentication::Agent"),
+            Self::PrivateKey {
+                private_key,
+                passphrase,
+            } => formatter
+                .debug_struct("LoadedAuthentication::PrivateKey")
+                .field("private_key", private_key)
+                .field("passphrase", &passphrase.as_ref().map(|_| "<redacted>"))
+                .finish(),
+        }
+    }
 }
 
 pub struct SshProvisioningDriver {
@@ -195,33 +226,48 @@ impl SshProvisioningDriver {
         if record.host_key_approved_at.is_none() {
             return Err(failure("HOST_KEY_NOT_APPROVED", false));
         }
-        let credential = self.load_secret(record)?;
-        let _session = self.connect_loaded(record, &credential, false)?;
-        if record.credential_policy.remember_requested {
-            let reference = self.store_authenticated_credential(record, &credential)?;
-            Ok(StepCompletion::AuthenticatedStored {
-                credential_reference: reference,
-            })
-        } else {
-            Ok(StepCompletion::AuthenticatedSessionOnly)
+        let authentication = self.load_authentication(record)?;
+        let _session = self.connect_loaded_authentication(record, &authentication, false)?;
+        match &authentication {
+            LoadedAuthentication::Password(credential)
+                if record.credential_policy.remember_requested =>
+            {
+                let reference = self.store_authenticated_credential(record, credential)?;
+                Ok(StepCompletion::AuthenticatedStored {
+                    credential_reference: reference,
+                })
+            }
+            LoadedAuthentication::Password(_)
+            | LoadedAuthentication::Agent
+            | LoadedAuthentication::PrivateKey { .. } => {
+                Ok(StepCompletion::AuthenticatedSessionOnly)
+            }
         }
     }
 
     fn discover(&self, record: &ComputerRecord) -> Result<StepCompletion, DriverFailure> {
-        let credential = self.load_secret(record)?;
+        let authentication = self.load_authentication(record)?;
         let platforms: &[RemotePlatform] = match self.options.discovery_platform_hint {
             Some(RemotePlatform::Linux) => &[RemotePlatform::Linux],
+            Some(RemotePlatform::Macos) => &[RemotePlatform::Macos],
             Some(RemotePlatform::Windows) => &[RemotePlatform::Windows],
-            None => &[RemotePlatform::Linux, RemotePlatform::Windows],
+            None => &[
+                RemotePlatform::Linux,
+                RemotePlatform::Macos,
+                RemotePlatform::Windows,
+            ],
         };
         let mut last_failure = None;
         for platform in platforms {
             let attempt = self
-                .connect_loaded(record, &credential, true)
+                .connect_loaded_authentication(record, &authentication, true)
                 .and_then(|mut session| self.run_discovery(record, *platform, session.as_mut()));
             match attempt {
                 Ok(inventory) => {
-                    return if record.credential_policy.state == CredentialState::Stored {
+                    return if record.ssh_authentication.method()
+                        == SshAuthenticationMethod::Password
+                        && record.credential_policy.state == CredentialState::Stored
+                    {
                         let reference = record
                             .credential_reference
                             .clone()
@@ -255,7 +301,9 @@ impl SshProvisioningDriver {
         let workspace = record.configuration.workspace.clone().unwrap_or_default();
         let argument = CommandArgument::new(workspace).map_err(map_ssh_error)?;
         let command = match platform {
-            RemotePlatform::Linux => FixedCommand::posix_script(script_path, [argument]),
+            RemotePlatform::Linux | RemotePlatform::Macos => {
+                FixedCommand::posix_script(script_path, [argument])
+            }
             RemotePlatform::Windows => {
                 FixedCommand::windows_powershell_script(script_path, [argument])
             }
@@ -289,7 +337,6 @@ impl SshProvisioningDriver {
 
     fn install_worker(&self, record: &ComputerRecord) -> Result<StepCompletion, DriverFailure> {
         let kit = self.load_record_kit(record)?;
-        let mut session = self.authenticated_session(record)?;
         let in_place_repair = record.cycle > 0
             && record.pairing_id.is_some()
             && record.paired_node_id == Some(record.intended_node_id);
@@ -305,6 +352,8 @@ impl SshProvisioningDriver {
             // dormant until the normal enrollment checkpoints complete.
             ("repair", LifecycleReceiptExpectation::DormantInstalled)
         };
+        ensure_lifecycle_expectation_supported(kit.target(), expectation)?;
+        let mut session = self.authenticated_session(record)?;
         self.run_lifecycle(record, session.as_mut(), &kit, action, None, expectation)?;
         Ok(StepCompletion::WorkerInstalled)
     }
@@ -467,6 +516,10 @@ impl SshProvisioningDriver {
 
     fn enable_service(&self, record: &ComputerRecord) -> Result<StepCompletion, DriverFailure> {
         let kit = self.load_record_kit(record)?;
+        ensure_lifecycle_expectation_supported(
+            kit.target(),
+            LifecycleReceiptExpectation::PairedService,
+        )?;
         let mut session = self.authenticated_session(record)?;
         self.run_lifecycle(
             record,
@@ -566,12 +619,13 @@ impl SshProvisioningDriver {
         enrollment_path: Option<&RemotePath>,
         expectation: LifecycleReceiptExpectation,
     ) -> Result<(), DriverFailure> {
+        ensure_lifecycle_expectation_supported(kit.target(), expectation)?;
         let platform = platform_for_target(kit.target());
         let layout = RemoteLayout::new(record, platform)?;
         let lifecycle_path = layout.join(kit.lifecycle_name())?;
         let mut arguments = Vec::new();
         match platform {
-            RemotePlatform::Linux => {
+            RemotePlatform::Linux | RemotePlatform::Macos => {
                 arguments.push(argument(action)?);
                 arguments.push(argument("--bundle-root")?);
                 arguments.push(argument(layout.staging_dir.as_str())?);
@@ -629,14 +683,20 @@ impl SshProvisioningDriver {
             }
         }
         let command = match platform {
-            RemotePlatform::Linux => FixedCommand::posix_script(lifecycle_path, arguments),
+            RemotePlatform::Linux | RemotePlatform::Macos => {
+                FixedCommand::posix_script(lifecycle_path, arguments)
+            }
             RemotePlatform::Windows => {
                 FixedCommand::windows_powershell_script(lifecycle_path, arguments)
             }
         };
         let output = session.exec_fixed(&command).map_err(map_ssh_error)?;
         if output.exit_code != 0 {
-            return Err(failure("WORKER_LIFECYCLE_FAILED", true));
+            return Err(map_lifecycle_command_failure(
+                platform,
+                output.exit_code,
+                &output.stderr,
+            ));
         }
         validate_lifecycle_receipt(&output.stdout, action, expectation)?;
         Ok(())
@@ -742,8 +802,10 @@ impl SshProvisioningDriver {
     }
 
     fn delete_credential(&self, record: &ComputerRecord) -> Result<(), DriverFailure> {
-        let key = credential_key(record)?;
-        self.vault.delete(&key).map_err(map_vault_delete_error)?;
+        if record.ssh_authentication.method() == SshAuthenticationMethod::Password {
+            let key = credential_key(record)?;
+            self.vault.delete(&key).map_err(map_vault_delete_error)?;
+        }
         self.transient_secrets.clear(record.id);
         Ok(())
     }
@@ -752,30 +814,45 @@ impl SshProvisioningDriver {
         &self,
         record: &ComputerRecord,
     ) -> Result<Box<dyn RemoteSession>, DriverFailure> {
-        let credential = self.load_secret(record)?;
-        self.connect_loaded(record, &credential, true)
+        let authentication = self.load_authentication(record)?;
+        self.connect_loaded_authentication(record, &authentication, true)
     }
 
-    fn connect_loaded(
+    fn connect_loaded_authentication(
         &self,
         record: &ComputerRecord,
-        credential: &LoadedCredential,
+        authentication: &LoadedAuthentication,
         replace_stored_from_transient: bool,
     ) -> Result<Box<dyn RemoteSession>, DriverFailure> {
-        let session = match self.connect(record, &credential.secret) {
+        let session = match self.connect(record, authentication) {
             Ok(session) => session,
             Err(error) => {
-                if error.code.as_str() == "SSH_AUTH_REJECTED" {
-                    self.invalidate_rejected_credential(record, credential)?;
+                match authentication {
+                    LoadedAuthentication::Password(credential)
+                        if error.code.as_str() == "SSH_AUTH_REJECTED" =>
+                    {
+                        self.invalidate_rejected_credential(record, credential)?;
+                    }
+                    LoadedAuthentication::PrivateKey {
+                        passphrase: Some(passphrase),
+                        ..
+                    } if error.code.as_str() == "SSH_PRIVATE_KEY_REJECTED" => self
+                        .transient_secrets
+                        .clear_if_matches(record.id, passphrase),
+                    LoadedAuthentication::Password(_)
+                    | LoadedAuthentication::Agent
+                    | LoadedAuthentication::PrivateKey { .. } => {}
                 }
                 return Err(error);
             }
         };
-        if replace_stored_from_transient
-            && credential.source == CredentialSource::Transient
-            && record.credential_policy.remember_requested
-        {
-            self.store_authenticated_credential(record, credential)?;
+        if let LoadedAuthentication::Password(credential) = authentication {
+            if replace_stored_from_transient
+                && credential.source == CredentialSource::Transient
+                && record.credential_policy.remember_requested
+            {
+                self.store_authenticated_credential(record, credential)?;
+            }
         }
         Ok(session)
     }
@@ -820,7 +897,7 @@ impl SshProvisioningDriver {
     fn connect(
         &self,
         record: &ComputerRecord,
-        secret: &Secret,
+        authentication: &LoadedAuthentication,
     ) -> Result<Box<dyn RemoteSession>, DriverFailure> {
         let endpoint = ssh_endpoint(record)?;
         let pinned = record
@@ -829,11 +906,57 @@ impl SshProvisioningDriver {
             .ok_or_else(|| failure("HOST_KEY_MISSING", false))?;
         let pinned = HostKey::try_from(pinned).map_err(|_| failure("HOST_KEY_INVALID", false))?;
         self.transport
-            .connect_password(&endpoint, &pinned, &record.endpoint.username, secret)
+            .connect_with_authentication(
+                &endpoint,
+                &pinned,
+                &record.endpoint.username,
+                match authentication {
+                    LoadedAuthentication::Password(credential) => {
+                        SshAuthentication::Password(&credential.secret)
+                    }
+                    LoadedAuthentication::Agent => SshAuthentication::Agent,
+                    LoadedAuthentication::PrivateKey {
+                        private_key,
+                        passphrase,
+                    } => SshAuthentication::PrivateKey {
+                        private_key,
+                        passphrase: passphrase.as_ref(),
+                    },
+                },
+            )
             .map_err(map_ssh_error)
     }
 
+    fn load_authentication(
+        &self,
+        record: &ComputerRecord,
+    ) -> Result<LoadedAuthentication, DriverFailure> {
+        match record.ssh_authentication.method() {
+            SshAuthenticationMethod::Password => {
+                self.load_secret(record).map(LoadedAuthentication::Password)
+            }
+            SshAuthenticationMethod::Agent => Ok(LoadedAuthentication::Agent),
+            SshAuthenticationMethod::PrivateKey => {
+                let private_key = record
+                    .ssh_authentication
+                    .private_key_file()
+                    .map_err(|_| failure("SSH_PRIVATE_KEY_INVALID", false))?;
+                let passphrase = self
+                    .transient_secrets
+                    .retrieve(record.id)
+                    .map_err(|_| failure("TRANSIENT_SECRET_PROVIDER_FAILED", true))?;
+                Ok(LoadedAuthentication::PrivateKey {
+                    private_key,
+                    passphrase,
+                })
+            }
+        }
+    }
+
     fn load_secret(&self, record: &ComputerRecord) -> Result<LoadedCredential, DriverFailure> {
+        if record.ssh_authentication.method() != SshAuthenticationMethod::Password {
+            return Err(failure("SSH_AUTH_POLICY_INVALID", false));
+        }
         if let Some(secret) = self
             .transient_secrets
             .retrieve(record.id)
@@ -935,6 +1058,7 @@ fn platform_for_target(target: WorkerKitTarget) -> RemotePlatform {
     match target {
         WorkerKitTarget::WindowsX86_64 => RemotePlatform::Windows,
         WorkerKitTarget::LinuxX86_64 | WorkerKitTarget::LinuxAarch64 => RemotePlatform::Linux,
+        WorkerKitTarget::MacosX86_64 | WorkerKitTarget::MacosAarch64 => RemotePlatform::Macos,
     }
 }
 
@@ -949,6 +1073,9 @@ impl RemoteLayout {
         let staging = match platform {
             RemotePlatform::Linux => {
                 format!("/tmp/.clusteryourcodex-provision-{suffix}")
+            }
+            RemotePlatform::Macos => {
+                format!("/private/tmp/.clusteryourcodex-provision-{suffix}")
             }
             RemotePlatform::Windows => {
                 format!("C:\\Windows\\Temp\\clusteryourcodex-provision-{suffix}")
@@ -968,7 +1095,7 @@ impl RemoteLayout {
             return Err(failure("REMOTE_PATH_INVALID", false));
         }
         let separator = match self.platform {
-            RemotePlatform::Linux => "/",
+            RemotePlatform::Linux | RemotePlatform::Macos => "/",
             RemotePlatform::Windows => "\\",
         };
         RemotePath::new(format!("{}{separator}{leaf}", self.staging_dir.as_str()))
@@ -987,6 +1114,9 @@ fn cleanup_script_path(
     let suffix = format!("{}-{}", record.id.simple(), record.cycle);
     let path = match platform {
         RemotePlatform::Linux => format!("/tmp/.clusteryourcodex-clean-{suffix}.sh"),
+        RemotePlatform::Macos => {
+            format!("/private/tmp/.clusteryourcodex-clean-{suffix}.sh")
+        }
         RemotePlatform::Windows => {
             format!("C:\\Windows\\Temp\\clusteryourcodex-clean-{suffix}.ps1")
         }
@@ -1004,11 +1134,12 @@ fn run_cleanup_script(
     let script_path = cleanup_script_path(record, platform)?;
     let content = match platform {
         RemotePlatform::Linux => LINUX_CLEANUP_SCRIPT.as_bytes(),
+        RemotePlatform::Macos => MACOS_CLEANUP_SCRIPT.as_bytes(),
         RemotePlatform::Windows => WINDOWS_CLEANUP_SCRIPT.as_bytes(),
     };
     upload_and_verify(session, &script_path, content, 0o700)?;
     let command = match platform {
-        RemotePlatform::Linux => FixedCommand::posix_script(
+        RemotePlatform::Linux | RemotePlatform::Macos => FixedCommand::posix_script(
             script_path.clone(),
             [argument(mode)?, argument(target.as_str())?],
         ),
@@ -1097,6 +1228,36 @@ enum LifecycleReceiptExpectation {
     Uninstall,
 }
 
+fn ensure_lifecycle_expectation_supported(
+    target: WorkerKitTarget,
+    expectation: LifecycleReceiptExpectation,
+) -> Result<(), DriverFailure> {
+    if matches!(
+        target,
+        WorkerKitTarget::MacosX86_64 | WorkerKitTarget::MacosAarch64
+    ) && expectation == LifecycleReceiptExpectation::PairedService
+    {
+        return Err(failure(MACOS_CONTAINMENT_FAILURE_CODE, false));
+    }
+    Ok(())
+}
+
+fn map_lifecycle_command_failure(
+    platform: RemotePlatform,
+    exit_code: i32,
+    stderr: &[u8],
+) -> DriverFailure {
+    if platform == RemotePlatform::Macos
+        && exit_code == 78
+        && stderr
+            .windows(MACOS_CONTAINMENT_ERROR_TAG.len())
+            .any(|window| window == MACOS_CONTAINMENT_ERROR_TAG)
+    {
+        return failure(MACOS_CONTAINMENT_FAILURE_CODE, false);
+    }
+    failure("WORKER_LIFECYCLE_FAILED", true)
+}
+
 fn validate_lifecycle_receipt(
     content: &[u8],
     expected_action: &str,
@@ -1117,6 +1278,9 @@ fn validate_lifecycle_receipt(
     let object = value
         .as_object()
         .ok_or_else(|| failure("LIFECYCLE_RECEIPT_INVALID", false))?;
+    let schema = object
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_str);
     const ALLOWED: &[&str] = &[
         "schemaVersion",
         "action",
@@ -1133,15 +1297,14 @@ fn validate_lifecycle_receipt(
     if object.keys().any(|key| !ALLOWED.contains(&key.as_str()))
         || object.get("succeeded").and_then(serde_json::Value::as_bool) != Some(true)
         || object.get("action").and_then(serde_json::Value::as_str) != Some(expected_action)
-        || object
-            .get("schemaVersion")
-            .and_then(serde_json::Value::as_str)
-            .is_none_or(|value| {
-                !matches!(
-                    value,
-                    "cyc.dev/linux-worker-install/v1" | "cyc.dev/windows-worker-install/v1"
-                )
-            })
+        || schema.is_none_or(|value| {
+            !matches!(
+                value,
+                "cyc.dev/linux-worker-install/v1"
+                    | "cyc.dev/macos-worker-install/v1"
+                    | "cyc.dev/windows-worker-install/v1"
+            )
+        })
     {
         return Err(failure("LIFECYCLE_RECEIPT_INVALID", false));
     }
@@ -1173,7 +1336,8 @@ fn validate_lifecycle_receipt(
             paired == Some(true) && service == Some("not_enabled") && service_enabled == Some(false)
         }
         LifecycleReceiptExpectation::PairedService => {
-            paired == Some(true)
+            schema != Some("cyc.dev/macos-worker-install/v1")
+                && paired == Some(true)
                 && service_is_valid
                 && service != Some("not_enabled")
                 && service_enabled.is_none_or(|value| value)
@@ -1190,6 +1354,21 @@ fn map_ssh_error(error: SshError) -> DriverFailure {
     match error {
         SshError::Authentication { .. } | SshError::AuthenticationRejected => {
             failure("SSH_AUTH_REJECTED", true)
+        }
+        SshError::AgentUnavailable => failure("SSH_AGENT_UNAVAILABLE", true),
+        SshError::AgentAuthenticationFailed | SshError::AgentAuthenticationRejected => {
+            failure("SSH_AGENT_REJECTED", true)
+        }
+        SshError::PrivateKeyAuthenticationFailed
+        | SshError::PrivateKeyAuthenticationRejected
+        | SshError::PrivateKeyPassphraseNotUtf8 => failure("SSH_PRIVATE_KEY_REJECTED", true),
+        SshError::InvalidPrivateKeyPath
+        | SshError::PrivateKeyPathValidationUnavailable
+        | SshError::UnsafePrivateKeyPath
+        | SshError::PrivateKeyNotRegularFile => failure("SSH_PRIVATE_KEY_INVALID", false),
+        SshError::PrivateKeyUnavailable => failure("SSH_PRIVATE_KEY_UNAVAILABLE", true),
+        SshError::UnsupportedAuthenticationMethod { .. } => {
+            failure("SSH_AUTH_METHOD_UNSUPPORTED", false)
         }
         SshError::HostKeyMismatch { .. } => failure("HOST_KEY_CHANGED", false),
         SshError::UnsupportedHostKeyAlgorithm => failure("HOST_KEY_UNSUPPORTED", false),
@@ -1241,12 +1420,27 @@ fn failure(code: &str, retryable: bool) -> DriverFailure {
 const LINUX_CLEANUP_SCRIPT: &str = r#"#!/bin/sh
 set -eu
 umask 077
+[ "${1:-}" != "--" ] || shift
 mode="${1:-}"
 target="${2:-}"
 case "$target" in /tmp/.clusteryourcodex-provision-*) ;; *) exit 2 ;; esac
 case "$mode" in
   file) rm -f -- "$target" ;;
   tree) if [ -d "$target" ] && [ ! -L "$target" ]; then rm -rf -- "$target"; fi ;;
+  *) exit 2 ;;
+esac
+"#;
+
+const MACOS_CLEANUP_SCRIPT: &str = r#"#!/bin/sh
+set -eu
+umask 077
+[ "${1:-}" != "--" ] || shift
+mode="${1:-}"
+target="${2:-}"
+case "$target" in /private/tmp/.clusteryourcodex-provision-*) ;; *) exit 2 ;; esac
+case "$mode" in
+  file) rm -f "$target" ;;
+  tree) if [ -d "$target" ] && [ ! -L "$target" ]; then rm -rf "$target"; fi ;;
   *) exit 2 ;;
 esac
 "#;
@@ -1290,8 +1484,8 @@ mod tests {
         CredentialKey, CredentialReference, CredentialVault, Secret, StoredCredential, VaultError,
     };
     use cyc_ssh::{
-        CommandOutput, FixedCommand, HostKey, RemotePath, RemoteSession, SshEndpoint, SshError,
-        SshTransport, TransferReceipt,
+        CommandOutput, FixedCommand, HostKey, PrivateKeyFile, RemotePath, RemoteSession,
+        SshEndpoint, SshError, SshTransport, TransferReceipt,
     };
     use ed25519_dalek::{Signer, SigningKey};
     use sha2::{Digest, Sha256};
@@ -1299,14 +1493,17 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        sha256_hex, validate_lifecycle_receipt, ControllerBoundary, ControllerBoundaryFailure,
-        LifecycleReceiptExpectation, PairingObservation, RemotePlatform, SshDriverOptions,
-        SshProvisioningDriver, TransientSecretError, TransientSecretProvider, WorkerKitCatalog,
+        cleanup_script_path, ensure_lifecycle_expectation_supported, map_lifecycle_command_failure,
+        map_ssh_error, platform_for_target, sha256_hex, validate_lifecycle_receipt,
+        ControllerBoundary, ControllerBoundaryFailure, LifecycleReceiptExpectation,
+        PairingObservation, RemoteLayout, RemotePlatform, SshDriverOptions, SshProvisioningDriver,
+        TransientSecretError, TransientSecretProvider, WorkerKitCatalog, WorkerKitTarget,
+        MACOS_CLEANUP_SCRIPT, MACOS_CONTAINMENT_FAILURE_CODE,
     };
     use crate::{
         ComputerEndpoint, CredentialState, DriveOutcome, DriverRequest, NewComputer,
         ProvisioningAction, ProvisioningDriver, ProvisioningEngine, ProvisioningState,
-        ProvisioningStep, ProvisioningStore, StepCompletion,
+        ProvisioningStep, ProvisioningStore, SshAuthenticationPolicy, StepCompletion,
     };
 
     const FIXTURE_SIGNING_SEED: [u8; 32] = [
@@ -1376,6 +1573,84 @@ mod tests {
             LifecycleReceiptExpectation::PairedService,
         )
         .is_err());
+
+        let macos_pair_only = br#"{"schemaVersion":"cyc.dev/macos-worker-install/v1","action":"repair","succeeded":true,"paired":true,"service":"not_enabled","serviceEnabled":false,"scope":"user","allowOnBattery":false}
+"#;
+        validate_lifecycle_receipt(
+            macos_pair_only,
+            "repair",
+            LifecycleReceiptExpectation::PairingOnly,
+        )
+        .unwrap();
+        assert!(validate_lifecycle_receipt(
+            macos_pair_only,
+            "repair",
+            LifecycleReceiptExpectation::PairedService,
+        )
+        .is_err());
+        assert!(validate_lifecycle_receipt(
+            br#"{"schemaVersion":"cyc.dev/macos-worker-install/v1","action":"repair","succeeded":true,"paired":true,"service":"launch_agent","serviceEnabled":true,"scope":"user","allowOnBattery":false}
+"#,
+            "repair",
+            LifecycleReceiptExpectation::PairedService,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn macos_pair_only_is_allowed_but_service_activation_is_nonretryably_gated() {
+        for target in [WorkerKitTarget::MacosX86_64, WorkerKitTarget::MacosAarch64] {
+            assert_eq!(platform_for_target(target), RemotePlatform::Macos);
+            ensure_lifecycle_expectation_supported(
+                target,
+                LifecycleReceiptExpectation::PairingOnly,
+            )
+            .unwrap();
+            let failure = ensure_lifecycle_expectation_supported(
+                target,
+                LifecycleReceiptExpectation::PairedService,
+            )
+            .unwrap_err();
+            assert_eq!(failure.code.as_str(), MACOS_CONTAINMENT_FAILURE_CODE);
+            assert!(!failure.retryable);
+        }
+
+        let mapped = map_lifecycle_command_failure(
+            RemotePlatform::Macos,
+            78,
+            b"[CYC-MACOS-WORKER-CONTAINMENT-UNAVAILABLE] gated\n",
+        );
+        assert_eq!(mapped.code.as_str(), MACOS_CONTAINMENT_FAILURE_CODE);
+        assert!(!mapped.retryable);
+
+        let generic = map_lifecycle_command_failure(
+            RemotePlatform::Macos,
+            78,
+            b"[CYC-MACOS-PYTHON-REQUIRED] missing\n",
+        );
+        assert_eq!(generic.code.as_str(), "WORKER_LIFECYCLE_FAILED");
+        assert!(generic.retryable);
+    }
+
+    #[test]
+    fn macos_remote_layout_and_cleanup_are_confined_to_private_tmp() {
+        let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
+        let record = engine.create(new_computer(true)).unwrap();
+        let layout = RemoteLayout::new(&record, RemotePlatform::Macos).unwrap();
+        assert!(layout
+            .staging_dir
+            .as_str()
+            .starts_with("/private/tmp/.clusteryourcodex-provision-"));
+        assert!(layout
+            .join("install-worker.sh")
+            .unwrap()
+            .as_str()
+            .ends_with("/install-worker.sh"));
+        assert!(cleanup_script_path(&record, RemotePlatform::Macos)
+            .unwrap()
+            .as_str()
+            .starts_with("/private/tmp/.clusteryourcodex-clean-"));
+        assert!(MACOS_CLEANUP_SCRIPT.contains("/private/tmp/.clusteryourcodex-provision-*"));
     }
 
     struct Harness {
@@ -1525,6 +1800,205 @@ mod tests {
         assert!(forgotten.credential_reference.is_none());
         assert_eq!(harness.vault.delete_count(), 1);
         assert_eq!(harness.controller.revoke_count(), 0);
+    }
+
+    #[test]
+    fn ssh_agent_authentication_needs_no_secret_or_vault_entry() {
+        let harness = Harness::new(GOOD_PASSWORD);
+        let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
+        let mut input = new_computer(false);
+        input.ssh_authentication = SshAuthenticationPolicy::agent();
+        let created = engine.create(input).unwrap();
+
+        approve_when_pending(&engine, created.id, &harness);
+        let ready = drive_to(&engine, created.id, &harness, ProvisioningStep::Ready);
+
+        assert_eq!(
+            ready.ssh_authentication.method(),
+            crate::SshAuthenticationMethod::Agent
+        );
+        assert_eq!(ready.credential_policy.state, CredentialState::SessionOnly);
+        assert_eq!(harness.transient.retrieval_count(), 0);
+        assert_eq!(harness.vault.store_count(), 0);
+        let events = harness.ssh.events();
+        assert!(events.iter().any(|event| event == "authenticate:agent"));
+        assert!(
+            events.iter().position(|event| event == "probe_host_key")
+                < events
+                    .iter()
+                    .position(|event| event == "authenticate:agent")
+        );
+    }
+
+    #[test]
+    fn private_key_passphrase_is_transient_redacted_and_retryable() {
+        let key_dir = TempDir::new().unwrap();
+        let key_path = key_dir.path().join("id_fixture");
+        fs::write(&key_path, b"fixture-private-key-material").unwrap();
+        let private_key = PrivateKeyFile::new(&key_path).unwrap();
+
+        let harness = Harness::new(BAD_PASSWORD);
+        let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
+        let mut input = new_computer(false);
+        input.ssh_authentication = SshAuthenticationPolicy::private_key(&private_key).unwrap();
+        let created = engine.create(input).unwrap();
+        approve_when_pending(&engine, created.id, &harness);
+
+        let failed = drive_one(&engine, created.id, &harness);
+        assert!(matches!(
+            failed.state,
+            ProvisioningState::Failed {
+                ref code,
+                retryable: true,
+                ..
+            } if code.as_str() == "SSH_PRIVATE_KEY_REJECTED"
+        ));
+        assert_eq!(failed.credential_policy.state, CredentialState::Pending);
+        assert!(failed.credential_reference.is_none());
+        assert!(harness.transient.is_empty());
+        let diagnostic = format!("{failed:?} {:?}", harness.ssh.events());
+        assert!(!diagnostic.contains(BAD_PASSWORD));
+        assert!(!diagnostic.contains(&key_path.to_string_lossy().to_string()));
+        assert!(harness
+            .ssh
+            .events()
+            .iter()
+            .any(|event| event == &format!("authenticate:private_key:{}", BAD_PASSWORD.len())));
+
+        let corrected = Arc::new(FakeTransientSecrets::new(Some(GOOD_PASSWORD)));
+        let retry = engine
+            .request_intent(failed.id, failed.revision, crate::ProvisioningIntent::Retry)
+            .unwrap();
+        let mut driver = harness.driver_with_transient(corrected.clone());
+        let checkpoint = outcome_record(
+            engine
+                .drive_once(retry.id, retry.revision, &mut driver)
+                .unwrap(),
+        );
+        let authenticated = outcome_record(
+            engine
+                .drive_once(checkpoint.id, checkpoint.revision, &mut driver)
+                .unwrap(),
+        );
+        assert_eq!(authenticated.state, ProvisioningState::Authenticated);
+        assert_eq!(
+            authenticated.credential_policy.state,
+            CredentialState::SessionOnly
+        );
+        assert!(!corrected.is_empty());
+        assert_eq!(harness.vault.store_count(), 0);
+    }
+
+    #[test]
+    fn unencrypted_private_key_authentication_needs_no_transient_secret() {
+        let key_dir = TempDir::new().unwrap();
+        let key_path = key_dir.path().join("id_unencrypted_fixture");
+        fs::write(&key_path, b"fixture-unencrypted-private-key-material").unwrap();
+        let private_key = PrivateKeyFile::new(&key_path).unwrap();
+        let harness = Harness::new(GOOD_PASSWORD);
+        let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
+        let mut input = new_computer(false);
+        input.ssh_authentication = SshAuthenticationPolicy::private_key(&private_key).unwrap();
+        let created = engine.create(input).unwrap();
+
+        let connecting = drive_one(&engine, created.id, &harness);
+        let pending = drive_one(&engine, connecting.id, &harness);
+        let fingerprint = pending.host_key.as_ref().unwrap().fingerprint.clone();
+        let approved = engine
+            .approve_host_key(pending.id, pending.revision, &fingerprint)
+            .unwrap();
+        let no_secret = Arc::new(FakeTransientSecrets::new(None));
+        let mut driver = harness.driver_with_transient(no_secret.clone());
+        let authenticated = outcome_record(
+            engine
+                .drive_once(approved.id, approved.revision, &mut driver)
+                .unwrap(),
+        );
+
+        assert_eq!(authenticated.state, ProvisioningState::Authenticated);
+        assert_eq!(
+            authenticated.credential_policy.state,
+            CredentialState::SessionOnly
+        );
+        assert_eq!(no_secret.retrieval_count(), 1);
+        assert!(no_secret.is_empty());
+        assert!(harness
+            .ssh
+            .events()
+            .iter()
+            .any(|event| event == "authenticate:private_key:0"));
+        assert_eq!(harness.vault.store_count(), 0);
+    }
+
+    #[test]
+    fn authentication_errors_map_to_stable_redacted_public_codes() {
+        let cases = [
+            (SshError::AgentUnavailable, "SSH_AGENT_UNAVAILABLE", true),
+            (
+                SshError::AgentAuthenticationFailed,
+                "SSH_AGENT_REJECTED",
+                true,
+            ),
+            (
+                SshError::AgentAuthenticationRejected,
+                "SSH_AGENT_REJECTED",
+                true,
+            ),
+            (
+                SshError::PrivateKeyAuthenticationFailed,
+                "SSH_PRIVATE_KEY_REJECTED",
+                true,
+            ),
+            (
+                SshError::PrivateKeyAuthenticationRejected,
+                "SSH_PRIVATE_KEY_REJECTED",
+                true,
+            ),
+            (
+                SshError::PrivateKeyPassphraseNotUtf8,
+                "SSH_PRIVATE_KEY_REJECTED",
+                true,
+            ),
+            (
+                SshError::InvalidPrivateKeyPath,
+                "SSH_PRIVATE_KEY_INVALID",
+                false,
+            ),
+            (
+                SshError::PrivateKeyPathValidationUnavailable,
+                "SSH_PRIVATE_KEY_INVALID",
+                false,
+            ),
+            (
+                SshError::UnsafePrivateKeyPath,
+                "SSH_PRIVATE_KEY_INVALID",
+                false,
+            ),
+            (
+                SshError::PrivateKeyNotRegularFile,
+                "SSH_PRIVATE_KEY_INVALID",
+                false,
+            ),
+            (
+                SshError::PrivateKeyUnavailable,
+                "SSH_PRIVATE_KEY_UNAVAILABLE",
+                true,
+            ),
+            (
+                SshError::UnsupportedAuthenticationMethod {
+                    method: cyc_ssh::AuthenticationMethod::PrivateKey,
+                },
+                "SSH_AUTH_METHOD_UNSUPPORTED",
+                false,
+            ),
+        ];
+
+        for (error, expected_code, expected_retryable) in cases {
+            let mapped = map_ssh_error(error);
+            assert_eq!(mapped.code.as_str(), expected_code);
+            assert_eq!(mapped.retryable, expected_retryable);
+            assert!(!format!("{mapped:?}").contains("private-key-path"));
+        }
     }
 
     #[test]
@@ -2240,6 +2714,62 @@ mod tests {
                 pairing_phase: self.pairing_phase.clone(),
             }))
         }
+
+        fn connect_agent(
+            &self,
+            _endpoint: &SshEndpoint,
+            pinned_host_key: &HostKey,
+            _username: &str,
+        ) -> Result<Box<dyn RemoteSession>, SshError> {
+            if pinned_host_key != &self.host_key {
+                return Err(SshError::HostKeyMismatch {
+                    expected: pinned_host_key.fingerprint().to_owned(),
+                    actual: self.host_key.fingerprint().to_owned(),
+                });
+            }
+            self.inner
+                .lock()
+                .unwrap()
+                .events
+                .push("authenticate:agent".to_owned());
+            Ok(Box::new(FakeSession {
+                inner: self.inner.clone(),
+                pairing_phase: self.pairing_phase.clone(),
+            }))
+        }
+
+        fn connect_private_key(
+            &self,
+            _endpoint: &SshEndpoint,
+            pinned_host_key: &HostKey,
+            _username: &str,
+            _private_key: &PrivateKeyFile,
+            passphrase: Option<&Secret>,
+        ) -> Result<Box<dyn RemoteSession>, SshError> {
+            if pinned_host_key != &self.host_key {
+                return Err(SshError::HostKeyMismatch {
+                    expected: pinned_host_key.fingerprint().to_owned(),
+                    actual: self.host_key.fingerprint().to_owned(),
+                });
+            }
+            let passphrase_bytes = passphrase.map_or(0, Secret::len);
+            self.inner
+                .lock()
+                .unwrap()
+                .events
+                .push(format!("authenticate:private_key:{passphrase_bytes}"));
+            let accepted = passphrase.is_none_or(|passphrase| {
+                let observed: [u8; 32] = Sha256::digest(passphrase.expose_secret()).into();
+                observed == self.accepted_password_hash
+            });
+            if !accepted {
+                return Err(SshError::PrivateKeyAuthenticationRejected);
+            }
+            Ok(Box::new(FakeSession {
+                inner: self.inner.clone(),
+                pairing_phase: self.pairing_phase.clone(),
+            }))
+        }
     }
 
     struct FakeSession {
@@ -2517,6 +3047,10 @@ mod tests {
 
         fn retrieval_count(&self) -> usize {
             *self.retrievals.lock().unwrap()
+        }
+
+        fn is_empty(&self) -> bool {
+            self.bytes.lock().unwrap().is_none()
         }
     }
 

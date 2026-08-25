@@ -1500,6 +1500,7 @@ exit 4
     [System.IO.File]::WriteAllText((Join-Path $mcpSdk 'package.json'), '{"name":"@modelcontextprotocol/sdk","version":"1.30.0"}')
     [System.IO.File]::WriteAllText($nodeLicense, 'node-license')
     $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+    $productVersion = (Get-Content -LiteralPath (Join-Path $repoRoot 'VERSION') -Raw).Trim()
     $opensslCommand = Get-Command openssl -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     $openssl = if ($opensslCommand) { [string]$opensslCommand.Source } elseif (Test-Path -LiteralPath 'C:\Program Files\Git\usr\bin\openssl.exe') { 'C:\Program Files\Git\usr\bin\openssl.exe' } else { throw 'OpenSSL fixture tool is unavailable.' }
     $fixtureSigningKey = Join-Path $testRoot 'worker-kit-fixture-private.pem'
@@ -1516,13 +1517,20 @@ exit 4
         [Convert]::ToBase64String([byte[]]$fixturePublicDerBytes[12..43]) + "`n",
         (New-Object System.Text.UTF8Encoding($false))
     )
-    foreach ($target in @('windows-x86_64', 'linux-x86_64', 'linux-aarch64')) {
+    $allWorkerKitTargets = @(
+        'windows-x86_64',
+        'linux-x86_64',
+        'linux-aarch64',
+        'macos-x86_64',
+        'macos-aarch64'
+    )
+    foreach ($target in $allWorkerKitTargets) {
         & (Join-Path $repoRoot 'packaging\worker-kits\New-WorkerKit.ps1') `
             -Target $target `
             -WorkerExecutable (Join-Path $rootTarget 'cyc-worker.exe') `
             -OutputDirectory (Join-Path $workerKits "artifact-$target") `
             -SigningKeyPath $fixtureSigningKey `
-            -SigningKeyId 'cyc-release-2026-01' `
+            -SigningKeyId 'cyc-release-2026-02' `
             -TrustedPublicKeyPath $fixturePublicKey | Out-Null
     }
     $sourceMcpManifest = Join-Path $repoRoot 'plugins\cluster-your-codex\.mcp.json'
@@ -1535,6 +1543,7 @@ exit 4
         -NodeExecutable $nodeRuntime `
         -NodeLicense $nodeLicense `
         -WorkerKitsRoot $workerKits `
+        -SourceTag "v$productVersion" `
         -OutputRoot $preview | Out-Null
     Assert-True (Test-Path -LiteralPath (Join-Path $preview 'bootstrap.ps1') -PathType Leaf) 'preview contains bootstrap'
     Assert-True (Test-Path -LiteralPath (Join-Path $preview 'Install-ClusterYourCodex.cmd') -PathType Leaf) 'preview contains double-click installer'
@@ -1544,7 +1553,7 @@ exit 4
     Assert-True (Test-Path -LiteralPath (Join-Path $preview 'payload\installer\bootstrap.ps1') -PathType Leaf) 'preview installs its bootstrap for repair/uninstall'
     Assert-True (Test-Path -LiteralPath (Join-Path $preview 'payload\installer\Uninstall-ClusterYourCodex.ps1') -PathType Leaf) 'preview installs the elevated uninstaller launcher'
     Assert-True (Test-Path -LiteralPath (Join-Path $preview 'payload\integrations\codex\cluster-agents-block.md') -PathType Leaf) 'preview contains the public managed AGENTS.md block template'
-    foreach ($target in @('windows-x86_64', 'linux-x86_64', 'linux-aarch64')) {
+    foreach ($target in $allWorkerKitTargets) {
         Assert-True (Test-Path -LiteralPath (Join-Path $preview "payload\worker-kits\$target\worker-kit.json") -PathType Leaf) "preview contains $target worker kit"
         Assert-True (Test-Path -LiteralPath (Join-Path $preview "payload\worker-kits\$target\worker-kit.sig") -PathType Leaf) "preview contains $target publisher signature"
         Assert-True (Test-Path -LiteralPath (Join-Path $preview "payload\worker-kits\$target\SHA256SUMS") -PathType Leaf) "preview contains $target worker-kit checksums"
@@ -1557,7 +1566,13 @@ exit 4
     Assert-True ($stagedMcp.mcpServers.cluster_your_codex.command -eq './mcp/runtime/node.exe') 'staged MCP uses private Node'
     Assert-True ((Get-FileHash -LiteralPath $sourceMcpManifest -Algorithm SHA256).Hash -eq $sourceMcpHash) 'source MCP manifest remains unchanged'
     $previewManifest = Get-Content -LiteralPath (Join-Path $preview 'preview-manifest.json') -Raw | ConvertFrom-Json
-    Assert-True (@($previewManifest.workerKits).Count -eq 3) 'preview manifest binds all worker kits'
+    Assert-True ([string]$previewManifest.productVersion -ceq $productVersion) 'preview manifest binds root product VERSION'
+    Assert-True ([string]$previewManifest.releaseChannel -ceq 'prerelease') 'preview manifest records prerelease channel'
+    Assert-True ([string]$previewManifest.sourceTag -ceq "v$productVersion") 'preview manifest binds the exact prerelease source tag'
+    Assert-True (@($previewManifest.workerKits).Count -eq $allWorkerKitTargets.Count) 'preview manifest binds all worker kits'
+    foreach ($workerKit in @($previewManifest.workerKits)) {
+        Assert-True ([string]$workerKit.version -ceq $productVersion) "preview rejects worker-kit product-version drift for $($workerKit.target)"
+    }
     $stagedMcpRoot = Join-Path $preview 'payload\integrations\codex-marketplace\plugins\cluster-your-codex\mcp'
     Assert-True (Test-Path -LiteralPath (Join-Path $stagedMcpRoot 'node_modules\@modelcontextprotocol\sdk\package.json') -PathType Leaf) 'preview contains the declared MCP production dependency'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $stagedMcpRoot 'node_modules\.pnpm'))) 'preview never stages pnpm virtual-store metadata'
@@ -2146,11 +2161,15 @@ exit /b !ERRORLEVEL!
             packageManifestSha256 = [string]$publicRecoveryRequest.packageManifestSha256
             updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
         }
+        # GetNewClosure executes in a dynamic module, so capture the helper
+        # implementation explicitly instead of relying on script-scope function
+        # lookup from inside that module.
+        $firewallAtomicJsonWriter = ${function:Write-CycFirewallAtomicJson}
         $writePublicRecoveryJournal = {
             param([string]$Phase)
             $publicRecoveryJournal.phase = $Phase
             $publicRecoveryJournal.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
-            Write-CycFirewallAtomicJson -Path $publicRecoveryJournalPath -Value $publicRecoveryJournal
+            & $firewallAtomicJsonWriter -Path $publicRecoveryJournalPath -Value $publicRecoveryJournal
             return (Get-FileHash -LiteralPath $publicRecoveryJournalPath -Algorithm SHA256).Hash.ToLowerInvariant()
         }.GetNewClosure()
         $publicRecoveryJournalHash = & $writePublicRecoveryJournal prepared

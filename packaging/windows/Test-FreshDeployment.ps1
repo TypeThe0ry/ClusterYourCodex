@@ -221,6 +221,9 @@ try {
     Assert-FreshTest ($plan.exitCode -eq 0) 'manifest-bound install plan succeeds'
     $previewManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     Assert-FreshTest ([string]$previewManifest.schemaVersion -eq 'cyc.dev/windows-preview/v1') 'preview manifest schema is recognized'
+    Assert-FreshTest ([string]$previewManifest.productVersion -match '^[0-9]+\.[0-9]+\.[0-9]+-(preview|alpha|beta|rc)\.[0-9]+$') 'preview manifest carries a strict prerelease product version'
+    Assert-FreshTest ([string]$previewManifest.releaseChannel -ceq 'prerelease') 'preview manifest release channel remains prerelease'
+    Assert-FreshTest ($null -eq $previewManifest.sourceTag -or [string]$previewManifest.sourceTag -ceq "v$($previewManifest.productVersion)") 'preview manifest source tag is absent or exactly vPRODUCT_VERSION'
 
     [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $common -LogRoot $logRoot -Label 'install')
     $installed = $true
@@ -231,6 +234,7 @@ try {
     Assert-FreshTest (Test-Path -LiteralPath $installedManifestPath -PathType Leaf) 'install manifest is durable'
     $installedManifest = Get-Content -LiteralPath $installedManifestPath -Raw | ConvertFrom-Json
     Assert-FreshTest ([string]$installedManifest.schemaVersion -eq 'cyc.dev/windows-install-manifest/v1') 'installed manifest schema is recognized'
+    Assert-FreshTest ([string]$installedManifest.productVersion -ceq [string]$previewManifest.productVersion) 'installed manifest preserves the package product version'
     Assert-FreshTest ([string]$installedManifest.installRoot -eq $installRoot) 'manifest binds the isolated install root'
     Assert-FreshTest ([string]$installedManifest.dataRoot -eq $dataRoot) 'manifest binds the isolated data root'
     Assert-FreshTest (-not [bool]$installedManifest.managedWorker.enabled) 'managed worker is disabled for isolated smoke'

@@ -30,15 +30,17 @@ const COMPILED_KEY_ID: &str = "cyc-test-fixture-rfc8032-1";
 const COMPILED_PUBLIC_KEY_B64: &str = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=";
 
 #[cfg(not(test))]
-const COMPILED_KEY_ID: &str = "cyc-release-2026-01";
+const COMPILED_KEY_ID: &str = "cyc-release-2026-02";
 #[cfg(not(test))]
-const COMPILED_PUBLIC_KEY_B64: &str = include_str!("../publisher_keys/cyc-release-2026-01.pub");
+const COMPILED_PUBLIC_KEY_B64: &str = include_str!("../publisher_keys/cyc-release-2026-02.pub");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkerKitTarget {
     WindowsX86_64,
     LinuxX86_64,
     LinuxAarch64,
+    MacosX86_64,
+    MacosAarch64,
 }
 
 impl WorkerKitTarget {
@@ -48,6 +50,8 @@ impl WorkerKitTarget {
             Self::WindowsX86_64 => "windows-x86_64",
             Self::LinuxX86_64 => "linux-x86_64",
             Self::LinuxAarch64 => "linux-aarch64",
+            Self::MacosX86_64 => "macos-x86_64",
+            Self::MacosAarch64 => "macos-aarch64",
         }
     }
 
@@ -56,14 +60,15 @@ impl WorkerKitTarget {
         match self {
             Self::WindowsX86_64 => "windows",
             Self::LinuxX86_64 | Self::LinuxAarch64 => "linux",
+            Self::MacosX86_64 | Self::MacosAarch64 => "macos",
         }
     }
 
     #[must_use]
     pub fn architecture(self) -> &'static str {
         match self {
-            Self::WindowsX86_64 | Self::LinuxX86_64 => "x86_64",
-            Self::LinuxAarch64 => "aarch64",
+            Self::WindowsX86_64 | Self::LinuxX86_64 | Self::MacosX86_64 => "x86_64",
+            Self::LinuxAarch64 | Self::MacosAarch64 => "aarch64",
         }
     }
 
@@ -76,7 +81,7 @@ impl WorkerKitTarget {
                 "worker-kit.sig",
                 "SHA256SUMS",
             ],
-            Self::LinuxX86_64 | Self::LinuxAarch64 => [
+            Self::LinuxX86_64 | Self::LinuxAarch64 | Self::MacosX86_64 | Self::MacosAarch64 => [
                 "cyc-worker",
                 "install-worker.sh",
                 "worker-kit.json",
@@ -102,6 +107,8 @@ impl WorkerKitTarget {
             ("windows", "x86_64") => Ok(Self::WindowsX86_64),
             ("linux", "x86_64") => Ok(Self::LinuxX86_64),
             ("linux", "aarch64") => Ok(Self::LinuxAarch64),
+            ("macos", "x86_64") => Ok(Self::MacosX86_64),
+            ("macos", "aarch64") => Ok(Self::MacosAarch64),
             _ => Err(WorkerKitError::UnsupportedTarget),
         }
     }
@@ -140,7 +147,7 @@ impl WorkerKitCatalog {
 
     /// Construct from an already-resolved exact `worker-kits` root. This is
     /// useful for isolated tests and embedders that do not have an installer
-    /// root, and still never scans outside the three fixed target children.
+    /// root, and still never scans outside the five fixed target children.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
@@ -587,7 +594,7 @@ pub enum WorkerKitError {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::BTreeMap, fs};
 
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
     use ed25519_dalek::{Signer, SigningKey};
@@ -604,30 +611,30 @@ mod tests {
         0x7f, 0x60,
     ];
 
-    fn fixture() -> TempDir {
+    fn fixture_for(target: WorkerKitTarget) -> TempDir {
         let root = TempDir::new().unwrap();
-        let directory = root.path().join("linux-x86_64");
+        let directory = root.path().join(target.as_str());
         fs::create_dir(&directory).unwrap();
         let worker = b"fixture-worker";
         let lifecycle = b"#!/bin/sh\nexit 0\n";
-        fs::write(directory.join("cyc-worker"), worker).unwrap();
-        fs::write(directory.join("install-worker.sh"), lifecycle).unwrap();
+        fs::write(directory.join(target.worker_name()), worker).unwrap();
+        fs::write(directory.join(target.lifecycle_name()), lifecycle).unwrap();
         let manifest = WorkerKitManifest {
             schema_version: "cyc.dev/worker-kit/v1".to_owned(),
             product: "ClusterYourCodex Managed Worker".to_owned(),
             version: "0.1.0-test.1".to_owned(),
-            target: "linux-x86_64".to_owned(),
-            os: "linux".to_owned(),
-            architecture: "x86_64".to_owned(),
+            target: target.as_str().to_owned(),
+            os: target.operating_system().to_owned(),
+            architecture: target.architecture().to_owned(),
             files: vec![
                 ManifestFile {
-                    path: "cyc-worker".to_owned(),
+                    path: target.worker_name().to_owned(),
                     size_bytes: worker.len() as u64,
                     sha256: sha256_hex(worker),
                     role: "worker".to_owned(),
                 },
                 ManifestFile {
-                    path: "install-worker.sh".to_owned(),
+                    path: target.lifecycle_name().to_owned(),
                     size_bytes: lifecycle.len() as u64,
                     sha256: sha256_hex(lifecycle),
                     role: "lifecycle".to_owned(),
@@ -653,15 +660,35 @@ mod tests {
         fs::write(
             directory.join("SHA256SUMS"),
             format!(
-                "{}  cyc-worker\n{}  install-worker.sh\n{}  worker-kit.json\n{}  worker-kit.sig\n",
+                "{}  {}\n{}  {}\n{}  worker-kit.json\n{}  worker-kit.sig\n",
                 sha256_hex(worker),
+                target.worker_name(),
                 sha256_hex(lifecycle),
+                target.lifecycle_name(),
                 sha256_hex(&manifest_bytes),
                 sha256_hex(&signature_bytes)
             ),
         )
         .unwrap();
         root
+    }
+
+    fn fixture() -> TempDir {
+        fixture_for(WorkerKitTarget::LinuxX86_64)
+    }
+
+    fn inventory(operating_system: &str, architecture: &str) -> crate::DiscoveredComputer {
+        crate::DiscoveredComputer {
+            hostname: "fixture-worker".to_owned(),
+            operating_system: operating_system.to_owned(),
+            architecture: architecture.to_owned(),
+            cpu_model: "fixture-cpu".to_owned(),
+            logical_cpu_count: 8,
+            memory_bytes: 16 * 1024 * 1024 * 1024,
+            workspace_free_bytes: 100 * 1024 * 1024,
+            gpu_devices: Vec::new(),
+            toolchains: BTreeMap::new(),
+        }
     }
 
     #[test]
@@ -676,6 +703,45 @@ mod tests {
     }
 
     #[test]
+    fn macos_targets_map_from_inventory_and_load_exact_signed_kits() {
+        for (architecture, target) in [
+            ("x86_64", WorkerKitTarget::MacosX86_64),
+            ("aarch64", WorkerKitTarget::MacosAarch64),
+        ] {
+            let discovered = inventory("macos", architecture);
+            assert_eq!(
+                WorkerKitTarget::from_inventory(&discovered).unwrap(),
+                target
+            );
+            let root = fixture_for(target);
+            let kit = WorkerKitCatalog::new(root.path())
+                .load_for_inventory(&discovered)
+                .unwrap();
+            assert_eq!(kit.target(), target);
+            assert_eq!(kit.files().len(), 5);
+            assert_eq!(
+                kit.files()
+                    .iter()
+                    .map(|file| file.name.as_str())
+                    .collect::<std::collections::BTreeSet<_>>(),
+                [
+                    "SHA256SUMS",
+                    "cyc-worker",
+                    "install-worker.sh",
+                    "worker-kit.json",
+                    "worker-kit.sig",
+                ]
+                .into_iter()
+                .collect()
+            );
+        }
+        assert!(matches!(
+            WorkerKitTarget::from_inventory(&inventory("macos", "armv7")),
+            Err(WorkerKitError::UnsupportedTarget)
+        ));
+    }
+
+    #[test]
     fn install_root_maps_only_to_fixed_worker_kits_child() {
         let install_root = TempDir::new().unwrap();
         let catalog = WorkerKitCatalog::from_install_root(install_root.path()).unwrap();
@@ -685,7 +751,7 @@ mod tests {
 
     #[test]
     fn repository_publisher_public_key_is_a_valid_ed25519_trust_root() {
-        let encoded = include_str!("../publisher_keys/cyc-release-2026-01.pub").trim();
+        let encoded = include_str!("../publisher_keys/cyc-release-2026-02.pub").trim();
         let decoded = BASE64_STANDARD.decode(encoded).unwrap();
         let public_key: [u8; 32] = decoded.try_into().unwrap();
         assert!(ed25519_dalek::VerifyingKey::from_bytes(&public_key).is_ok());
