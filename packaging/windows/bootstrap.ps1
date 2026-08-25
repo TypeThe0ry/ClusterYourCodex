@@ -3614,7 +3614,16 @@ function Stop-CycRuntime {
         $processPath = $null
         try { $processPath = $process.Path } catch { $processPath = $null }
         if ($processPath -and ($ownedExecutables -contains (Resolve-NormalizedPath $processPath))) {
-            Stop-Process -Id $process.Id -Force -ErrorAction Stop
+            try {
+                Stop-Process -Id $process.Id -Force -ErrorAction Stop
+            } catch {
+                # A scheduled-task process can exit between the snapshot and
+                # the stop request. Treat that narrow race as already stopped,
+                # but preserve access-denied and other real failures.
+                if (Get-Process -Id $process.Id -ErrorAction SilentlyContinue) {
+                    throw
+                }
+            }
             Wait-Process -Id $process.Id -Timeout 15 -ErrorAction SilentlyContinue
         }
     }

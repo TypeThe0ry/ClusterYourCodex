@@ -392,6 +392,7 @@ try {
     Assert-True ($source -match 'Set-PrivateDirectoryAcl -Path \$Plan\.installRoot -AllowAdministratorsReadAndExecute[\s\S]+Set-PrivateDirectoryAcl -Path \$Plan\.dataRoot') 'only the install tree, never private data/TLS state, receives the administrator read contract'
     Assert-True ($source -match 'Assert-SafePurgeTarget') 'recursive purge is guarded'
     Assert-True ($source -match 'Stop-CycRuntime') 'owned runtime is stopped before replacement'
+    Assert-True ($source -match 'Get-Process -Id \$process\.Id -ErrorAction SilentlyContinue') 'runtime stop tolerates a process exiting between snapshot and stop'
     Assert-True ($source -match 'Restore-FileRollbackSnapshot') 'failed replacement has file rollback'
     Assert-True ($source -match 'Restore-CycTaskSnapshots') 'failed replacement has task rollback'
     Assert-True ($source -match 'Wait-CycTaskStable') 'Scheduled Tasks require a stable running window'
