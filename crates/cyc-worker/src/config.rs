@@ -17,7 +17,14 @@ use crate::security::{
 
 pub const WORKER_CONFIG_VERSION: &str = "cyc.dev/worker-config/v1";
 const BOOT_GENERATION_STATE_VERSION: &str = "cyc.dev/worker-boot-generation/v1";
-const BOOT_GENERATION_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+// Allocating a generation replaces an ACL-protected state file while holding
+// this lock. On Windows, every contender must complete several native DACL
+// apply/verify operations in sequence. A 30-second bound was shorter than the
+// legitimate serialized work of eight independent daemon starts on a clean
+// release runner, so the last valid contender could fail even though the lock
+// owner was making progress. Keep the wait bounded, but cover the supported
+// contention test and slow first-run ACL initialization.
+const BOOT_GENERATION_LOCK_TIMEOUT: Duration = Duration::from_secs(120);
 const PAIRING_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// RAII ownership of the stable per-config pairing lock.  The lock file is a
