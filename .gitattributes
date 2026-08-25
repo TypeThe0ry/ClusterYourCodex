@@ -1,0 +1,4 @@
+# Exact release identity and executable lifecycle scripts are byte-sensitive.
+VERSION text eol=lf
+*.sh text eol=lf
+*.pub text eol=lf

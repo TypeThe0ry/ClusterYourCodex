@@ -28,3 +28,14 @@ critical or high-severity advisory remains unresolved.
 - Retries are limited to classified transient failures.
 - GitHub Actions are pinned to immutable commit SHAs and dependency advisories
   are checked for both Rust lockfiles and the pnpm workspace.
+
+## Target-scoped advisory dispositions
+
+`GHSA-wrw7-89jp-8q8g` applies to `glib` versions below 0.20. The Tauri 2.11
+Linux GTK backend currently resolves `glib 0.18.5`, but that backend is not in
+the declared or published product scope: the desktop host is Windows x64 only,
+and the Windows and macOS target graphs contain no `glib` package. The alert is
+therefore dismissed as `not_used` for the current prerelease scope rather than
+misrepresented as an upgraded dependency. It must be re-opened and resolved
+before a Linux desktop-host artifact is declared or published; target-scope
+proof is retained in the exact-SHA release evidence.
