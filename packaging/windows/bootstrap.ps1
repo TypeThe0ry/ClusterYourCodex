@@ -88,7 +88,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
-$script:ProductVersion = '0.1.0-preview.8'
+$script:ProductVersion = '0.1.0-preview.9'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
@@ -3726,8 +3726,11 @@ function Wait-CycControllerReady {
             $stream.ReadTimeout = 1000
             $stream.WriteTimeout = 1000
 
+            # The controller validates the complete loopback authority,
+            # including its bound port.  Keep this probe proxy-independent,
+            # but send the same Host value a normal URI request would produce.
             $request = [Text.Encoding]::ASCII.GetBytes(
-                "GET /v1/health HTTP/1.1`r`nHost: 127.0.0.1`r`nConnection: close`r`n`r`n"
+                "GET /v1/health HTTP/1.1`r`nHost: 127.0.0.1:47831`r`nConnection: close`r`n`r`n"
             )
             $stream.Write($request, 0, $request.Length)
             $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::ASCII, $false, 1024, $true)

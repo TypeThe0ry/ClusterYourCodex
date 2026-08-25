@@ -1117,6 +1117,10 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($safeRef)) { $safeRef = 'build' }
           $name = "ClusterYourCodex-$safeRef-windows-x64-self-contained-preview"
           $preview = Join-Path $env:RUNNER_TEMP $name
+          $freshWorkRoot = Join-Path $env:RUNNER_TEMP 'ClusterYourCodex-fresh-deployment-smoke'
+          if (Test-Path -LiteralPath $freshWorkRoot) {
+            Remove-Item -LiteralPath $freshWorkRoot -Recurse -Force
+          }
           $archive = Join-Path $PWD "release-assets\$name.zip"
           if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
             throw "published ZIP is missing: $archive"
@@ -1150,8 +1154,18 @@ jobs:
               [string]::Join("`n", $sourceInventory) -cne [string]::Join("`n", $extractedInventory)) {
             throw 'published ZIP did not preserve the exact forced/hidden package tree and file bytes'
           }
-          & .\packaging\windows\Test-FreshDeployment.ps1 -PackageRoot $extractedPackage
+          & .\packaging\windows\Test-FreshDeployment.ps1 `
+            -PackageRoot $extractedPackage `
+            -WorkRoot $freshWorkRoot `
+            -KeepWorkRoot
           if ($LASTEXITCODE -ne 0) { throw 'fresh deployment lifecycle smoke failed' }
+      - name: Upload fresh deployment diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ClusterYourCodex-windows-fresh-deployment-diagnostics
+          path: ${{ runner.temp }}\ClusterYourCodex-fresh-deployment-smoke\**
+          if-no-files-found: warn
       - name: Run silent Setup lifecycle smoke in disposable runner
         shell: pwsh
         env:

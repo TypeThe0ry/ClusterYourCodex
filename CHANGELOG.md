@@ -7,6 +7,17 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.9] - 2026-08-26
+
+### Fixed
+
+- Windows installer controller readiness now sends the validated loopback
+  authority (`127.0.0.1:47831`) in its direct TCP health probe. The controller
+  rejects a host header without the bound port, which previously made the
+  clean self-contained deployment smoke fail even when the process was
+  listening.
+- Added a regression assertion for the port-qualified health-probe authority.
+
 ## [0.1.0-preview.8] - 2026-08-26
 
 ### Fixed
