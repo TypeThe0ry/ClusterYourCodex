@@ -22,6 +22,8 @@ are versioned independently from the product.
 - Controller network planning now resolves one immutable private-LAN plan for
   PlanOnly, Install, Repair, and runtime use, with a .NET fallback when the
   optional Windows NetTCPIP cmdlet is unavailable.
+- Windows lifecycle cleanup tolerates a managed process exiting between the
+  process snapshot and the stop request while still surfacing real failures.
 - Controller identity verification enforces the exact typed multi-SAN set and
   pairing recovery distinguishes Pending, Consumed, Ready, Failed, and
   Revoked states.
