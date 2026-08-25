@@ -1013,18 +1013,24 @@ function Test-CycLifecycleCoreCommitAfterImage {
     return $false
 }
 
-function Get-CycRolledBackUninstallRetryEvidence {
+function Get-CycRolledBackNoManifestCleanupEvidence {
     param(
         [AllowNull()]$Journal,
         [AllowNull()]$Receipt,
         [AllowNull()]$Manifest,
         [AllowNull()]$Request,
-        [Parameter(Mandatory = $true)][string]$RequestedAction
+        [Parameter(Mandatory = $true)][ValidateSet('Install', 'Repair', 'Uninstall')][string]$RequestedAction
     )
-    if ($RequestedAction -cne 'Uninstall' -or -not $Journal -or -not $Receipt -or -not $Request -or $Manifest -or
-        [string]$Journal.action -cne 'Uninstall' -or
+    # RequestedAction is deliberately not part of the stored-obligation
+    # identity.  A rolled-back mutation with no manifest cannot prove that its
+    # snapshot excluded the managed rule.  Both an Uninstall/Remove predecessor
+    # and a legacy Install-or-Repair/Apply predecessor therefore require one
+    # independently journaled, verified Remove before any later action.
+    if (-not $Journal -or -not $Receipt -or -not $Request -or $Manifest -or
+        [string]$Journal.action -cnotin @('Install', 'Repair', 'Uninstall') -or
         [string]$Receipt.result -cne 'rolledBack' -or
-        [string]$Request.action -cne 'Remove' -or
+        ([string]$Journal.action -cin @('Install', 'Repair') -and
+            [string]$Journal.phase -cnotin @('prepared', 'firewallApplied', 'complete')) -or
         -not (Test-CycFirewallReceiptJournalBinding -Receipt $Receipt -Journal $Journal) -or
         -not (Test-CycFirewallRequestJournalBinding -Request $Request -Journal $Journal)) {
         return $null
@@ -1032,15 +1038,167 @@ function Get-CycRolledBackUninstallRetryEvidence {
     if ([string]$Request.programSha256 -cnotmatch '^[0-9a-f]{64}$' -or
         [string]$Request.packageManifestSha256 -cnotmatch '^[0-9a-f]{64}$' -or
         [int]$Request.port -lt 1 -or [int]$Request.port -gt 65535) {
-        throw 'Rolled-back Uninstall retry evidence is malformed.'
+        throw 'Rolled-back no-manifest cleanup evidence is malformed.'
     }
     return [PSCustomObject]@{
         predecessorTransactionId = [string]$Journal.transactionId
         predecessorRequestSha256 = [string]$Journal.requestSha256
         predecessorAction = [string]$Journal.action
+        cleanupLifecycleAction = 'Uninstall'
+        cleanupFirewallAction = 'Remove'
         programSha256 = [string]$Request.programSha256
         packageManifestSha256 = [string]$Request.packageManifestSha256
         port = [int]$Request.port
+    }
+}
+
+function Get-CycRolledBackUninstallRetryEvidence {
+    param(
+        [AllowNull()]$Journal,
+        [AllowNull()]$Receipt,
+        [AllowNull()]$Manifest,
+        [AllowNull()]$Request,
+        [Parameter(Mandatory = $true)][ValidateSet('Install', 'Repair', 'Uninstall')][string]$RequestedAction
+    )
+    return Get-CycRolledBackNoManifestCleanupEvidence `
+        -Journal $Journal `
+        -Receipt $Receipt `
+        -Manifest $Manifest `
+        -Request $Request `
+        -RequestedAction $RequestedAction
+}
+
+function Get-CycLifecycleRecoveryRouting {
+    param(
+        [AllowNull()]$Journal,
+        [AllowNull()]$Receipt,
+        [AllowNull()]$Manifest,
+        [AllowNull()]$Request,
+        [Parameter(Mandatory = $true)][ValidateSet('Install', 'Repair', 'Uninstall')][string]$RequestedAction
+    )
+
+    $resumeAction = $RequestedAction
+    $deferredAction = $null
+    $cleanupPending = $false
+    if (-not $Journal -or $Manifest) {
+        return [PSCustomObject]@{
+            resumeAction = $resumeAction
+            deferredAction = $deferredAction
+            cleanupPending = $cleanupPending
+        }
+    }
+
+    $journalAction = [string]$Journal.action
+    $cleanupVerified = $journalAction -ceq 'Uninstall' -and
+        [string]$Journal.phase -ceq 'complete' -and
+        $Receipt -and [string]$Receipt.result -ceq 'verified' -and
+        (Test-CycFirewallReceiptJournalBinding -Receipt $Receipt -Journal $Journal)
+    if ($cleanupVerified) {
+        return [PSCustomObject]@{
+            resumeAction = $resumeAction
+            deferredAction = $deferredAction
+            cleanupPending = $cleanupPending
+        }
+    }
+
+    $journalPhase = [string]$Journal.phase
+    if ($journalAction -cin @('Install', 'Repair') -and $journalPhase -ceq 'coreApplied') {
+        throw 'A no-manifest coreApplied Apply transaction cannot be recovered safely.'
+    }
+    $receiptResult = if ($Receipt) { [string]$Receipt.result } else { $null }
+    $preCoreApply = $journalAction -cin @('Install', 'Repair') -and
+        $journalPhase -cin @('prepared', 'firewallApplied') -and
+        (-not $Receipt -or $receiptResult -cin @('rollbackFailed', 'rolledBack'))
+    $legacyRolledBackApply = $journalAction -cin @('Install', 'Repair') -and
+        $journalPhase -ceq 'complete' -and
+        $receiptResult -ceq 'rolledBack'
+    $requiresApplyCleanup = $preCoreApply -or $legacyRolledBackApply
+    if ($journalAction -cne 'Uninstall' -and -not $requiresApplyCleanup) {
+        return [PSCustomObject]@{
+            resumeAction = $resumeAction
+            deferredAction = $deferredAction
+            cleanupPending = $cleanupPending
+        }
+    }
+
+    # An unfinished no-manifest Uninstall, a pre-core Apply that must first
+    # rollback, or a legacy rolled-back Apply is an outstanding firewall cleanup
+    # obligation. Its immutable request must remain reconstructable; otherwise
+    # fail closed without retiring the journal.
+    $expectedRequestAction = if ($journalAction -ceq 'Uninstall') { 'Remove' } else { 'Apply' }
+    if (-not $Request -or [string]$Request.action -cne $expectedRequestAction -or
+        -not (Test-CycFirewallRequestJournalBinding -Request $Request -Journal $Journal) -or
+        ($Receipt -and -not (Test-CycFirewallReceiptJournalBinding -Receipt $Receipt -Journal $Journal))) {
+        throw 'Pending no-manifest firewall cleanup is missing its exact immutable request evidence.'
+    }
+    $cleanupPending = $true
+    $resumeAction = $journalAction
+    if ($RequestedAction -cne 'Uninstall') {
+        $deferredAction = $RequestedAction
+    }
+    return [PSCustomObject]@{
+        resumeAction = $resumeAction
+        deferredAction = $deferredAction
+        cleanupPending = $cleanupPending
+    }
+}
+
+function Get-CycLifecycleTransactionAction {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Install', 'Repair', 'Uninstall')][string]$RequestedAction,
+        [AllowNull()]$CleanupEvidence
+    )
+    if (-not $CleanupEvidence) { return $RequestedAction }
+    if (-not $CleanupEvidence.PSObject.Properties['cleanupLifecycleAction'] -or
+        -not $CleanupEvidence.PSObject.Properties['cleanupFirewallAction'] -or
+        [string]$CleanupEvidence.cleanupLifecycleAction -cne 'Uninstall' -or
+        [string]$CleanupEvidence.cleanupFirewallAction -cne 'Remove') {
+        throw 'Stored firewall cleanup obligation is malformed.'
+    }
+    return 'Uninstall'
+}
+
+function Get-CycLifecycleDeferredAction {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Install', 'Repair', 'Uninstall')][string]$RequestedAction,
+        [AllowNull()][string]$CurrentDeferredAction,
+        [AllowNull()]$CleanupEvidence
+    )
+    if (-not [string]::IsNullOrWhiteSpace($CurrentDeferredAction)) {
+        if ($CurrentDeferredAction -cnotin @('Install', 'Repair')) {
+            throw 'Stored deferred lifecycle action is malformed.'
+        }
+        return $CurrentDeferredAction
+    }
+    if ($CleanupEvidence -and $RequestedAction -cin @('Install', 'Repair')) {
+        return $RequestedAction
+    }
+    return $null
+}
+
+function Get-CycLifecyclePostTransactionDecision {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Install', 'Repair', 'Uninstall')][string]$RequestedAction,
+        [Parameter(Mandatory = $true)][ValidateSet('Install', 'Repair', 'Uninstall')][string]$TransactionAction,
+        [AllowNull()][string]$DeferredAction,
+        [Parameter(Mandatory = $true)][bool]$FirewallVerified
+    )
+    if (-not [string]::IsNullOrWhiteSpace($DeferredAction)) {
+        if (-not $FirewallVerified -or $TransactionAction -cne 'Uninstall' -or
+            $DeferredAction -cnotin @('Install', 'Repair') -or
+            $DeferredAction -cne $RequestedAction) {
+            throw 'Deferred lifecycle continuation is not bound to a verified cleanup transaction.'
+        }
+        return [PSCustomObject]@{
+            continueRequestedAction = $true
+            nextAction = $DeferredAction
+            terminalAction = $null
+        }
+    }
+    return [PSCustomObject]@{
+        continueRequestedAction = $false
+        nextAction = $null
+        terminalAction = $TransactionAction
     }
 }
 
@@ -1053,16 +1211,21 @@ function Complete-CycPreCoreFirewallRecovery {
         [Parameter(Mandatory = $true)][ValidateSet('Install', 'Repair', 'Uninstall')][string]$RequestedAction,
         [Parameter(Mandatory = $true)][string]$JournalPath
     )
-    $retryEvidence = Get-CycRolledBackUninstallRetryEvidence `
+    $retryEvidence = Get-CycRolledBackNoManifestCleanupEvidence `
         -Journal $Journal `
         -Receipt $Receipt `
         -Manifest $Manifest `
         -Request $Request `
         -RequestedAction $RequestedAction
+    if (-not $Manifest -and [string]$Receipt.result -ceq 'rolledBack' -and
+        [string]$Journal.action -cin @('Install', 'Repair', 'Uninstall') -and -not $retryEvidence) {
+        throw 'Rolled-back no-manifest cleanup evidence could not be reconstructed; retaining its journal.'
+    }
 
-    # The complete write is the predecessor tombstone commit point.  If an
-    # absent-manifest Uninstall needs another Remove, leave these exact journal
-    # bytes in place until Write-CycLifecycleActiveJournal replaces them by CAS.
+    # The complete write is the predecessor tombstone commit point.  If a
+    # rolled-back no-manifest mutation needs a conservative Remove, leave these
+    # exact journal bytes in place until Write-CycLifecycleActiveJournal
+    # replaces them by CAS.
     # A crash before successor publication can therefore reconstruct the retry
     # from the immutable request and atomically published rolledBack receipt.
     $Journal.phase = 'complete'
@@ -1829,6 +1992,15 @@ function Invoke-ClusterYourCodexLifecycleCore {
     if ($privateReceiptFailure -and -not $oldReceipt) {
         throw $privateReceiptFailure
     }
+    $recoveryRouting = Get-CycLifecycleRecoveryRouting `
+        -Journal $oldJournal `
+        -Receipt $oldReceipt `
+        -Manifest $oldManifest `
+        -Request $oldRequest `
+        -RequestedAction $Action
+    $resumeAction = [string]$recoveryRouting.resumeAction
+    $deferredAction = $recoveryRouting.deferredAction
+    $cleanupPending = [bool]$recoveryRouting.cleanupPending
     # The core process may commit and exit in the narrow window before the
     # coordinator records coreApplied.  Reconcile only from an exact durable
     # core after-image bound to the immutable request: a pending install/repair
@@ -1839,7 +2011,7 @@ function Invoke-ClusterYourCodexLifecycleCore {
         [string]$oldReceipt.result -ceq 'rollbackFailed'
     if ($oldJournal -and $receiptAllowsCorePromotion -and
         [string]$oldJournal.phase -ceq 'firewallApplied' -and
-        [string]$oldJournal.action -ceq $Action) {
+        [string]$oldJournal.action -ceq $resumeAction) {
         $coreCommitObserved = Test-CycLifecycleCoreCommitAfterImage `
             -Journal $oldJournal `
             -Manifest $oldManifest `
@@ -1855,13 +2027,13 @@ function Invoke-ClusterYourCodexLifecycleCore {
         -Receipt $oldReceipt `
         -Manifest $oldManifest `
         -ReceiptSha256 $oldReceiptSha256 `
-        -RequestedAction $Action
+        -RequestedAction $resumeAction
     Set-CycLifecycleDiagnosticStage -Stage 'state-evaluated'
     if ($resumeDecision -eq 'Reject') { throw 'Existing firewall lifecycle journal does not belong to this user/action.' }
     $replaceCompletedTransactionId = $null
     $replaceCompletedRequestSha256 = $null
     $replaceCompletedAction = $null
-    $rolledBackUninstallRetry = $null
+    $rolledBackCleanupEvidence = $null
     if ($resumeDecision -eq 'RetireThenStart') {
         $replaceCompletedTransactionId = [string]$oldJournal.transactionId
         $replaceCompletedRequestSha256 = [string]$oldJournal.requestSha256
@@ -1905,6 +2077,10 @@ function Invoke-ClusterYourCodexLifecycleCore {
             -ExpectedAction ([string]$oldJournal.action) `
             -ExpectedRequestSha256 ([string]$oldJournal.requestSha256) `
             -BestEffort)
+        if (-not [string]::IsNullOrWhiteSpace([string]$deferredAction)) {
+            Set-CycLifecycleDiagnosticStage -Stage 'deferred-firewall-cleanup-complete'
+            return Invoke-ClusterYourCodexLifecycleCore
+        }
         Set-CycLifecycleDiagnosticStage -Stage 'complete'
         return [PSCustomObject]@{ action = $Action; status = 'unchanged'; resumed = $true; firewallVerified = $true }
     }
@@ -1918,20 +2094,27 @@ function Invoke-ClusterYourCodexLifecycleCore {
             -ExpectedAction ([string]$oldJournal.action) `
             -ExpectedRequestSha256 ([string]$oldJournal.requestSha256) `
             -BestEffort)
+        if (-not [string]::IsNullOrWhiteSpace([string]$deferredAction)) {
+            Set-CycLifecycleDiagnosticStage -Stage 'deferred-firewall-cleanup-complete'
+            return Invoke-ClusterYourCodexLifecycleCore
+        }
         Set-CycLifecycleDiagnosticStage -Stage 'complete'
         return [PSCustomObject]@{ action = $Action; status = 'unchanged'; resumed = $true; firewallVerified = $true }
     }
     if ($resumeDecision -eq 'RetireAbortedThenStart') {
-        $rolledBackUninstallRetry = Get-CycRolledBackUninstallRetryEvidence `
+        $rolledBackCleanupEvidence = Get-CycRolledBackNoManifestCleanupEvidence `
             -Journal $oldJournal `
             -Receipt $oldReceipt `
             -Manifest $oldManifest `
             -Request $oldRequest `
-            -RequestedAction $Action
+            -RequestedAction $resumeAction
+        if ($cleanupPending -and -not $oldManifest -and -not $rolledBackCleanupEvidence) {
+            throw 'Rolled-back no-manifest cleanup obligation could not be reconstructed; retaining its journal.'
+        }
         $oldJournal.phase = 'complete'
         $oldJournal.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
         Write-CycLifecycleAtomicJson -Path $journalPath -Value $oldJournal
-        if ($rolledBackUninstallRetry) {
+        if ($rolledBackCleanupEvidence) {
             # Keep the completed tombstone until the successor Remove journal
             # atomically replaces it. A crash anywhere before that CAS must
             # retain enough immutable evidence to retry orphan cleanup.
@@ -2061,12 +2244,16 @@ function Invoke-ClusterYourCodexLifecycleCore {
                 -ExpectedAction ([string]$oldJournal.action) `
                 -ExpectedRequestSha256 ([string]$oldJournal.requestSha256) `
                 -BestEffort)
+            if (-not [string]::IsNullOrWhiteSpace([string]$deferredAction)) {
+                Set-CycLifecycleDiagnosticStage -Stage 'deferred-firewall-cleanup-complete'
+                return Invoke-ClusterYourCodexLifecycleCore
+            }
             Set-CycLifecycleDiagnosticStage -Stage 'complete'
             return [PSCustomObject]@{ action = $Action; status = 'unchanged'; resumed = $true; firewallVerified = $true }
         }
-        # A pre-core rollback is normally terminal.  Uninstall is the one
-        # exception: core may already have removed the install manifest while
-        # the helper restored a snapshot that still contains the managed rule.
+        # A pre-core rollback with no manifest is not terminal: the restored
+        # snapshot may still contain the managed rule, including legacy Apply
+        # transactions that replaced an older cleanup tombstone.
         # Derive the retry only from the exact request-bound receipt that was
         # atomically published above, then retain the completed predecessor as
         # a tombstone until a successor Remove journal replaces it by CAS.
@@ -2077,9 +2264,9 @@ function Invoke-ClusterYourCodexLifecycleCore {
             -Receipt $recoveryReceipt `
             -Manifest $oldManifest `
             -Request $oldRequest `
-            -RequestedAction $Action `
+            -RequestedAction $resumeAction `
             -JournalPath $journalPath
-        $rolledBackUninstallRetry = $preCoreRecoveryCompletion.retryEvidence
+        $rolledBackCleanupEvidence = $preCoreRecoveryCompletion.retryEvidence
         $replaceCompletedTransactionId = $preCoreRecoveryCompletion.replaceCompletedTransactionId
         $replaceCompletedRequestSha256 = $preCoreRecoveryCompletion.replaceCompletedRequestSha256
         $replaceCompletedAction = $preCoreRecoveryCompletion.replaceCompletedAction
@@ -2088,13 +2275,24 @@ function Invoke-ClusterYourCodexLifecycleCore {
         $oldReceiptSha256 = $null
     }
 
+    # A same-action Apply may only become rolledBack during the recovery above.
+    # Once that exact receipt produces cleanup evidence, preserve the caller's
+    # Install/Repair as the deferred action before switching this transaction to
+    # conservative Uninstall/Remove cleanup.
+    $deferredAction = Get-CycLifecycleDeferredAction `
+        -RequestedAction $Action `
+        -CurrentDeferredAction ([string]$deferredAction) `
+        -CleanupEvidence $rolledBackCleanupEvidence
+    $transactionAction = Get-CycLifecycleTransactionAction `
+        -RequestedAction $Action `
+        -CleanupEvidence $rolledBackCleanupEvidence
     $transactionId = [Guid]::NewGuid().ToString('N')
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds($FirewallTimeoutSeconds)
     $plan = $null
     $programSha = $null
     $port = 47832
     $packageDigest = ('0' * 64)
-    if ($Action -in @('Install', 'Repair')) {
+    if ($transactionAction -in @('Install', 'Repair')) {
         Set-CycLifecycleDiagnosticStage -Stage 'plan-validating'
         if (-not (Test-Path -LiteralPath $BundleRoot -PathType Container)) { throw 'BundleRoot is missing.' }
         if (-not (Test-Path -LiteralPath $PackageManifest -PathType Leaf)) { throw 'Package manifest is missing.' }
@@ -2118,14 +2316,14 @@ function Invoke-ClusterYourCodexLifecycleCore {
         Set-CycLifecycleDiagnosticStage -Stage 'plan-validated'
     } else {
         if (-not $oldManifest) {
-            if ($rolledBackUninstallRetry) {
-                # The previous Remove transaction restored its snapshot after
-                # core Uninstall had already removed the manifest. Re-issue an
-                # independently journaled Remove from the immutable old request
-                # evidence instead of declaring an orphaned rule "unchanged".
-                $programSha = [string]$rolledBackUninstallRetry.programSha256
-                $port = [int]$rolledBackUninstallRetry.port
-                $packageDigest = [string]$rolledBackUninstallRetry.packageManifestSha256
+            if ($rolledBackCleanupEvidence) {
+                # The previous mutation rolled back with no manifest, so its
+                # restored snapshot cannot prove that the managed rule is gone.
+                # Re-issue an independently journaled Remove from the immutable
+                # old request evidence instead of reporting "unchanged".
+                $programSha = [string]$rolledBackCleanupEvidence.programSha256
+                $port = [int]$rolledBackCleanupEvidence.port
+                $packageDigest = [string]$rolledBackCleanupEvidence.packageManifestSha256
                 Set-CycLifecycleDiagnosticStage -Stage 'uninstall-firewall-retry'
             } else {
                 if (-not [string]::IsNullOrWhiteSpace($replaceCompletedTransactionId)) {
@@ -2165,7 +2363,7 @@ function Invoke-ClusterYourCodexLifecycleCore {
         -Roots $roots `
         -Exchange $exchange `
         -TransactionId $transactionId `
-        -FirewallAction $(if ($Action -eq 'Uninstall') { 'Remove' } else { 'Apply' }) `
+        -FirewallAction $(if ($transactionAction -eq 'Uninstall') { 'Remove' } else { 'Apply' }) `
         -ProgramSha256 $programSha `
         -PackageDigest $packageDigest `
         -Port $port `
@@ -2177,7 +2375,7 @@ function Invoke-ClusterYourCodexLifecycleCore {
     $journal = [ordered]@{
         schemaVersion = $script:CycLifecycleJournalSchema
         transactionId = $transactionId
-        action = $Action
+        action = $transactionAction
         phase = 'prepared'
         initiatorSid = $binding.sid
         initiatorProfile = $binding.profile
@@ -2227,7 +2425,7 @@ function Invoke-ClusterYourCodexLifecycleCore {
         [void](Assert-CycInitiatorStillCurrent -Binding $binding)
         $coreArgs = Get-CycBootstrapArguments `
             -BootstrapPath $bootstrap `
-            -Operation $Action `
+            -Operation $transactionAction `
             -Binding $binding `
             -Roots $roots `
             -TransactionId $transactionId `
@@ -2282,7 +2480,7 @@ function Invoke-ClusterYourCodexLifecycleCore {
         -RequestHash $requestHash
     $receipt = $publishedReceipt.receipt
     $privateReceiptSha256 = [string]$publishedReceipt.sha256
-    if ($Action -in @('Install', 'Repair')) {
+    if ($transactionAction -in @('Install', 'Repair')) {
         Invoke-CycCommitFirewallReceipt `
             -BootstrapPath (Join-Path $roots.installRoot 'installer\bootstrap.ps1') `
             -Binding $binding `
@@ -2309,20 +2507,30 @@ function Invoke-ClusterYourCodexLifecycleCore {
     [void](Remove-CycCompletedLifecycleJournal `
         -Path $journalPath `
         -TransactionId $transactionId `
-        -ExpectedAction $Action `
+        -ExpectedAction $transactionAction `
         -ExpectedRequestSha256 $requestHash `
         -BestEffort)
     Set-CycLifecycleDiagnosticStage -Stage 'complete'
 
-    if ($Action -eq 'Install' -and -not $NoLaunch) {
+    $postTransactionDecision = Get-CycLifecyclePostTransactionDecision `
+        -RequestedAction $Action `
+        -TransactionAction $transactionAction `
+        -DeferredAction ([string]$deferredAction) `
+        -FirewallVerified ([string]$receipt.result -ceq 'verified')
+    if ([bool]$postTransactionDecision.continueRequestedAction) {
+        Set-CycLifecycleDiagnosticStage -Stage 'deferred-firewall-cleanup-complete'
+        return Invoke-ClusterYourCodexLifecycleCore
+    }
+
+    if ($transactionAction -eq 'Install' -and -not $NoLaunch) {
         $gui = Join-Path $roots.installRoot 'ClusterYourCodex.exe'
         if (Test-Path -LiteralPath $gui -PathType Leaf) {
             Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList ('"' + $gui + '"') | Out-Null
         }
     }
     return [PSCustomObject]@{
-        action = $Action
-        status = if ($Action -eq 'Repair') { 'repaired' } elseif ($Action -eq 'Uninstall') { 'removed' } else { 'installed' }
+        action = $transactionAction
+        status = if ($transactionAction -eq 'Repair') { 'repaired' } elseif ($transactionAction -eq 'Uninstall') { 'removed' } else { 'installed' }
         resumed = $false
         firewallVerified = $true
         coreSucceeded = $coreSucceeded

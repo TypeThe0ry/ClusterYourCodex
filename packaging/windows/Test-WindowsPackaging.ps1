@@ -2925,6 +2925,110 @@ exit /b !ERRORLEVEL!
     Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $null -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Repair) -eq 'Reject') 'pre-core rollbackFailed recovery cannot cross lifecycle actions'
     $resumeJournal.phase = 'prepared'
     Assert-True ((Get-CycFirewallResumeDecision -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $null -ReceiptSha256 $resumeReceiptSha256 -RequestedAction Install) -eq 'Resume') 'prepared rollbackFailed evidence resumes exact snapshot rollback'
+    foreach ($preCoreRequestedAction in @('Install', 'Repair')) {
+        $preCoreRollbackRouting = Get-CycLifecycleRecoveryRouting `
+            -Journal $resumeJournal `
+            -Receipt $resumeReceipt `
+            -Manifest $null `
+            -Request $resumeRequest `
+            -RequestedAction $preCoreRequestedAction
+        Assert-True ([bool]$preCoreRollbackRouting.cleanupPending) "prepared rollbackFailed Apply is cleanup-owned before requested $preCoreRequestedAction"
+        Assert-True ([string]$preCoreRollbackRouting.resumeAction -ceq 'Install') "requested $preCoreRequestedAction first resumes the exact predecessor Install rollback"
+        Assert-True ([string]$preCoreRollbackRouting.deferredAction -ceq $preCoreRequestedAction) "requested $preCoreRequestedAction cannot false-succeed as removed after pre-core rollback"
+        $preCoreNoReceiptRouting = Get-CycLifecycleRecoveryRouting `
+            -Journal $resumeJournal `
+            -Receipt $null `
+            -Manifest $null `
+            -Request $resumeRequest `
+            -RequestedAction $preCoreRequestedAction
+        Assert-True ([string]$preCoreNoReceiptRouting.resumeAction -ceq 'Install') "prepared Apply without a receipt resumes its exact Install action before $preCoreRequestedAction"
+        Assert-True ([string]$preCoreNoReceiptRouting.deferredAction -ceq $preCoreRequestedAction) "prepared Apply without a receipt preserves requested $preCoreRequestedAction through rollback and cleanup"
+
+        $simulatedRecoveredApplyReceipt = New-CycFirewallReceipt `
+            -Request $resumeRequest `
+            -RequestHash $requestHash `
+            -Result rolledBack `
+            -FailureCode 'coordinator-cancelled-or-timed-out'
+        $simulatedCleanupEvidence = Get-CycRolledBackNoManifestCleanupEvidence `
+            -Journal $resumeJournal `
+            -Receipt $simulatedRecoveredApplyReceipt `
+            -Manifest $null `
+            -Request $resumeRequest `
+            -RequestedAction $preCoreRequestedAction
+        $simulatedDeferredAction = Get-CycLifecycleDeferredAction `
+            -RequestedAction $preCoreRequestedAction `
+            -CurrentDeferredAction ([string]$preCoreNoReceiptRouting.deferredAction) `
+            -CleanupEvidence $simulatedCleanupEvidence
+        $simulatedCleanupTransactionAction = Get-CycLifecycleTransactionAction `
+            -RequestedAction $preCoreRequestedAction `
+            -CleanupEvidence $simulatedCleanupEvidence
+        $simulatedPostCleanup = Get-CycLifecyclePostTransactionDecision `
+            -RequestedAction $preCoreRequestedAction `
+            -TransactionAction $simulatedCleanupTransactionAction `
+            -DeferredAction $simulatedDeferredAction `
+            -FirewallVerified $true
+        Assert-True ([bool]$simulatedPostCleanup.continueRequestedAction) "verified Remove continues into requested $preCoreRequestedAction instead of returning removed"
+        Assert-True ($null -eq $simulatedPostCleanup.terminalAction) "cleanup cannot be reported as terminal success for requested $preCoreRequestedAction"
+        Assert-True ([string]$simulatedPostCleanup.nextAction -ceq $preCoreRequestedAction) "post-cleanup control flow re-enters requested $preCoreRequestedAction"
+        $simulatedFinalAction = Get-CycLifecycleTransactionAction `
+            -RequestedAction ([string]$simulatedPostCleanup.nextAction) `
+            -CleanupEvidence $null
+        $simulatedFinalManifest = Convert-CycPackagingJson ($pendingManifest | ConvertTo-Json -Depth 12)
+        $simulatedFinalManifest.coreCommit.action = $simulatedFinalAction
+        Assert-True ([string]$simulatedFinalAction -ceq $preCoreRequestedAction) "final transaction remains requested $preCoreRequestedAction after cleanup"
+        Assert-True ([string]$simulatedFinalManifest.coreCommit.action -ceq $preCoreRequestedAction) "final manifest records requested $preCoreRequestedAction rather than Uninstall"
+    }
+    $resumeJournal.phase = 'firewallApplied'
+    foreach ($preCoreRequestedAction in @('Install', 'Repair')) {
+        foreach ($preCoreReceipt in @($null, $resumeReceipt)) {
+            $firewallAppliedRouting = Get-CycLifecycleRecoveryRouting `
+                -Journal $resumeJournal `
+                -Receipt $preCoreReceipt `
+                -Manifest $null `
+                -Request $resumeRequest `
+                -RequestedAction $preCoreRequestedAction
+            Assert-True ([string]$firewallAppliedRouting.resumeAction -ceq 'Install') "firewallApplied pre-core Apply resumes exact Install before $preCoreRequestedAction"
+            Assert-True ([string]$firewallAppliedRouting.deferredAction -ceq $preCoreRequestedAction) "firewallApplied pre-core Apply preserves $preCoreRequestedAction through rollback and verified Remove"
+        }
+    }
+    $resumeJournal.phase = 'prepared'
+    $preCoreUninstallRouting = Get-CycLifecycleRecoveryRouting `
+        -Journal $resumeJournal `
+        -Receipt $resumeReceipt `
+        -Manifest $null `
+        -Request $resumeRequest `
+        -RequestedAction Uninstall
+    Assert-True ([string]$preCoreUninstallRouting.resumeAction -ceq 'Install') 'requested Uninstall first finishes the exact predecessor Apply rollback'
+    Assert-True ([string]::IsNullOrWhiteSpace([string]$preCoreUninstallRouting.deferredAction)) 'the verified Remove cleanup itself satisfies a requested Uninstall'
+    $preCoreVerifiedReceipt = New-CycFirewallReceipt `
+        -Request $resumeRequest `
+        -RequestHash $requestHash `
+        -Result verified
+    $preCoreVerifiedRouting = Get-CycLifecycleRecoveryRouting `
+        -Journal $resumeJournal `
+        -Receipt $preCoreVerifiedReceipt `
+        -Manifest $null `
+        -Request $resumeRequest `
+        -RequestedAction Install
+    Assert-True (-not [bool]$preCoreVerifiedRouting.cleanupPending) 'verified pre-core Apply without a manifest is not reinterpreted as rolled-back cleanup'
+    Assert-True ((Get-CycFirewallResumeDecision `
+                -Journal $resumeJournal `
+                -Receipt $preCoreVerifiedReceipt `
+                -Manifest $null `
+                -ReceiptSha256 ('2' * 64) `
+                -RequestedAction Install) -eq 'Reject') 'verified Apply without its manifest after-image fails closed'
+    $resumeJournal.phase = 'coreApplied'
+    Assert-ThrowsLike `
+        -Action {
+            [void](Get-CycLifecycleRecoveryRouting `
+                -Journal $resumeJournal `
+                -Receipt $resumeReceipt `
+                -Manifest $null `
+                -Request $resumeRequest `
+                -RequestedAction Install)
+        } `
+        -Pattern 'coreApplied Apply transaction cannot be recovered safely' `
+        -Message 'coreApplied Apply without its exact manifest after-image fails closed'
     $resumeJournal.phase = 'coreApplied'
     $resumeReceipt.result = 'rolledBack'
     $resumeReceipt.failureCode = 'coordinator-cancelled-or-timed-out'
@@ -2946,7 +3050,39 @@ exit /b !ERRORLEVEL!
     Assert-True ([string]$rolledBackUninstallRetry.predecessorTransactionId -ceq [string]$resumeJournal.transactionId) 'rolled-back Uninstall retry preserves the exact predecessor transaction identity'
     Assert-True ([string]$rolledBackUninstallRetry.predecessorRequestSha256 -ceq [string]$resumeJournal.requestSha256) 'rolled-back Uninstall retry preserves the exact predecessor request digest'
     Assert-True ($null -eq (Get-CycRolledBackUninstallRetryEvidence -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $pendingManifest -Request $resumeRequest -RequestedAction Uninstall)) 'a surviving manifest does not use the absent-manifest firewall retry path'
-    Assert-True ($null -eq (Get-CycRolledBackUninstallRetryEvidence -Journal $resumeJournal -Receipt $resumeReceipt -Manifest $null -Request $resumeRequest -RequestedAction Install)) 'rolled-back Uninstall retry evidence is consumed only by a repeated Uninstall'
+    foreach ($crossAction in @('Install', 'Repair')) {
+        $crossActionRetry = Get-CycRolledBackUninstallRetryEvidence `
+            -Journal $resumeJournal `
+            -Receipt $resumeReceipt `
+            -Manifest $null `
+            -Request $resumeRequest `
+            -RequestedAction $crossAction
+        Assert-True ($null -ne $crossActionRetry) "rolled-back Uninstall cleanup survives a later $crossAction request"
+        Assert-True ([string]$crossActionRetry.cleanupLifecycleAction -ceq 'Uninstall') "$crossAction is ordered behind an Uninstall cleanup transaction"
+        Assert-True ([string]$crossActionRetry.cleanupFirewallAction -ceq 'Remove') "$crossAction is ordered behind an exact Remove mutation"
+        Assert-True ((Get-CycLifecycleTransactionAction -RequestedAction $crossAction -CleanupEvidence $crossActionRetry) -ceq 'Uninstall') "$crossAction cannot replace a pending cleanup tombstone with Apply"
+        Assert-True ((Get-CycLifecycleDeferredAction -RequestedAction $crossAction -CurrentDeferredAction $null -CleanupEvidence $crossActionRetry) -ceq $crossAction) "$crossAction remains scheduled after cleanup evidence switches the effective transaction to Uninstall"
+        $crossActionRouting = Get-CycLifecycleRecoveryRouting `
+            -Journal $resumeJournal `
+            -Receipt $resumeReceipt `
+            -Manifest $null `
+            -Request $resumeRequest `
+            -RequestedAction $crossAction
+        Assert-True ([bool]$crossActionRouting.cleanupPending) "$crossAction recognizes the outstanding exact Uninstall cleanup obligation"
+        Assert-True ([string]$crossActionRouting.resumeAction -ceq 'Uninstall') "$crossAction resumes the old Uninstall state machine before its own action"
+        Assert-True ([string]$crossActionRouting.deferredAction -ceq $crossAction) "$crossAction remains deferred until verified Remove completion"
+    }
+    Assert-ThrowsLike `
+        -Action {
+            [void](Get-CycLifecycleRecoveryRouting `
+                -Journal $resumeJournal `
+                -Receipt $resumeReceipt `
+                -Manifest $null `
+                -Request $null `
+                -RequestedAction Install)
+        } `
+        -Pattern 'exact immutable request evidence' `
+        -Message 'a rolled-back no-manifest Uninstall with missing request evidence fails closed without retiring its tombstone'
 
     # Integration regression for the second orphan Remove: a prepared
     # Uninstall with no manifest and an exact rollbackFailed receipt first
@@ -3009,6 +3145,261 @@ exit /b !ERRORLEVEL!
     $orphanRetryAfterCrashReceipt = Read-CycLifecycleJson -Path $orphanRetryReceiptPath -MaximumBytes 32768 -Label 'rolled-back Uninstall retry receipt'
     $orphanRetryAfterCrashRequest = Read-CycLifecycleJson -Path $orphanRetryRequestPath -MaximumBytes 32768 -Label 'rolled-back Uninstall retry request'
     Assert-True ($null -ne (Get-CycRolledBackUninstallRetryEvidence -Journal $orphanRetryTombstone -Receipt $orphanRetryAfterCrashReceipt -Manifest $null -Request $orphanRetryAfterCrashRequest -RequestedAction Uninstall)) 'a crash before successor publication reconstructs retry evidence from the retained exact request and receipt'
+
+    foreach ($crossAction in @('Install', 'Repair')) {
+        # Persist a separate copy so each requested action independently proves
+        # the tombstone -> Remove CAS ordering and the crash gap before CAS.
+        $crossRoot = Join-Path $testRoot ('rolledback-uninstall-before-' + $crossAction.ToLowerInvariant())
+        [void](New-Item -ItemType Directory -Path $crossRoot -Force)
+        $crossJournalPath = Join-Path $crossRoot 'firewall-lifecycle.json'
+        $crossRequestPath = Join-Path $crossRoot 'request.json'
+        $crossReceiptPath = Join-Path $crossRoot 'receipt.json'
+        $crossRequest = Convert-CycPackagingJson ($orphanRetryAfterCrashRequest | ConvertTo-Json -Depth 12)
+        $crossRequest.exchangeRoot = $crossRoot
+        Write-CycLifecycleAtomicJson -Path $crossRequestPath -Value $crossRequest
+        $crossRequestSha256 = Get-CycLifecycleSha256 -Path $crossRequestPath
+        $crossJournal = Convert-CycPackagingJson ($orphanRetryTombstone | ConvertTo-Json -Depth 12)
+        $crossJournal.exchangeRoot = $crossRoot
+        $crossJournal.requestPath = $crossRequestPath
+        $crossJournal.requestSha256 = $crossRequestSha256
+        $crossJournal.privateReceiptPath = $crossReceiptPath
+        $crossJournal.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        Write-CycLifecycleAtomicJson -Path $crossJournalPath -Value $crossJournal
+        $crossReceipt = New-CycFirewallReceipt `
+            -Request $crossRequest `
+            -RequestHash $crossRequestSha256 `
+            -Result rolledBack `
+            -FailureCode 'coordinator-cancelled-or-timed-out'
+        Write-CycLifecycleAtomicJson -Path $crossReceiptPath -Value $crossReceipt
+
+        $crossEvidence = Get-CycRolledBackNoManifestCleanupEvidence `
+            -Journal $crossJournal `
+            -Receipt $crossReceipt `
+            -Manifest $null `
+            -Request $crossRequest `
+            -RequestedAction $crossAction
+        $crossRouting = Get-CycLifecycleRecoveryRouting `
+            -Journal $crossJournal `
+            -Receipt $crossReceipt `
+            -Manifest $null `
+            -Request $crossRequest `
+            -RequestedAction $crossAction
+        Assert-True ([string]$crossRouting.resumeAction -ceq 'Uninstall') "$crossAction resumes the predecessor Uninstall rather than starting Apply"
+        Assert-True ([string]$crossRouting.deferredAction -ceq $crossAction) "$crossAction stays deferred behind durable cleanup"
+        $crossJournalHashBeforeCrash = Get-CycLifecycleSha256 -Path $crossJournalPath
+        $crossAfterCrash = Read-CycLifecycleJson -Path $crossJournalPath -MaximumBytes 65536 -Label "$crossAction cleanup tombstone after simulated crash"
+        Assert-True ([string]$crossAfterCrash.phase -ceq 'complete') "$crossAction crash before successor CAS retains the completed cleanup tombstone"
+        Assert-True ((Get-CycLifecycleSha256 -Path $crossJournalPath) -ceq $crossJournalHashBeforeCrash) "$crossAction routing does not retire or mutate cleanup evidence before successor CAS"
+        Assert-True ($null -ne (Get-CycRolledBackNoManifestCleanupEvidence -Journal $crossAfterCrash -Receipt $crossReceipt -Manifest $null -Request $crossRequest -RequestedAction $crossAction)) "$crossAction reconstructs cleanup after the retirement-to-successor crash gap"
+
+        $successorTransactionId = [Guid]::NewGuid().ToString('N')
+        $successorExchange = Join-Path $crossRoot 'successor-remove'
+        [void](New-Item -ItemType Directory -Path $successorExchange -Force)
+        $successorRequestPath = Join-Path $successorExchange 'request.json'
+        $successorReceiptPath = Join-Path $successorExchange 'receipt.json'
+        $successorRequest = Convert-CycPackagingJson ($crossRequest | ConvertTo-Json -Depth 12)
+        $successorRequest.transactionId = $successorTransactionId
+        $successorRequest.requestNonce = ('8' * 64)
+        $successorRequest.action = 'Remove'
+        $successorRequest.createdAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        $successorRequest.deadlineUtc = [DateTimeOffset]::UtcNow.AddMinutes(10).ToString('o')
+        $successorRequest.exchangeRoot = $successorExchange
+        Write-CycLifecycleAtomicJson -Path $successorRequestPath -Value $successorRequest
+        $successorRequestSha256 = Get-CycLifecycleSha256 -Path $successorRequestPath
+        $successorJournal = Convert-CycPackagingJson ($crossAfterCrash | ConvertTo-Json -Depth 12)
+        $successorJournal.transactionId = $successorTransactionId
+        $successorJournal.action = Get-CycLifecycleTransactionAction -RequestedAction $crossAction -CleanupEvidence $crossEvidence
+        $successorJournal.phase = 'prepared'
+        $successorJournal.exchangeRoot = $successorExchange
+        $successorJournal.requestPath = $successorRequestPath
+        $successorJournal.requestSha256 = $successorRequestSha256
+        $successorJournal.privateReceiptPath = $successorReceiptPath
+        $successorJournal.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        Write-CycLifecycleActiveJournal `
+            -Path $crossJournalPath `
+            -Value $successorJournal `
+            -ExpectedCompletedTransactionId ([string]$crossAfterCrash.transactionId) `
+            -ExpectedCompletedRequestSha256 ([string]$crossAfterCrash.requestSha256) `
+            -ExpectedCompletedAction ([string]$crossAfterCrash.action)
+        $publishedSuccessor = Read-CycLifecycleJson -Path $crossJournalPath -MaximumBytes 65536 -Label "$crossAction successor Remove journal"
+        Assert-True ([string]$publishedSuccessor.action -ceq 'Uninstall') "$crossAction successor CAS publishes Uninstall, never Apply"
+        Assert-True ([string]$successorRequest.action -ceq 'Remove') "$crossAction successor firewall request is Remove"
+        Assert-True (Test-CycFirewallRequestJournalBinding -Request $successorRequest -Journal $publishedSuccessor) "$crossAction successor Remove request is exactly bound to its journal"
+
+        $publishedSuccessor.phase = 'coreApplied'
+        $publishedSuccessor.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        Write-CycLifecycleAtomicJson -Path $crossJournalPath -Value $publishedSuccessor
+        $successorVerifiedReceipt = New-CycFirewallReceipt `
+            -Request $successorRequest `
+            -RequestHash $successorRequestSha256 `
+            -Result verified
+        Write-CycLifecycleAtomicJson -Path $successorReceiptPath -Value $successorVerifiedReceipt
+        Assert-True ((Get-CycFirewallResumeDecision `
+                    -Journal $publishedSuccessor `
+                    -Receipt $successorVerifiedReceipt `
+                    -Manifest $null `
+                    -ReceiptSha256 (Get-CycLifecycleSha256 -Path $successorReceiptPath) `
+                    -RequestedAction Uninstall) -eq 'Complete') "$crossAction deferred action can continue only after a verified successor Remove"
+        $publishedSuccessor.phase = 'complete'
+        $publishedSuccessor.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        Write-CycLifecycleAtomicJson -Path $crossJournalPath -Value $publishedSuccessor
+        [void](Remove-CycCompletedLifecycleJournal `
+            -Path $crossJournalPath `
+            -TransactionId $successorTransactionId `
+            -ExpectedAction Uninstall `
+            -ExpectedRequestSha256 $successorRequestSha256)
+        Assert-True (-not (Test-Path -LiteralPath $crossJournalPath)) "$crossAction begins only after verified Remove cleanup retires durably"
+    }
+
+    # Compatibility regression for the old buggy coordinator that could CAS a
+    # pending cleanup tombstone directly to Apply.  If that persisted Apply is
+    # prepared and then rolls back with no manifest, its snapshot may have
+    # restored the orphan.  A later action must conservatively run a separately
+    # journaled verified Remove; Uninstall must never report unchanged here.
+    foreach ($legacyApplyAction in @('Install', 'Repair')) {
+        $legacyRoot = Join-Path $testRoot ('legacy-rolledback-apply-' + $legacyApplyAction.ToLowerInvariant())
+        [void](New-Item -ItemType Directory -Path $legacyRoot -Force)
+        $legacyJournalPath = Join-Path $legacyRoot 'firewall-lifecycle.json'
+        $legacyRequestPath = Join-Path $legacyRoot 'request.json'
+        $legacyReceiptPath = Join-Path $legacyRoot 'receipt.json'
+        $legacyRequest = Convert-CycPackagingJson ($resumeRequest | ConvertTo-Json -Depth 12)
+        $legacyRequest.transactionId = [Guid]::NewGuid().ToString('N')
+        $legacyRequest.requestNonce = ('5' * 64)
+        $legacyRequest.action = 'Apply'
+        $legacyRequest.createdAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        $legacyRequest.deadlineUtc = [DateTimeOffset]::UtcNow.AddMinutes(10).ToString('o')
+        $legacyRequest.exchangeRoot = $legacyRoot
+        Write-CycLifecycleAtomicJson -Path $legacyRequestPath -Value $legacyRequest
+        $legacyRequestSha256 = Get-CycLifecycleSha256 -Path $legacyRequestPath
+        $legacyJournal = Convert-CycPackagingJson ($resumeJournal | ConvertTo-Json -Depth 12)
+        $legacyJournal.transactionId = [string]$legacyRequest.transactionId
+        $legacyJournal.action = $legacyApplyAction
+        $legacyJournal.phase = 'prepared'
+        $legacyJournal.exchangeRoot = $legacyRoot
+        $legacyJournal.requestPath = $legacyRequestPath
+        $legacyJournal.requestSha256 = $legacyRequestSha256
+        $legacyJournal.privateReceiptPath = $legacyReceiptPath
+        $legacyJournal.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        Write-CycLifecycleAtomicJson -Path $legacyJournalPath -Value $legacyJournal
+        $legacyRolledBackReceipt = New-CycFirewallReceipt `
+            -Request $legacyRequest `
+            -RequestHash $legacyRequestSha256 `
+            -Result rolledBack `
+            -FailureCode 'coordinator-cancelled-or-timed-out'
+        Write-CycLifecycleAtomicJson -Path $legacyReceiptPath -Value $legacyRolledBackReceipt
+
+        $legacyUninstallRouting = Get-CycLifecycleRecoveryRouting `
+            -Journal $legacyJournal `
+            -Receipt $legacyRolledBackReceipt `
+            -Manifest $null `
+            -Request $legacyRequest `
+            -RequestedAction Uninstall
+        Assert-True ([bool]$legacyUninstallRouting.cleanupPending) "$legacyApplyAction rolledBack Apply with no manifest is conservatively owned cleanup state"
+        Assert-True ([string]$legacyUninstallRouting.resumeAction -ceq $legacyApplyAction) "$legacyApplyAction rolledBack Apply is retired only from its exact predecessor action"
+        Assert-True ([string]::IsNullOrWhiteSpace([string]$legacyUninstallRouting.deferredAction)) "$legacyApplyAction rolledBack Apply can satisfy a requested Uninstall directly through cleanup"
+        $legacyDeferredRouting = Get-CycLifecycleRecoveryRouting `
+            -Journal $legacyJournal `
+            -Receipt $legacyRolledBackReceipt `
+            -Manifest $null `
+            -Request $legacyRequest `
+            -RequestedAction $legacyApplyAction
+        Assert-True ([string]$legacyDeferredRouting.deferredAction -ceq $legacyApplyAction) "$legacyApplyAction retry is deferred until the restored-rule uncertainty is removed"
+        $legacyCleanupEvidence = Get-CycRolledBackNoManifestCleanupEvidence `
+            -Journal $legacyJournal `
+            -Receipt $legacyRolledBackReceipt `
+            -Manifest $null `
+            -Request $legacyRequest `
+            -RequestedAction Uninstall
+        Assert-True ($null -ne $legacyCleanupEvidence) "$legacyApplyAction rolledBack Apply yields exact request-bound cleanup evidence"
+        Assert-True ((Get-CycLifecycleTransactionAction -RequestedAction Uninstall -CleanupEvidence $legacyCleanupEvidence) -ceq 'Uninstall') "$legacyApplyAction rolledBack Apply forces verified Remove instead of unchanged Uninstall"
+        Assert-True ((Get-CycLifecycleDeferredAction -RequestedAction $legacyApplyAction -CurrentDeferredAction $null -CleanupEvidence $legacyCleanupEvidence) -ceq $legacyApplyAction) "$legacyApplyAction is restored as the deferred action when rollback evidence appears only after recovery"
+
+        $legacyRollbackFailedReceipt = New-CycFirewallReceipt `
+            -Request $legacyRequest `
+            -RequestHash $legacyRequestSha256 `
+            -Result rollbackFailed `
+            -FailureCode 'helper-and-rollback-failure'
+        $legacyRollbackFailedRouting = Get-CycLifecycleRecoveryRouting `
+            -Journal $legacyJournal `
+            -Receipt $legacyRollbackFailedReceipt `
+            -Manifest $null `
+            -Request $legacyRequest `
+            -RequestedAction Uninstall
+        $legacyJournalHashBeforeRecovery = Get-CycLifecycleSha256 -Path $legacyJournalPath
+        Assert-True ((Get-CycFirewallResumeDecision `
+                    -Journal $legacyJournal `
+                    -Receipt $legacyRollbackFailedReceipt `
+                    -Manifest $null `
+                    -ReceiptSha256 ('4' * 64) `
+                    -RequestedAction ([string]$legacyRollbackFailedRouting.resumeAction)) -eq 'Resume') "$legacyApplyAction rollbackFailed cross-action resumes exact snapshot rollback before Uninstall"
+        Assert-True ((Get-CycLifecycleSha256 -Path $legacyJournalPath) -ceq $legacyJournalHashBeforeRecovery) "$legacyApplyAction rollbackFailed routing preserves the active journal until recovery publishes rolledBack"
+
+        $legacyCompletion = Complete-CycPreCoreFirewallRecovery `
+            -Journal $legacyJournal `
+            -Receipt $legacyRolledBackReceipt `
+            -Manifest $null `
+            -Request $legacyRequest `
+            -RequestedAction Uninstall `
+            -JournalPath $legacyJournalPath
+        Assert-True ($null -ne $legacyCompletion.retryEvidence) "$legacyApplyAction rolledBack Apply commits a durable cleanup tombstone"
+        $legacyTombstone = Read-CycLifecycleJson -Path $legacyJournalPath -MaximumBytes 65536 -Label "$legacyApplyAction rolledBack Apply tombstone"
+        Assert-True ([string]$legacyTombstone.phase -ceq 'complete') "$legacyApplyAction rolledBack Apply tombstone survives until Remove successor CAS"
+
+        $legacyRemoveTransactionId = [Guid]::NewGuid().ToString('N')
+        $legacyRemoveRoot = Join-Path $legacyRoot 'successor-remove'
+        [void](New-Item -ItemType Directory -Path $legacyRemoveRoot -Force)
+        $legacyRemoveRequestPath = Join-Path $legacyRemoveRoot 'request.json'
+        $legacyRemoveReceiptPath = Join-Path $legacyRemoveRoot 'receipt.json'
+        $legacyRemoveRequest = Convert-CycPackagingJson ($legacyRequest | ConvertTo-Json -Depth 12)
+        $legacyRemoveRequest.transactionId = $legacyRemoveTransactionId
+        $legacyRemoveRequest.requestNonce = ('3' * 64)
+        $legacyRemoveRequest.action = 'Remove'
+        $legacyRemoveRequest.createdAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        $legacyRemoveRequest.deadlineUtc = [DateTimeOffset]::UtcNow.AddMinutes(10).ToString('o')
+        $legacyRemoveRequest.exchangeRoot = $legacyRemoveRoot
+        Write-CycLifecycleAtomicJson -Path $legacyRemoveRequestPath -Value $legacyRemoveRequest
+        $legacyRemoveRequestSha256 = Get-CycLifecycleSha256 -Path $legacyRemoveRequestPath
+        $legacyRemoveJournal = Convert-CycPackagingJson ($legacyTombstone | ConvertTo-Json -Depth 12)
+        $legacyRemoveJournal.transactionId = $legacyRemoveTransactionId
+        $legacyRemoveJournal.action = 'Uninstall'
+        $legacyRemoveJournal.phase = 'prepared'
+        $legacyRemoveJournal.exchangeRoot = $legacyRemoveRoot
+        $legacyRemoveJournal.requestPath = $legacyRemoveRequestPath
+        $legacyRemoveJournal.requestSha256 = $legacyRemoveRequestSha256
+        $legacyRemoveJournal.privateReceiptPath = $legacyRemoveReceiptPath
+        $legacyRemoveJournal.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        Write-CycLifecycleActiveJournal `
+            -Path $legacyJournalPath `
+            -Value $legacyRemoveJournal `
+            -ExpectedCompletedTransactionId ([string]$legacyCompletion.replaceCompletedTransactionId) `
+            -ExpectedCompletedRequestSha256 ([string]$legacyCompletion.replaceCompletedRequestSha256) `
+            -ExpectedCompletedAction ([string]$legacyCompletion.replaceCompletedAction)
+        Assert-True (Test-CycFirewallRequestJournalBinding -Request $legacyRemoveRequest -Journal $legacyRemoveJournal) "$legacyApplyAction uncertainty is replaced by an exact successor Remove journal"
+        $legacyRemoveJournal.phase = 'coreApplied'
+        $legacyRemoveJournal.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        Write-CycLifecycleAtomicJson -Path $legacyJournalPath -Value $legacyRemoveJournal
+        $legacyVerifiedRemove = New-CycFirewallReceipt `
+            -Request $legacyRemoveRequest `
+            -RequestHash $legacyRemoveRequestSha256 `
+            -Result verified
+        Write-CycLifecycleAtomicJson -Path $legacyRemoveReceiptPath -Value $legacyVerifiedRemove
+        Assert-True ((Get-CycFirewallResumeDecision `
+                    -Journal $legacyRemoveJournal `
+                    -Receipt $legacyVerifiedRemove `
+                    -Manifest $null `
+                    -ReceiptSha256 (Get-CycLifecycleSha256 -Path $legacyRemoveReceiptPath) `
+                    -RequestedAction Uninstall) -eq 'Complete') "$legacyApplyAction persisted rollback converges through verified Remove, never unchanged"
+        $legacyRemoveJournal.phase = 'complete'
+        $legacyRemoveJournal.updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        Write-CycLifecycleAtomicJson -Path $legacyJournalPath -Value $legacyRemoveJournal
+        [void](Remove-CycCompletedLifecycleJournal `
+            -Path $legacyJournalPath `
+            -TransactionId $legacyRemoveTransactionId `
+            -ExpectedAction Uninstall `
+            -ExpectedRequestSha256 $legacyRemoveRequestSha256)
+        Assert-True (-not (Test-Path -LiteralPath $legacyJournalPath)) "$legacyApplyAction legacy rollback cleanup retires only after verified Remove"
+    }
+
     $orphanSuccessor = Convert-CycPackagingJson ($orphanRetryTombstone | ConvertTo-Json -Depth 12)
     $orphanSuccessor.transactionId = [Guid]::NewGuid().ToString('N')
     $orphanSuccessor.requestSha256 = ('7' * 64)
