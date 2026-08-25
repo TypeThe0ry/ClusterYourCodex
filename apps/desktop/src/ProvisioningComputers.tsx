@@ -612,6 +612,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
               {selected.state === "failed" && selected.failure ? (
                 <section className="provisioning-failure">
                   <strong>{selected.failure.code}</strong>
+                  <p>{selected.failure.message}</p>
                   <p>Failed at {stepLabels[selected.step]}. {selected.failure.retryable ? "Retry this exact checkpoint, or roll it back." : "Roll back or remove this incomplete setup record."}</p>
                 </section>
               ) : null}
