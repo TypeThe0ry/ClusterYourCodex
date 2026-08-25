@@ -516,24 +516,102 @@ fn invoke_windows_acl(shell: &str, path: &Path, kind: &str, action: &str) -> Res
         .output()
         .with_context(|| format!("failed to launch {shell} ACL operation"))?;
     if !operation.status.success() {
+        if let Some(detail) = bounded_windows_acl_diagnostic(
+            &operation.stderr,
+            "controller private-path ACL operation failed: ",
+        ) {
+            bail!("private path ACL operation failed ({detail})");
+        }
         bail!("private path ACL operation failed");
     }
     Ok(())
 }
 
 #[cfg(windows)]
+fn bounded_windows_acl_diagnostic(stderr: &[u8], expected_prefix: &str) -> Option<String> {
+    const MAX_DIAGNOSTIC_BYTES: usize = 384;
+
+    String::from_utf8_lossy(stderr).lines().find_map(|line| {
+        let sanitized = line
+            .chars()
+            .map(|character| {
+                if character.is_ascii_control() || !character.is_ascii() {
+                    '?'
+                } else {
+                    character
+                }
+            })
+            .take(MAX_DIAGNOSTIC_BYTES)
+            .collect::<String>();
+        let suffix = sanitized.trim().strip_prefix(expected_prefix)?;
+        if suffix.is_empty()
+            || !suffix.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'A'..=b'F' | b'=' | b',' | b'-' | b'_' | b'x')
+            })
+        {
+            return None;
+        }
+        Some(format!("{expected_prefix}{suffix}"))
+    })
+}
+
+#[cfg(windows)]
 const WINDOWS_ACL_SCRIPT: &str = r#"
 $ErrorActionPreference = 'Stop'
+$diagnostic = 'stage=bootstrap'
 try {
+    function ConvertTo-CanonicalFileAccessMask([int64]$rawMask) {
+        if ($rawMask -lt 0) { $rawMask += 0x100000000L }
+        if ($rawMask -lt 0 -or $rawMask -gt 0xFFFFFFFFL) {
+            throw 'access mask is outside the 32-bit range'
+        }
+
+        # FILE_GENERIC_MAPPING. Generic bits are replaced, not retained, and
+        # Synchronize is never added independently to a non-generic mask.
+        $canonical = $rawMask -band 0x0FFFFFFFL
+        if (($rawMask -band 0x80000000L) -ne 0) { $canonical = $canonical -bor 0x00120089L }
+        if (($rawMask -band 0x40000000L) -ne 0) { $canonical = $canonical -bor 0x00120116L }
+        if (($rawMask -band 0x20000000L) -ne 0) { $canonical = $canonical -bor 0x001200A0L }
+        if (($rawMask -band 0x10000000L) -ne 0) { $canonical = $canonical -bor 0x001F01FFL }
+        return [int64]$canonical
+    }
+
+    $action = [Environment]::GetEnvironmentVariable('CYC_PRIVATE_ACL_ACTION')
+    if ($action -eq 'normalize-mask') {
+        $diagnostic = 'stage=normalize-mask'
+        $rawMaskText = [Environment]::GetEnvironmentVariable('CYC_PRIVATE_ACL_RAW_MASK')
+        if ([string]::IsNullOrWhiteSpace($rawMaskText)) {
+            $diagnostic = 'code=missing-mask'
+            throw 'ACL contract violation'
+        }
+        $rawMask = [int64]::Parse(
+            $rawMaskText,
+            [Globalization.NumberStyles]::Integer,
+            [Globalization.CultureInfo]::InvariantCulture)
+        $canonicalMask = ConvertTo-CanonicalFileAccessMask $rawMask
+        $isExact = $canonicalMask -eq 0x001F01FFL
+        [Console]::Out.WriteLine(('{0:X8},{1}' -f $canonicalMask, $isExact.ToString().ToLowerInvariant()))
+        exit 0
+    }
+
+    $diagnostic = 'stage=read-input'
     $path = [Environment]::GetEnvironmentVariable('CYC_PRIVATE_ACL_PATH')
     $sidText = [Environment]::GetEnvironmentVariable('CYC_PRIVATE_ACL_SID')
     $kind = [Environment]::GetEnvironmentVariable('CYC_PRIVATE_ACL_KIND')
-    $action = [Environment]::GetEnvironmentVariable('CYC_PRIVATE_ACL_ACTION')
     if ([string]::IsNullOrWhiteSpace($path) -or [string]::IsNullOrWhiteSpace($sidText) -or $kind -notin @('file', 'directory')) {
-        throw 'missing ACL input'
+        $diagnostic = 'code=missing-input'
+        throw 'ACL contract violation'
     }
+    if ($action -notin @('apply', 'verify')) {
+        $diagnostic = 'code=invalid-action'
+        throw 'ACL contract violation'
+    }
+    $diagnostic = 'stage=parse-principals'
     $user = [System.Security.Principal.SecurityIdentifier]::new($sidText)
     $system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $diagnostic = 'stage=resolve-target'
     if ($kind -eq 'directory') {
         $item = [System.IO.DirectoryInfo]::new($path)
         $inheritance = ([System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit)
@@ -541,7 +619,17 @@ try {
         $item = [System.IO.FileInfo]::new($path)
         $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
     }
+    $item.Refresh()
+    if (-not $item.Exists) {
+        $diagnostic = 'code=target-missing'
+        throw 'ACL contract violation'
+    }
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        $diagnostic = 'code=target-reparse'
+        throw 'ACL contract violation'
+    }
     if ($action -eq 'apply') {
+        $diagnostic = 'stage=build-dacl'
         if ($kind -eq 'directory') {
             $replacement = [System.Security.AccessControl.DirectorySecurity]::new()
         } else {
@@ -558,44 +646,93 @@ try {
                 [System.Security.AccessControl.AccessControlType]::Allow)
             [void]$replacement.AddAccessRule($rule)
         }
+        $diagnostic = 'stage=apply-dacl'
         if ($item.PSObject.Methods.Name -contains 'SetAccessControl') {
             $item.SetAccessControl($replacement)
         } else {
             [System.IO.FileSystemAclExtensions]::SetAccessControl($item, $replacement)
         }
-    } elseif ($action -ne 'verify') {
-        throw 'invalid ACL action'
     }
+
+    # Discard the FileSystemInfo used to write the descriptor. Windows
+    # PowerShell and pwsh can otherwise expose a cached pre-write descriptor.
+    $diagnostic = 'stage=reload-target'
+    if ($kind -eq 'directory') {
+        $item = [System.IO.DirectoryInfo]::new($path)
+    } else {
+        $item = [System.IO.FileInfo]::new($path)
+    }
+    $item.Refresh()
+    if (-not $item.Exists) {
+        $diagnostic = 'code=target-missing-after-reload'
+        throw 'ACL contract violation'
+    }
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        $diagnostic = 'code=target-reparse-after-reload'
+        throw 'ACL contract violation'
+    }
+
+    $diagnostic = 'stage=read-dacl'
     if ($item.PSObject.Methods.Name -contains 'GetAccessControl') {
         $acl = $item.GetAccessControl()
     } else {
         $acl = [System.IO.FileSystemAclExtensions]::GetAccessControl($item)
     }
-    if (-not $acl.AreAccessRulesProtected) { throw 'DACL inheritance remains enabled' }
+    if (-not $acl.AreAccessRulesProtected) {
+        $diagnostic = 'code=dacl-not-protected'
+        throw 'ACL contract violation'
+    }
     $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-    if ($owner -ne $sidText) { throw 'unexpected owner' }
+    if ($owner -ne $sidText) {
+        $diagnostic = 'code=owner'
+        throw 'ACL contract violation'
+    }
     $rules = @($acl.GetAccessRules(
         $true, $true, [System.Security.Principal.SecurityIdentifier]))
-    if ($rules.Count -ne 2) { throw 'unexpected ACE count' }
+    if ($rules.Count -ne 2) {
+        $diagnostic = 'code=ace-count,count=' + [string]$rules.Count
+        throw 'ACL contract violation'
+    }
     $expected = @{$sidText = $false; 'S-1-5-18' = $false}
+    $ruleIndex = 0
     foreach ($rule in $rules) {
         $ruleSid = $rule.IdentityReference.Value
         if (-not $expected.ContainsKey($ruleSid) -or $expected[$ruleSid]) {
-            throw 'unexpected or duplicate principal'
+            $diagnostic = 'code=principal,index=' + [string]$ruleIndex
+            throw 'ACL contract violation'
         }
-        if ($rule.IsInherited -or
-            $rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or
-            $rule.InheritanceFlags -ne $inheritance -or
-            $rule.PropagationFlags -ne [System.Security.AccessControl.PropagationFlags]::None -or
-            (($rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne
-             [System.Security.AccessControl.FileSystemRights]::FullControl)) {
-            throw 'unexpected access rule'
+        if ($rule.IsInherited) {
+            $diagnostic = 'code=inherited,index=' + [string]$ruleIndex
+            throw 'ACL contract violation'
+        }
+        if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) {
+            $diagnostic = 'code=access-type,index=' + [string]$ruleIndex
+            throw 'ACL contract violation'
+        }
+        if ($rule.InheritanceFlags -ne $inheritance) {
+            $diagnostic = 'code=inheritance,index=' + [string]$ruleIndex
+            throw 'ACL contract violation'
+        }
+        if ($rule.PropagationFlags -ne [System.Security.AccessControl.PropagationFlags]::None) {
+            $diagnostic = 'code=propagation,index=' + [string]$ruleIndex
+            throw 'ACL contract violation'
+        }
+        $diagnostic = 'stage=normalize-mask,index=' + [string]$ruleIndex
+        $canonicalMask = ConvertTo-CanonicalFileAccessMask ([int64]$rule.FileSystemRights)
+        if ($canonicalMask -ne 0x001F01FFL) {
+            $diagnostic = 'code=access-mask,index=' + [string]$ruleIndex +
+                ',mask=0x' + $canonicalMask.ToString('X8', [Globalization.CultureInfo]::InvariantCulture)
+            throw 'ACL contract violation'
         }
         $expected[$ruleSid] = $true
+        $ruleIndex++
     }
-    if ($expected.Values -contains $false) { throw 'required principal missing' }
+    if ($expected.Values -contains $false) {
+        $diagnostic = 'code=required-principal'
+        throw 'ACL contract violation'
+    }
 } catch {
-    [Console]::Error.WriteLine('controller private-path ACL operation failed')
+    [Console]::Error.WriteLine('controller private-path ACL operation failed: ' + $diagnostic)
     exit 1
 }
 "#;
@@ -894,6 +1031,46 @@ mod tests {
         assert!(token.matches(&"a".repeat(64)));
         assert!(!token.matches(&"a".repeat(63)));
         assert!(!token.matches(&"b".repeat(64)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_acl_mask_normalization_is_strict_and_maps_generic_bits() {
+        use std::process::Command;
+
+        let cases = [
+            (0x001F01FF_i64, "001F01FF,true"),
+            (0x10000000_i64, "001F01FF,true"),
+            (-0x80000000_i64, "00120089,false"),
+            (0x40000000_i64, "00120116,false"),
+            (0x20000000_i64, "001200A0,false"),
+            (0x000F01FF_i64, "000F01FF,false"),
+            (0x011F01FF_i64, "011F01FF,false"),
+            (0x021F01FF_i64, "021F01FF,false"),
+        ];
+
+        for (raw_mask, expected) in cases {
+            let output = Command::new("powershell.exe")
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    WINDOWS_ACL_SCRIPT,
+                ])
+                .env("CYC_PRIVATE_ACL_ACTION", "normalize-mask")
+                .env("CYC_PRIVATE_ACL_RAW_MASK", raw_mask.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "normalization failed for {raw_mask}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+        }
     }
 
     #[cfg(windows)]
