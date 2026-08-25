@@ -611,7 +611,9 @@ fn validate_absolute_existing_path(path: &Path, kind: EntryKind) -> Result<(), W
     for component in path.components() {
         candidate.push(component.as_os_str());
         let metadata = fs::symlink_metadata(&candidate).map_err(WorkerKitError::Io)?;
-        if metadata.file_type().is_symlink() || metadata_is_windows_reparse(&metadata) {
+        if (metadata.file_type().is_symlink() && !is_allowed_platform_path_alias(&candidate))
+            || metadata_is_windows_reparse(&metadata)
+        {
             return Err(WorkerKitError::UnsafeEntry);
         }
     }
@@ -624,6 +626,29 @@ fn validate_absolute_existing_path(path: &Path, kind: EntryKind) -> Result<(), W
         return Err(WorkerKitError::UnsafeEntry);
     }
     Ok(())
+}
+
+/// macOS exposes `/var` and `/tmp` as stable system aliases to locations
+/// below `/private`.  `tempfile::TempDir` (and the system temporary directory
+/// used by the desktop host) commonly lives below `/var/folders`; rejecting
+/// that one OS-owned alias would make otherwise regular, non-link catalog
+/// roots fail closed on every macOS runner.  Arbitrary user-created links are
+/// still rejected by this function and by all entry-level checks.
+#[cfg(target_os = "macos")]
+fn is_allowed_platform_path_alias(path: &Path) -> bool {
+    let expected = match path {
+        path if path == Path::new("/var") => Path::new("/private/var"),
+        path if path == Path::new("/tmp") => Path::new("/private/tmp"),
+        _ => return false,
+    };
+    fs::canonicalize(path)
+        .map(|resolved| resolved == expected)
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_allowed_platform_path_alias(_path: &Path) -> bool {
+    false
 }
 
 fn verify_unchanged_identity(

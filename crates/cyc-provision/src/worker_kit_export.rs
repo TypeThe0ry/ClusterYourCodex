@@ -783,7 +783,7 @@ fn validate_existing_path_chain(
     for component in path.components() {
         candidate.push(component.as_os_str());
         let metadata = fs::symlink_metadata(&candidate).map_err(map_io)?;
-        reject_reparse_metadata(&metadata)?;
+        reject_path_chain_reparse_metadata(&candidate, &metadata)?;
     }
     let metadata = fs::symlink_metadata(path).map_err(map_io)?;
     if !metadata_matches_kind(&metadata, expected_kind) {
@@ -856,6 +856,39 @@ fn reject_reparse_metadata(metadata: &fs::Metadata) -> Result<(), WorkerKitExpor
         return Err(WorkerKitExportError::UnsafePath);
     }
     Ok(())
+}
+
+fn reject_path_chain_reparse_metadata(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(), WorkerKitExportError> {
+    if (metadata.file_type().is_symlink() && !is_allowed_platform_path_alias(path))
+        || metadata_is_windows_reparse(metadata)
+    {
+        return Err(WorkerKitExportError::UnsafePath);
+    }
+    Ok(())
+}
+
+/// macOS exposes `/var` and `/tmp` as stable system aliases to locations
+/// below `/private`.  Temporary test and desktop staging roots may therefore
+/// have one of these aliases in their existing parent chain.  Only the exact
+/// OS-owned targets are allowed; arbitrary links remain rejected.
+#[cfg(target_os = "macos")]
+fn is_allowed_platform_path_alias(path: &Path) -> bool {
+    let expected = match path {
+        path if path == Path::new("/var") => Path::new("/private/var"),
+        path if path == Path::new("/tmp") => Path::new("/private/tmp"),
+        _ => return false,
+    };
+    fs::canonicalize(path)
+        .map(|resolved| resolved == expected)
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_allowed_platform_path_alias(_path: &Path) -> bool {
+    false
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
