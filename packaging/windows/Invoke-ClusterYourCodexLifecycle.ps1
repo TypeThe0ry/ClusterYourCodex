@@ -2442,6 +2442,18 @@ function Invoke-ClusterYourCodexLifecycleCore {
         Set-CycLifecycleDiagnosticStage -Stage 'firewall-applied'
 
         [void](Assert-CycInitiatorStillCurrent -Binding $binding)
+        # Uninstall has no planner result: bootstrap only needs the managed
+        # worker network arguments for Install/Repair.  Passing
+        # `$plan.managedWorker` unconditionally makes PowerShell evaluate a
+        # property on `$null` and abort after the firewall rule was removed,
+        # leaving the installed product behind.  Keep the argument explicitly
+        # null for the uninstall transaction so the same core entry point can
+        # complete the file/task cleanup.
+        $coreManagedWorker = if ($transactionAction -in @('Install', 'Repair')) {
+            $plan.managedWorker
+        } else {
+            $null
+        }
         $coreArgs = Get-CycBootstrapArguments `
             -BootstrapPath $bootstrap `
             -Operation $transactionAction `
@@ -2449,7 +2461,7 @@ function Invoke-ClusterYourCodexLifecycleCore {
             -Roots $roots `
             -TransactionId $transactionId `
             -RequestSha256 $requestHash `
-            -ManagedWorker $plan.managedWorker
+            -ManagedWorker $coreManagedWorker
         Set-CycLifecycleDiagnosticStage -Stage 'core-applying'
         [void](Invoke-CycBootstrapProcess -Arguments $coreArgs)
         $coreManifest = Read-CycLifecycleJson `

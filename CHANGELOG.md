@@ -7,6 +7,17 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.7] - 2026-08-26
+
+### Fixed
+
+- Windows silent Setup uninstall now passes a null managed-worker plan to the
+  core cleanup path instead of dereferencing the absent Install/Repair plan
+  after the firewall transaction has completed.
+- Added a packaging regression guard for the uninstall lifecycle path so a
+  successful firewall mutation cannot be followed by a PowerShell null-plan
+  failure that leaves the installed product behind.
+
 ## [0.1.0-preview.6] - 2026-08-25
 
 ### Added

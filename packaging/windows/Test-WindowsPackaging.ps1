@@ -3928,6 +3928,7 @@ exit 91
     Assert-True ($lifecycleSource -match 'PreviousSha256') 'rollbackFailed recovery waits for atomic response replacement rather than stale filename existence'
     Assert-True ($lifecycleSource -match 'Get-CycRolledBackUninstallRetryEvidence') 'a rolled-back Uninstall with an absent manifest is retried from exact immutable firewall evidence'
     Assert-True ($lifecycleSource -match 'uninstall-firewall-retry') 'repeated Uninstall cannot report unchanged while its previous firewall rollback remains outstanding'
+    Assert-True ($lifecycleSource -match 'coreManagedWorker\s*=\s*if\s*\(\$transactionAction\s+-in\s+@\(''Install'',\s*''Repair''\)\)[\s\S]+-ManagedWorker\s+\$coreManagedWorker') 'Uninstall core invocation does not dereference a null install plan'
     Assert-True ($lifecycleSource -match 'Publish-CycLifecycleReceiptAtomic') 'private firewall receipts are published by same-directory atomic replacement'
     Assert-True ($lifecycleSource -match '\[System\.IO\.File\]::Replace\(') 'lifecycle journal replacement uses the native same-volume atomic replace primitive'
     Assert-True ($lifecycleSource -match 'Remove-CycCompletedLifecycleJournal[\s\S]+-ExpectedRequestSha256') 'normal and resumed completion retire only the expected terminal transaction'
