@@ -1490,6 +1490,8 @@ mod tests {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!("cyc-ssh-test-{}", Uuid::new_v4()));
             fs::create_dir(&path).expect("create temporary directory");
+            #[cfg(target_os = "macos")]
+            let path = fs::canonicalize(path).expect("canonical temporary directory");
             Self { path }
         }
 
