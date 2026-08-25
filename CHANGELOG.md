@@ -7,6 +7,33 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.6] - 2026-08-25
+
+### Added
+
+- Typed enrollment and pairing lifecycle contracts now persist terminal
+  failures as `Failed` rather than losing recovery state.
+- Worker Kit export has a native, secret-free lifecycle with schema-backed
+  manifests and deterministic path-safety checks for Windows, Linux, and
+  macOS system aliases.
+
+### Changed
+
+- Controller network planning now resolves one immutable private-LAN plan for
+  PlanOnly, Install, Repair, and runtime use, with a .NET fallback when the
+  optional Windows NetTCPIP cmdlet is unavailable.
+- Controller identity verification enforces the exact typed multi-SAN set and
+  pairing recovery distinguishes Pending, Consumed, Ready, Failed, and
+  Revoked states.
+
+### Security
+
+- Enrollment listener, bind/public host, firewall, and persisted identity
+  metadata now share the same validated network plan; arbitrary wildcard
+  listeners and unsafe path-chain entries fail closed.
+- Issue #5 hostile-isolation production readiness remains explicitly false
+  until independent OS-level isolation proofs are complete.
+
 ## [0.1.0-preview.5] - 2026-08-25
 
 ### Fixed
@@ -83,7 +110,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.5...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.6...HEAD
+[0.1.0-preview.6]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.5...v0.1.0-preview.6
 [0.1.0-preview.5]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.4...v0.1.0-preview.5
 [0.1.0-preview.4]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.3...v0.1.0-preview.4
 [0.1.0-preview.3]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.2...v0.1.0-preview.3

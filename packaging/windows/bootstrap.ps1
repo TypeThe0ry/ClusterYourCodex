@@ -88,7 +88,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
-$script:ProductVersion = '0.1.0-preview.5'
+$script:ProductVersion = '0.1.0-preview.6'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
@@ -2442,8 +2442,10 @@ function Resolve-CycManagedWorkerNetworkPlan {
         [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$ListenPort
     )
     $reusable = Get-CycReusableManagedWorkerNetworkPlan -Manifest $ExistingManifest
-    $explicitPrivateAddressCount = 0
-    foreach ($unusedPrivateAddress in @($ExplicitPrivateAddresses)) { $explicitPrivateAddressCount++ }
+    $explicitPrivateAddresses = @($ExplicitPrivateAddresses | Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_)
+    })
+    $explicitPrivateAddressCount = $explicitPrivateAddresses.Count
     $hasExplicit = -not [string]::IsNullOrWhiteSpace($ExplicitBindHost) -or
         $ExplicitInterfaceIndex -ne 0 -or
         -not [string]::IsNullOrWhiteSpace($ExplicitControllerHostName) -or
@@ -2462,7 +2464,7 @@ function Resolve-CycManagedWorkerNetworkPlan {
             -BindHost $ExplicitBindHost `
             -PublicHost $RequestedPublicHost `
             -ControllerHostName $ExplicitControllerHostName `
-            -PrivateAddresses $ExplicitPrivateAddresses `
+            -PrivateAddresses $explicitPrivateAddresses `
             -ListenPort $ListenPort
     }
     if ($reusable) {
