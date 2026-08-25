@@ -45,6 +45,178 @@ function Assert-SetupSilent {
     }
 }
 
+function ConvertTo-SetupSilentSid {
+    param([Parameter(Mandatory = $true)][string]$IdentityText)
+
+    if ([string]::IsNullOrWhiteSpace($IdentityText) -or
+        [regex]::IsMatch($IdentityText, '[\x00-\x1F\x7F]')) {
+        throw 'Scheduled Task identity is blank or malformed.'
+    }
+
+    try {
+        if ($IdentityText.StartsWith('S-', [System.StringComparison]::OrdinalIgnoreCase)) {
+            # A SID-looking value must be a structurally valid SID. Never
+            # reinterpret an invalid SID as an account name.
+            $sid = New-Object System.Security.Principal.SecurityIdentifier($IdentityText)
+        } else {
+            $account = New-Object System.Security.Principal.NTAccount($IdentityText)
+            $sid = $account.Translate([System.Security.Principal.SecurityIdentifier])
+        }
+    } catch {
+        throw 'Scheduled Task identity could not be resolved to a stable SID.'
+    }
+
+    if (-not $sid -or [string]::IsNullOrWhiteSpace([string]$sid.Value)) {
+        throw 'Scheduled Task identity resolved without a stable SID.'
+    }
+    return [string]$sid.Value
+}
+
+function Assert-SetupSilentTaskIdentityXml {
+    param(
+        [Parameter(Mandatory = $true)][xml]$TaskXml,
+        [Parameter(Mandatory = $true)][string]$ExpectedSid
+    )
+
+    $taskNamespace = 'http://schemas.microsoft.com/windows/2004/02/mit/task'
+    if (-not $TaskXml.DocumentElement -or
+        [string]$TaskXml.DocumentElement.LocalName -cne 'Task' -or
+        [string]$TaskXml.DocumentElement.NamespaceURI -cne $taskNamespace) {
+        throw 'Scheduled Task XML uses an unexpected root or namespace.'
+    }
+
+    $namespaceManager = New-Object System.Xml.XmlNamespaceManager($TaskXml.NameTable)
+    $namespaceManager.AddNamespace('task', $taskNamespace)
+
+    $foreignElements = @($TaskXml.SelectNodes("//*[namespace-uri() != '$taskNamespace']"))
+    if ($foreignElements.Count -ne 0) {
+        throw 'Scheduled Task XML contains an element outside the Task Scheduler namespace.'
+    }
+
+    $principalContainers = @($TaskXml.SelectNodes('/task:Task/task:Principals', $namespaceManager))
+    if ($principalContainers.Count -ne 1) {
+        throw 'Scheduled Task XML must contain exactly one principals container.'
+    }
+    $principalElements = @($principalContainers[0].SelectNodes('*'))
+    if ($principalElements.Count -ne 1 -or
+        [string]$principalElements[0].LocalName -cne 'Principal' -or
+        [string]$principalElements[0].NamespaceURI -cne $taskNamespace) {
+        throw 'Scheduled Task XML must contain exactly one principal.'
+    }
+    $principalChildElements = @($principalElements[0].SelectNodes('*'))
+    $principalUserIds = @($principalChildElements | Where-Object {
+        [string]$_.LocalName -ceq 'UserId' -and [string]$_.NamespaceURI -ceq $taskNamespace
+    })
+    $principalGroupIds = @($principalChildElements | Where-Object {
+        [string]$_.LocalName -ceq 'GroupId' -and [string]$_.NamespaceURI -ceq $taskNamespace
+    })
+    if ($principalUserIds.Count -ne 1 -or $principalGroupIds.Count -ne 0) {
+        throw 'Scheduled Task XML must contain exactly one user principal.'
+    }
+
+    $triggerContainers = @($TaskXml.SelectNodes('/task:Task/task:Triggers', $namespaceManager))
+    if ($triggerContainers.Count -ne 1) {
+        throw 'Scheduled Task XML must contain exactly one triggers container.'
+    }
+    $triggerElements = @($triggerContainers[0].SelectNodes('*'))
+    if ($triggerElements.Count -ne 1 -or
+        [string]$triggerElements[0].LocalName -cne 'LogonTrigger' -or
+        [string]$triggerElements[0].NamespaceURI -cne $taskNamespace) {
+        throw 'Scheduled Task XML must contain exactly one logon trigger.'
+    }
+    $triggerChildElements = @($triggerElements[0].SelectNodes('*'))
+    $triggerUserIds = @($triggerChildElements | Where-Object {
+        [string]$_.LocalName -ceq 'UserId' -and [string]$_.NamespaceURI -ceq $taskNamespace
+    })
+    if ($triggerUserIds.Count -ne 1) {
+        throw 'Scheduled Task XML logon trigger must contain exactly one UserId.'
+    }
+
+    $expectedSidValue = ConvertTo-SetupSilentSid -IdentityText $ExpectedSid
+    $principalSid = ConvertTo-SetupSilentSid -IdentityText ([string]$principalUserIds[0].InnerText)
+    $triggerSid = ConvertTo-SetupSilentSid -IdentityText ([string]$triggerUserIds[0].InnerText)
+    if (-not [string]::Equals($principalSid, $expectedSidValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Scheduled Task XML principal SID does not match the initiating SID.'
+    }
+    if (-not [string]::Equals($triggerSid, $expectedSidValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Scheduled Task XML logon trigger SID does not match the initiating SID.'
+    }
+
+    return [PSCustomObject]@{
+        principalSid = $principalSid
+        triggerSid = $triggerSid
+    }
+}
+
+function Invoke-SetupSilentTaskIdentityContractSelfTest {
+    $fixtureSid = 'S-1-5-18'
+    $taskNamespace = 'http://schemas.microsoft.com/windows/2004/02/mit/task'
+    $validXmlText = @"
+<Task xmlns="$taskNamespace">
+  <Principals>
+    <Principal id="Author">
+      <UserId>$fixtureSid</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Triggers>
+    <LogonTrigger>
+      <UserId>$fixtureSid</UserId>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+</Task>
+"@
+
+    [xml]$validXml = $validXmlText
+    [void](Assert-SetupSilentTaskIdentityXml -TaskXml $validXml -ExpectedSid $fixtureSid)
+
+    $rejectedFixtures = [ordered]@{
+        'foreign-namespace principal sibling' = $validXmlText.Replace(
+            '</Principals>',
+            '<evil:Principal xmlns:evil="urn:cyc:test:evil" /></Principals>'
+        )
+        'foreign-namespace logon trigger' = $validXmlText.Replace(
+            '<LogonTrigger>',
+            '<evil:LogonTrigger xmlns:evil="urn:cyc:test:evil">'
+        ).Replace('</LogonTrigger>', '</evil:LogonTrigger>')
+        'foreign-namespace principal child' = $validXmlText.Replace(
+            '<LogonType>InteractiveToken</LogonType>',
+            '<evil:UserId xmlns:evil="urn:cyc:test:evil">S-1-5-19</evil:UserId><LogonType>InteractiveToken</LogonType>'
+        )
+        'multiple principals' = $validXmlText.Replace(
+            '</Principals>',
+            "<Principal><UserId>$fixtureSid</UserId></Principal></Principals>"
+        )
+        'group principal' = $validXmlText.Replace(
+            "<UserId>$fixtureSid</UserId>",
+            "<UserId>$fixtureSid</UserId><GroupId>S-1-5-32-545</GroupId>"
+        )
+        'boot trigger' = $validXmlText.Replace('LogonTrigger', 'BootTrigger')
+        'multiple triggers' = $validXmlText.Replace(
+            '</Triggers>',
+            "<LogonTrigger><UserId>$fixtureSid</UserId></LogonTrigger></Triggers>"
+        )
+        'wrong namespace' = $validXmlText.Replace($taskNamespace, 'urn:cyc:test:wrong-task')
+        'wrong principal SID' = $validXmlText.Replace(
+            "<UserId>$fixtureSid</UserId>",
+            '<UserId>S-1-5-19</UserId>'
+        )
+    }
+
+    foreach ($fixture in $rejectedFixtures.GetEnumerator()) {
+        [xml]$fixtureXml = [string]$fixture.Value
+        $rejected = $false
+        try {
+            [void](Assert-SetupSilentTaskIdentityXml -TaskXml $fixtureXml -ExpectedSid $fixtureSid)
+        } catch {
+            $rejected = $true
+        }
+        Assert-SetupSilent $rejected ("identity contract rejects " + [string]$fixture.Key)
+    }
+}
+
 function Resolve-SetupSilentPath {
     param([Parameter(Mandatory = $true)][string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path)) { throw 'A required path is empty.' }
@@ -698,14 +870,14 @@ function Assert-SetupSilentManifest {
 function Assert-SetupSilentControllerTask {
     param(
         [Parameter(Mandatory = $true)][string]$InstallRoot,
-        [Parameter(Mandatory = $true)][string]$ExpectedIdentity,
         [Parameter(Mandatory = $true)][string]$ExpectedSid
     )
-    $controllerTasks = @(Get-ScheduledTask -TaskName $script:ControllerTaskName -ErrorAction SilentlyContinue)
-    $workerTasks = @(Get-ScheduledTask -TaskName $script:WorkerTaskName -ErrorAction SilentlyContinue)
+    $controllerTasks = @(Get-ScheduledTask -TaskName $script:ControllerTaskName -TaskPath '\' -ErrorAction SilentlyContinue)
+    $workerTasks = @(Get-ScheduledTask -TaskName $script:WorkerTaskName -TaskPath '\' -ErrorAction SilentlyContinue)
     Assert-SetupSilent ($controllerTasks.Count -eq 1) 'controller Scheduled Task is installed exactly once'
     Assert-SetupSilent ($workerTasks.Count -eq 0) 'unpaired local worker task remains absent'
     $task = $controllerTasks[0]
+    Assert-SetupSilent ([string]$task.TaskPath -ceq '\') 'controller task is registered at the root task path'
     $actions = @($task.Actions)
     Assert-SetupSilent ($actions.Count -eq 1) 'controller Scheduled Task has exactly one action'
     $expectedExecutable = Join-Path $InstallRoot 'cyc-controller.exe'
@@ -713,14 +885,22 @@ function Assert-SetupSilentControllerTask {
     Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$actions[0].WorkingDirectory) -Right $InstallRoot) 'controller task working directory is the install root'
     Assert-SetupSilent ([string]$actions[0].Arguments -match '(?:^|\s)--bind\s+127\.0\.0\.1:47831(?:\s|$)') 'controller task binds the loopback API'
     Assert-SetupSilent ([string]$actions[0].Arguments -match '(?:^|\s)--worker-bind\s+0\.0\.0\.0:47832(?:\s|$)') 'controller task binds the managed-worker listener'
-    $principalUserId = [string]$task.Principal.UserId
-    $principalMatches = [string]::Equals($principalUserId, $ExpectedIdentity, [System.StringComparison]::OrdinalIgnoreCase) -or
-        [string]::Equals($principalUserId, $ExpectedSid, [System.StringComparison]::OrdinalIgnoreCase)
-    Assert-SetupSilent $principalMatches 'controller task principal is the initiating identity'
+    # The ScheduledTasks CIM provider may display the same principal as a SID,
+    # qualified NTAccount, UPN, or bare local account. Compare only canonical
+    # SIDs, then independently verify the persisted task definition.
+    $principalSid = ConvertTo-SetupSilentSid -IdentityText ([string]$task.Principal.UserId)
+    Assert-SetupSilent (
+        [string]::Equals($principalSid, $ExpectedSid, [System.StringComparison]::OrdinalIgnoreCase)
+    ) 'controller task principal SID is the initiating SID'
+    [xml]$taskXml = Export-ScheduledTask `
+        -TaskName $script:ControllerTaskName `
+        -TaskPath '\' `
+        -ErrorAction Stop
+    [void](Assert-SetupSilentTaskIdentityXml -TaskXml $taskXml -ExpectedSid $ExpectedSid)
     Assert-SetupSilent ([string]$task.Principal.RunLevel -match '^(Limited|0)$') 'controller task uses limited run level'
     Assert-SetupSilent ([string]$task.Principal.LogonType -match '^(Interactive|InteractiveToken|3)$') 'controller task uses interactive logon'
     Assert-SetupSilent ([string]$task.State -ceq 'Running') 'controller task is running'
-    $info = Get-ScheduledTaskInfo -TaskName $script:ControllerTaskName -ErrorAction Stop
+    $info = Get-ScheduledTaskInfo -TaskName $script:ControllerTaskName -TaskPath '\' -ErrorAction Stop
     Assert-SetupSilent ([long]$info.LastTaskResult -in @(0, 267009)) 'controller task reports a healthy last result'
     return $task
 }
@@ -883,6 +1063,7 @@ if (-not $DisposableEnvironment -or [string]$env:CYC_DISPOSABLE_WINDOWS -cne '1'
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     throw 'Silent Setup smoke requires Windows.'
 }
+[void](Invoke-SetupSilentTaskIdentityContractSelfTest)
 
 $setup = Resolve-SetupSilentPath $SetupPath
 $package = Resolve-SetupSilentPath $PackageRoot
@@ -898,7 +1079,6 @@ $manifestPath = Join-Path $dataRoot '.installer\install-manifest.json'
 $journalPath = Join-Path $dataRoot '.installer\firewall-lifecycle.json'
 $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-$identityName = [string]$identity.Name
 $identitySid = [string]$identity.User.Value
 $expectedRuleName = 'ClusterYourCodex.ManagedWorker.' + $identitySid.Replace('-', '_')
 $expectedController = Join-Path $installRoot 'cyc-controller.exe'
@@ -1029,7 +1209,7 @@ try {
         -ExpectedProfile $profile `
         -ExpectedLocalAppData $localAppData
     [void](Assert-SetupSilentUninstallRegistration -InstallRoot $installRoot -DataRoot $dataRoot)
-    [void](Assert-SetupSilentControllerTask -InstallRoot $installRoot -ExpectedIdentity $identityName -ExpectedSid $identitySid)
+    [void](Assert-SetupSilentControllerTask -InstallRoot $installRoot -ExpectedSid $identitySid)
     $runtime = Assert-SetupSilentControllerRuntime -InstallRoot $installRoot
     [void](Assert-SetupSilentFirewall -Manifest $manifest)
     $installLifecycleEvidence = Assert-SetupSilentAppliedLifecycleEvidence `
@@ -1094,7 +1274,7 @@ try {
     Assert-SetupSilent ($cliHashAfterRepair -ceq ([string]$cliRecord.sha256).ToLowerInvariant()) 'Repair restores the corrupted installed CLI'
     Assert-SetupSilent ((Get-FileHash -LiteralPath $certificatePath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $certificateHashBefore) 'Repair preserves the TLS certificate identity'
     Assert-SetupSilent ((Get-FileHash -LiteralPath $privateKeyPath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $privateKeyHashBefore) 'Repair preserves the TLS private key identity'
-    [void](Assert-SetupSilentControllerTask -InstallRoot $installRoot -ExpectedIdentity $identityName -ExpectedSid $identitySid)
+    [void](Assert-SetupSilentControllerTask -InstallRoot $installRoot -ExpectedSid $identitySid)
     $runtimeAfterRepair = Assert-SetupSilentControllerRuntime -InstallRoot $installRoot
     [void](Assert-SetupSilentFirewall -Manifest $manifestAfterRepair)
     [void](Assert-SetupSilentUninstallRegistration -InstallRoot $installRoot -DataRoot $dataRoot)
@@ -1152,7 +1332,7 @@ try {
     Assert-SetupSilent ($cliHashAfterSecondRepair -ceq ([string]$cliRecordAfterSecondRepair.sha256).ToLowerInvariant()) 'second Repair restores the corrupted installed CLI again'
     Assert-SetupSilent ((Get-FileHash -LiteralPath $certificatePath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $certificateHashBefore) 'second Repair preserves the TLS certificate identity'
     Assert-SetupSilent ((Get-FileHash -LiteralPath $privateKeyPath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $privateKeyHashBefore) 'second Repair preserves the TLS private key identity'
-    [void](Assert-SetupSilentControllerTask -InstallRoot $installRoot -ExpectedIdentity $identityName -ExpectedSid $identitySid)
+    [void](Assert-SetupSilentControllerTask -InstallRoot $installRoot -ExpectedSid $identitySid)
     $runtimeAfterSecondRepair = Assert-SetupSilentControllerRuntime -InstallRoot $installRoot
     [void](Assert-SetupSilentFirewall -Manifest $manifestAfterSecondRepair)
     [void](Assert-SetupSilentUninstallRegistration -InstallRoot $installRoot -DataRoot $dataRoot)

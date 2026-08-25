@@ -3706,6 +3706,35 @@ exit 91
     Assert-True ($freshDeploymentSource -match 'fresh deployment runner starts without pre-existing product tasks') 'fresh deployment smoke fails closed around pre-existing product tasks'
     $setupSilentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-SetupSilent.ps1') -Raw
     Assert-True ($setupSilentSource -match 'MaximumInstallManifestBytes\s*=\s*16MB') 'silent Setup smoke accepts the bounded self-contained install manifest size'
+    Assert-True ($setupSilentSource -match 'ConvertTo-SetupSilentSid') 'silent Setup canonicalizes Scheduled Task identities to SIDs'
+    Assert-True ($setupSilentSource -match 'Export-ScheduledTask[\s\S]+Assert-SetupSilentTaskIdentityXml') 'silent Setup verifies the persisted Scheduled Task identity definition'
+    Assert-True ($setupSilentSource -match 'LogonTrigger[\s\S]+triggerSid') 'silent Setup binds the logon trigger to the initiating SID'
+    Assert-True ($setupSilentSource -notmatch '\$principalMatches|ExpectedIdentity') 'silent Setup never authorizes a Scheduled Task by raw account-name equality'
+    Assert-True ($setupSilentSource -match 'NTAccount\(\$IdentityText\)[\s\S]+Translate\(\[System\.Security\.Principal\.SecurityIdentifier\]\)') 'silent Setup translates account-name representations to a canonical SID'
+    Assert-True ($setupSilentSource -match 'StartsWith\(''S-''[\s\S]+SecurityIdentifier\(\$IdentityText\)') 'silent Setup validates SID-looking values without an account-name fallback'
+    Assert-True ($setupSilentSource -match 'taskNamespace\s*=\s*''http://schemas\.microsoft\.com/windows/2004/02/mit/task''') 'silent Setup accepts only the Task Scheduler XML namespace'
+    Assert-True ($setupSilentSource -match 'foreignElements\.Count\s+-ne\s+0') 'silent Setup rejects elements from foreign XML namespaces'
+    Assert-True ($setupSilentSource -match 'principalElements\[0\]\.NamespaceURI\s+-cne\s+\$taskNamespace') 'silent Setup requires the sole principal to use the Task Scheduler namespace'
+    Assert-True ($setupSilentSource -match 'triggerElements\[0\]\.NamespaceURI\s+-cne\s+\$taskNamespace') 'silent Setup requires the sole logon trigger to use the Task Scheduler namespace'
+    Assert-True ($setupSilentSource -match 'principalElements\.Count\s+-ne\s+1[\s\S]+principalGroupIds\.Count\s+-ne\s+0') 'silent Setup rejects missing, duplicate, or group principals'
+    Assert-True ($setupSilentSource -match 'triggerElements\.Count\s+-ne\s+1[\s\S]+LogonTrigger[\s\S]+triggerUserIds\.Count\s+-ne\s+1') 'silent Setup requires one account-bound logon trigger'
+    Assert-True ($setupSilentSource -match 'Invoke-SetupSilentTaskIdentityContractSelfTest[\s\S]+foreign-namespace principal sibling[\s\S]+foreign-namespace logon trigger') 'silent Setup executes positive and foreign-namespace identity fixtures before installation'
+    Assert-True ($setupSilentSource -match 'Get-ScheduledTask[\s\S]+-TaskPath ''\\''[\s\S]+Export-ScheduledTask[\s\S]+-TaskPath ''\\''') 'silent Setup scopes task identity checks to the root task path'
+    $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $currentIdentityName = [string]$currentIdentity.Name
+    $currentIdentitySid = [string]$currentIdentity.User.Value
+    $qualifiedSid = (New-Object System.Security.Principal.NTAccount($currentIdentityName)).Translate(
+        [System.Security.Principal.SecurityIdentifier]
+    ).Value
+    Assert-True ([string]$qualifiedSid -ceq $currentIdentitySid) 'Windows resolves the initiating qualified account to its canonical SID'
+    $identityParts = @($currentIdentityName -split '\\', 2)
+    if ($identityParts.Count -eq 2 -and
+        [string]::Equals($identityParts[0], $env:COMPUTERNAME, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $bareSid = (New-Object System.Security.Principal.NTAccount($identityParts[1])).Translate(
+            [System.Security.Principal.SecurityIdentifier]
+        ).Value
+        Assert-True ([string]$bareSid -ceq $currentIdentitySid) 'Windows resolves the bare local account representation returned by ScheduledTasks CIM'
+    }
     Assert-True ($setupSilentSource -notmatch '(?<!@)\(Get-SetupSilent(?:TaskSnapshot|FirewallSnapshot|Listeners|ProductProcesses)\)\.Count') 'silent Setup smoke array-wraps zero-or-one item function output before Count'
     Assert-True ($setupSilentSource -match 'EnvironmentVariables[\s\S]+CYC_SETUP_DIAGNOSTIC_LOG') 'silent Setup smoke injects the structured lifecycle diagnostic path into Setup.exe'
     Assert-True ($setupSilentSource -match 'primaryFailure\s*=\s*if\s*\(\$primaryFailure\)') 'silent Setup cleanup receipt preserves the primary failure independently of cleanup'
