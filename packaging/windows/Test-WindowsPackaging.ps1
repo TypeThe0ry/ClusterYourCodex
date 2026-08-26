@@ -4147,6 +4147,8 @@ exit 0
     foreach ($case in @('standard-ascii', 'administrator-ascii', 'standard-non-ascii', 'administrator-non-ascii')) {
         Assert-True ($profileMatrixSource -match [regex]::Escape($case)) "profile matrix declares $case"
     }
+    Assert-True ($profileMatrixSource -match '\$normalizedCaseNames' -and $profileMatrixSource -match '-split') 'profile matrix normalizes comma-separated CaseName values before strict validation'
+    Assert-True ($releaseWorkflow -match '-CaseName @\(') 'release workflow passes profile matrix cases as a PowerShell array'
     Assert-True ($profileMatrixSource -match 'New-LocalUser') 'profile matrix creates disposable local users without shelling a password through argv'
     Assert-True ($profileMatrixSource -match 'Start-Process[\s\S]+Credential[\s\S]+LoadUserProfile') 'profile matrix launches each child with a loaded user profile'
     Assert-True ($profileMatrixSource -match 'Add-LocalGroupMember') 'profile matrix exercises an administrator account'

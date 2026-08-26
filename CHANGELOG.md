@@ -13,6 +13,8 @@ are versioned independently from the product.
 
 - Added regression coverage proving every macOS hostile-isolation runtime gate
   fails closed when native containment and external reconciliation are absent.
+- Fixed the Windows 11 profile-matrix release invocation to accept all four cases
+  as a PowerShell array and normalized comma-separated CLI input for compatibility.
 
 ## [0.1.0-preview.18] - 2026-08-26
 

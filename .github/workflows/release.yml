@@ -1356,7 +1356,7 @@ jobs:
             -File .\\packaging\\windows\\Test-WindowsProfileMatrix.ps1 `
             -PackageRoot $env:CYC_ACCEPTANCE_PACKAGE_ROOT `
             -WorkRoot $matrixRoot `
-            -CaseName standard-ascii,administrator-ascii,standard-non-ascii,administrator-non-ascii `
+            -CaseName @('standard-ascii', 'administrator-ascii', 'standard-non-ascii', 'administrator-non-ascii') `
             -RequireWindows11 `
             -KeepWorkRoot
           $matrixExitCode = $LASTEXITCODE

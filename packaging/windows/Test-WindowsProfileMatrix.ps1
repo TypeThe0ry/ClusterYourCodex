@@ -6,7 +6,6 @@ param(
 
     [string]$WorkRoot = (Join-Path ([System.IO.Path]::GetTempPath()) ('clusteryourcodex-profile-matrix-' + [Guid]::NewGuid().ToString('N'))),
 
-    [ValidateSet('standard-ascii', 'administrator-ascii', 'standard-non-ascii', 'administrator-non-ascii')]
     [string[]]$CaseName = @('standard-ascii', 'administrator-ascii', 'standard-non-ascii', 'administrator-non-ascii'),
 
     [switch]$KeepWorkRoot,
@@ -23,6 +22,33 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# PowerShell treats a comma-separated value passed after a [string[]]
+# parameter as one string when the script is launched from a command line.
+# Accept both repeated/array values and the documented comma-separated form,
+# then validate the normalized cases explicitly so callers get the same strict
+# allow-list without a surprising parameter-binding failure.
+$allowedCaseNames = @(
+    'standard-ascii'
+    'administrator-ascii'
+    'standard-non-ascii'
+    'administrator-non-ascii'
+)
+$normalizedCaseNames = New-Object System.Collections.Generic.List[string]
+foreach ($rawCaseName in @($CaseName)) {
+    foreach ($candidate in ([string]$rawCaseName -split ',')) {
+        $trimmed = $candidate.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+        if ($allowedCaseNames -notcontains $trimmed) {
+            throw "CaseName must be one of: $($allowedCaseNames -join ', '); got '$trimmed'."
+        }
+        [void]$normalizedCaseNames.Add($trimmed)
+    }
+}
+if ($normalizedCaseNames.Count -eq 0) {
+    throw 'CaseName must contain at least one profile-matrix case.'
+}
+$CaseName = @($normalizedCaseNames)
 
 function Assert-ProfileMatrix {
     param(
