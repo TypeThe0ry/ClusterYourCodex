@@ -7,6 +7,13 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.19] - 2026-08-26
+
+### Fixed
+
+- Added regression coverage proving every macOS hostile-isolation runtime gate
+  fails closed when native containment and external reconciliation are absent.
+
 ## [0.1.0-preview.18] - 2026-08-26
 
 ### Added
@@ -241,7 +248,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.18...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.19...HEAD
+[0.1.0-preview.19]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.18...v0.1.0-preview.19
 [0.1.0-preview.18]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.17...v0.1.0-preview.18
 [0.1.0-preview.17]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.16...v0.1.0-preview.17
 [0.1.0-preview.16]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.15...v0.1.0-preview.16
