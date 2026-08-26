@@ -7,6 +7,12 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+### Fixed
+
+- Corrected the Keep a Changelog comparison links so the `Unreleased` range
+  starts at `v0.1.0-preview.16` and every published preview heading resolves to
+  its exact predecessor tag.
+
 ## [0.1.0-preview.16] - 2026-08-26
 
 ### Added
@@ -216,7 +222,17 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.6...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.16...HEAD
+[0.1.0-preview.16]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.15...v0.1.0-preview.16
+[0.1.0-preview.15]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.14...v0.1.0-preview.15
+[0.1.0-preview.14]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.13...v0.1.0-preview.14
+[0.1.0-preview.13]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.12...v0.1.0-preview.13
+[0.1.0-preview.12]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.11...v0.1.0-preview.12
+[0.1.0-preview.11]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.10...v0.1.0-preview.11
+[0.1.0-preview.10]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.9...v0.1.0-preview.10
+[0.1.0-preview.9]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.8...v0.1.0-preview.9
+[0.1.0-preview.8]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.7...v0.1.0-preview.8
+[0.1.0-preview.7]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.6...v0.1.0-preview.7
 [0.1.0-preview.6]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.5...v0.1.0-preview.6
 [0.1.0-preview.5]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.4...v0.1.0-preview.5
 [0.1.0-preview.4]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.3...v0.1.0-preview.4

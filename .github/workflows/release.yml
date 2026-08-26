@@ -54,6 +54,9 @@ jobs:
           "product_version=$([string]$identity.productVersion)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           'release_channel=prerelease' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "source_tag=$([string]$identity.sourceTag)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Verify changelog links match the tagged preview
+        shell: pwsh
+        run: ./scripts/Test-ChangelogConsistency.ps1
 
   msrv:
     name: Minimum supported Rust 1.88.0 (${{ matrix.graph }})
