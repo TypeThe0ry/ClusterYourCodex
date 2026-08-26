@@ -3963,6 +3963,7 @@ exit 91
     Assert-True ($nsis -match 'Invoke-ClusterYourCodexLifecycle\.ps1[\s\S]+-PackageManifest ') 'Setup.exe invokes the coordinator and manifest validation gate'
     Assert-True ($nsis -match 'powershell\.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden') 'silent Setup hides the non-elevated lifecycle PowerShell console'
     Assert-True ($lifecycleSource -match 'Start-Process[\s\S]+-Verb RunAs -WindowStyle Hidden -PassThru') 'firewall-only elevation hides its PowerShell console after UAC consent'
+    Assert-True ($lifecycleSource -match "'-WindowStyle',\s*'Hidden'[\s\S]+'-EncodedCommand',\s*`\$encodedLoader") 'elevated firewall helper passes an explicit hidden host flag under ARM64 emulation'
     Assert-True ($nsis -match 'SetErrorLevel \$0') 'Setup.exe preserves bootstrap failure status'
     Assert-True ($nsis -match 'MessageBox[\s\S]+/SD IDOK') 'silent Setup failure never blocks on an interactive message box'
     Assert-True ($nsis -match 'IfSilent silent_complete[\s\S]+Exec[\s\S]+silent_complete:') 'silent Setup success never launches the GUI'

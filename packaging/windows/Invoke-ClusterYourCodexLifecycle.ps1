@@ -1549,7 +1549,8 @@ if (-not [string]::IsNullOrWhiteSpace(`$recoveryAction)) {
     $encodedLoader = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($loader))
     $systemPowerShell = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
     $arguments = @(
-        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden',
+        '-ExecutionPolicy', 'Bypass',
         '-EncodedCommand', $encodedLoader
     )
     # This is the only RunAs call in the complete product lifecycle. The

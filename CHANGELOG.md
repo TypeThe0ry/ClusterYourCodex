@@ -7,6 +7,17 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.13] - 2026-08-26
+
+### Fixed
+
+- Windows firewall-only elevation now passes an explicit `-WindowStyle Hidden`
+  argument in addition to the hidden process-start setting. This prevents a
+  transient elevated PowerShell console during silent Setup on clean Windows
+  11 ARM64 x64 emulation.
+- Added a regression assertion for the elevated helper's explicit hidden host
+  flag.
+
 ## [0.1.0-preview.12] - 2026-08-26
 
 ### Fixed
