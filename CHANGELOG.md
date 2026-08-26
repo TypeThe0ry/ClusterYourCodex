@@ -7,6 +7,16 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.10] - 2026-08-26
+
+### Fixed
+
+- Windows controller readiness now tolerates the slower first start and HTTP
+  response path of the x64 binaries under clean Windows 11 ARM64 emulation,
+  while retaining bounded connect, I/O, and overall readiness deadlines.
+- Added static regression assertions for the ARM64-compatible readiness
+  timeouts so the loopback smoke cannot silently regress to native-only timing.
+
 ## [0.1.0-preview.9] - 2026-08-26
 
 ### Fixed

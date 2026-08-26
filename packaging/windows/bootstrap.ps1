@@ -88,7 +88,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
-$script:ProductVersion = '0.1.0-preview.9'
+$script:ProductVersion = '0.1.0-preview.10'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
@@ -3709,7 +3709,10 @@ function Test-CycWorkerStatus {
 }
 
 function Wait-CycControllerReady {
-    param([int]$TimeoutSeconds = 15)
+    # x64 binaries under Windows 11 ARM64 emulation can take materially longer
+    # to start and answer their first request than native x64. Keep readiness
+    # bounded, but do not turn a slow first start into a false install failure.
+    param([int]$TimeoutSeconds = 60)
 
     function Test-CycControllerLoopbackHealth {
         $client = New-Object System.Net.Sockets.TcpClient
@@ -3718,13 +3721,13 @@ function Wait-CycControllerReady {
         try {
             $connect = $client.BeginConnect('127.0.0.1', 47831, $null, $null)
             $connectWaitHandle = $connect.AsyncWaitHandle
-            if (-not $connectWaitHandle.WaitOne(1000)) {
+            if (-not $connectWaitHandle.WaitOne(5000)) {
                 return $false
             }
             $client.EndConnect($connect)
             $stream = $client.GetStream()
-            $stream.ReadTimeout = 1000
-            $stream.WriteTimeout = 1000
+            $stream.ReadTimeout = 5000
+            $stream.WriteTimeout = 5000
 
             # The controller validates the complete loopback authority,
             # including its bound port.  Keep this probe proxy-independent,
