@@ -30,6 +30,9 @@ jobs:
       - name: Verify exact-tag production signing boundary
         shell: pwsh
         run: ./scripts/Test-ReleaseSigningBoundary.ps1
+      - name: Verify Windows Authenticode boundary contract
+        shell: pwsh
+        run: ./scripts/Test-WindowsAuthenticodeBoundary.ps1
       - id: identity
         name: Require strict prerelease VERSION and exact vVERSION tag
         shell: pwsh
@@ -1338,6 +1341,31 @@ jobs:
             -DisposableEnvironment `
             -KeepWorkRoot
           if ($LASTEXITCODE -ne 0) { throw "Silent Setup acceptance failed with exit code $LASTEXITCODE." }
+      - name: Run Windows 11 standard/admin/non-ASCII profile matrix
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $matrixRoot = Join-Path $env:ProgramData ('ClusterYourCodex\profile-matrix-' + [Guid]::NewGuid().ToString('N'))
+          $matrixDiagnosticRoot = Join-Path $env:CYC_ACCEPTANCE_DIAGNOSTIC_ROOT 'profile-matrix'
+          $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          & $windowsPowerShell `
+            -NoLogo `
+            -NoProfile `
+            -NonInteractive `
+            -ExecutionPolicy Bypass `
+            -File .\\packaging\\windows\\Test-WindowsProfileMatrix.ps1 `
+            -PackageRoot $env:CYC_ACCEPTANCE_PACKAGE_ROOT `
+            -WorkRoot $matrixRoot `
+            -CaseName standard-ascii,administrator-ascii,standard-non-ascii,administrator-non-ascii `
+            -RequireWindows11 `
+            -KeepWorkRoot
+          $matrixExitCode = $LASTEXITCODE
+          if (-not (Test-Path -LiteralPath $matrixRoot -PathType Container)) {
+            throw "Windows profile/path matrix did not leave its diagnostic root: $matrixRoot"
+          }
+          New-Item -ItemType Directory -Path $matrixDiagnosticRoot -Force | Out-Null
+          Copy-Item -Path (Join-Path $matrixRoot '*') -Destination $matrixDiagnosticRoot -Recurse -Force
+          if ($matrixExitCode -ne 0) { throw "Windows profile/path matrix failed with exit code $matrixExitCode." }
       - name: Upload Windows 11 ARM64 compatibility diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -4124,6 +4124,53 @@ exit 0
     Assert-True ($mcpDeploymentSmoke -match 'STABILITY_WINDOW_MS[\s\S]+unexpectedTermination[\s\S]+child\.exitCode') 'MCP deployment smoke rejects a server that exits after returning expected responses'
     Assert-True ($mcpDeploymentSmoke.IndexOf('await stopChild();', [StringComparison]::Ordinal) -lt $mcpDeploymentSmoke.IndexOf('process.stdout.write(`${JSON.stringify(smokeResult)}', [StringComparison]::Ordinal)) 'MCP deployment smoke reports success only after lifecycle and shutdown checks pass'
 
+    # The Windows profile/path acceptance harness is intentionally split into a
+    # controller and a per-user child. Keep a static contract here so the
+    # release workflow cannot silently drop the four-case matrix while the live
+    # test remains reserved for a clean disposable Windows runner.
+    $profileMatrix = Join-Path $PSScriptRoot 'Test-WindowsProfileMatrix.ps1'
+    $profileMatrixChild = Join-Path $PSScriptRoot 'Test-WindowsProfileMatrixChild.ps1'
+    Assert-True (Test-Path -LiteralPath $profileMatrix -PathType Leaf) 'Windows profile matrix controller exists'
+    Assert-True (Test-Path -LiteralPath $profileMatrixChild -PathType Leaf) 'Windows profile matrix child exists'
+    foreach ($profileScript in @($profileMatrix, $profileMatrixChild)) {
+        $parseTokens = $null
+        $parseErrors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseFile(
+            $profileScript,
+            [ref]$parseTokens,
+            [ref]$parseErrors
+        )
+        Assert-True (@($parseErrors).Count -eq 0) "profile matrix script parses: $([System.IO.Path]::GetFileName($profileScript))"
+    }
+    $profileMatrixSource = Get-Content -LiteralPath $profileMatrix -Raw
+    $profileMatrixChildSource = Get-Content -LiteralPath $profileMatrixChild -Raw
+    foreach ($case in @('standard-ascii', 'administrator-ascii', 'standard-non-ascii', 'administrator-non-ascii')) {
+        Assert-True ($profileMatrixSource -match [regex]::Escape($case)) "profile matrix declares $case"
+    }
+    Assert-True ($profileMatrixSource -match 'New-LocalUser') 'profile matrix creates disposable local users without shelling a password through argv'
+    Assert-True ($profileMatrixSource -match 'Start-Process[\s\S]+Credential[\s\S]+LoadUserProfile') 'profile matrix launches each child with a loaded user profile'
+    Assert-True ($profileMatrixSource -match 'Add-LocalGroupMember') 'profile matrix exercises an administrator account'
+    Assert-True ($profileMatrixSource -match 'Remove-LocalUser') 'profile matrix removes disposable local users'
+    Assert-True ($profileMatrixSource -match 'Win32_UserProfile') 'profile matrix removes created user profiles by SID'
+    Assert-True ($profileMatrixSource -match 'robocopy') 'profile matrix stages a private package copy for alternate users'
+    Assert-True ($profileMatrixChildSource -match 'Test-FreshDeployment\.ps1') 'profile matrix child runs the complete install/repair/uninstall lifecycle harness'
+    Assert-True ($profileMatrixChildSource -match 'USERPROFILE') 'profile matrix child records the effective USERPROFILE'
+    Assert-True ($profileMatrixChildSource -match 'LOCALAPPDATA') 'profile matrix child records the effective LOCALAPPDATA'
+    Assert-True ($profileMatrixChildSource -match 'isAdministrator') 'profile matrix child records administrator membership'
+    Assert-True ($profileMatrixChildSource -match 'nonAsciiProfile') 'profile matrix child records non-ASCII profile evidence'
+
+    $profileWorkflowNeedle = 'Test-WindowsProfileMatrix\.ps1'
+    Assert-True ($releaseWorkflow -match $profileWorkflowNeedle) 'release workflow invokes the Windows profile/path matrix'
+    Assert-True ($releaseWorkflow -match 'standard-ascii[\s\S]+administrator-ascii[\s\S]+standard-non-ascii[\s\S]+administrator-non-ascii') 'release workflow retains all four Windows profile matrix cases'
+
+    $authenticodeBoundary = Join-Path $repoRoot 'scripts\Test-WindowsAuthenticodeBoundary.ps1'
+    Assert-True (Test-Path -LiteralPath $authenticodeBoundary -PathType Leaf) 'Windows Authenticode boundary contract script exists'
+    $authenticodeSource = Get-Content -LiteralPath $authenticodeBoundary -Raw
+    Assert-True ($authenticodeSource -match 'Get-AuthenticodeSignature') 'Authenticode boundary script reads the platform signature status'
+    Assert-True ($authenticodeSource -match 'RequireValid') 'Authenticode boundary script has a strict signed-artifact mode'
+    Assert-True ($authenticodeSource -match 'RequireTimestamp') 'Authenticode boundary script can require a trusted timestamp'
+    Assert-True ($authenticodeSource -match 'repository-contract') 'Authenticode boundary script has a repository contract mode'
+
     $forbiddenPnpmDeploy = Join-Path $testRoot 'mcp-deploy-forbidden-pnpm'
     Copy-Item -LiteralPath $mcpDeploy -Destination $forbiddenPnpmDeploy -Recurse
     [void](New-Item -ItemType Directory -Path (Join-Path $forbiddenPnpmDeploy 'node_modules\.pnpm') -Force)

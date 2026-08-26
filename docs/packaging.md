@@ -93,6 +93,37 @@ Setup and the helper; the runtime `-RequirePackageSignature` path verifies both
 before the helper mutates the firewall. Until that gate is satisfied, this is a
 truthfully labelled preview rather than a signed cross-user elevation claim.
 
+### Windows profile and path acceptance
+
+The clean Windows acceptance job also runs
+`packaging/windows/Test-WindowsProfileMatrix.ps1`. It creates disposable local
+accounts for `standard-ascii`, `administrator-ascii`, `standard-non-ascii`, and
+`administrator-non-ascii`, launches the child harness with
+`Start-Process -Credential -LoadUserProfile`, and records the effective SID,
+administrator membership, `USERPROFILE`, `LOCALAPPDATA`, and `TEMP`. Each case
+runs the complete Install → Repair (corrupted CLI) → Uninstall lifecycle from a
+private staged package copy. Credentials are held only in-memory as a
+`PSCredential`; they are never placed in command arguments, files, or logs.
+The controller removes the disposable account and its profile by SID after the
+case, while retaining a job-owned JSON receipt and logs for CI diagnostics.
+
+The repository contract can be checked locally without creating accounts:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File .\scripts\Test-WindowsAuthenticodeBoundary.ps1
+```
+
+For a signed GA artifact, the same gate accepts explicit paths and requires a
+valid chain and timestamp without exposing certificate material in logs:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File .\scripts\Test-WindowsAuthenticodeBoundary.ps1 `
+  -Path .\ClusterYourCodex-Setup.exe,.\Invoke-ClusterYourCodexFirewall.ps1 `
+  -RequireValid -RequireTimestamp
+```
+
 ## Linux and macOS preview posture
 
 - The Linux x64 preview is a portable native archive containing

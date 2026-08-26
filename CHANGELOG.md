@@ -7,6 +7,18 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.18] - 2026-08-26
+
+### Added
+
+- Added a clean Windows 11 profile/path acceptance matrix covering standard
+  and administrator accounts with ASCII and non-ASCII profiles. Each case runs
+  the complete Install → Repair → Uninstall lifecycle under a loaded disposable
+  user profile and publishes a JSON receipt with SID/path evidence.
+- Added a reusable Windows Authenticode boundary contract and signed-artifact
+  verifier. Preview builds remain explicitly unsigned; GA can require a valid
+  chain and trusted timestamp for Setup and the narrow elevated helper.
+
 ## [0.1.0-preview.17] - 2026-08-26
 
 ### Fixed
@@ -229,7 +241,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.17...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.18...HEAD
+[0.1.0-preview.18]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.17...v0.1.0-preview.18
 [0.1.0-preview.17]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.16...v0.1.0-preview.17
 [0.1.0-preview.16]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.15...v0.1.0-preview.16
 [0.1.0-preview.15]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.14...v0.1.0-preview.15
