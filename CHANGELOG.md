@@ -7,6 +7,17 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.15] - 2026-08-26
+
+### Fixed
+
+- Windows silent Setup now launches the non-elevated lifecycle through the
+  hidden `nsExec` process boundary instead of NSIS `ExecWait`, which could
+  briefly expose a PowerShell console under Windows 11 ARM64 x64 emulation.
+- Silent Setup diagnostics now capture the visible PowerShell executable,
+  command line, parent process, window title, handle, and window class before
+  terminating the failed process tree.
+
 ## [0.1.0-preview.14] - 2026-08-26
 
 ### Fixed
