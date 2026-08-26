@@ -233,7 +233,7 @@ try {
                 $sid = [string]$identity.User.Value
             } else {
                 $password = ConvertTo-ProfileMatrixSecureString
-                $newUser = New-LocalUser -Name $userName -Password $password -Description 'ClusterYourCodex disposable profile-matrix account' -AccountNeverExpires -UserMayNotChangePassword -PasswordNeverExpires -ErrorAction Stop
+                $newUser = New-LocalUser -Name $userName -Password $password -Description 'ClusterYourCodex profile-matrix account' -AccountNeverExpires -UserMayNotChangePassword -PasswordNeverExpires -ErrorAction Stop
                 $sid = [string]$newUser.SID.Value
                 if ($isAdmin) { Add-LocalGroupMember -Group $adminGroup -Member $userName -ErrorAction Stop }
                 $credential = [System.Management.Automation.PSCredential]::new("$env:COMPUTERNAME\$userName", $password)
