@@ -1336,6 +1336,83 @@ mod tests {
     }
 
     #[test]
+    fn macos_external_reconciliation_is_fail_closed_at_every_runtime_gate() {
+        let directory = tempfile::tempdir().unwrap();
+        let node_id = Uuid::new_v4();
+        let worker_uid = unsafe { libc_geteuid_portable() };
+        let execution_uid = if worker_uid == 65_534 { 65_533 } else { 65_534 };
+        let isolation = HostileIsolation {
+            config_path: Some(directory.path().join("hostile.json")),
+            backend: Some(IsolationBackend::Macos(MacosIsolation {
+                node_id,
+                execution_uid,
+                execution_gid: 20,
+                guard_executable: directory.path().join("fake-guard"),
+                guard_state_directory: directory.path().to_path_buf(),
+                guard_state_file: directory.path().join("fake-receipt.json"),
+            })),
+        };
+        let worker = WorkerConfig {
+            api_version: crate::config::WORKER_CONFIG_VERSION.to_owned(),
+            worker_url: "https://controller.example.invalid/worker".to_owned(),
+            certificate_pem: "test-certificate".to_owned(),
+            controller_id: Uuid::new_v4(),
+            node_id,
+            worker_api_version: "cyc.dev/worker-api/v1".to_owned(),
+            heartbeat_interval_seconds: 5,
+            lease_seconds: 30,
+            workspace_root: directory.path().join("workspace"),
+            credential_file: directory.path().join("worker.credential"),
+        };
+        let inventory = isolation.inventory();
+        let marker = "CYC-MACOS-HOSTILE-ISOLATION-UNAVAILABLE";
+
+        assert!(!inventory.ready);
+        assert!(!inventory.dedicated_identity);
+        assert!(!inventory.external_reconciliation);
+        assert_eq!(
+            inventory.reason_code.as_deref(),
+            Some(MACOS_BACKEND_UNAVAILABLE_REASON)
+        );
+        assert!(isolation
+            .validate_worker_boundaries(&directory.path().join("worker.json"), &worker)
+            .unwrap_err()
+            .to_string()
+            .contains(marker));
+        assert!(isolation
+            .reconcile_before_claim()
+            .unwrap_err()
+            .to_string()
+            .contains(marker));
+        assert!(isolation
+            .verify_before_claim()
+            .unwrap_err()
+            .to_string()
+            .contains(marker));
+        assert!(isolation
+            .launch_spec(
+                OsStr::new("ignored"),
+                &[],
+                directory.path(),
+                &directory.path().join("stdout.log"),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains(marker));
+        let mut command = Command::new("ignored");
+        assert!(isolation
+            .configure_command(&mut command, directory.path())
+            .unwrap_err()
+            .to_string()
+            .contains(marker));
+        assert!(isolation
+            .verify_after_process()
+            .unwrap_err()
+            .to_string()
+            .contains(marker));
+    }
+
+    #[test]
     fn process_scope_cannot_expand_beyond_exact_run_root() {
         let directory = tempfile::tempdir().unwrap();
         let jobs = directory.path().join("jobs");
