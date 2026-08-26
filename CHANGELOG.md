@@ -7,6 +7,14 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.20] - 2026-08-26
+
+### Fixed
+
+- Fixed the clean Windows 11 profile-matrix release invocation so Windows
+  PowerShell receives all four `CaseName` values as one quoted argument instead
+  of expanding them into positional arguments under x64 emulation.
+
 ## [0.1.0-preview.19] - 2026-08-26
 
 ### Fixed
@@ -250,7 +258,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.19...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.20...HEAD
+[0.1.0-preview.20]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.19...v0.1.0-preview.20
 [0.1.0-preview.19]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.18...v0.1.0-preview.19
 [0.1.0-preview.18]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.17...v0.1.0-preview.18
 [0.1.0-preview.17]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.16...v0.1.0-preview.17
