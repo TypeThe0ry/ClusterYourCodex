@@ -144,8 +144,9 @@ impl std::error::Error for ProcessRunError {
 
 /// Enforce the platform gate before the daemon claims work. Linux uses a
 /// subreaper plus PID/start-time descendant tracking; Windows uses a Job
-/// Object. Other Unix targets remain probe/pair capable but fail closed for
-/// managed execution until an equally strong containment backend exists.
+/// Object; macOS uses a native process group and `proc_listpgrppids` probe.
+/// Other Unix targets remain probe/pair capable but fail closed for managed
+/// execution until an equally strong containment backend exists.
 pub fn ensure_process_containment_available() -> Result<()> {
     #[cfg(windows)]
     {
@@ -187,7 +188,15 @@ pub fn ensure_process_containment_available() -> Result<()> {
             .map(|_| ())
             .map_err(|message| anyhow::anyhow!(message.clone()))
     }
-    #[cfg(all(unix, not(target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+        if count < 1 {
+            bail!("macOS process inventory is unavailable");
+        }
+        Ok(())
+    }
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     {
         bail!(
             "managed execution is unsupported on this Unix platform: no reliable descendant containment backend"
@@ -257,7 +266,7 @@ impl LogBudget {
         }
     }
 
-    #[cfg(all(test, any(windows, target_os = "linux")))]
+    #[cfg(all(test, any(windows, target_os = "linux", target_os = "macos")))]
     fn remaining(&self) -> u64 {
         self.remaining.load(Ordering::SeqCst)
     }
@@ -1150,7 +1159,44 @@ impl ProcessTree {
             {
                 self.descendants.is_empty()
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "macos")]
+            {
+                let required =
+                    unsafe { libc::proc_listpgrppids(self.process_group, std::ptr::null_mut(), 0) };
+                if required < 0 {
+                    return Err(io::Error::last_os_error())
+                        .context("enumerate macOS process group");
+                }
+                if required > 0 {
+                    let mut pids = vec![0 as libc::pid_t; required as usize];
+                    let written = unsafe {
+                        libc::proc_listpgrppids(
+                            self.process_group,
+                            pids.as_mut_ptr().cast(),
+                            (pids.len() * std::mem::size_of::<libc::pid_t>()) as i32,
+                        )
+                    };
+                    if written < 0 {
+                        return Err(io::Error::last_os_error()).context("read macOS process group");
+                    }
+                    if written > 0 {
+                        return Ok(false);
+                    }
+                }
+                let result = unsafe { libc::kill(-self.process_group, 0) };
+                if result == 0 {
+                    return Ok(false);
+                }
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::ESRCH) {
+                    return Ok(true);
+                }
+                if error.raw_os_error() == Some(libc::EPERM) {
+                    return Ok(false);
+                }
+                Err(error).context("probe macOS process group")
+            }
+            #[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
             {
                 let result = unsafe { libc::kill(-self.process_group, 0) };
                 if result == 0 {
@@ -1293,7 +1339,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[cfg(all(unix, not(target_os = "linux")))]
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     #[tokio::test]
     async fn managed_execution_fails_closed_without_a_containment_backend() {
         let directory = tempdir().unwrap();
@@ -1342,7 +1388,7 @@ mod tests {
         )));
     }
 
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn timeout_terminates_process() {
         let directory = tempdir().unwrap();
@@ -1382,7 +1428,7 @@ mod tests {
         assert!(!result.succeeded());
     }
 
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn spawn_failure_has_empty_logs_and_a_confirmed_empty_tree() {
         let directory = tempdir().unwrap();
@@ -1411,7 +1457,7 @@ mod tests {
         assert_eq!(fs::metadata(stderr).unwrap().len(), 0);
     }
 
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn injected_monitor_failure_is_unconfirmed_not_terminal_proof() {
         let directory = tempdir().unwrap();
@@ -1564,7 +1610,7 @@ mod tests {
         unrelated.wait().unwrap();
     }
 
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn timeout_kills_descendants_before_they_can_write_a_sentinel() {
         let directory = tempdir().unwrap();
@@ -1617,7 +1663,7 @@ mod tests {
         assert!(!directory.path().join("sentinel").exists());
     }
 
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn normal_root_exit_cleans_up_background_descendants() {
         let directory = tempdir().unwrap();
@@ -1669,7 +1715,7 @@ mod tests {
         assert!(!directory.path().join("sentinel").exists());
     }
 
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn one_log_budget_is_shared_across_processes_and_streams() {
         let directory = tempdir().unwrap();

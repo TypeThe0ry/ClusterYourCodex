@@ -7,6 +7,16 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.16] - 2026-08-26
+
+### Added
+
+- macOS managed-process startup now probes the native process inventory and
+  verifies the dedicated process group with `proc_listpgrppids` instead of
+  treating every non-Linux Unix target as unsupported. The signed macOS Worker
+  Kit remains runtime-gated until the native LaunchAgent lifecycle acceptance
+  is completed.
+
 ## [0.1.0-preview.15] - 2026-08-26
 
 ### Fixed

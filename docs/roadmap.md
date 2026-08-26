@@ -40,7 +40,7 @@ Status vocabulary:
 |---|---|
 | Linux x64/aarch64 Worker Kits + systemd | implemented/CI verified; arm64 hardware acceptance pending |
 | macOS x64/arm64 portable archives + signed Worker Kits | implemented and locally packaging-verified; tagged native-workflow evidence pending |
-| macOS managed worker + LaunchAgent lifecycle | packaged; `runtimeGated=true`, containment/live acceptance blocker for issue #3 |
+| macOS managed worker + LaunchAgent lifecycle | native process-group backend implemented; package remains `runtimeGated=true` until live LaunchAgent acceptance for issue #3 |
 | Resource leases/session isolation | implemented for trusted single-user scheduling |
 | Hostile-workload isolation | Linux mechanism passed a native P1 test, but audited escape/identity/resource/reconciliation gates and Windows/macOS native guards remain issue #5 blockers; all production hostile tiers are unavailable and multi-tenant claims are forbidden |
 | GPU/container/cache-aware scheduling | partial; expand after base live E2E |

@@ -430,16 +430,19 @@ Windows trusted-job execution uses a Job Object with kill-on-close. Linux
 requires `PR_SET_CHILD_SUBREAPER` before claiming work, combines a dedicated
 process group with PID/start-time descendant tracking, and fails closed when it
 cannot confirm that every descendant (including a `setsid` escape) is gone.
-These lifecycle mechanisms are not hostile-workload guards. The opt-in Linux
+macOS now probes the native process inventory before claiming work and verifies
+the dedicated process group through `proc_listpgrppids`; this is the trusted-job
+backend used by the future LaunchAgent lifecycle. These lifecycle mechanisms
+are not hostile-workload guards. The opt-in Linux
 dedicated-identity/cgroup-v2 mechanism has passed an internal native P1 test,
 but it remains production-gated while issue #5's cgroup-escape, identity,
 resource, and reconciliation proof set is completed. A Windows hostile-workload
 external guard is not implemented. All three platforms report hostile readiness
 as false, publish no hostile scheduling capability, and reject configured
-hostile execution before launch. A packaged macOS worker can pair and probe,
-but refuses to claim executable work until a platform containment backend can
-provide the same proof. Packaging and signature validation do not change that
-runtime gate.
+hostile execution before launch. A packaged macOS worker can pair and probe, but
+its Worker Kit still refuses to activate a LaunchAgent until the native macOS
+lifecycle acceptance is complete. Packaging and signature validation do not
+change that package-level runtime gate.
 
 ## Evidence gate
 
