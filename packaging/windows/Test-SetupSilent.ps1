@@ -612,6 +612,73 @@ function ConvertTo-SetupSilentNativeArgument {
     return $builder.ToString()
 }
 
+function Get-SetupSilentProcessEvidence {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    $record = [ordered]@{
+        pid = $ProcessId
+        executablePath = ''
+        commandLine = ''
+        parentPid = $null
+        parentExecutablePath = ''
+        parentCommandLine = ''
+        processName = ''
+        windowTitle = ''
+        mainWindowHandle = 0
+        windowClass = ''
+        capturedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+    }
+
+    try {
+        $processInfo = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $ProcessId) -ErrorAction Stop
+        if ($processInfo) {
+            $record.executablePath = [string]$processInfo.ExecutablePath
+            $record.commandLine = [string]$processInfo.CommandLine
+            $record.parentPid = [int]$processInfo.ParentProcessId
+            if ($record.parentPid -gt 0) {
+                $parentInfo = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $record.parentPid) -ErrorAction SilentlyContinue
+                if ($parentInfo) {
+                    $record.parentExecutablePath = [string]$parentInfo.ExecutablePath
+                    $record.parentCommandLine = [string]$parentInfo.CommandLine
+                }
+            }
+        }
+    } catch {
+        $record.cimError = $_.Exception.Message
+    }
+
+    try {
+        $process = Get-Process -Id $ProcessId -ErrorAction Stop
+        $record.processName = [string]$process.ProcessName
+        $record.windowTitle = [string]$process.MainWindowTitle
+        if ($process.MainWindowHandle) {
+            $record.mainWindowHandle = [int64]$process.MainWindowHandle.ToInt64()
+            try {
+                if (-not ('CycSetupSilentNativeMethods' -as [type])) {
+                    Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class CycSetupSilentNativeMethods {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+}
+'@
+                }
+                $className = New-Object System.Text.StringBuilder 256
+                if ([CycSetupSilentNativeMethods]::GetClassName($process.MainWindowHandle, $className, $className.Capacity) -gt 0) {
+                    $record.windowClass = $className.ToString()
+                }
+            } catch {
+                $record.windowClassError = $_.Exception.Message
+            }
+        }
+    } catch {
+        $record.processError = $_.Exception.Message
+    }
+    return [PSCustomObject]$record
+}
+
 function Invoke-SetupSilentBoundedProcess {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
@@ -689,6 +756,21 @@ function Invoke-SetupSilentBoundedProcess {
             }
         }
         if ($timedOut -or $null -ne $visiblePowerShellPid) {
+            if ($null -ne $visiblePowerShellPid) {
+                try {
+                    $evidence = Get-SetupSilentProcessEvidence -ProcessId $visiblePowerShellPid
+                    $evidencePath = Join-Path $LogRoot ('visible-powershell-' + $visiblePowerShellPid + '.json')
+                    $evidenceJson = $evidence | ConvertTo-Json -Depth 8
+                    [System.IO.File]::WriteAllText(
+                        $evidencePath,
+                        $evidenceJson,
+                        (New-Object System.Text.UTF8Encoding($false))
+                    )
+                } catch {
+                    # Preserve the original visibility failure even if the
+                    # diagnostic snapshot races process teardown.
+                }
+            }
             $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
             $taskKillExit = -1
             try {

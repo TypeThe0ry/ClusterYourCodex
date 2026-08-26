@@ -235,9 +235,17 @@ cyc_package_extraction_failed:
 
 cyc_package_extraction_complete:
   DetailPrint "Validating package and freezing one private-LAN listener plan; only the firewall step will request UAC..."
+  ; ExecWait inherits the NSIS coordinator's console creation flags.  On
+  ; Windows 11 ARM64 x64 emulation that can briefly materialize a visible
+  ; Windows PowerShell console even when -WindowStyle Hidden is present.
+  ; nsExec creates the child with CREATE_NO_WINDOW and still gives us the
+  ; native exit code, so silent Setup has one hidden process boundary.
   ClearErrors
-  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$CycMappedDrive\p\Invoke-ClusterYourCodexLifecycle.ps1" -Action Install -BundleRoot "$CycMappedDrive\p\payload" -PackageRoot "$CycMappedDrive\p" -PackageManifest "$CycMappedDrive\p\preview-manifest.json" -PackageExecutable "$EXEPATH" ${CYC_SIGNATURE_ARGUMENT} -NoLaunch' $0
-  IfErrors cyc_lifecycle_launch_failed cyc_lifecycle_finished
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$CycMappedDrive\p\Invoke-ClusterYourCodexLifecycle.ps1" -Action Install -BundleRoot "$CycMappedDrive\p\payload" -PackageRoot "$CycMappedDrive\p" -PackageManifest "$CycMappedDrive\p\preview-manifest.json" -PackageExecutable "$EXEPATH" ${CYC_SIGNATURE_ARGUMENT} -NoLaunch'
+  Pop $0
+  Pop $1
+  StrCmp $0 "error" cyc_lifecycle_launch_failed
+  Goto cyc_lifecycle_finished
 
 cyc_lifecycle_launch_failed:
   DetailPrint "ClusterYourCodex lifecycle process could not be launched."
