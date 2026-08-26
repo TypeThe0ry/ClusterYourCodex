@@ -65,17 +65,85 @@ function Resolve-ProfileMatrixPath {
     return [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
 }
 
+function Test-ProfileMatrixKnownCompatibilityJunction {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProfileRoot,
+        [Parameter(Mandatory = $true)][System.IO.FileSystemInfo]$Item
+    )
+
+    # A fresh Windows profile contains legacy-compatibility junctions such as
+    # "Application Data". They are created by the OS, not by the package
+    # under test. Keep the exception narrow: only a direct child of a real
+    # C:\Users\<name> profile root, only the documented junction name, and
+    # only when its target is the exact in-profile destination we expect.
+    $usersRoot = Resolve-ProfileMatrixPath (Join-Path $env:SystemDrive 'Users')
+    $resolvedProfileRoot = Resolve-ProfileMatrixPath $ProfileRoot
+    if (-not [string]::Equals((Split-Path -Parent $resolvedProfileRoot), $usersRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    if (-not [string]::Equals((Split-Path -Parent ([string]$Item.FullName)), $resolvedProfileRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    $knownTargets = @{
+        'Application Data' = 'AppData\Roaming'
+        'Cookies' = 'AppData\Local\Microsoft\Windows\INetCookies'
+        'Local Settings' = 'AppData\Local'
+        'My Documents' = 'Documents'
+        'NetHood' = 'AppData\Roaming\Microsoft\Windows\Network Shortcuts'
+        'PrintHood' = 'AppData\Roaming\Microsoft\Windows\Printer Shortcuts'
+        'Recent' = 'AppData\Roaming\Microsoft\Windows\Recent'
+        'SendTo' = 'AppData\Roaming\Microsoft\Windows\SendTo'
+        'Start Menu' = 'AppData\Roaming\Microsoft\Windows\Start Menu'
+        'Templates' = 'AppData\Roaming\Microsoft\Windows\Templates'
+    }
+    if (-not $knownTargets.ContainsKey([string]$Item.Name)) { return $false }
+    if (-not [string]::Equals([string]$Item.LinkType, 'Junction', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    $target = @($Item.Target | Select-Object -First 1)
+    if ($target.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$target[0])) { return $false }
+    $targetPath = [string]$target[0]
+    if (-not [System.IO.Path]::IsPathRooted($targetPath)) {
+        $targetPath = Join-Path (Split-Path -Parent ([string]$Item.FullName)) $targetPath
+    }
+    $expectedTarget = Resolve-ProfileMatrixPath (Join-Path $resolvedProfileRoot $knownTargets[[string]$Item.Name])
+    $resolvedTarget = Resolve-ProfileMatrixPath $targetPath
+    return [string]::Equals($resolvedTarget, $expectedTarget, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 function Test-ProfileMatrixReparseFree {
-    param([Parameter(Mandatory = $true)][string]$Root)
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [switch]$AllowKnownCompatibilityJunctions
+    )
     $resolved = Resolve-ProfileMatrixPath $Root
     if (-not (Test-Path -LiteralPath $resolved -PathType Container)) { return }
     $rootItem = Get-Item -LiteralPath $resolved -Force
     if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "profile matrix refuses a reparse point: $resolved"
     }
-    foreach ($item in @(Get-ChildItem -LiteralPath $resolved -Force -Recurse)) {
-        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "profile matrix refuses a reparse point: $($item.FullName)"
+
+    # Walk regular directories ourselves instead of using -Recurse. This
+    # guarantees that an allowed OS compatibility junction is not traversed
+    # into, while every unexpected reparse point still fails closed before any
+    # caller can recursively delete or copy the tree.
+    $pending = New-Object System.Collections.Generic.Stack[string]
+    $pending.Push($resolved)
+    while ($pending.Count -gt 0) {
+        $current = $pending.Pop()
+        foreach ($item in @(Get-ChildItem -LiteralPath $current -Force)) {
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                if ($AllowKnownCompatibilityJunctions -and
+                    (Test-ProfileMatrixKnownCompatibilityJunction -ProfileRoot $resolved -Item $item)) {
+                    continue
+                }
+                throw "profile matrix refuses a reparse point: $($item.FullName)"
+            }
+            if ($item.PSIsContainer) {
+                $pending.Push([string]$item.FullName)
+            }
         }
     }
 }
@@ -135,6 +203,24 @@ function Get-ProfileMatrixExpectedCurrentCase {
     return [string]$RequestedCases[0]
 }
 
+function Remove-ProfileMatrixKnownCompatibilityJunctions {
+    param([Parameter(Mandatory = $true)][string]$ProfileRoot)
+
+    $resolved = Resolve-ProfileMatrixPath $ProfileRoot
+    foreach ($item in @(Get-ChildItem -LiteralPath $resolved -Force)) {
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
+            continue
+        }
+        if (-not (Test-ProfileMatrixKnownCompatibilityJunction -ProfileRoot $resolved -Item $item)) {
+            throw "profile matrix refuses an unexpected profile reparse point during cleanup: $($item.FullName)"
+        }
+        # Remove the link itself, never its target. Do this before the final
+        # recursive profile deletion because Windows PowerShell 5.1 may walk
+        # directory junctions when -Recurse is used.
+        Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop
+    }
+}
+
 function Remove-ProfileMatrixUserProfile {
     param(
         [Parameter(Mandatory = $true)][string]$Sid,
@@ -156,7 +242,11 @@ function Remove-ProfileMatrixUserProfile {
         -not [string]::Equals($leaf, $UserName, [System.StringComparison]::Ordinal)) {
         throw "refusing to remove unexpected user profile path: $resolved"
     }
-    if (Test-Path -LiteralPath $resolved) { Test-ProfileMatrixReparseFree -Root $resolved }
+    if (Test-Path -LiteralPath $resolved) {
+        Test-ProfileMatrixReparseFree -Root $resolved -AllowKnownCompatibilityJunctions
+        Remove-ProfileMatrixKnownCompatibilityJunctions -ProfileRoot $resolved
+        Test-ProfileMatrixReparseFree -Root $resolved
+    }
     try { Remove-CimInstance -InputObject $profile -ErrorAction Stop } catch { Write-Warning "profile WMI removal failed for ${Sid}: $($_.Exception.Message)" }
     if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue }
 }
