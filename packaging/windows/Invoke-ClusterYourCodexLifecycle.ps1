@@ -1740,7 +1740,12 @@ function Invoke-CycBootstrapProcess {
         $previousErrorActionPreference = $ErrorActionPreference
         try {
             $ErrorActionPreference = 'Continue'
-            $stdout = @(& $systemPowerShell @Arguments 2> $stderrPath)
+            # Keep the nested Windows PowerShell host hidden as well as the
+            # NSIS coordinator. Windows 11 ARM64 x64 emulation can otherwise
+            # briefly expose the child console even when the parent lifecycle
+            # process was launched with -WindowStyle Hidden.
+            $hiddenArguments = @('-WindowStyle', 'Hidden') + $Arguments
+            $stdout = @(& $systemPowerShell @hiddenArguments 2> $stderrPath)
             $exitCode = [int]$LASTEXITCODE
         } finally {
             $ErrorActionPreference = $previousErrorActionPreference

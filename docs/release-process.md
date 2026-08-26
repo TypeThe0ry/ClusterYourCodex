@@ -25,8 +25,8 @@ SemVer changes do not alter protocol schema identifiers.
 Before a tag:
 
 ```powershell
-./scripts/Set-ProductVersion.ps1 -Version 0.1.0-preview.10
-./scripts/Test-VersionConsistency.ps1 -ExpectedTag v0.1.0-preview.10
+./scripts/Set-ProductVersion.ps1 -Version 0.1.0-preview.11
+./scripts/Test-VersionConsistency.ps1 -ExpectedTag v0.1.0-preview.11
 ```
 
 The tag, binaries' `--version`, Tauri/package/plugin/MCP versions, installer

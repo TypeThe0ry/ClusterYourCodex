@@ -7,6 +7,17 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.11] - 2026-08-26
+
+### Fixed
+
+- Windows silent Setup now passes `-WindowStyle Hidden` to the nested
+  Windows PowerShell bootstrap process as well as the NSIS coordinator. This
+  closes the transient console-window race observed under clean Windows 11
+  ARM64 x64 emulation.
+- Added a static regression assertion that the nested bootstrap host remains
+  hidden in the packaged lifecycle path.
+
 ## [0.1.0-preview.10] - 2026-08-26
 
 ### Fixed
