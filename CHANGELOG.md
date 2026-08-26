@@ -7,7 +7,14 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.17] - 2026-08-26
+
 ### Fixed
+
+- Release identity now validates that the current preview has a changelog
+  heading, exact predecessor comparison link, and a complete set of version
+  link definitions, preventing stale release-note metadata from reaching a
+  tagged prerelease.
 
 - Corrected the Keep a Changelog comparison links so the `Unreleased` range
   starts at `v0.1.0-preview.16` and every published preview heading resolves to
@@ -222,7 +229,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.16...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.17...HEAD
+[0.1.0-preview.17]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.16...v0.1.0-preview.17
 [0.1.0-preview.16]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.15...v0.1.0-preview.16
 [0.1.0-preview.15]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.14...v0.1.0-preview.15
 [0.1.0-preview.14]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.13...v0.1.0-preview.14
