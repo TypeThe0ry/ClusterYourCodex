@@ -3987,6 +3987,7 @@ exit 91
     Assert-True (-not $freshDeploymentSource.Contains("'-PurgeData'")) 'fresh deployment smoke preserves isolated product data before harness-owned cleanup'
     Assert-True ($freshDeploymentSource -match 'Remove-FreshOwnedIsolationRoot') 'fresh deployment smoke cleans only its validated harness-owned isolation root'
     Assert-True ($freshDeploymentSource -match 'Remove-FreshOwnedWorkRoot[\s\S]+reparse point') 'fresh deployment work-root cleanup rejects nested reparse points'
+    Assert-True ($freshDeploymentSource -match 'Wait-FreshFileUnlocked[\s\S]+FileShare\]::None') 'fresh deployment waits for transient executable handles before repair mutation'
     Assert-True ($freshDeploymentSource -match 'repair precondition corrupts the installed CLI[\s\S]+repair restores the exact packaged CLI bytes') 'fresh deployment Repair restores a deliberately corrupted production file'
     Assert-True ($freshDeploymentSource -match "'ClusterYourCodex Controller', 'ClusterYourCodex Worker'") 'fresh deployment smoke protects both fixed product task names'
     Assert-True ($freshDeploymentSource -match 'fresh deployment runner starts without pre-existing product tasks') 'fresh deployment smoke fails closed around pre-existing product tasks'

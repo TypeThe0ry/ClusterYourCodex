@@ -272,7 +272,7 @@ function startControllerVerificationWhenEligible(): void {
 }
 
 const server = new Server(
-  { name: "cluster-your-codex", version: "0.1.0-preview.11" },
+  { name: "cluster-your-codex", version: "0.1.0-preview.12" },
   {
     capabilities: { tools: {} },
     instructions:

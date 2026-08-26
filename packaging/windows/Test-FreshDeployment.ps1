@@ -162,6 +162,46 @@ function Assert-InstalledFile {
     return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Wait-FreshFileUnlocked {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [int]$TimeoutSeconds = 60
+    )
+
+    if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 300) {
+        throw "invalid fresh deployment file-unlock timeout: $TimeoutSeconds"
+    }
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastError = ''
+    do {
+        $stream = $null
+        try {
+            # Windows 11 ARM64 x64 emulation and endpoint scanners can retain a
+            # transient executable handle after a short-lived --help process
+            # has returned. Require an exclusive read/write open before the
+            # harness mutates the packaged executable for the repair proof.
+            $stream = [System.IO.File]::Open(
+                $Path,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::ReadWrite,
+                [System.IO.FileShare]::None
+            )
+            return
+        } catch [System.IO.IOException] {
+            $lastError = $_.Exception.Message
+        } catch [System.UnauthorizedAccessException] {
+            $lastError = $_.Exception.Message
+        } finally {
+            if ($null -ne $stream) {
+                $stream.Dispose()
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+
+    throw "fresh deployment file remained locked before repair mutation: $Path; lastError=$lastError"
+}
+
 $package = Resolve-FreshPath $PackageRoot
 $work = Resolve-FreshPath $WorkRoot
 $workExistedAtStart = Test-Path -LiteralPath $work
@@ -271,6 +311,7 @@ try {
     $installedCliSha256 = (Get-FileHash -LiteralPath $installedCliPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $installedCliBytes = [System.IO.File]::ReadAllBytes($installedCliPath)
     Assert-FreshTest ($installedCliBytes.Length -gt 4096) 'installed CLI is large enough for a deterministic repair mutation'
+    Wait-FreshFileUnlocked -Path $installedCliPath
     $mutationOffset = $installedCliBytes.Length - 1
     $installedCliBytes[$mutationOffset] = $installedCliBytes[$mutationOffset] -bxor 0xff
     [System.IO.File]::WriteAllBytes($installedCliPath, $installedCliBytes)

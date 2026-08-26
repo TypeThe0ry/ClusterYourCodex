@@ -88,7 +88,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
-$script:ProductVersion = '0.1.0-preview.11'
+$script:ProductVersion = '0.1.0-preview.12'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
