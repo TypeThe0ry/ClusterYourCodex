@@ -1,6 +1,6 @@
 [package]
 name = "clusteryourcodex-desktop-host"
-version = "0.1.0-preview.13"
+version = "0.1.0-preview.14"
 description = "Security boundary and native host for ClusterYourCodex"
 authors = ["ClusterYourCodex contributors"]
 edition = "2021"

@@ -7,6 +7,14 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.14] - 2026-08-26
+
+### Fixed
+
+- Corrected the Windows packaging regression guard for the elevated helper's
+  hidden-host argument so the PowerShell 5.1 static test evaluates the literal
+  `$encodedLoader` token without runtime variable interpolation.
+
 ## [0.1.0-preview.13] - 2026-08-26
 
 ### Fixed
