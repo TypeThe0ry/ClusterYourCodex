@@ -4156,10 +4156,17 @@ exit 0
     Assert-True ($profileMatrixSource -match 'Win32_UserProfile') 'profile matrix removes created user profiles by SID'
     Assert-True ($profileMatrixSource -match 'robocopy') 'profile matrix stages a private package copy for alternate users'
     Assert-True ($profileMatrixSource -match 'Test-ProfileMatrixKnownCompatibilityJunction') 'profile matrix recognizes only the OS-created profile compatibility junctions'
+    Assert-True ($profileMatrixSource -match 'Normalize-ProfileMatrixLinkTarget' -and
+        $profileMatrixSource -match 'ResolvedTarget' -and
+        $profileMatrixSource -match 'LinkTarget') 'profile matrix normalizes all PowerShell link-target projections'
+    Assert-True ($profileMatrixSource -match '\\\?\?\\' -and
+        $profileMatrixSource -match 'DosDevices') 'profile matrix normalizes NT/Win32 junction target prefixes'
     Assert-True ($profileMatrixSource -match 'AllowKnownCompatibilityJunctions') 'profile matrix scopes compatibility-junction allowance to the disposable profile cleanup path'
     Assert-True ($profileMatrixSource -match 'Remove-ProfileMatrixKnownCompatibilityJunctions') 'profile matrix removes known compatibility junctions before recursive profile cleanup'
     Assert-True ($profileMatrixSource -match "'Application Data'" -and $profileMatrixSource -match "'Local Settings'") 'profile matrix names the legacy compatibility junction allow-list explicitly'
     Assert-True ($profileMatrixSource -match '\$knownTargets' -and $profileMatrixSource -match 'LinkType') 'profile matrix validates compatibility-junction targets instead of allowing arbitrary reparse points'
+    Assert-True ($profileMatrixSource -match 'primary child/verification error' -and
+        $profileMatrixSource -match 'profile cleanup error') 'profile matrix preserves the primary case failure when cleanup also fails'
     Assert-True ($profileMatrixSource -match 'Stack\[string\]' -and $profileMatrixSource -match 'Get-ChildItem -LiteralPath \$current -Force') 'profile matrix walks regular directories without traversing allowed junctions'
     Assert-True ($profileMatrixChildSource -match 'Test-FreshDeployment\.ps1') 'profile matrix child runs the complete install/repair/uninstall lifecycle harness'
     Assert-True ($profileMatrixChildSource -match 'USERPROFILE') 'profile matrix child records the effective USERPROFILE'

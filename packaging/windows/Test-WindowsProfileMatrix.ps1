@@ -65,6 +65,65 @@ function Resolve-ProfileMatrixPath {
     return [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
 }
 
+function Normalize-ProfileMatrixLinkTarget {
+    param(
+        [Parameter(Mandatory = $true)][string]$BasePath,
+        [Parameter(Mandatory = $true)]$Value
+    )
+
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+    $text = $text.Trim().Trim([char]0).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+
+    # Windows may expose a junction target through the NT namespace rather
+    # than the Win32 namespace. Normalize only the well-known wrappers; do
+    # not accept arbitrary device paths or UNC targets for this allow-list.
+    foreach ($prefix in @('\??\', '\DosDevices\', '\\?\', '\\.\')) {
+        if ($text.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $text = $text.Substring($prefix.Length)
+            break
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($text) -or $text.StartsWith('\', [System.StringComparison]::Ordinal)) {
+        return $null
+    }
+    if (-not [System.IO.Path]::IsPathRooted($text)) {
+        $text = Join-Path $BasePath $text
+    }
+    try {
+        return Resolve-ProfileMatrixPath $text
+    } catch {
+        return $null
+    }
+}
+
+function Get-ProfileMatrixLinkTargets {
+    param(
+        [Parameter(Mandatory = $true)][System.IO.FileSystemInfo]$Item,
+        [Parameter(Mandatory = $true)][string]$BasePath
+    )
+
+    $observed = New-Object System.Collections.Generic.List[string]
+    foreach ($propertyName in @('Target', 'ResolvedTarget', 'LinkTarget')) {
+        $property = $Item.PSObject.Properties[$propertyName]
+        if ($null -eq $property -or $null -eq $property.Value) { continue }
+        foreach ($rawValue in @($property.Value)) {
+            if ($null -eq $rawValue) { continue }
+            $candidate = $rawValue
+            # A provider can expose a link target as a FileSystemInfo object;
+            # prefer its full path over the object's formatted ToString().
+            $fullNameProperty = $candidate.PSObject.Properties['FullName']
+            if ($null -ne $fullNameProperty -and -not [string]::IsNullOrWhiteSpace([string]$fullNameProperty.Value)) {
+                $candidate = $fullNameProperty.Value
+            }
+            $normalized = Normalize-ProfileMatrixLinkTarget -BasePath $BasePath -Value $candidate
+            if ($null -ne $normalized) { [void]$observed.Add($normalized) }
+        }
+    }
+    return @($observed | Sort-Object -Unique)
+}
+
 function Test-ProfileMatrixKnownCompatibilityJunction {
     param(
         [Parameter(Mandatory = $true)][string]$ProfileRoot,
@@ -98,19 +157,16 @@ function Test-ProfileMatrixKnownCompatibilityJunction {
         'Templates' = 'AppData\Roaming\Microsoft\Windows\Templates'
     }
     if (-not $knownTargets.ContainsKey([string]$Item.Name)) { return $false }
-    if (-not [string]::Equals([string]$Item.LinkType, 'Junction', [System.StringComparison]::OrdinalIgnoreCase)) {
+    $linkTypeProperty = $Item.PSObject.Properties['LinkType']
+    if ($null -eq $linkTypeProperty -or
+        -not [string]::Equals([string]$linkTypeProperty.Value, 'Junction', [System.StringComparison]::OrdinalIgnoreCase)) {
         return $false
     }
 
-    $target = @($Item.Target | Select-Object -First 1)
-    if ($target.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$target[0])) { return $false }
-    $targetPath = [string]$target[0]
-    if (-not [System.IO.Path]::IsPathRooted($targetPath)) {
-        $targetPath = Join-Path (Split-Path -Parent ([string]$Item.FullName)) $targetPath
-    }
     $expectedTarget = Resolve-ProfileMatrixPath (Join-Path $resolvedProfileRoot $knownTargets[[string]$Item.Name])
-    $resolvedTarget = Resolve-ProfileMatrixPath $targetPath
-    return [string]::Equals($resolvedTarget, $expectedTarget, [System.StringComparison]::OrdinalIgnoreCase)
+    $targets = @(Get-ProfileMatrixLinkTargets -Item $Item -BasePath (Split-Path -Parent ([string]$Item.FullName)))
+    if ($targets.Count -ne 1) { return $false }
+    return [string]::Equals([string]$targets[0], $expectedTarget, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
 function Test-ProfileMatrixReparseFree {
@@ -318,6 +374,8 @@ try {
         $receiptPath = Join-Path $caseRoot 'receipt.json'
         [void](New-Item -ItemType Directory -Path $caseRoot -Force)
         Add-ProfileMatrixUsersModify -Path $caseRoot
+        $caseFailureRecord = $null
+        $caseCleanupFailureMessage = $null
         try {
             if ($CurrentUserOnly) {
                 $sid = [string]$identity.User.Value
@@ -357,15 +415,32 @@ try {
             Assert-ProfileMatrix ([string]$receipt.caseName -ceq $case) "case $case receipt binds the case name"
             Assert-ProfileMatrix ([string]$receipt.sid -ceq $sid) "case $case receipt binds the expected SID"
             [void]$cases.Add($receipt)
+        } catch {
+            # Preserve the primary child/verification error so a later profile
+            # cleanup problem cannot replace the useful root cause.
+            $caseFailureRecord = $_
         } finally {
             if (-not $CurrentUserOnly) {
                 if ($isAdmin -and $null -ne $sid) {
                     try { Remove-LocalGroupMember -Group $adminGroup -Member $userName -ErrorAction SilentlyContinue } catch { }
                 }
                 try { Remove-LocalUser -Name $userName -ErrorAction SilentlyContinue } catch { }
-                if ($null -ne $sid) { Remove-ProfileMatrixUserProfile -Sid $sid -UserName $userName }
+                if ($null -ne $sid) {
+                    try {
+                        Remove-ProfileMatrixUserProfile -Sid $sid -UserName $userName
+                    } catch {
+                        $caseCleanupFailureMessage = [string]$_.Exception.Message
+                    }
+                }
             }
         }
+        if ($null -ne $caseCleanupFailureMessage) {
+            if ($null -ne $caseFailureRecord) {
+                throw ("$([string]$caseFailureRecord.Exception.Message); profile cleanup error: $caseCleanupFailureMessage")
+            }
+            throw "case $case profile cleanup failed: $caseCleanupFailureMessage"
+        }
+        if ($null -ne $caseFailureRecord) { throw $caseFailureRecord }
     }
 } catch {
     $failure = $_

@@ -3664,15 +3664,49 @@ function Wait-CycTaskStable {
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $runningSince = $null
+    $lastObservedState = 'missing'
+    $lastObservedResult = $null
+    $lastObservedRunTime = $null
+    $lastObservedAction = $null
+    $lastObservedProcess = $null
     do {
         $task = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+        if ($task) {
+            $lastObservedState = [string]$task.State
+            $actionsProperty = $task.PSObject.Properties['Actions']
+            if ($null -ne $actionsProperty -and $null -ne $actionsProperty.Value) {
+                $action = @($actionsProperty.Value | Select-Object -First 1)
+                if ($action.Count -eq 1) {
+                    $lastObservedAction = (([string]$action[0].Execute) + ' ' + ([string]$action[0].Arguments)).Trim()
+                    $executableName = Split-Path -Leaf ([string]$action[0].Execute)
+                    if (-not [string]::IsNullOrWhiteSpace($executableName)) {
+                        $executableName = [System.IO.Path]::GetFileNameWithoutExtension($executableName)
+                        $lastObservedProcess = (@(Get-Process -Name $executableName -ErrorAction SilentlyContinue |
+                            Select-Object -First 5 |
+                            ForEach-Object { "#$($_.Id)" })) -join ','
+                        if ([string]::IsNullOrWhiteSpace($lastObservedProcess)) { $lastObservedProcess = 'absent' }
+                    }
+                }
+            }
+            try {
+                $taskInfo = Get-ScheduledTaskInfo -TaskName $Name -ErrorAction Stop
+                $lastObservedResult = [long]$taskInfo.LastTaskResult
+                $lastObservedRunTime = [string]$taskInfo.LastRunTime
+            } catch {
+                $lastObservedResult = 'unavailable'
+                $lastObservedRunTime = 'unavailable'
+            }
+        } else {
+            $lastObservedState = 'missing'
+            $lastObservedProcess = 'unavailable'
+        }
         if ($task -and [string]$task.State -eq 'Running') {
             if (-not $runningSince) { $runningSince = [DateTime]::UtcNow }
             if (([DateTime]::UtcNow - $runningSince).TotalSeconds -ge $StableSeconds) {
                 $taskInfo = Get-ScheduledTaskInfo -TaskName $Name -ErrorAction Stop
                 $lastResult = [long]$taskInfo.LastTaskResult
                 if ($lastResult -notin @(0, 267009)) {
-                    throw "Scheduled Task reported failure while running: $Name (result=$lastResult)"
+                    throw "Scheduled Task reported failure while running: $Name (result=$lastResult, state=$lastObservedState, lastRun=$lastObservedRunTime, process=$lastObservedProcess, action=$lastObservedAction)"
                 }
                 return
             }
@@ -3681,7 +3715,7 @@ function Wait-CycTaskStable {
         }
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw "Scheduled Task did not remain healthy for $StableSeconds seconds: $Name"
+    throw "Scheduled Task did not remain healthy for $StableSeconds seconds: $Name (state=$lastObservedState, lastResult=$lastObservedResult, lastRun=$lastObservedRunTime, process=$lastObservedProcess, action=$lastObservedAction)"
 }
 
 function Test-CycWorkerStatus {
