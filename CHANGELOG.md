@@ -7,6 +7,15 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.23] - 2026-08-27
+
+### Fixed
+
+- Normalized Windows profile compatibility junction targets across Win32 and
+  NT namespace projections, while keeping unknown reparse points fail-closed.
+- Preserved the primary profile-matrix case failure when cleanup also fails and
+  added scheduled-task state, result, runtime, action, and process diagnostics.
+
 ## [0.1.0-preview.22] - 2026-08-26
 
 ### Fixed
@@ -274,7 +283,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.22...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.23...HEAD
+[0.1.0-preview.23]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.22...v0.1.0-preview.23
 [0.1.0-preview.22]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.21...v0.1.0-preview.22
 [0.1.0-preview.21]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.20...v0.1.0-preview.21
 [0.1.0-preview.20]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.19...v0.1.0-preview.20
