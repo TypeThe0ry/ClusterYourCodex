@@ -383,6 +383,12 @@ impl HostileIsolation {
 
         match backend {
             IsolationBackend::Linux(config) => {
+                // The cgroup control files do not exist until the node-owned
+                // child is prepared. Create and validate that boundary first,
+                // then run the broader worker/credential checks against the
+                // now-existing controls before allowing a claim.
+                prepare_guard_parent(&config.guard_state_file)?;
+                prepare_linux_cgroup(config)?;
                 validate_linux_worker_boundaries(
                     config,
                     isolation_config,
@@ -390,8 +396,6 @@ impl HostileIsolation {
                     &worker_config.credential_file,
                     &worker_config.workspace_root,
                 )?;
-                prepare_guard_parent(&config.guard_state_file)?;
-                prepare_linux_cgroup(config)?;
             }
             IsolationBackend::Windows(_) | IsolationBackend::Macos(_) => {
                 bail!("unavailable hostile backend bypassed the fail-closed startup gate")
@@ -904,8 +908,12 @@ fn prepare_linux_cgroup(config: &LinuxIsolation) -> Result<()> {
 fn validate_linux_cgroup_control_boundary(config: &LinuxIsolation) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    let cgroup = fs::symlink_metadata(&config.cgroup_path)
-        .with_context(|| format!("inspect hostile cgroup boundary {}", config.cgroup_path.display()))?;
+    let cgroup = fs::symlink_metadata(&config.cgroup_path).with_context(|| {
+        format!(
+            "inspect hostile cgroup boundary {}",
+            config.cgroup_path.display()
+        )
+    })?;
     if !cgroup.is_dir() || cgroup.file_type().is_symlink() || cgroup.uid() != 0 {
         bail!("hostile cgroup directory must be root-owned and non-symlink");
     }
@@ -941,11 +949,6 @@ fn cgroup_pids_limit(path: &Path) -> Result<u32> {
         .context("hostile cgroup pids.max must be a finite numeric limit")
 }
 
-#[cfg(not(target_os = "linux"))]
-fn cgroup_pids_limit(_path: &Path) -> Result<u32> {
-    bail!("linux hostile isolation requires a Linux worker")
-}
-
 #[cfg(target_os = "linux")]
 fn validate_linux_cgroup_resource_limit(config: &LinuxIsolation) -> Result<()> {
     let observed = cgroup_pids_limit(&config.cgroup_path)?;
@@ -960,6 +963,7 @@ fn validate_linux_cgroup_resource_limit(config: &LinuxIsolation) -> Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 fn validate_linux_cgroup_resource_limit(_config: &LinuxIsolation) -> Result<()> {
     bail!("linux hostile isolation requires a Linux worker")
 }
@@ -1677,11 +1681,19 @@ mod tests {
                     OsString::from(
                         "printf 'uid=%s gid=%s\\n' \"$(id -u)\" \"$(id -g)\"; \
                          if cat \"$1\" >/dev/null 2>&1; then exit 91; fi; \
-                         if cat \"$2\" >/dev/null 2>&1; then exit 92; fi",
+                         if cat \"$2\" >/dev/null 2>&1; then exit 92; fi; \
+                         if printf '%s\\n' \"$$\" > \"$3\" 2>/dev/null; then exit 93; fi; \
+                         printf 'cgroup_escape=blocked\\n'",
                     ),
                     OsString::from("hostile-live"),
                     credential.as_os_str().to_owned(),
                     guard_state.as_os_str().to_owned(),
+                    cgroup
+                        .parent()
+                        .unwrap()
+                        .join("cgroup.procs")
+                        .as_os_str()
+                        .to_owned(),
                 ],
                 cwd: repo,
                 timeout: Duration::from_secs(30),
@@ -1699,7 +1711,7 @@ mod tests {
         assert!(result.succeeded(), "{result:?}");
         assert_eq!(
             fs::read_to_string(&stdout).unwrap(),
-            format!("uid={uid} gid={gid}\n")
+            format!("uid={uid} gid={gid}\ncgroup_escape=blocked\n")
         );
         isolation.verify_after_process().unwrap();
 
