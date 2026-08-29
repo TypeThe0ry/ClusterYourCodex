@@ -7,6 +7,14 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.25] - 2026-08-29
+
+### Fixed
+
+- Fixed Linux hostile-isolation startup ordering so the disposable cgroup-v2 child is created and its control boundary is validated before worker/credential boundary checks.
+- Expanded the Linux native acceptance probe to prove dedicated identity execution, credential/guard protection, cgroup escape blocking, residual reconciliation, and cleanup when run on a configured worker.
+
+
 ## [0.1.0-preview.24] - 2026-08-29
 
 ### Fixed
@@ -295,7 +303,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.24...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.25...HEAD
+[0.1.0-preview.25]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.24...v0.1.0-preview.25
 [0.1.0-preview.24]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.23...v0.1.0-preview.24
 [0.1.0-preview.23]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.22...v0.1.0-preview.23
 [0.1.0-preview.22]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.21...v0.1.0-preview.22
