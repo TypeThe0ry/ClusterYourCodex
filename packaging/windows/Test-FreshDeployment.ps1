@@ -6,11 +6,28 @@ param(
 
     [string]$WorkRoot = (Join-Path ([System.IO.Path]::GetTempPath()) ('clusteryourcodex-fresh-' + [Guid]::NewGuid().ToString('N'))),
 
-    [switch]$KeepWorkRoot
+    [switch]$KeepWorkRoot,
+
+    # The normal product task principal is InteractiveToken.  The profile
+    # matrix launches disposable accounts from a non-interactive CI session,
+    # so that harness explicitly requests the S4U test principal.  Bootstrap
+    # rejects S4U unless ProfileMatrixTestMode is also present; callers of this
+    # smoke harness therefore cannot silently change production semantics.
+    [ValidateSet('Interactive', 'S4U')]
+    [string]$ScheduledTaskLogonType = 'Interactive',
+
+    [switch]$ProfileMatrixTestMode
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($ProfileMatrixTestMode -and $ScheduledTaskLogonType -cne 'S4U') {
+    throw 'ProfileMatrixTestMode requires ScheduledTaskLogonType S4U.'
+}
+if (-not $ProfileMatrixTestMode -and $ScheduledTaskLogonType -cne 'Interactive') {
+    throw 'ScheduledTaskLogonType S4U is restricted to ProfileMatrixTestMode.'
+}
 
 function Assert-FreshTest {
     param(
@@ -162,6 +179,33 @@ function Assert-InstalledFile {
     return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Normalize-FreshTaskLogonType {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    switch -Regex ($Value) {
+        '^(?:Interactive|InteractiveToken|3)$' { return 'Interactive' }
+        '^(?:S4U|4)$' { return 'S4U' }
+        default { return $null }
+    }
+}
+
+function Assert-FreshTaskPrincipal {
+    param(
+        [Parameter(Mandatory = $true)]$Task,
+        [Parameter(Mandatory = $true)][string]$ExpectedLogonType,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $principalProperty = $Task.PSObject.Properties['Principal']
+    Assert-FreshTest ($null -ne $principalProperty -and $null -ne $principalProperty.Value) "$Label exposes its task principal"
+    $logonProperty = $principalProperty.Value.PSObject.Properties['LogonType']
+    Assert-FreshTest ($null -ne $logonProperty) "$Label exposes its task logon type"
+    $rawLogonType = [string]$logonProperty.Value
+    $observed = Normalize-FreshTaskLogonType -Value $rawLogonType
+    Assert-FreshTest ($observed -ceq $ExpectedLogonType) "$Label uses the expected task logon type (expected=$ExpectedLogonType observed=$rawLogonType)"
+    return $observed
+}
+
 function Wait-FreshFileUnlocked {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -240,6 +284,12 @@ $common = @(
     '-SkipCodexIntegration',
     '-SkipUninstallRegistration'
 )
+if ($ProfileMatrixTestMode) {
+    $common += @(
+        '-ProfileMatrixTestMode',
+        '-ScheduledTaskLogonType', $ScheduledTaskLogonType
+    )
+}
 # Do not append a serialized `-Confirm:$false` token here. Windows PowerShell
 # 5.1 treats that native argv token as a String when a script is launched with
 # `powershell.exe -File`, then fails to bind it to SwitchParameter. This child
@@ -282,6 +332,11 @@ try {
     $installedWorkerTasks = @(Get-ScheduledTask -TaskName 'ClusterYourCodex Worker' -ErrorAction SilentlyContinue)
     Assert-FreshTest ($installedControllerTasks.Count -eq 1) 'install registers exactly one controller task'
     Assert-FreshTest ($installedWorkerTasks.Count -eq 0) 'disabled managed worker does not leave a worker task'
+    $expectedTaskLogonType = if ($ProfileMatrixTestMode) { 'S4U' } else { 'Interactive' }
+    $observedTaskLogonType = Assert-FreshTaskPrincipal `
+        -Task $installedControllerTasks[0] `
+        -ExpectedLogonType $expectedTaskLogonType `
+        -Label 'controller task'
     Assert-FreshTest ([string]$installedControllerTasks[0].TaskPath -eq '\') 'controller task is registered at the expected task path'
     $installedControllerActions = @($installedControllerTasks[0].Actions)
     Assert-FreshTest ($installedControllerActions.Count -eq 1) 'controller task has exactly one action'
@@ -323,6 +378,12 @@ try {
     [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $repairArguments -LogRoot $logRoot -Label 'repair')
     $repairedManifest = Get-Content -LiteralPath $installedManifestPath -Raw | ConvertFrom-Json
     Assert-FreshTest ([string]$repairedManifest.schemaVersion -eq 'cyc.dev/windows-install-manifest/v1') 'repair keeps a valid manifest'
+    $repairedControllerTasks = @(Get-ScheduledTask -TaskName 'ClusterYourCodex Controller' -ErrorAction SilentlyContinue)
+    Assert-FreshTest ($repairedControllerTasks.Count -eq 1) 'repair keeps exactly one controller task'
+    [void](Assert-FreshTaskPrincipal `
+        -Task $repairedControllerTasks[0] `
+        -ExpectedLogonType $expectedTaskLogonType `
+        -Label 'repaired controller task')
     $repairedCliSha256 = (Get-FileHash -LiteralPath $installedCliPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-FreshTest ($repairedCliSha256 -ceq $installedCliSha256) 'repair restores the exact packaged CLI bytes'
     & $installedCliPath '--help' *> (Join-Path $logRoot 'cli-help-after-repair.log')
@@ -355,6 +416,7 @@ try {
         packageRoot = $package
         installRoot = $installRoot
         dataRoot = $dataRoot
+        taskLogonType = $observedTaskLogonType
         steps = @('plan', 'install', 'controller-version', 'worker-probe', 'cli-help', 'repair-corrupted-cli', 'uninstall')
         logs = $logRoot
     } | ConvertTo-Json -Depth 6

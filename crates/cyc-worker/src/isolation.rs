@@ -443,7 +443,9 @@ impl HostileIsolation {
                     config.node_id,
                     HostileIsolationBackend::LinuxCgroupV2DedicatedIdentity,
                 )?;
-                ensure_linux_cgroup_empty(&config.cgroup_path)
+                ensure_linux_cgroup_empty(&config.cgroup_path)?;
+                validate_linux_cgroup_control_boundary(config)?;
+                validate_linux_cgroup_resource_limit(config)
             }
             Some(IsolationBackend::Windows(config)) => {
                 let _ = config;
@@ -767,6 +769,9 @@ fn validate_linux_worker_boundaries(
         bail!("linux hostile execution uid must differ from the worker uid");
     }
     validate_linux_account(config.execution_uid, config.execution_gid)?;
+    // A delegated cgroup is only a containment boundary when the hostile
+    // identity cannot rewrite its control files. Validate this before claim.
+    validate_linux_cgroup_control_boundary(config)?;
     for (label, path) in [
         ("hostile isolation config", isolation_config),
         ("worker config", worker_config),
@@ -885,12 +890,78 @@ fn prepare_linux_cgroup(config: &LinuxIsolation) -> Result<()> {
             bail!("hostile cgroup v2 control `{required}` is unavailable");
         }
     }
+    validate_linux_cgroup_control_boundary(config)?;
     fs::write(
         config.cgroup_path.join("pids.max"),
         format!("{}\n", config.pids_max),
     )
     .context("set hostile cgroup pids.max")?;
+    validate_linux_cgroup_resource_limit(config)?;
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_linux_cgroup_control_boundary(config: &LinuxIsolation) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let cgroup = fs::symlink_metadata(&config.cgroup_path)
+        .with_context(|| format!("inspect hostile cgroup boundary {}", config.cgroup_path.display()))?;
+    if !cgroup.is_dir() || cgroup.file_type().is_symlink() || cgroup.uid() != 0 {
+        bail!("hostile cgroup directory must be root-owned and non-symlink");
+    }
+    if cgroup.mode() & 0o022 != 0 {
+        bail!("hostile cgroup directory is writable by group or other");
+    }
+    for name in ["cgroup.procs", "cgroup.kill", "pids.max"] {
+        let path = config.cgroup_path.join(name);
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect hostile cgroup control {name}"))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.uid() != 0 {
+            bail!("hostile cgroup control {name} must be a root-owned regular file");
+        }
+        let mode = metadata.mode() & 0o777;
+        if mode & 0o002 != 0 || (metadata.gid() == config.execution_gid && mode & 0o020 != 0) {
+            bail!("hostile execution identity can write cgroup control {name}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn validate_linux_cgroup_control_boundary(_config: &LinuxIsolation) -> Result<()> {
+    bail!("linux hostile isolation requires a Linux worker")
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_pids_limit(path: &Path) -> Result<u32> {
+    let raw = fs::read_to_string(path.join("pids.max"))
+        .with_context(|| format!("read hostile cgroup pids.max at {}", path.display()))?;
+    raw.trim()
+        .parse::<u32>()
+        .context("hostile cgroup pids.max must be a finite numeric limit")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cgroup_pids_limit(_path: &Path) -> Result<u32> {
+    bail!("linux hostile isolation requires a Linux worker")
+}
+
+#[cfg(target_os = "linux")]
+fn validate_linux_cgroup_resource_limit(config: &LinuxIsolation) -> Result<()> {
+    let observed = cgroup_pids_limit(&config.cgroup_path)?;
+    if observed != config.pids_max {
+        bail!(
+            "hostile cgroup resource limit mismatch (expected {}, observed {})",
+            config.pids_max,
+            observed
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn validate_linux_cgroup_resource_limit(_config: &LinuxIsolation) -> Result<()> {
+    bail!("linux hostile isolation requires a Linux worker")
 }
 
 #[cfg(not(target_os = "linux"))]

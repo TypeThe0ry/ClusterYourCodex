@@ -7,6 +7,18 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.24] - 2026-08-29
+
+### Fixed
+
+- Hardened the Windows profile/path matrix for PowerShell 5.1 and Windows 11
+  ARM64 x64 emulation by validating compatibility junctions through the native
+  `fsutil` mount-point contract and rejecting ambiguous or unsafe targets.
+- Kept production Scheduled Tasks on `InteractiveToken` while adding an
+  explicitly guarded `S4U` principal only for the non-interactive disposable
+  profile-matrix harness.
+- Added Linux hostile-isolation native probe documentation and reproducible
+  cleanup evidence without widening the runtime readiness gate.
 ## [0.1.0-preview.23] - 2026-08-27
 
 ### Fixed
@@ -283,7 +295,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.23...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.24...HEAD
+[0.1.0-preview.24]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.23...v0.1.0-preview.24
 [0.1.0-preview.23]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.22...v0.1.0-preview.23
 [0.1.0-preview.22]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.21...v0.1.0-preview.22
 [0.1.0-preview.21]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.20...v0.1.0-preview.21

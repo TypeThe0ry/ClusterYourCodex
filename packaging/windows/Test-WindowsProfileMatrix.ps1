@@ -79,13 +79,25 @@ function Normalize-ProfileMatrixLinkTarget {
     # Windows may expose a junction target through the NT namespace rather
     # than the Win32 namespace. Normalize only the well-known wrappers; do
     # not accept arbitrary device paths or UNC targets for this allow-list.
+    $hadNamespacePrefix = $false
     foreach ($prefix in @('\??\', '\DosDevices\', '\\?\', '\\.\')) {
         if ($text.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
             $text = $text.Substring($prefix.Length)
+            $hadNamespacePrefix = $true
             break
         }
     }
     if ([string]::IsNullOrWhiteSpace($text) -or $text.StartsWith('\', [System.StringComparison]::Ordinal)) {
+        return $null
+    }
+    # A namespace-wrapped target is only accepted when it resolves to a local
+    # drive path. Reject volume/device/GLOBALROOT/UNC forms before the normal
+    # relative-path handling; otherwise a value such as \??\Volume{...} could
+    # be misinterpreted as a path beneath the profile root.
+    if ($hadNamespacePrefix -and $text -notmatch '^[A-Za-z]:[\\/]') {
+        return $null
+    }
+    if ($text -match '^(?i:GLOBALROOT[\\/]|Device[\\/]|Volume\{|UNC[\\/])') {
         return $null
     }
     if (-not [System.IO.Path]::IsPathRooted($text)) {
@@ -124,6 +136,86 @@ function Get-ProfileMatrixLinkTargets {
     return @($observed | Sort-Object -Unique)
 }
 
+function ConvertFrom-ProfileMatrixFsutilReparseOutput {
+    <#
+    Windows PowerShell 5.1 (including the x64 emulation host on Windows 11
+    ARM64) does not project the FileSystemInfo LinkType/Target properties for
+    the compatibility junctions that Windows creates in a new profile.  Keep
+    the parser separate from the fsutil process invocation so its rules stay
+    deterministic and can be exercised with a captured fsutil transcript.
+
+    The parser deliberately accepts only a single mount-point tag and a
+    single NT/Win32 path wrapper.  A missing/ambiguous tag or target is an
+    unknown reparse point, not an allow-list match.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines,
+        [Parameter(Mandatory = $true)][string]$BasePath
+    )
+
+    $text = [string]::Join([Environment]::NewLine, @($Lines | ForEach-Object { [string]$_ }))
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+
+    # fsutil's labels are localized, but the tag is emitted as a hexadecimal
+    # value. Restrict the match to a line that contains the word "tag" rather
+    # than accepting an arbitrary 0x... value from the reparse data dump.
+    $tagMatches = [regex]::Matches(
+        $text,
+        '(?im)^\s*[^:\r\n]*\btag\b[^:\r\n]*:\s*0x(?<tag>[0-9a-f]+)\b'
+    )
+    if ($tagMatches.Count -ne 1) { return $null }
+    $tag = $tagMatches[0].Groups['tag'].Value.ToLowerInvariant()
+    # IO_REPARSE_TAG_MOUNT_POINT (name-surrogate junction) is 0xA0000003.
+    if ($tag -cne 'a0000003') { return $null }
+
+    # Do not depend on the localized "Substitute Name"/"Print Name" labels.
+    # The NT/Win32 wrappers are stable and occur only for the path fields in
+    # fsutil output. Collect every wrapped path and require all observations to
+    # normalize to one exact target.
+    $targetMatches = [regex]::Matches(
+        $text,
+        '(?im)(?<target>(?:\\\?\?\\|\\DosDevices\\|\\\\\?\\|\\\\\.\\)[^\r\n]+)'
+    )
+    if ($targetMatches.Count -eq 0) { return $null }
+    $targets = New-Object System.Collections.Generic.List[string]
+    foreach ($match in $targetMatches) {
+        $rawTarget = [string]$match.Groups['target'].Value.Trim()
+        $normalized = Normalize-ProfileMatrixLinkTarget -BasePath $BasePath -Value $rawTarget
+        if ($null -eq $normalized) { return $null }
+        [void]$targets.Add($normalized)
+    }
+    $uniqueTargets = @($targets | Sort-Object -Unique)
+    if ($uniqueTargets.Count -ne 1) { return $null }
+
+    return [PSCustomObject]@{
+        tag = $tag
+        target = [string]$uniqueTargets[0]
+        source = 'fsutil'
+    }
+}
+
+function Get-ProfileMatrixNativeReparseInfo {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$BasePath
+    )
+
+    $fsutil = Join-Path $env:SystemRoot 'System32\fsutil.exe'
+    if (-not (Test-Path -LiteralPath $fsutil -PathType Leaf)) { return $null }
+    try {
+        # fsutil inserts a blank separator line; filter it before binding the
+        # strict string-array parser (PS5.1 rejects an empty scalar argument).
+        $lines = @(& $fsutil reparsepoint query $Path 2>&1 |
+            ForEach-Object { [string]$_ } |
+            Where-Object { $_.Length -gt 0 })
+        $exitCode = $LASTEXITCODE
+    } catch {
+        return $null
+    }
+    if ($exitCode -ne 0) { return $null }
+    return ConvertFrom-ProfileMatrixFsutilReparseOutput -Lines $lines -BasePath $BasePath
+}
+
 function Test-ProfileMatrixKnownCompatibilityJunction {
     param(
         [Parameter(Mandatory = $true)][string]$ProfileRoot,
@@ -158,15 +250,34 @@ function Test-ProfileMatrixKnownCompatibilityJunction {
     }
     if (-not $knownTargets.ContainsKey([string]$Item.Name)) { return $false }
     $linkTypeProperty = $Item.PSObject.Properties['LinkType']
-    if ($null -eq $linkTypeProperty -or
+    # Windows PowerShell 5.1 has no LinkType projection. If the property is
+    # present, keep the old strict check; if it is absent/blank, the native
+    # fsutil fallback below is the authoritative type check.
+    if ($null -ne $linkTypeProperty -and
+        -not [string]::IsNullOrWhiteSpace([string]$linkTypeProperty.Value) -and
         -not [string]::Equals([string]$linkTypeProperty.Value, 'Junction', [System.StringComparison]::OrdinalIgnoreCase)) {
         return $false
     }
 
     $expectedTarget = Resolve-ProfileMatrixPath (Join-Path $resolvedProfileRoot $knownTargets[[string]$Item.Name])
-    $targets = @(Get-ProfileMatrixLinkTargets -Item $Item -BasePath (Split-Path -Parent ([string]$Item.FullName)))
-    if ($targets.Count -ne 1) { return $false }
-    return [string]::Equals([string]$targets[0], $expectedTarget, [System.StringComparison]::OrdinalIgnoreCase)
+    $basePath = Split-Path -Parent ([string]$Item.FullName)
+    $targets = @(Get-ProfileMatrixLinkTargets -Item $Item -BasePath $basePath)
+    if ($targets.Count -eq 1) {
+        # A projected target is useful on PowerShell 7, but still require a
+        # native mount-point tag whenever fsutil is available. This prevents a
+        # provider-supplied Target property from widening the exception to an
+        # arbitrary reparse type.
+        $native = Get-ProfileMatrixNativeReparseInfo -Path ([string]$Item.FullName) -BasePath $basePath
+        if ($null -eq $native) { return $false }
+        return [string]::Equals([string]$targets[0], $expectedTarget, [System.StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals([string]$native.target, $expectedTarget, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    # PS5.1's missing projections land here. Native output must independently
+    # prove both the mount-point tag and the exact in-profile destination.
+    $fallback = Get-ProfileMatrixNativeReparseInfo -Path ([string]$Item.FullName) -BasePath $basePath
+    if ($null -eq $fallback) { return $false }
+    return [string]::Equals([string]$fallback.target, $expectedTarget, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
 function Test-ProfileMatrixReparseFree {

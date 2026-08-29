@@ -107,6 +107,25 @@ private staged package copy. Credentials are held only in-memory as a
 The controller removes the disposable account and its profile by SID after the
 case, while retaining a job-owned JSON receipt and logs for CI diagnostics.
 
+A disposable profile launched by a non-interactive CI session cannot obtain the
+Winlogon token required by a production `InteractiveToken` task. Therefore the
+profile-matrix child passes both `-ProfileMatrixTestMode` and
+`-ScheduledTaskLogonType S4U` to the fresh-deployment harness. Bootstrap rejects
+S4U unless that explicit test-only marker is present, and the harness verifies
+the persisted Controller task principal after both Install and Repair. This
+keeps the normal lifecycle contract unchanged: ordinary fresh deployment,
+Setup, Repair, and user installs continue to register `InteractiveToken` tasks;
+S4U is not a supported production setting and is never inferred from a runner
+label, job name, or non-interactive host.
+
+The profile/path matrix also treats compatibility junctions as an explicit
+allow-list, not as generic reparse points. On Windows PowerShell 5.1, where
+`LinkType`/`Target` projections may be absent, it queries `fsutil reparsepoint
+query`, requires the native mount-point tag `0xA0000003`, and requires every
+reported target to normalize to the exact expected in-profile destination.
+Device, volume, `GLOBALROOT`, UNC, ambiguous, and unknown-tag targets fail
+closed before cleanup or recursive traversal.
+
 The repository contract can be checked locally without creating accounts:
 
 ```powershell

@@ -3864,6 +3864,7 @@ try {
 
     $lifecycleSource = Get-Content -LiteralPath $lifecycleScript -Raw
     $firewallSource = Get-Content -LiteralPath $firewallScript -Raw
+    $bootstrapSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'bootstrap.ps1') -Raw
     $uninstallerSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Uninstall-ClusterYourCodex.ps1') -Raw
     $desktopIntegrationSource = Get-Content -LiteralPath (Join-Path $repoRoot 'apps\desktop\src-tauri\src\integration.rs') -Raw
     Assert-True (([regex]::Matches($lifecycleSource, '(?i)-Verb\s+RunAs')).Count -eq 1) 'coordinator contains exactly one firewall-only elevation site'
@@ -3945,6 +3946,15 @@ exit 91
     Assert-True ($firewallSource -match 'Profile Private[\s\S]+Protocol TCP[\s\S]+RemoteAddress LocalSubnet') 'helper fixes Private/TCP/LocalSubnet scope'
     Assert-True ($firewallSource -match 'Restore-CycExactFirewallSnapshot') 'helper retains a durable rollback path for core failure and timeout'
 
+    # Scheduled-task principal contract: production stays InteractiveToken;
+    # only the non-interactive disposable profile matrix may opt into S4U.
+    Assert-True ($bootstrapSource -match "ValidateSet\('Interactive', 'S4U'\)") 'bootstrap exposes only the two known Scheduled Task logon types'
+    Assert-True ($bootstrapSource -match '\$ProfileMatrixTestMode[\s\S]+requires ScheduledTaskLogonType S4U') 'bootstrap requires explicit profile-matrix test mode for S4U'
+    Assert-True ($bootstrapSource -match 'elseif \(\$ScheduledTaskLogonType -cne ''Interactive''\)') 'bootstrap rejects non-Interactive task principals outside profile-matrix test mode'
+    Assert-True ($bootstrapSource -match 'New-ScheduledTaskPrincipal[\s\S]+-LogonType \$LogonType[\s\S]+-RunLevel Limited') 'bootstrap registers the validated task principal and retains least privilege'
+    Assert-True ($bootstrapSource -match 'taskLogonType\s*=\s*\$script:ScheduledTaskLogonType') 'bootstrap records the selected task principal in the install manifest'
+    Assert-True ($bootstrapSource -match 'enabled = \$true; logonType = \$script:ScheduledTaskLogonType') 'bootstrap binds enabled controller plan entries to the selected task principal'
+
     $nsis = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'ClusterYourCodex.nsi') -Raw
     Assert-True ($nsis -match 'RequestExecutionLevel user') 'Setup.exe remains in the initiating user token'
     Assert-True ($nsis -notmatch 'RequestExecutionLevel admin') 'Setup.exe never switches LOCALAPPDATA/HKCU to an over-the-shoulder admin'
@@ -3993,6 +4003,12 @@ exit 91
     Assert-True ($freshDeploymentSource -match 'Wait-FreshFileUnlocked[\s\S]+FileShare\]::None') 'fresh deployment waits for transient executable handles before repair mutation'
     Assert-True ($freshDeploymentSource -match 'repair precondition corrupts the installed CLI[\s\S]+repair restores the exact packaged CLI bytes') 'fresh deployment Repair restores a deliberately corrupted production file'
     Assert-True ($freshDeploymentSource -match "'ClusterYourCodex Controller', 'ClusterYourCodex Worker'") 'fresh deployment smoke protects both fixed product task names'
+    Assert-True ($freshDeploymentSource -match "ValidateSet\('Interactive', 'S4U'\)") 'fresh deployment smoke exposes only the two known Scheduled Task logon types'
+    Assert-True ($freshDeploymentSource -match '\$ProfileMatrixTestMode[\s\S]+requires ScheduledTaskLogonType S4U') 'fresh deployment smoke requires explicit profile-matrix test mode for S4U'
+    Assert-True ($freshDeploymentSource -match '-not \$ProfileMatrixTestMode[\s\S]+-cne ''Interactive''') 'fresh deployment smoke rejects S4U outside profile-matrix test mode'
+    Assert-True ($freshDeploymentSource -match '\$common\s*\+=\s*@\([\s\S]+-ProfileMatrixTestMode[\s\S]+-ScheduledTaskLogonType') 'fresh deployment smoke forwards test-only principal flags to bootstrap'
+    Assert-True ($freshDeploymentSource -match 'expectedTaskLogonType\s*=\s*if\s*\(\$ProfileMatrixTestMode\)[\s\S]+S4U[\s\S]+Interactive') 'fresh deployment smoke verifies S4U only for profile-matrix and Interactive otherwise'
+    Assert-True ($freshDeploymentSource -match 'Assert-FreshTaskPrincipal') 'fresh deployment smoke verifies the persisted Scheduled Task principal after install and repair'
     Assert-True ($freshDeploymentSource -match 'fresh deployment runner starts without pre-existing product tasks') 'fresh deployment smoke fails closed around pre-existing product tasks'
     $setupSilentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-SetupSilent.ps1') -Raw
     Assert-True ($setupSilentSource -match 'MaximumInstallManifestBytes\s*=\s*16MB') 'silent Setup smoke accepts the bounded self-contained install manifest size'
@@ -4165,6 +4181,11 @@ exit 0
     Assert-True ($profileMatrixSource -match 'Remove-ProfileMatrixKnownCompatibilityJunctions') 'profile matrix removes known compatibility junctions before recursive profile cleanup'
     Assert-True ($profileMatrixSource -match "'Application Data'" -and $profileMatrixSource -match "'Local Settings'") 'profile matrix names the legacy compatibility junction allow-list explicitly'
     Assert-True ($profileMatrixSource -match '\$knownTargets' -and $profileMatrixSource -match 'LinkType') 'profile matrix validates compatibility-junction targets instead of allowing arbitrary reparse points'
+    Assert-True ($profileMatrixSource -match 'ConvertFrom-ProfileMatrixFsutilReparseOutput') 'profile matrix has a deterministic native fsutil reparse transcript parser'
+    Assert-True ($profileMatrixSource -match 'Get-ProfileMatrixNativeReparseInfo[\s\S]+fsutil\.exe[\s\S]+reparsepoint query') 'profile matrix uses the native fsutil fallback when PowerShell link metadata is absent'
+    Assert-True ($profileMatrixSource -match 'a0000003') 'profile matrix accepts only the Windows mount-point junction reparse tag'
+    Assert-True ($profileMatrixSource -match '(?i)GLOBALROOT[\\/]|\\bDevice[\\/]|Volume\\{|UNC[\\/]') 'profile matrix rejects device, volume, GLOBALROOT, and UNC reparse targets'
+    Assert-True ($profileMatrixSource -match 'tagMatches\.Count -ne 1[\s\S]+uniqueTargets\.Count -ne 1') 'profile matrix rejects ambiguous or malformed native reparse metadata'
     Assert-True ($profileMatrixSource -match 'primary child/verification error' -and
         $profileMatrixSource -match 'profile cleanup error') 'profile matrix preserves the primary case failure when cleanup also fails'
     Assert-True ($profileMatrixSource -match 'Stack\[string\]' -and $profileMatrixSource -match 'Get-ChildItem -LiteralPath \$current -Force') 'profile matrix walks regular directories without traversing allowed junctions'
@@ -4173,6 +4194,9 @@ exit 0
     Assert-True ($profileMatrixChildSource -match 'LOCALAPPDATA') 'profile matrix child records the effective LOCALAPPDATA'
     Assert-True ($profileMatrixChildSource -match 'isAdministrator') 'profile matrix child records administrator membership'
     Assert-True ($profileMatrixChildSource -match 'nonAsciiProfile') 'profile matrix child records non-ASCII profile evidence'
+    Assert-True ($profileMatrixChildSource -match "'-ProfileMatrixTestMode'[\s\S]+'-ScheduledTaskLogonType', 'S4U'") 'profile matrix child explicitly selects the guarded S4U test principal'
+    Assert-True ($profileMatrixChildSource -match "taskLogonType = 'S4U'") 'profile matrix child receipt records its test-only task principal'
+    Assert-True ($profileMatrixChildSource -match 'non-interactive-profile-matrix-harness') 'profile matrix child receipt explains why S4U is used'
 
     $profileWorkflowNeedle = 'Test-WindowsProfileMatrix\.ps1'
     Assert-True ($releaseWorkflow -match $profileWorkflowNeedle) 'release workflow invokes the Windows profile/path matrix'

@@ -93,7 +93,15 @@ $arguments = @(
     '-File', $freshTest,
     '-PackageRoot', $package,
     '-WorkRoot', $freshWork,
-    '-KeepWorkRoot'
+    '-KeepWorkRoot',
+    # The parent launches this disposable account with CreateProcessWithLogonW
+    # from a non-interactive CI session.  A production InteractiveToken task
+    # would correctly refuse that missing Winlogon session, so the profile
+    # matrix uses bootstrap's explicitly guarded S4U test principal while the
+    # regular fresh-deployment and Setup tests continue to exercise
+    # InteractiveToken by default.
+    '-ProfileMatrixTestMode',
+    '-ScheduledTaskLogonType', 'S4U'
 )
 
 $startedAt = [DateTimeOffset]::UtcNow
@@ -119,6 +127,8 @@ $result = [ordered]@{
     localAppData = $localAppData
     temp = $temp
     nonAsciiProfile = [bool](Test-NonAscii $profile)
+    taskLogonType = 'S4U'
+    taskLogonTypeReason = 'non-interactive-profile-matrix-harness'
     packageRoot = $package
     workRoot = $work
     freshDeploymentWorkRoot = $freshWork

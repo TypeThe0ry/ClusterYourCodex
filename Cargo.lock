@@ -471,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "cyc-cli"
-version = "0.1.0-preview.23"
+version = "0.1.0-preview.24"
 dependencies = [
  "anyhow",
  "clap",
@@ -495,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "cyc-controller"
-version = "0.1.0-preview.23"
+version = "0.1.0-preview.24"
 dependencies = [
  "anyhow",
  "axum",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "cyc-protocol"
-version = "0.1.0-preview.23"
+version = "0.1.0-preview.24"
 dependencies = [
  "chrono",
  "serde",
@@ -537,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "cyc-provision"
-version = "0.1.0-preview.23"
+version = "0.1.0-preview.24"
 dependencies = [
  "base64",
  "chrono",
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "cyc-scheduler"
-version = "0.1.0-preview.23"
+version = "0.1.0-preview.24"
 dependencies = [
  "chrono",
  "cyc-protocol",
@@ -568,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "cyc-secrets"
-version = "0.1.0-preview.23"
+version = "0.1.0-preview.24"
 dependencies = [
  "serde",
  "serde_json",
@@ -580,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "cyc-ssh"
-version = "0.1.0-preview.23"
+version = "0.1.0-preview.24"
 dependencies = [
  "base64",
  "cyc-secrets",
@@ -592,7 +592,7 @@ dependencies = [
 
 [[package]]
 name = "cyc-worker"
-version = "0.1.0-preview.23"
+version = "0.1.0-preview.24"
 dependencies = [
  "anyhow",
  "async-trait",

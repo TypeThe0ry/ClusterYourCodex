@@ -74,7 +74,18 @@ param(
 
     [switch]$PurgeData,
 
-    [switch]$PlanOnly
+    [switch]$PlanOnly,
+
+    # The product uses an interactive-token task so the controller stays in
+    # the initiating user's session.  The Windows profile-matrix harness runs
+    # disposable accounts from a non-interactive CI session, where an
+    # InteractiveToken task cannot obtain a Winlogon token.  It may opt into
+    # S4U only with the explicit test-mode marker below; production invocations
+    # fail closed if they request any non-interactive task principal.
+    [ValidateSet('Interactive', 'S4U')]
+    [string]$ScheduledTaskLogonType = 'Interactive',
+
+    [switch]$ProfileMatrixTestMode
 )
 
 Set-StrictMode -Version Latest
@@ -88,7 +99,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
-$script:ProductVersion = '0.1.0-preview.23'
+$script:ProductVersion = '0.1.0-preview.24'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
@@ -117,6 +128,15 @@ $script:MaxCodexOnlyReceiptBytes = 4096
 $script:FileCatalogSchema = 'cyc.dev/file-catalog/v1'
 $script:CodexMarketplaceRelativeRoot = 'integrations/codex-marketplace'
 $script:CodexMarketplacePrefix = 'integrations/codex-marketplace/'
+
+if ($ProfileMatrixTestMode) {
+    if ($ScheduledTaskLogonType -cne 'S4U') {
+        throw 'ProfileMatrixTestMode requires ScheduledTaskLogonType S4U.'
+    }
+} elseif ($ScheduledTaskLogonType -cne 'Interactive') {
+    throw 'ScheduledTaskLogonType S4U is restricted to ProfileMatrixTestMode.'
+}
+$script:ScheduledTaskLogonType = $ScheduledTaskLogonType
 
 function Resolve-NormalizedPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -2739,8 +2759,8 @@ function Get-InstallPlan {
         codexPayloadCatalogSha256 = $codexPayloadCatalogSha256
         files = $files
         tasks = @(
-            [PSCustomObject]@{ name = $script:ControllerTaskName; action = $controllerAction; enabled = $true },
-            [PSCustomObject]@{ name = $script:WorkerTaskName; action = $workerAction; enabled = [bool]$EnableWorker }
+            [PSCustomObject]@{ name = $script:ControllerTaskName; action = $controllerAction; enabled = $true; logonType = $script:ScheduledTaskLogonType },
+            [PSCustomObject]@{ name = $script:WorkerTaskName; action = $workerAction; enabled = [bool]$EnableWorker; logonType = $script:ScheduledTaskLogonType }
         )
         workerConfig = $workerConfigPath
         managedWorker = [PSCustomObject]@{
@@ -3547,15 +3567,23 @@ function Install-PlannedFiles {
 function Register-CycTask {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
-        [Parameter(Mandatory = $true)]$Action
+        [Parameter(Mandatory = $true)]$Action,
+        [ValidateSet('Interactive', 'S4U')]
+        [string]$LogonType = $script:ScheduledTaskLogonType
     )
+    if ($ProfileMatrixTestMode -and $LogonType -cne 'S4U') {
+        throw 'Profile-matrix task registration requires the S4U test principal.'
+    }
+    if (-not $ProfileMatrixTestMode -and $LogonType -cne 'Interactive') {
+        throw 'Production task registration requires the Interactive principal.'
+    }
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     $taskAction = New-ScheduledTaskAction `
         -Execute $Action.executable `
         -Argument $Action.arguments `
         -WorkingDirectory $Action.workingDirectory
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
-    $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
+    $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType $LogonType -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet `
         -MultipleInstances IgnoreNew `
         -AllowStartIfOnBatteries `
@@ -4605,6 +4633,7 @@ function Write-InstallManifest {
         files = @($Plan.files | ForEach-Object {
             [ordered]@{ relativePath = $_.relativePath; sha256 = $_.sha256; length = $_.length }
         })
+        taskLogonType = $script:ScheduledTaskLogonType
         tasks = @($Plan.tasks | Where-Object enabled | ForEach-Object { $_.name })
         managedWorker = [ordered]@{
             enabled = $Plan.managedWorker.enabled
