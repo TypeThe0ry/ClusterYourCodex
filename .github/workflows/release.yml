@@ -1631,7 +1631,7 @@ jobs:
           if-no-files-found: error
 
   github-release:
-    name: Create tagged draft developer preview
+    name: Publish tagged developer preview
     if: github.ref_type == 'tag' && needs.release-identity.outputs.source_tag != ''
     needs: [release-identity, release-index]
     runs-on: ubuntu-latest
@@ -1645,7 +1645,9 @@ jobs:
           path: release-assets
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          draft: true
+          # Every tagged build is immediately visible, but remains explicitly
+          # prerelease until the separate protected GA workflow is approved.
+          draft: false
           prerelease: true
           generate_release_notes: true
           files: release-assets/*
