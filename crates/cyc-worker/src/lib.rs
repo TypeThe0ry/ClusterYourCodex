@@ -632,6 +632,8 @@ fn containment_inventory() -> ContainmentInventory {
         ContainmentBackend::WindowsJobObject
     } else if cfg!(target_os = "linux") {
         ContainmentBackend::LinuxSubreaperProcessGroup
+    } else if cfg!(target_os = "macos") {
+        ContainmentBackend::MacosProcessGroup
     } else {
         ContainmentBackend::Unsupported
     };
@@ -961,6 +963,15 @@ mod tests {
         assert!(!normalized_os_name().is_empty());
         assert!(!normalized_arch_name().is_empty());
         assert_eq!(containment_inventory().max_safe_slots, 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_reports_native_process_group_containment() {
+        assert_eq!(
+            containment_inventory().backend,
+            ContainmentBackend::MacosProcessGroup
+        );
     }
 
     #[test]

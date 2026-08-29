@@ -329,7 +329,7 @@ export interface NodeInventoryPayload {
   workerVersion: string;
   protocolVersion: number;
   containment: {
-    backend: "legacy" | "linux_subreaper_process_group" | "windows_job_object" | "unsupported";
+    backend: "legacy" | "linux_subreaper_process_group" | "macos_process_group" | "windows_job_object" | "unsupported";
     version: string;
     maxSafeSlots: number;
   };

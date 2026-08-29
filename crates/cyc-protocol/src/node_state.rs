@@ -195,6 +195,11 @@ pub enum ContainmentBackend {
     #[default]
     Legacy,
     LinuxSubreaperProcessGroup,
+    /// macOS native process-group inventory and descendant reconciliation.
+    ///
+    /// This is the trusted same-user lifecycle backend; hostile-workload
+    /// isolation remains a separate, fail-closed capability.
+    MacosProcessGroup,
     WindowsJobObject,
     Unsupported,
 }
