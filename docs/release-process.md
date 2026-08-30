@@ -99,9 +99,19 @@ are present and valid:
 - `sourceCommit` is the exact reviewed 40-character source SHA;
 - `provider` and `hostType` are non-empty external identifiers and do not name
   GitHub Actions, a hosted runner, or an equivalent hosted execution surface;
-- `evidenceId` is a bounded identifier for retained evidence; and
+- `evidenceId` is a bounded portable filename identifier (letters, digits,
+  `.`, `_`, and `-` only; no path separators); and
 - `rawLog.url` is an absolute HTTPS URL and `rawLog.sha256` is its 64-character
   SHA-256 digest.
+
+The retained `rawLog` descriptor must also record the exact command and
+external node, ISO-8601 `startedAt`/`endedAt` instants, integer `exitCode=0`,
+non-negative `tests.passed`/`tests.failed`/`tests.ignored` counts with
+`tests.failed=0`, and `cleanup=true`. The readiness workflow runs
+`scripts/Test-GARawLogs.ps1`, downloads every HTTPS log without following
+redirects, enforces the size limit, recomputes SHA-256 over the downloaded
+bytes, and retains a per-log verification record. A URL plus a syntactically
+valid digest is therefore insufficient without the matching downloaded bytes.
 
 The `gates` object is fail-closed: every required gate is a JSON boolean with
 value `true`; a missing, non-boolean, or false gate fails the manifest. Issue
@@ -109,11 +119,15 @@ value `true`; a missing, non-boolean, or false gate fails the manifest. Issue
 `perUserScheduledTasks`, `sidScopedDataDirAcl`,
 `bundledMcpInstallerMarketplace`, `installRepairUpgradeRollbackUninstall`,
 `cleanWindows11Vm`, `liveWindowsControllerWorkerRoundTrip`, and
-`productionAuthenticodeSetupHelper`. Issue #3 requires
+`productionAuthenticodeSetupHelper`, `signedNMinus1ToNUpgrade`,
+`interruptedUpgradeRollback`, `downgradePolicy`, and
+`noOpenUnwaivedP0P1Blocker`. Issue #3 requires
 `linuxSystemdUserServicePackage`, `macosLaunchAgentPackage`,
 `linuxX64ReleaseArtifact`, `macosX64ReleaseArtifact`,
 `macosArm64ReleaseArtifact`, `platformNativeShells`,
 `platformNativeProcessGroups`, `crossPlatformPathAclTests`, and `liveMacosRun`.
+It also requires `liveLinuxControllerWorkerRoundTrip` and
+`macosDeveloperIdSigningNotarization`.
 Issue #5 requires `linuxDedicatedExecutionIdentity`,
 `linuxCgroupV2Reconciliation`, `windowsIsolatedExecutionIdentity`,
 `windowsJobObject`, `windowsProtectedExternalGuard`,
@@ -154,4 +168,15 @@ downloaded stable index before it invokes `gh attestation verify` for every
 payload using the exact source tag, commit, and pinned signer identity. Only
 the validated payloads, sidecars, signature, and required release metadata are
 uploaded; the attestation receipt remains verification input rather than an
-unindexed extra release asset.
+unindexed extra release asset. The stable payload ZIP and its Sigstore
+attestation must come from a reviewed stable builder. The manual GA dispatch
+therefore requires `attestation_signer_repo`, `attestation_signer_workflow`,
+and `attestation_cert_identity` inputs. The protected `production` environment
+must also set `CYC_GA_TRUSTED_BUILDER_REPO` and
+`CYC_GA_TRUSTED_BUILDER_WORKFLOW`, and `CYC_GA_TRUSTED_BUILDER_DIGEST`.
+Dispatch values are rejected unless they match those protected policy values
+exactly; the digest must be a full workflow commit SHA, the repository must be
+external, and the certificate identity must bind to the exact source tag. The
+prerelease `release.yml` workflow is explicitly rejected. This keeps the
+producer explicit instead of treating the
+prerelease publisher as a stable attestation authority.

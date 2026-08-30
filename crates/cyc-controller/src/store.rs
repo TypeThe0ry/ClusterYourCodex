@@ -8187,7 +8187,16 @@ mod tests {
         second.name = "concurrent-writer".to_owned();
         writer.upsert_node(&second).unwrap();
         writer
-            .submit_job(&job(), None, &Scheduler::default())
+            // The test deliberately opens a long-lived WAL snapshot before
+            // performing the concurrent write.  Keep the scheduling policy
+            // under test focused on snapshot/revision pinning instead of
+            // making the result depend on the 15-second production heartbeat
+            // TTL when a loaded CI runner pauses this test.
+            .submit_job(
+                &job(),
+                None,
+                &Scheduler::default().with_node_freshness_ttl(Duration::from_secs(300)),
+            )
             .unwrap();
 
         let observed_at = Utc::now();

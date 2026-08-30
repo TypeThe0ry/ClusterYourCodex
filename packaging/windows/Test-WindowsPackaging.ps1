@@ -3958,6 +3958,39 @@ exit 91
     Assert-True ($bootstrapSource -match 'parent-elevated-registration-v1[\s\S]+not-started') 'bootstrap has an explicit parent-elevated registration-only gate'
     Assert-True ($bootstrapSource -match 'ProfileMatrixTaskHelperMode[\s\S]+requires its explicit test switch') 'bootstrap requires an explicit helper-mode switch in addition to the IPC declaration'
     Assert-True ($bootstrapSource -match 'Invoke-CycProfileMatrixTaskGate[\s\S]+requestId') 'bootstrap binds gated task registration to a request/response exchange'
+    Assert-True ($bootstrapSource -match "ValidateSet\('Register', 'Unregister', 'Restore'\)") 'bootstrap task gate includes a dedicated restore operation'
+    Assert-True ($bootstrapSource -match 'cyc\.dev/windows-profile-matrix-task-request/v2') 'bootstrap restore requests use the versioned structured task IPC contract'
+    Assert-True ($bootstrapSource -match 'windows-profile-matrix-task-helper/v1' -and
+        $bootstrapSource -match 'observedTaskPath' -and
+        $bootstrapSource -match 'observedPrincipalSid' -and
+        $bootstrapSource -match 'observedTriggerSids') 'bootstrap cross-binds helper response schema and restored task identity'
+    $restoreTaskFunction = [regex]::Match($bootstrapSource, 'function Restore-CycTaskSnapshots[\s\S]+?function Wait-CycTaskStable')
+    Assert-True ($restoreTaskFunction.Success -and
+        $restoreTaskFunction.Value -match 'Invoke-CycProfileMatrixTaskGate[\s\S]+-Operation Restore' -and
+        $restoreTaskFunction.Value -match 'ProfileMatrixTaskGate' -and
+        $restoreTaskFunction.Value -match 'wasRunning' -and
+        $restoreTaskFunction.Value -match 'Validate') 'bootstrap rollback validates task snapshots before using the parent restore gate'
+    $restoreGatePrefix = if ($restoreTaskFunction.Success) {
+        $restoreTaskFunction.Value.Substring(0, $restoreTaskFunction.Value.IndexOf("if (`$script:ProfileMatrixTaskGate -ne 'none')", [StringComparison]::Ordinal))
+    } else { '' }
+    Assert-True ($restoreTaskFunction.Success -and
+        $restoreTaskFunction.Value -match 'Register-ScheduledTask[\s\S]+-Xml' -and
+        $restoreTaskFunction.Value -match 'Start-ScheduledTask' -and
+        $restoreGatePrefix -notmatch 'Register-ScheduledTask[\s\S]+-Xml' -and
+        $restoreGatePrefix -notmatch 'Start-ScheduledTask') 'bootstrap raw XML restore and task start remain production-only'
+    $payloadEnumerator = [regex]::Match($bootstrapSource, 'function Get-PayloadFiles[\s\S]+?function Get-CycSha256Hex')
+    Assert-True ($payloadEnumerator.Success -and $payloadEnumerator.Value -match 'Stack\[string\]' -and
+        $payloadEnumerator.Value -match 'Get-ChildItem -LiteralPath \$current' -and
+        $payloadEnumerator.Value -notmatch 'Get-ChildItem -LiteralPath \$bundle -Recurse') 'bootstrap walks payload directories without recursively following reparse points'
+    foreach ($atomicName in @('Write-CycDurableAtomicBytes', 'Write-DurableAtomicJson')) {
+        $atomicWriter = [regex]::Match($bootstrapSource, "function $atomicName[\s\S]+?function ")
+        Assert-True ($atomicWriter.Success -and
+            $atomicWriter.Value -match '\$backupStream\s*=\s*\[System\.IO\.FileStream\]::new' -and
+            $atomicWriter.Value -match '\[System\.IO\.FileMode\]::CreateNew' -and
+            $atomicWriter.Value -match '\$backupPrepared\s*=\s*\$true' -and
+            $atomicWriter.Value -match '\[System\.IO\.File\]::Replace\(\$temporary,\s*\$Path,\s*\$backup' -and
+            $atomicWriter.Value -match '\$operationError') "$atomicName pre-creates the backup and preserves the primary failure"
+    }
     Assert-True ($bootstrapSource -match 'if \(\$script:ProfileMatrixTaskGate -eq ''none''\)[\s\S]+Start-ScheduledTask') 'bootstrap keeps task start on the normal production path only'
     Assert-True ($bootstrapSource -match 'enabled = \$true; logonType = \$script:ScheduledTaskLogonType') 'bootstrap binds enabled controller plan entries to the selected task principal'
 
@@ -4019,6 +4052,23 @@ exit 91
     Assert-True ($freshDeploymentSource -match 'expectedTaskLogonType\s*=\s*if\s*\(\$ProfileMatrixTestMode\)[\s\S]+S4U[\s\S]+Interactive') 'fresh deployment smoke verifies S4U only for profile-matrix and Interactive otherwise'
     Assert-True ($freshDeploymentSource -match 'Assert-FreshTaskPrincipal') 'fresh deployment smoke verifies the persisted Scheduled Task principal after install and repair'
     Assert-True ($freshDeploymentSource -match 'fresh deployment runner starts without pre-existing product tasks') 'fresh deployment smoke fails closed around pre-existing product tasks'
+    Assert-True ($freshDeploymentSource -match 'New-FreshIsolationOwnerMarker[\s\S]+cyc\.dev/fresh-deployment-owner/v1') 'fresh deployment smoke creates a schema-bound owner marker before using its isolated root'
+    Assert-True ($freshDeploymentSource -match '\$isolatedRootExistedAtStart[\s\S]+did not exist before this harness run') 'fresh deployment smoke rejects a pre-existing isolated root before any lifecycle mutation'
+    Assert-True ($freshDeploymentSource -match 'Assert-FreshIsolationOwnerMarker[\s\S]+Remove-FreshOwnedIsolationRoot') 'fresh deployment cleanup validates the owner marker before recursive root removal'
+    $freshMarkerFunction = [regex]::Match($freshDeploymentSource, 'function New-FreshIsolationOwnerMarker[\s\S]+?function Assert-FreshIsolationOwnerMarker')
+    Assert-True ($freshMarkerFunction.Success -and
+        $freshMarkerFunction.Value -match '\$rootCreated\s*=\s*\$false' -and
+        $freshMarkerFunction.Value -match 'catch\s*\{' -and
+        $freshMarkerFunction.Value -match 'Remove-Item -LiteralPath \$markerPath' -and
+        $freshMarkerFunction.Value -match 'Preserve the marker/ownership failure') 'fresh deployment owner-marker creation has bounded failure cleanup without masking the primary error'
+    Assert-True ($freshDeploymentSource -match 'Get-ScheduledTask[\s\S]+-TaskPath ''\\''') 'fresh deployment task inventory is scoped to the root Task Scheduler path'
+    Assert-True ($freshDeploymentSource -match 'Get-FreshLifecycleState[\s\S]+lifecycleOwned') 'fresh deployment cleanup derives ownership from observed lifecycle state'
+    Assert-True ($freshDeploymentSource -match '\$installAttempted\s*=\s*\$true[\s\S]+\$installed\s*=\s*\$true[\s\S]+Invoke-FreshPowerShell[\s\S]+-Label ''install''') 'fresh deployment arms failure cleanup before invoking the install child'
+    Assert-True ($freshDeploymentSource -match '\$uninstallAttempted\s*=\s*\$true[\s\S]+Assert-FreshLifecycleAbsent[\s\S]+\$uninstalled\s*=\s*\$true') 'fresh deployment marks uninstall complete only after lifecycle postconditions pass'
+    Assert-True ($freshDeploymentSource -match 'failure cleanup[\s\S]+final lifecycle postcondition') 'fresh deployment verifies cleanup postconditions before and after owned-root removal'
+    $preRootCheckIndex = $freshDeploymentSource.IndexOf("Label = 'pre-root-removal lifecycle'", [StringComparison]::Ordinal)
+    $ownedRootRemovalIndex = $freshDeploymentSource.IndexOf('Remove-FreshOwnedIsolationRoot -Root', [StringComparison]::Ordinal)
+    Assert-True ($preRootCheckIndex -ge 0 -and $ownedRootRemovalIndex -gt $preRootCheckIndex) 'fresh deployment proves lifecycle absence before deleting the synthetic root'
     $setupSilentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-SetupSilent.ps1') -Raw
     Assert-True ($setupSilentSource -match 'MaximumInstallManifestBytes\s*=\s*16MB') 'silent Setup smoke accepts the bounded self-contained install manifest size'
     Assert-True ($setupSilentSource -match 'ConvertTo-SetupSilentSid') 'silent Setup canonicalizes Scheduled Task identities to SIDs'
@@ -4208,6 +4258,16 @@ exit 0
     Assert-True ($profileMatrixSource -match 'tagMatches\.Count -ne 1[\s\S]+uniqueTargets\.Count -ne 1') 'profile matrix rejects ambiguous or malformed native reparse metadata'
     Assert-True ($profileMatrixSource -match 'invalidTargetProjection[\s\S]+return \$false') 'profile matrix rejects malformed link projections instead of ignoring them'
     Assert-True ($profileMatrixSource -match 'IPC path escaped its case root' -and $profileMatrixSource -match 'IPC path is a reparse point') 'profile matrix confines elevated-helper IPC to the case root without following links'
+    Assert-True ($profileMatrixSource -match 'cyc\.dev/windows-profile-matrix-task-request/v2' -and
+        $profileMatrixSource -match 'cyc\.dev/windows-profile-matrix-task-snapshot/v1' -and
+        $profileMatrixSource -match "operation -notin @\('Register', 'Unregister', 'Restore'\)") 'profile matrix parent helper validates the structured restore operation contract'
+    Assert-True ($profileMatrixSource -match '\$actionProperty' -and
+        $profileMatrixSource -match 'action binding for \$operation' -and
+        $profileMatrixSource -match 'snapshotProperty') 'profile matrix parent helper binds action and snapshot fields to their operation'
+    Assert-True ($profileMatrixSource -match 'raw XML in a restore request' -and
+        $profileMatrixSource -match 'wasRunning to be a JSON boolean' -and
+        $profileMatrixSource -match 'registration-only rollback cannot restore a running task') 'profile matrix restore rejects raw XML and running-task snapshots'
+    Assert-True ($profileMatrixSource -match 'requestedSet' -and $profileMatrixSource -match 'defaultSet') 'CurrentUserOnly validates the exact four-case set instead of count alone'
     $profileAtomicWriter = [regex]::Match(
         $profileMatrixSource,
         'function Write-ProfileMatrixAtomicJson[\s\S]+?function Get-ProfileMatrixTaskRequestProperty'
@@ -4229,6 +4289,8 @@ exit 0
         $profileMatrixSource -match 'observedAction') 'profile matrix helper evidence records the verified task identity and action binding'
     Assert-True ($profileMatrixSource -match 'primary child/verification error' -and
         $profileMatrixSource -match 'profile cleanup error') 'profile matrix preserves the primary case failure when cleanup also fails'
+    Assert-True ($profileMatrixSource -match 'profile cleanup failed for \$Sid after bounded retries' -and
+        $profileMatrixSource -match 'profile cleanup postcondition still has profile or directory state') 'profile matrix turns residual profile state into a bounded cleanup failure'
     Assert-True ($profileMatrixSource -match 'Stack\[string\]' -and $profileMatrixSource -match 'Get-ChildItem -LiteralPath \$current -Force') 'profile matrix walks regular directories without traversing allowed junctions'
     Assert-True ($profileMatrixSource -match 'Remove-ProfileMatrixKnownCompatibilityJunctions[\s\S]+\$links[\s\S]+Sort-Object \{ \$_.Length \} -Descending') 'profile cleanup removes nested compatibility junctions deepest-first'
     Assert-True ($profileMatrixChildSource -match 'Test-FreshDeployment\.ps1') 'profile matrix child runs the complete install/repair/uninstall lifecycle harness'

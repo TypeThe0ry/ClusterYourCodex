@@ -45,7 +45,7 @@ function Resolve-FreshPath {
     return [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
 }
 
-function Remove-FreshOwnedIsolationRoot {
+function Resolve-FreshOwnedIsolationRoot {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)][string]$Suffix
@@ -56,23 +56,140 @@ function Remove-FreshOwnedIsolationRoot {
     }
     $resolvedRoot = Resolve-FreshPath $Root
     $localAppData = Resolve-FreshPath $env:LOCALAPPDATA
-    $localAppDataItem = Get-Item -LiteralPath $localAppData -Force
+    $localAppDataItem = Get-Item -LiteralPath $localAppData -Force -ErrorAction Stop
     if (($localAppDataItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "refusing to remove a fresh deployment root beneath redirected LOCALAPPDATA: $localAppData"
+        throw "refusing to use a fresh deployment root beneath redirected LOCALAPPDATA: $localAppData"
     }
     $expectedLeaf = "ClusterYourCodex-fresh-$Suffix"
     $expectedRoot = Resolve-FreshPath (Join-Path $localAppData $expectedLeaf)
     if (-not [string]::Equals($resolvedRoot, $expectedRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
         -not [string]::Equals((Split-Path -Parent $resolvedRoot), $localAppData, [System.StringComparison]::OrdinalIgnoreCase) -or
         (Split-Path -Leaf $resolvedRoot) -cne $expectedLeaf) {
-        throw "refusing to remove an unowned fresh deployment root: $resolvedRoot"
+        throw "refusing to use an unowned fresh deployment root: $resolvedRoot"
     }
+    return $resolvedRoot
+}
+
+function New-FreshIsolationOwnerMarker {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Suffix
+    )
+
+    $resolvedRoot = Resolve-FreshOwnedIsolationRoot -Root $Root -Suffix $Suffix
+    if (Test-Path -LiteralPath $resolvedRoot) {
+        throw "fresh deployment isolation root already exists before the harness run: $resolvedRoot"
+    }
+    # New-Item on Windows PowerShell 5.1 has no LiteralPath parameter. The
+    # validated GUID-derived root contains no wildcard metacharacters.
+    $rootCreated = $false
+    $markerPath = Join-Path $resolvedRoot '.clusteryourcodex-fresh-owner.json'
+    try {
+        [void](New-Item -ItemType Directory -Path $resolvedRoot -ErrorAction Stop)
+        $rootCreated = $true
+        $rootItem = Get-Item -LiteralPath $resolvedRoot -Force -ErrorAction Stop
+        if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "refusing to use a reparse-point fresh deployment isolation root: $resolvedRoot"
+        }
+        $marker = [ordered]@{
+            schemaVersion = 'cyc.dev/fresh-deployment-owner/v1'
+            owner = 'Test-FreshDeployment.ps1'
+            root = $resolvedRoot
+            suffix = $Suffix
+            createdAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        }
+        $markerJson = $marker | ConvertTo-Json -Depth 4 -Compress
+        [System.IO.File]::WriteAllText(
+            $markerPath,
+            $markerJson,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        [void](Assert-FreshIsolationOwnerMarker -Root $resolvedRoot -Suffix $Suffix)
+        return $markerPath
+    } catch {
+        # The caller has not received the marker path yet, so this function is
+        # the only owner that can safely roll back a root created by a failed
+        # marker transaction. Remove it only while it is still a regular,
+        # marker-only directory; leave unexpected/racy content in place for
+        # evidence instead of widening cleanup scope.
+        if ($rootCreated -and (Test-Path -LiteralPath $resolvedRoot -PathType Container)) {
+            try {
+                $rootItem = Get-Item -LiteralPath $resolvedRoot -Force -ErrorAction Stop
+                if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
+                    if (Test-Path -LiteralPath $markerPath) {
+                        Remove-Item -LiteralPath $markerPath -Force -ErrorAction Stop
+                    }
+                    if (-not (Get-ChildItem -LiteralPath $resolvedRoot -Force -ErrorAction Stop | Select-Object -First 1)) {
+                        Remove-Item -LiteralPath $resolvedRoot -Force -ErrorAction Stop
+                    }
+                }
+            } catch {
+                # Preserve the marker/ownership failure as the primary error;
+                # an unexpected cleanup failure is retained on disk for the
+                # outer harness to diagnose.
+            }
+        }
+        throw
+    }
+}
+
+function Assert-FreshIsolationOwnerMarker {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Suffix
+    )
+
+    $resolvedRoot = Resolve-FreshOwnedIsolationRoot -Root $Root -Suffix $Suffix
+    $markerPath = Join-Path $resolvedRoot '.clusteryourcodex-fresh-owner.json'
+    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+        throw "fresh deployment isolation owner marker is missing: $markerPath"
+    }
+    $markerItem = Get-Item -LiteralPath $markerPath -Force -ErrorAction Stop
+    if (($markerItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "refusing to trust a reparse-point fresh deployment owner marker: $markerPath"
+    }
+    try {
+        $marker = [System.IO.File]::ReadAllText($markerPath) | ConvertFrom-Json
+    } catch {
+        throw "fresh deployment isolation owner marker is not valid JSON: $($_.Exception.Message)"
+    }
+    foreach ($propertyName in @('schemaVersion', 'owner', 'root', 'suffix', 'createdAtUtc')) {
+        if ($null -eq $marker.PSObject.Properties[$propertyName]) {
+            throw "fresh deployment isolation owner marker is missing $propertyName"
+        }
+    }
+    if ([string]$marker.schemaVersion -cne 'cyc.dev/fresh-deployment-owner/v1' -or
+        [string]$marker.owner -cne 'Test-FreshDeployment.ps1' -or
+        [string]$marker.root -cne $resolvedRoot -or
+        [string]$marker.suffix -cne $Suffix) {
+        throw "fresh deployment isolation owner marker does not bind this harness root"
+    }
+    try {
+        [void][DateTimeOffset]::Parse(
+            [string]$marker.createdAtUtc,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        )
+    } catch {
+        throw "fresh deployment isolation owner marker has an invalid creation timestamp"
+    }
+    return $markerPath
+}
+
+function Remove-FreshOwnedIsolationRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Suffix
+    )
+
+    $resolvedRoot = Resolve-FreshOwnedIsolationRoot -Root $Root -Suffix $Suffix
     if (-not (Test-Path -LiteralPath $resolvedRoot)) {
         return
     }
     if (-not (Test-Path -LiteralPath $resolvedRoot -PathType Container)) {
         throw "fresh deployment isolation root is not a directory: $resolvedRoot"
     }
+    [void](Assert-FreshIsolationOwnerMarker -Root $resolvedRoot -Suffix $Suffix)
 
     # Validate the complete owned tree without traversing a reparse point. The
     # harness, rather than the product uninstaller, owns this synthetic root.
@@ -180,6 +297,64 @@ function Assert-InstalledFile {
     return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Get-FreshProductTasks {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$TaskNames
+    )
+
+    $tasks = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($taskName in $TaskNames) {
+        # Task names are product-owned fixed names. Scope every query to the
+        # root Task Scheduler path so an unrelated nested task cannot satisfy
+        # (or defeat) this lifecycle proof.
+        foreach ($task in @(Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction SilentlyContinue)) {
+            [void]$tasks.Add($task)
+        }
+    }
+    return $tasks.ToArray()
+}
+
+function Get-FreshLifecycleState {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$DataRoot,
+        [Parameter(Mandatory = $true)][string]$InstallManifestPath,
+        [Parameter(Mandatory = $true)][string[]]$TaskNames
+    )
+
+    $tasks = @(Get-FreshProductTasks -TaskNames $TaskNames)
+    $installRootExists = Test-Path -LiteralPath $InstallRoot
+    $dataRootExists = Test-Path -LiteralPath $DataRoot
+    $manifestExists = Test-Path -LiteralPath $InstallManifestPath -PathType Leaf
+    [PSCustomObject]@{
+        installRootExists = [bool]$installRootExists
+        dataRootExists = [bool]$dataRootExists
+        manifestExists = [bool]$manifestExists
+        taskCount = [int]$tasks.Count
+        taskNames = @($tasks | ForEach-Object { [string]$_.TaskName })
+        # A data root is expected to survive an ordinary Uninstall. The
+        # install root, manifest, or fixed product tasks are the cleanup-owned
+        # lifecycle state that requires another uninstall attempt.
+        lifecycleOwned = [bool]($installRootExists -or $manifestExists -or $tasks.Count -gt 0)
+    }
+}
+
+function Assert-FreshLifecycleAbsent {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$DataRoot,
+        [Parameter(Mandatory = $true)][string]$InstallManifestPath,
+        [Parameter(Mandatory = $true)][string[]]$TaskNames,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $state = Get-FreshLifecycleState -InstallRoot $InstallRoot -DataRoot $DataRoot -InstallManifestPath $InstallManifestPath -TaskNames $TaskNames
+    Assert-FreshTest (-not $state.installRootExists) ("{0} removes the isolated install root" -f $Label)
+    Assert-FreshTest (-not $state.manifestExists) ("{0} removes the install manifest" -f $Label)
+    Assert-FreshTest ($state.taskCount -eq 0) ("{0} leaves no product task in the root task path" -f $Label)
+    return $state
+}
+
 function Normalize-FreshTaskLogonType {
     param([Parameter(Mandatory = $true)][string]$Value)
 
@@ -259,6 +434,8 @@ $isolatedRoot = Resolve-FreshPath (Join-Path $env:LOCALAPPDATA "ClusterYourCodex
 $installRoot = Resolve-FreshPath (Join-Path $isolatedRoot 'program')
 $dataRoot = Resolve-FreshPath (Join-Path $isolatedRoot 'data')
 $workerConfig = Resolve-FreshPath (Join-Path $dataRoot 'worker\config.json')
+$installedManifestPath = Join-Path $dataRoot '.installer\install-manifest.json'
+$isolatedRootExistedAtStart = Test-Path -LiteralPath $isolatedRoot
 
 Assert-FreshTest (Test-Path -LiteralPath $package -PathType Container) "package root exists: $package"
 Assert-FreshTest (Test-Path -LiteralPath $payload -PathType Container) 'package payload exists'
@@ -300,16 +477,23 @@ if ($ProfileMatrixTaskHelperMode) {
 # starts with -NoProfile and the default ConfirmPreference (High), while the
 # lifecycle's ConfirmImpact is Medium, so the non-interactive smoke remains
 # non-prompting without forwarding the common parameter.
+$installAttempted = $false
 $installed = $false
+$uninstallAttempted = $false
 $uninstalled = $false
+$isolatedRootPrepared = $false
+$isolatedRootMarkerPath = $null
 $bodySucceeded = $false
 $productTaskNames = @('ClusterYourCodex Controller', 'ClusterYourCodex Worker')
 
 try {
-    $productTasksBefore = @($productTaskNames | ForEach-Object {
-        Get-ScheduledTask -TaskName $_ -ErrorAction SilentlyContinue
-    })
+    Assert-FreshTest (-not $isolatedRootExistedAtStart) 'isolated root did not exist before this harness run'
+    $isolatedRootMarkerPath = New-FreshIsolationOwnerMarker -Root $isolatedRoot -Suffix $suffix
+    $isolatedRootPrepared = $true
+    $productTasksBefore = @(Get-FreshProductTasks -TaskNames $productTaskNames)
+    $preInstallState = Get-FreshLifecycleState -InstallRoot $installRoot -DataRoot $dataRoot -InstallManifestPath $installedManifestPath -TaskNames $productTaskNames
     Assert-FreshTest ($productTasksBefore.Count -eq 0) 'fresh deployment runner starts without pre-existing product tasks'
+    Assert-FreshTest (-not $preInstallState.lifecycleOwned) 'isolated lifecycle state did not exist before install'
 
     $plan = Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments ($common + @('-PlanOnly')) -LogRoot $logRoot -Label 'plan'
     Assert-FreshTest ($plan.exitCode -eq 0) 'manifest-bound install plan succeeds'
@@ -319,12 +503,14 @@ try {
     Assert-FreshTest ([string]$previewManifest.releaseChannel -ceq 'prerelease') 'preview manifest release channel remains prerelease'
     Assert-FreshTest ($null -eq $previewManifest.sourceTag -or [string]$previewManifest.sourceTag -ceq "v$($previewManifest.productVersion)") 'preview manifest source tag is absent or exactly vPRODUCT_VERSION'
 
-    [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $common -LogRoot $logRoot -Label 'install')
+    # The child can commit a task/manifest and then fail before returning.
+    # Mark cleanup ownership before crossing that process boundary.
+    $installAttempted = $true
     $installed = $true
+    [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $common -LogRoot $logRoot -Label 'install')
     foreach ($relative in @('ClusterYourCodex.exe', 'cyc-controller.exe', 'cyc-worker.exe', 'cyc.exe', 'installer/bootstrap.ps1')) {
         [void](Assert-InstalledFile -Root $installRoot -RelativePath $relative)
     }
-    $installedManifestPath = Join-Path $dataRoot '.installer\install-manifest.json'
     Assert-FreshTest (Test-Path -LiteralPath $installedManifestPath -PathType Leaf) 'install manifest is durable'
     $installedManifest = Get-Content -LiteralPath $installedManifestPath -Raw | ConvertFrom-Json
     Assert-FreshTest ([string]$installedManifest.schemaVersion -eq 'cyc.dev/windows-install-manifest/v1') 'installed manifest schema is recognized'
@@ -332,8 +518,8 @@ try {
     Assert-FreshTest ([string]$installedManifest.installRoot -eq $installRoot) 'manifest binds the isolated install root'
     Assert-FreshTest ([string]$installedManifest.dataRoot -eq $dataRoot) 'manifest binds the isolated data root'
     Assert-FreshTest (-not [bool]$installedManifest.managedWorker.enabled) 'managed worker is disabled for isolated smoke'
-    $installedControllerTasks = @(Get-ScheduledTask -TaskName 'ClusterYourCodex Controller' -ErrorAction SilentlyContinue)
-    $installedWorkerTasks = @(Get-ScheduledTask -TaskName 'ClusterYourCodex Worker' -ErrorAction SilentlyContinue)
+    $installedControllerTasks = @(Get-ScheduledTask -TaskName 'ClusterYourCodex Controller' -TaskPath '\' -ErrorAction SilentlyContinue)
+    $installedWorkerTasks = @(Get-ScheduledTask -TaskName 'ClusterYourCodex Worker' -TaskPath '\' -ErrorAction SilentlyContinue)
     Assert-FreshTest ($installedControllerTasks.Count -eq 1) 'install registers exactly one controller task'
     Assert-FreshTest ($installedWorkerTasks.Count -eq 0) 'disabled managed worker does not leave a worker task'
     $expectedTaskLogonType = if ($ProfileMatrixTestMode) { 'S4U' } else { 'Interactive' }
@@ -382,7 +568,7 @@ try {
     [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $repairArguments -LogRoot $logRoot -Label 'repair')
     $repairedManifest = Get-Content -LiteralPath $installedManifestPath -Raw | ConvertFrom-Json
     Assert-FreshTest ([string]$repairedManifest.schemaVersion -eq 'cyc.dev/windows-install-manifest/v1') 'repair keeps a valid manifest'
-    $repairedControllerTasks = @(Get-ScheduledTask -TaskName 'ClusterYourCodex Controller' -ErrorAction SilentlyContinue)
+    $repairedControllerTasks = @(Get-ScheduledTask -TaskName 'ClusterYourCodex Controller' -TaskPath '\' -ErrorAction SilentlyContinue)
     Assert-FreshTest ($repairedControllerTasks.Count -eq 1) 'repair keeps exactly one controller task'
     [void](Assert-FreshTaskPrincipal `
         -Task $repairedControllerTasks[0] `
@@ -405,16 +591,20 @@ try {
     if ($ProfileMatrixTaskHelperMode) {
         $uninstallArguments += '-ProfileMatrixTaskHelperMode'
     }
+    $uninstallAttempted = $true
     [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $uninstallArguments -LogRoot $logRoot -Label 'uninstall')
-    $uninstalled = $true
-    Assert-FreshTest (-not (Test-Path -LiteralPath $installRoot)) 'uninstall removes the isolated install root'
+    # A successful child exit is not the lifecycle proof. Keep cleanup armed
+    # until the task, manifest, and install-root postconditions all pass.
+    $uninstallPostcondition = @{
+        InstallRoot = $installRoot
+        DataRoot = $dataRoot
+        InstallManifestPath = $installedManifestPath
+        TaskNames = $productTaskNames
+        Label = 'uninstall'
+    }
+    [void](Assert-FreshLifecycleAbsent @uninstallPostcondition)
     Assert-FreshTest (Test-Path -LiteralPath $dataRoot -PathType Container) 'uninstall preserves the isolated data root by default'
-    Assert-FreshTest (-not (Test-Path -LiteralPath $installedManifestPath)) 'uninstall removes the install manifest while preserving product data'
-
-    $productTasksAfter = @($productTaskNames | ForEach-Object {
-        Get-ScheduledTask -TaskName $_ -ErrorAction SilentlyContinue
-    })
-    Assert-FreshTest ($productTasksAfter.Count -eq 0) 'uninstall restores the clean product task state'
+    $uninstalled = $true
 
     $bodySucceeded = $true
     [PSCustomObject]@{
@@ -423,29 +613,50 @@ try {
         packageRoot = $package
         installRoot = $installRoot
         dataRoot = $dataRoot
+        ownerMarker = $isolatedRootMarkerPath
         taskLogonType = $observedTaskLogonType
         steps = @('plan', 'install', 'controller-version', 'worker-probe', 'cli-help', 'repair-corrupted-cli', 'uninstall')
         logs = $logRoot
     } | ConvertTo-Json -Depth 6
 } finally {
     $postTestCleanupFailures = New-Object System.Collections.Generic.List[string]
-    if ($installed -and -not $uninstalled) {
+    if ($isolatedRootPrepared -and $installed -and -not $uninstalled) {
+        $cleanupState = $null
         try {
-            $cleanupArguments = @(
-                '-Action', 'Uninstall',
-                '-InstallRoot', $installRoot,
-                '-DataRoot', $dataRoot,
-                '-DisableManagedWorkerListener',
-                '-SkipFirewall',
-                '-SkipCodexIntegration',
-                '-SkipUninstallRegistration'
-            )
-            if ($ProfileMatrixTaskHelperMode) {
-                $cleanupArguments += '-ProfileMatrixTaskHelperMode'
+            $cleanupState = Get-FreshLifecycleState -InstallRoot $installRoot -DataRoot $dataRoot -InstallManifestPath $installedManifestPath -TaskNames $productTaskNames
+            if (-not $cleanupState.lifecycleOwned) {
+                Write-Verbose 'fresh deployment cleanup skipped because no owned lifecycle state remains'
+            } else {
+                $cleanupArguments = @(
+                    '-Action', 'Uninstall',
+                    '-InstallRoot', $installRoot,
+                    '-DataRoot', $dataRoot,
+                    '-DisableManagedWorkerListener',
+                    '-SkipFirewall',
+                    '-SkipCodexIntegration',
+                    '-SkipUninstallRegistration'
+                )
+                if ($ProfileMatrixTaskHelperMode) {
+                    $cleanupArguments += '-ProfileMatrixTaskHelperMode'
+                }
+                [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $cleanupArguments -LogRoot $logRoot -Label 'cleanup')
             }
-            [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $cleanupArguments -LogRoot $logRoot -Label 'cleanup')
         } catch {
-            Write-Warning "fresh deployment cleanup failed: $($_.Exception.Message)"
+            $message = "fresh deployment cleanup failed: $($_.Exception.Message)"
+            if ($bodySucceeded) { [void]$postTestCleanupFailures.Add($message) } else { Write-Warning $message }
+        }
+        try {
+            $cleanupPostcondition = @{
+                InstallRoot = $installRoot
+                DataRoot = $dataRoot
+                InstallManifestPath = $installedManifestPath
+                TaskNames = $productTaskNames
+                Label = 'failure cleanup'
+            }
+            [void](Assert-FreshLifecycleAbsent @cleanupPostcondition)
+        } catch {
+            $message = "fresh deployment lifecycle cleanup postcondition failed: $($_.Exception.Message)"
+            if ($bodySucceeded) { [void]$postTestCleanupFailures.Add($message) } else { Write-Warning $message }
         }
     }
     try {
@@ -457,11 +668,51 @@ try {
         $message = "work-root cleanup failed: $($_.Exception.Message)"
         if ($bodySucceeded) { [void]$postTestCleanupFailures.Add($message) } else { Write-Warning $message }
     }
+    # Prove that no install root, manifest, or product task remains before
+    # deleting the synthetic root. Otherwise a failed uninstall could leave a
+    # scheduled task pointing at binaries that the harness has already erased.
+    $lifecycleClean = $true
+    if ($isolatedRootPrepared -and ($installAttempted -or $uninstallAttempted)) {
+        try {
+            $preRootRemovalPostcondition = @{
+                InstallRoot = $installRoot
+                DataRoot = $dataRoot
+                InstallManifestPath = $installedManifestPath
+                TaskNames = $productTaskNames
+                Label = 'pre-root-removal lifecycle'
+            }
+            [void](Assert-FreshLifecycleAbsent @preRootRemovalPostcondition)
+        } catch {
+            $lifecycleClean = $false
+            $message = "fresh deployment pre-root-removal lifecycle postcondition failed: $($_.Exception.Message)"
+            if ($bodySucceeded) { [void]$postTestCleanupFailures.Add($message) } else { Write-Warning $message }
+        }
+    }
     try {
-        Remove-FreshOwnedIsolationRoot -Root $isolatedRoot -Suffix $suffix
+        if ($isolatedRootPrepared -and $lifecycleClean) {
+            [void](Assert-FreshIsolationOwnerMarker -Root $isolatedRoot -Suffix $suffix)
+            Remove-FreshOwnedIsolationRoot -Root $isolatedRoot -Suffix $suffix
+        } elseif ($isolatedRootPrepared) {
+            Write-Warning 'owned isolation root retained because lifecycle cleanup did not reach its postcondition'
+        }
     } catch {
         $message = "owned-root cleanup failed: $($_.Exception.Message)"
         if ($bodySucceeded) { [void]$postTestCleanupFailures.Add($message) } else { Write-Warning $message }
+    }
+    if ($isolatedRootPrepared -and ($installAttempted -or $uninstallAttempted)) {
+        try {
+            $finalLifecyclePostcondition = @{
+                InstallRoot = $installRoot
+                DataRoot = $dataRoot
+                InstallManifestPath = $installedManifestPath
+                TaskNames = $productTaskNames
+                Label = 'final lifecycle'
+            }
+            [void](Assert-FreshLifecycleAbsent @finalLifecyclePostcondition)
+        } catch {
+            $message = "fresh deployment final lifecycle postcondition failed: $($_.Exception.Message)"
+            if ($bodySucceeded) { [void]$postTestCleanupFailures.Add($message) } else { Write-Warning $message }
+        }
     }
     if ($bodySucceeded -and $postTestCleanupFailures.Count -gt 0) {
         throw "fresh deployment post-test cleanup failed: $($postTestCleanupFailures -join '; ')"

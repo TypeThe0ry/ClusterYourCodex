@@ -35,6 +35,9 @@ policy and evidence model.
 - [ ] `release-index.json.sig` verifies with the pinned production public key;
       `unsigned=false` is never accepted as a self-declared trust decision.
 - [ ] Artifact attestation/provenance verifies independently after download.
+- [ ] Each Issue #2/#3/#5 raw log is downloaded from its HTTPS URL, retained,
+      re-hashed, and cross-bound to its external command/node, timestamps,
+      exit code, test counts, and cleanup result.
 - [ ] Protected branch/tag rules and an approved production release environment
       are active.
 - [ ] Clean Windows 11 standard/admin/non-ASCII profile matrix passes.
@@ -45,6 +48,14 @@ policy and evidence model.
 - [ ] No open unwaived P0/P1 blocker applies to the declared stable scope.
 - [ ] Stable tag was built through the gated stable path and the GitHub release
       is `prerelease: false`.
+- [ ] The stable payload builder, signer workflow, and Sigstore certificate
+      identity are explicit GA inputs bound to the exact stable tag; the
+      prerelease `release.yml` publisher is never accepted as the stable signer.
+- [ ] Protected `production` environment secrets
+      `CYC_GA_TRUSTED_BUILDER_REPO`, `CYC_GA_TRUSTED_BUILDER_WORKFLOW`, and
+      `CYC_GA_TRUSTED_BUILDER_DIGEST` are configured; dispatch signer inputs
+      match them exactly, the digest is a full workflow commit SHA, and the
+      signer identifies an external repository.
 
 The protected GA publisher enforces these checks mechanically: the stable
 `release-index.json` must have a detached RSA-PKCS1-SHA256 signature verified by

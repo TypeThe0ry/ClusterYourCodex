@@ -23,6 +23,22 @@ on:
         description: SHA-256 digest of the externally built stable asset bundle
         required: true
         type: string
+      attestation_signer_repo:
+        description: Owner/repository of the external stable payload builder
+        required: true
+        type: string
+      attestation_signer_workflow:
+        description: Full owner/repository/.github/workflows/file.yml path of the stable builder
+        required: true
+        type: string
+      attestation_cert_identity:
+        description: Exact Sigstore certificate identity for the stable builder at the source tag
+        required: true
+        type: string
+      attestation_signer_digest:
+        description: Exact 40-character workflow digest for the external stable builder
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -127,6 +143,22 @@ jobs:
           fi
           echo "CYC_GA_EVIDENCE_PATH=$evidence_path" >> "$GITHUB_ENV"
 
+      - name: Download and verify each retained GA raw log
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $readinessDirectory = Join-Path $env:RUNNER_TEMP 'cyc-ga-readiness'
+          $outputDirectory = Join-Path $readinessDirectory 'raw-logs'
+          & ./scripts/Test-GARawLogs.ps1 `
+            -EvidencePath $env:CYC_GA_EVIDENCE_PATH `
+            -OutputDirectory $outputDirectory `
+            -ExpectedCommit $env:CYC_GA_SOURCE_COMMIT | Out-Host
+          $verificationPath = Join-Path $outputDirectory 'raw-log-verification.json'
+          if (-not (Test-Path -LiteralPath $verificationPath -PathType Leaf)) {
+            throw "Raw-log verification report was not written: $verificationPath"
+          }
+          "CYC_GA_RAW_LOG_VERIFICATION_PATH=$verificationPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Snapshot live issue gates and repository governance
         shell: bash
         run: |
@@ -208,20 +240,25 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $reportPath = Join-Path $env:CYC_GA_REPORT_DIR 'ga-readiness.json'
           try {
-            $result = (& ./scripts/Test-GAReadiness.ps1 `
+            $resultLines = @(& ./scripts/Test-GAReadiness.ps1 `
               -RepositoryRoot $PWD `
               -ExpectedTag $env:CYC_GA_SOURCE_TAG `
               -ExpectedCommit $env:CYC_GA_SOURCE_COMMIT `
               -EvidencePath $env:CYC_GA_EVIDENCE_PATH `
+              -RawLogVerificationPath $env:CYC_GA_RAW_LOG_VERIFICATION_PATH `
               -IssueSnapshotPath $env:CYC_GA_ISSUE_SNAPSHOT_PATH `
               -ControlsPath $env:CYC_GA_CONTROLS_PATH `
               -Json)
-            $exitCode = $LASTEXITCODE
-            $result | Set-Content -LiteralPath $reportPath -Encoding UTF8
-            if ($exitCode -ne 0) {
-              throw "GA readiness gate exited with code $exitCode."
+            if ($resultLines.Count -eq 0) {
+              throw 'GA readiness gate produced no JSON result.'
             }
-            $result | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+            $resultJson = $resultLines -join "`n"
+            $result = $resultJson | ConvertFrom-Json
+            if ([string]$result.status -cne 'passed') {
+              throw "GA readiness gate returned unexpected status '$($result.status)'."
+            }
+            $resultJson | Set-Content -LiteralPath $reportPath -Encoding UTF8
+            $resultJson | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
           } catch {
             [string]$_.Exception.Message | Set-Content -LiteralPath $reportPath -Encoding UTF8
             throw
@@ -252,15 +289,19 @@ jobs:
       CYC_GA_EVIDENCE_SHA256: ${{ inputs.evidence_sha256 }}
       CYC_STABLE_ASSET_URL: ${{ inputs.stable_assets_url }}
       CYC_STABLE_ASSET_SHA256: ${{ inputs.stable_assets_sha256 }}
+      CYC_GA_ATTESTATION_SIGNER_REPO: ${{ inputs.attestation_signer_repo }}
+      CYC_GA_ATTESTATION_SIGNER_WORKFLOW: ${{ inputs.attestation_signer_workflow }}
+      CYC_GA_ATTESTATION_CERT_IDENTITY: ${{ inputs.attestation_cert_identity }}
+      CYC_GA_ATTESTATION_SIGNER_DIGEST: ${{ inputs.attestation_signer_digest }}
+      # These values are protected production-environment policy, not
+      # operator-controlled dispatch inputs. The request must match the
+      # reviewed stable builder exactly.
+      CYC_GA_TRUSTED_BUILDER_REPO: ${{ secrets.CYC_GA_TRUSTED_BUILDER_REPO }}
+      CYC_GA_TRUSTED_BUILDER_WORKFLOW: ${{ secrets.CYC_GA_TRUSTED_BUILDER_WORKFLOW }}
+      CYC_GA_TRUSTED_BUILDER_DIGEST: ${{ secrets.CYC_GA_TRUSTED_BUILDER_DIGEST }}
       # The branch-protection REST endpoint requires Administration:read;
       # this optional token is scoped to governance probes only.
       CYC_GA_GOVERNANCE_TOKEN: ${{ secrets.CYC_GA_GOVERNANCE_TOKEN }}
-      # These are reviewed policy constants. Keep them non-empty and update
-      # them together when the trusted builder or repository changes; the
-      # attestation step fails closed if they are malformed or inconsistent.
-      CYC_GA_ATTESTATION_SIGNER_REPO: TypeThe0ry/ClusterYourCodex
-      CYC_GA_ATTESTATION_SIGNER_WORKFLOW: TypeThe0ry/ClusterYourCodex/.github/workflows/release.yml
-      CYC_GA_ATTESTATION_CERT_IDENTITY: https://github.com/TypeThe0ry/ClusterYourCodex/.github/workflows/release.yml@refs/tags/${{ inputs.source_tag }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -417,6 +458,49 @@ jobs:
           evidence_hash="$(sha256sum "$evidence_path" | awk '{print tolower($1)}')"
           expected_evidence_hash="$(printf '%s' "$CYC_GA_EVIDENCE_SHA256" | tr '[:upper:]' '[:lower:]')"
           test "$evidence_hash" = "$expected_evidence_hash"
+          raw_log_dir="$RUNNER_TEMP/cyc-stable-raw-logs"
+          pwsh -NoLogo -NoProfile -File "$GITHUB_WORKSPACE/scripts/Test-GARawLogs.ps1" \
+            -EvidencePath "$evidence_path" \
+            -OutputDirectory "$raw_log_dir" \
+            -ExpectedCommit "$CYC_GA_SOURCE_COMMIT" >/dev/null
+          raw_verification="$raw_log_dir/raw-log-verification.json"
+          test -f "$raw_verification"
+          printf 'CYC_GA_RAW_LOG_VERIFICATION_PATH=%s\n' "$raw_verification" >> "$GITHUB_ENV"
+          jq -e --arg commit "$CYC_GA_SOURCE_COMMIT" --slurpfile manifest "$evidence_path" '
+            ($manifest[0]) as $m
+            | .schemaVersion == "cyc.dev/ga-raw-log-verification/v1"
+            and .status == "passed"
+            and ((.sourceCommit | type) == "string")
+            and ((.sourceCommit | ascii_downcase) == ($commit | ascii_downcase))
+            and ((.records | type) == "array" and (.records | length) == 3)
+            and ([.records[] | select(.status == "passed" and (.issue == "issue2")
+                and .evidenceId == $m.issue2.evidenceId
+                and .url == $m.issue2.rawLog.url
+                and ((.expectedSha256 | ascii_downcase) == ($m.issue2.rawLog.sha256 | ascii_downcase))
+                and ((.actualSha256 | ascii_downcase) == ($m.issue2.rawLog.sha256 | ascii_downcase)))] | length == 1)
+            and ([.records[] | select(.status == "passed" and (.issue == "issue3")
+                and .evidenceId == $m.issue3.evidenceId
+                and .url == $m.issue3.rawLog.url
+                and ((.expectedSha256 | ascii_downcase) == ($m.issue3.rawLog.sha256 | ascii_downcase))
+                and ((.actualSha256 | ascii_downcase) == ($m.issue3.rawLog.sha256 | ascii_downcase)))] | length == 1)
+            and ([.records[] | select(.status == "passed" and (.issue == "issue5")
+                and .evidenceId == $m.issue5.evidenceId
+                and .url == $m.issue5.rawLog.url
+                and ((.expectedSha256 | ascii_downcase) == ($m.issue5.rawLog.sha256 | ascii_downcase))
+                and ((.actualSha256 | ascii_downcase) == ($m.issue5.rawLog.sha256 | ascii_downcase)))] | length == 1)
+          ' "$raw_verification" >/dev/null
+          raw_root="$(cd "$raw_log_dir" && pwd -P)"
+          while IFS=$'\t' read -r raw_path raw_hash raw_bytes; do
+            test -n "$raw_path"
+            resolved_raw_path="$(realpath -e -- "$raw_path")"
+            case "$resolved_raw_path" in
+              "$raw_root"/*) ;;
+              *) echo 'raw-log verification path escaped its output directory' >&2; exit 1 ;;
+            esac
+            test -f "$resolved_raw_path"
+            test "$(sha256sum "$resolved_raw_path" | awk '{print tolower($1)}')" = "$(printf '%s' "$raw_hash" | tr '[:upper:]' '[:lower:]')"
+            test "$(stat -c '%s' "$resolved_raw_path")" = "$raw_bytes"
+          done < <(jq -r '.records[] | [.path, .actualSha256, .bytes] | @tsv' "$raw_verification")
           bundle_index_hash="$(sha256sum "$CYC_STABLE_BUNDLE_ROOT/release-index.json" | awk '{print tolower($1)}')"
           test "$bundle_index_hash" = "$(printf '%s' "$CYC_STABLE_INDEX_SHA256" | tr '[:upper:]' '[:lower:]')"
           evidence_index_hash="$(jq -r '.artifactVerification.indexSha256 // empty' "$evidence_path" | tr '[:upper:]' '[:lower:]')"
@@ -431,12 +515,29 @@ jobs:
               def sha256($value):
                 (string_value($value) | test("^[0-9a-fA-F]{64}$"));
               def valid_https_url($value):
-                (string_value($value) | test("^https://[^/?#[:space:]]+([/?#]|$)"));
+                (string_value($value) | test("^https://[^@/?#[:space:]]+([/?#]|$)"));
+              def valid_iso_instant($value):
+                (string_value($value) | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^[:space:]]+(Z|[+-][0-9]{2}:[0-9]{2})$"));
               def valid_raw_log($record):
                 (($record.rawLog | type) == "object")
                 and nonempty_string($record.rawLog.url)
                 and valid_https_url($record.rawLog.url)
-                and sha256($record.rawLog.sha256);
+                and sha256($record.rawLog.sha256)
+                and nonempty_string($record.rawLog.command)
+                and nonempty_string($record.rawLog.node)
+                and ((string_value($record.rawLog.node) | test("github|actions|hosted|runner"; "i")) | not)
+                and valid_iso_instant($record.rawLog.startedAt)
+                and valid_iso_instant($record.rawLog.endedAt)
+                and (($record.rawLog.exitCode | type) == "number")
+                and ($record.rawLog.exitCode == 0)
+                and (($record.rawLog.tests | type) == "object")
+                and (($record.rawLog.tests.passed | type) == "number")
+                and (($record.rawLog.tests.failed | type) == "number")
+                and (($record.rawLog.tests.ignored | type) == "number")
+                and ($record.rawLog.tests.passed >= 0)
+                and ($record.rawLog.tests.failed == 0)
+                and ($record.rawLog.tests.ignored >= 0)
+                and ($record.rawLog.cleanup == true);
               def all_gates($record; $gates):
                 ([$gates[] as $gate | ($record.gates[$gate] // false) == true] | all);
               def valid_issue_evidence($record; $gates):
@@ -448,7 +549,7 @@ jobs:
                 and ((string_value($record.provider) | test("github|actions|hosted|runner"; "i")) | not)
                 and nonempty_string($record.hostType)
                 and ((string_value($record.hostType) | test("github|actions|hosted|runner"; "i")) | not)
-                and (string_value($record.evidenceId) | test("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"))
+                and (string_value($record.evidenceId) | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))
                 and valid_raw_log($record)
                 and all_gates($record; $gates);
               .schemaVersion == "cyc.dev/ga-evidence/v1"
@@ -464,7 +565,11 @@ jobs:
                 "installRepairUpgradeRollbackUninstall",
                 "cleanWindows11Vm",
                 "liveWindowsControllerWorkerRoundTrip",
-                "productionAuthenticodeSetupHelper"
+                "productionAuthenticodeSetupHelper",
+                "signedNMinus1ToNUpgrade",
+                "interruptedUpgradeRollback",
+                "downgradePolicy",
+                "noOpenUnwaivedP0P1Blocker"
               ])
               and valid_issue_evidence(.issue3; [
                 "linuxSystemdUserServicePackage",
@@ -475,7 +580,9 @@ jobs:
                 "platformNativeShells",
                 "platformNativeProcessGroups",
                 "crossPlatformPathAclTests",
-                "liveMacosRun"
+                "liveMacosRun",
+                "liveLinuxControllerWorkerRoundTrip",
+                "macosDeveloperIdSigningNotarization"
               ])
               and valid_issue_evidence(.issue5; [
                 "linuxDedicatedExecutionIdentity",
@@ -488,6 +595,8 @@ jobs:
                 "jobsCannotReadWorkerCredentials",
                 "restartResidualProcessReconciliation"
               ])
+              and ([.issue2.evidenceId, .issue3.evidenceId, .issue5.evidenceId] | unique | length == 3)
+              and ([.issue2.rawLog.url, .issue3.rawLog.url, .issue5.rawLog.url] | unique | length == 3)
             ' \
             "$evidence_path" >/dev/null
           echo "GA evidence, issue3/issue5 acceptance gates, and stable release-index are source-bound to $bundle_index_hash" >> "$GITHUB_STEP_SUMMARY"
@@ -499,20 +608,57 @@ jobs:
           index="$CYC_STABLE_BUNDLE_ROOT/release-index.json"
           bundle="$CYC_STABLE_BUNDLE_ROOT/$CYC_STABLE_PROVENANCE_BUNDLE_NAME"
           test -f "$bundle"
-          : "${CYC_GA_ATTESTATION_SIGNER_REPO:?missing attestation signer repository policy constant}"
-          : "${CYC_GA_ATTESTATION_SIGNER_WORKFLOW:?missing attestation signer workflow policy constant}"
-          : "${CYC_GA_ATTESTATION_CERT_IDENTITY:?missing attestation certificate identity policy constant}"
+          : "${CYC_GA_ATTESTATION_SIGNER_REPO:?missing attestation signer repository input}"
+          : "${CYC_GA_ATTESTATION_SIGNER_WORKFLOW:?missing attestation signer workflow input}"
+          : "${CYC_GA_ATTESTATION_CERT_IDENTITY:?missing attestation certificate identity input}"
+          : "${CYC_GA_ATTESTATION_SIGNER_DIGEST:?missing attestation signer digest input}"
+          : "${CYC_GA_TRUSTED_BUILDER_REPO:?missing protected CYC_GA_TRUSTED_BUILDER_REPO production secret}"
+          : "${CYC_GA_TRUSTED_BUILDER_WORKFLOW:?missing protected CYC_GA_TRUSTED_BUILDER_WORKFLOW production secret}"
+          : "${CYC_GA_TRUSTED_BUILDER_DIGEST:?missing protected CYC_GA_TRUSTED_BUILDER_DIGEST production secret}"
           if [[ ! "$CYC_GA_ATTESTATION_SIGNER_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
-            echo 'attestation signer repository constant is not an owner/repository name' >&2
+            echo 'attestation signer repository input is not an owner/repository name' >&2
+            exit 1
+          fi
+          if [[ "$CYC_GA_ATTESTATION_SIGNER_REPO" != "$CYC_GA_TRUSTED_BUILDER_REPO" ]]; then
+            echo 'attestation signer repository input does not match protected stable-builder policy' >&2
+            exit 1
+          fi
+          if [[ "$CYC_GA_ATTESTATION_SIGNER_REPO" == "$GITHUB_REPOSITORY" ]]; then
+            echo 'stable attestation signer must be an external repository' >&2
             exit 1
           fi
           case "$CYC_GA_ATTESTATION_SIGNER_WORKFLOW" in
             "$CYC_GA_ATTESTATION_SIGNER_REPO"/.github/workflows/*.yml|"$CYC_GA_ATTESTATION_SIGNER_REPO"/.github/workflows/*.yaml) ;;
-            *) echo 'attestation signer workflow is outside the configured repository workflow directory' >&2; exit 1 ;;
+            *) echo 'attestation signer workflow input is outside the configured repository workflow directory' >&2; exit 1 ;;
           esac
+          if [[ "$CYC_GA_ATTESTATION_SIGNER_WORKFLOW" != "$CYC_GA_TRUSTED_BUILDER_WORKFLOW" ]]; then
+            echo 'attestation signer workflow input does not match protected stable-builder policy' >&2
+            exit 1
+          fi
+          if [[ ! "$CYC_GA_ATTESTATION_SIGNER_DIGEST" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'attestation signer digest input must be a full 40-character commit SHA' >&2
+            exit 1
+          fi
+          if [[ "$CYC_GA_ATTESTATION_SIGNER_DIGEST" != "$CYC_GA_TRUSTED_BUILDER_DIGEST" ]]; then
+            echo 'attestation signer digest input does not match protected stable-builder policy' >&2
+            exit 1
+          fi
+          if [[ "$CYC_GA_TRUSTED_BUILDER_WORKFLOW" == *'..'* ||
+                "$CYC_GA_TRUSTED_BUILDER_WORKFLOW" == *[[:space:]]* ]]; then
+            echo 'protected stable-builder workflow policy contains unsafe path syntax' >&2
+            exit 1
+          fi
+          if [[ "$CYC_GA_ATTESTATION_SIGNER_WORKFLOW" == "$CYC_GA_ATTESTATION_SIGNER_REPO/.github/workflows/release.yml" ||
+                "$CYC_GA_ATTESTATION_SIGNER_WORKFLOW" == "$CYC_GA_ATTESTATION_SIGNER_REPO/.github/workflows/release.yaml" ]]; then
+            echo 'stable attestation signer must be a stable external builder, not prerelease release.yml' >&2
+            exit 1
+          fi
           signer_workflow_path="${CYC_GA_ATTESTATION_SIGNER_WORKFLOW#"$CYC_GA_ATTESTATION_SIGNER_REPO"/}"
           expected_cert_identity="https://github.com/$CYC_GA_ATTESTATION_SIGNER_REPO/$signer_workflow_path@refs/tags/$CYC_GA_SOURCE_TAG"
-          test "$CYC_GA_ATTESTATION_CERT_IDENTITY" = "$expected_cert_identity"
+          if [[ "$CYC_GA_ATTESTATION_CERT_IDENTITY" != "$expected_cert_identity" ]]; then
+            echo 'attestation certificate identity must bind exactly to the signer workflow and stable source tag' >&2
+            exit 1
+          fi
           attestation_dir="$RUNNER_TEMP/cyc-stable-attestations"
           mkdir -p "$attestation_dir"
           mapfile -t subjects < <(jq -r '.artifacts[].name' "$index")
@@ -524,6 +670,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --signer-repo "$CYC_GA_ATTESTATION_SIGNER_REPO" \
               --signer-workflow "$CYC_GA_ATTESTATION_SIGNER_WORKFLOW" \
+              --signer-digest "$CYC_GA_ATTESTATION_SIGNER_DIGEST" \
               --cert-identity "$CYC_GA_ATTESTATION_CERT_IDENTITY" \
               --cert-oidc-issuer 'https://token.actions.githubusercontent.com' \
               --deny-self-hosted-runners \
@@ -623,6 +770,7 @@ jobs:
             -ExpectedTag "$CYC_GA_SOURCE_TAG" \
             -ExpectedCommit "$CYC_GA_SOURCE_COMMIT" \
             -EvidencePath "$RUNNER_TEMP/cyc-ga-evidence.json" \
+            -RawLogVerificationPath "$CYC_GA_RAW_LOG_VERIFICATION_PATH" \
             -IssueSnapshotPath "$final_gate_dir/issues.json" \
             -ControlsPath "$final_gate_dir/controls.json" \
             -Json 2>&1)"

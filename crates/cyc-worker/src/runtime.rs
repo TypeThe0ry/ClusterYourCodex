@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -51,6 +51,14 @@ const NODE_REPORT_INTERVAL: Duration = Duration::from_secs(5);
 const PAIRING_LEDGER_VERSION: &str = "cyc.dev/worker-pairing-state/v1";
 const MAX_PAIRING_LEDGER_BYTES: usize = 256 * 1024;
 const MAX_PAIRING_LEDGER_RECORDS: usize = 32;
+// `acquire_pairing_lock` keeps each OS-level probe bounded so a permanently
+// wedged peer cannot block a worker forever. A real pair/repair transaction
+// can legitimately hold that lock longer than one probe on Windows, where
+// each protected-file replacement re-applies and verifies a DACL. Retry only
+// the specific bounded-timeout result here so callers get a longer bounded
+// transaction wait without weakening lock ownership or sharing a lock inode.
+const PAIRING_TRANSACTION_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+const PAIRING_TRANSACTION_RETRY_DELAY: Duration = Duration::from_millis(25);
 
 #[derive(Default)]
 struct WorkerActivity {
@@ -491,7 +499,7 @@ async fn pair_with_transport(
     // This guard is intentionally kept across network awaits. Pairing is a
     // rare control-plane transaction; serializing it prevents two processes
     // from staging different secrets and last-writer-wins replacing config.
-    let _pairing_lock = acquire_pairing_lock(&config_path).await?;
+    let _pairing_lock = acquire_pairing_transaction_lock(&config_path).await?;
     let enrollment = load_enrollment_bundle(enrollment_file)?;
     let layout = prepare_pairing_layout(
         &config_path,
@@ -638,6 +646,37 @@ async fn pair_with_transport(
         enrollment.intended_node_id,
     )?;
     Ok(config)
+}
+
+/// Acquire the stable pairing lock with a transaction-level deadline.
+///
+/// The lower-level lock helper deliberately has a shorter per-probe timeout
+/// because it is also used by small synchronous lock tests. Pairing/repair is
+/// a larger transaction: on Windows its protected-directory and atomic-file
+/// checks can consume more than one probe under workspace contention. A
+/// timeout is therefore retried only when it is the exact pairing lock
+/// timeout. Permission, integrity, path, and task failures still return
+/// immediately, and no lock is ever held between attempts.
+async fn acquire_pairing_transaction_lock(
+    config_path: &Path,
+) -> Result<crate::config::PairingLock> {
+    let deadline = Instant::now() + PAIRING_TRANSACTION_WAIT_TIMEOUT;
+    loop {
+        match acquire_pairing_lock(config_path).await {
+            Ok(lock) => return Ok(lock),
+            Err(error) if is_pairing_lock_timeout(&error) => {
+                if Instant::now() >= deadline {
+                    return Err(error);
+                }
+                tokio::time::sleep(PAIRING_TRANSACTION_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn is_pairing_lock_timeout(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("timed out waiting for pairing transaction lock")
 }
 
 #[derive(Debug)]

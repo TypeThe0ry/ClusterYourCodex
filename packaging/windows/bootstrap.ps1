@@ -271,12 +271,27 @@ function Get-PayloadFiles {
     if (Test-ReparsePoint $rootItem) {
         throw 'Bundle payload root must not be a reparse point.'
     }
-    foreach ($item in Get-ChildItem -LiteralPath $bundle -Recurse -Force) {
-        if (Test-ReparsePoint $item) {
-            throw "Bundle payload contains a reparse point: $($item.FullName)"
+    # Do not use Get-ChildItem -Recurse here. Windows PowerShell 5.1 can
+    # follow a directory junction before the returned item is inspected,
+    # allowing a hostile payload to enumerate outside the bundle. Walk only
+    # regular directories and reject every reparse point before descending.
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $pending.Push($bundle)
+    while ($pending.Count -gt 0) {
+        $current = $pending.Pop()
+        $currentItem = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+        if (Test-ReparsePoint $currentItem) {
+            throw "Bundle payload contains a reparse point: $current"
         }
-        if (-not $item.PSIsContainer) {
-            $item
+        foreach ($item in @(Get-ChildItem -LiteralPath $current -Force -ErrorAction Stop)) {
+            if (Test-ReparsePoint $item) {
+                throw "Bundle payload contains a reparse point: $($item.FullName)"
+            }
+            if ($item.PSIsContainer) {
+                $pending.Push($item.FullName)
+            } else {
+                Write-Output $item
+            }
         }
     }
 }
@@ -820,7 +835,11 @@ function Write-CycDurableAtomicBytes {
     $temporary = Join-Path $directory ($leaf + '.cyc-tmp-' + [Guid]::NewGuid().ToString('N'))
     $backup = Join-Path $directory ($leaf + '.cyc-bak-' + [Guid]::NewGuid().ToString('N'))
     $stream = $null
+    $backupStream = $null
+    $backupCreated = $false
+    $backupPrepared = $false
     $committed = $false
+    $operationError = $null
     try {
         $stream = [System.IO.FileStream]::new(
             $temporary,
@@ -835,10 +854,30 @@ function Write-CycDurableAtomicBytes {
         $stream.Dispose()
         $stream = $null
         if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            # Windows PowerShell/.NET Framework requires the backup operand of
+            # File.Replace to already be a same-volume regular file.  Passing
+            # a merely planned path fails after the temporary payload was
+            # durably written, so create and flush the unique sibling first.
+            $backupStream = [System.IO.FileStream]::new(
+                $backup,
+                [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::None,
+                1,
+                [System.IO.FileOptions]::WriteThrough
+            )
+            $backupCreated = $true
+            $backupStream.Flush($true)
+            $backupPrepared = $true
+            $backupStream.Dispose()
+            $backupStream = $null
             [System.IO.File]::Replace($temporary, $Path, $backup, $true)
         } else {
             [System.IO.File]::Move($temporary, $Path)
         }
+        # Replace/move is the commit point.  Mark it before the post-commit
+        # flush so a failure reopening the destination cannot leak the backup.
+        $committed = $true
         $stream = [System.IO.FileStream]::new(
             $Path,
             [System.IO.FileMode]::Open,
@@ -850,11 +889,41 @@ function Write-CycDurableAtomicBytes {
         $stream.Flush($true)
         $stream.Dispose()
         $stream = $null
-        $committed = $true
+    } catch {
+        # Preserve the writer's primary failure even if best-effort cleanup
+        # below encounters a second, unrelated failure.
+        $operationError = $_
+        throw
     } finally {
-        if ($stream) { $stream.Dispose() }
-        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
-        if ($committed -and (Test-Path -LiteralPath $backup)) { Remove-Item -LiteralPath $backup -Force }
+        $cleanupError = $null
+        if ($stream) {
+            try { $stream.Dispose() } catch {
+                $cleanupError = $_
+            }
+        }
+        if ($backupStream) {
+            try { $backupStream.Dispose() } catch {
+                if ($null -eq $cleanupError) { $cleanupError = $_ }
+            }
+        }
+        try {
+            if (Test-Path -LiteralPath $temporary) {
+                Remove-Item -LiteralPath $temporary -Force
+            }
+        } catch {
+            if ($null -eq $cleanupError) { $cleanupError = $_ }
+        }
+        try {
+            if (($committed -or $backupCreated -or $backupPrepared) -and
+                (Test-Path -LiteralPath $backup)) {
+                Remove-Item -LiteralPath $backup -Force
+            }
+        } catch {
+            if ($null -eq $cleanupError) { $cleanupError = $_ }
+        }
+        if ($null -ne $cleanupError -and $null -eq $operationError) {
+            throw $cleanupError
+        }
     }
 }
 
@@ -3633,9 +3702,10 @@ function Install-PlannedFiles {
 
 function Invoke-CycProfileMatrixTaskGate {
     param(
-        [Parameter(Mandatory = $true)][ValidateSet('Register', 'Unregister')][string]$Operation,
+        [Parameter(Mandatory = $true)][ValidateSet('Register', 'Unregister', 'Restore')][string]$Operation,
         [Parameter(Mandatory = $true)][string]$Name,
-        $Action
+        $Action,
+        $Snapshot
     )
 
     if ($script:ProfileMatrixTaskGate -cne 'parent-elevated-registration-v1') {
@@ -3643,8 +3713,14 @@ function Invoke-CycProfileMatrixTaskGate {
     }
     $requestId = [Guid]::NewGuid().ToString('N')
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    if ($Operation -eq 'Restore' -and $null -eq $Snapshot) {
+        throw 'Profile-matrix restore requires a structured task snapshot.'
+    }
+    if ($Operation -ne 'Restore' -and $null -ne $Snapshot) {
+        throw "Profile-matrix $Operation does not accept a task snapshot."
+    }
     $request = [ordered]@{
-        schemaVersion = 'cyc.dev/windows-profile-matrix-task-request/v1'
+        schemaVersion = 'cyc.dev/windows-profile-matrix-task-request/v2'
         requestId = $requestId
         operation = $Operation
         taskName = $Name
@@ -3656,6 +3732,21 @@ function Invoke-CycProfileMatrixTaskGate {
                 executable = [string]$Action.executable
                 arguments = [string]$Action.arguments
                 workingDirectory = [string]$Action.workingDirectory
+            }
+        } else { $null }
+        snapshot = if ($Operation -eq 'Restore') {
+            [ordered]@{
+                schemaVersion = 'cyc.dev/windows-profile-matrix-task-snapshot/v1'
+                name = [string]$Snapshot.name
+                taskPath = [string]$Snapshot.taskPath
+                principalSid = [string]$Snapshot.principalSid
+                triggerSids = @($Snapshot.triggerSids | ForEach-Object { [string]$_ })
+                action = [ordered]@{
+                    executable = [string]$Snapshot.action.executable
+                    arguments = [string]$Snapshot.action.arguments
+                    workingDirectory = [string]$Snapshot.action.workingDirectory
+                }
+                wasRunning = [bool]$Snapshot.wasRunning
             }
         } else { $null }
         requestedAtUtc = [DateTime]::UtcNow.ToString('o')
@@ -3677,8 +3768,37 @@ function Invoke-CycProfileMatrixTaskGate {
             }
             if ($null -ne $response -and
                 [string]$response.requestId -ceq $requestId) {
+                if ([string]$response.schemaVersion -cne 'cyc.dev/windows-profile-matrix-task-helper/v1') {
+                    throw 'Profile-matrix parent task helper returned an unknown response schema.'
+                }
+                if ([string]$response.operation -cne $Operation -or
+                    [string]$response.taskName -cne $Name -or
+                    [string]$response.sid -cne [string]$identity.User.Value) {
+                    throw "Profile-matrix parent task helper returned a response bound to a different operation, task, or SID."
+                }
                 if ([string]$response.status -cne 'passed') {
                     throw "Profile-matrix parent task helper failed $Operation for $($Name): $([string]$response.error)"
+                }
+                if ($Operation -eq 'Restore') {
+                    if ([string]$response.runtime -cne 'not-started' -or
+                        $response.restoredRunning -isnot [bool] -or
+                        [bool]$response.restoredRunning) {
+                        throw 'Profile-matrix restore response did not preserve registration-only runtime semantics.'
+                    }
+                    if ([string]$response.observedTaskPath -cne '\' -or
+                        [string]$response.observedPrincipalSid -cne [string]$identity.User.Value -or
+                        $response.observedTriggerSids -isnot [System.Array] -or
+                        @($response.observedTriggerSids).Count -ne 1 -or
+                        [string]$response.observedTriggerSids[0] -cne [string]$identity.User.Value) {
+                        throw 'Profile-matrix restore response did not preserve task identity bindings.'
+                    }
+                    $observedAction = $response.PSObject.Properties['observedAction']
+                    if ($null -eq $observedAction -or $null -eq $observedAction.Value -or
+                        -not [string]::Equals([string]$observedAction.Value.executable, [string]$Snapshot.action.executable, [System.StringComparison]::OrdinalIgnoreCase) -or
+                        -not [string]::Equals([string]$observedAction.Value.arguments, [string]$Snapshot.action.arguments, [System.StringComparison]::Ordinal) -or
+                        -not [string]::Equals([string]$observedAction.Value.workingDirectory, [string]$Snapshot.action.workingDirectory, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        throw 'Profile-matrix restore response action does not match the requested snapshot.'
+                    }
                 }
                 return $response
             }
@@ -3722,6 +3842,7 @@ function Register-CycTask {
         -ExecutionTimeLimit ([TimeSpan]::Zero)
     Register-ScheduledTask `
         -TaskName $Name `
+        -TaskPath '\' `
         -Action $taskAction `
         -Trigger $trigger `
         -Principal $principal `
@@ -3736,20 +3857,57 @@ function Unregister-CycTask {
         [void](Invoke-CycProfileMatrixTaskGate -Operation Unregister -Name $Name)
         return
     }
-    if (Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue) {
-        Stop-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $Name -Confirm:$false
+    if (Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction SilentlyContinue) {
+        Stop-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $Name -TaskPath '\' -Confirm:$false
+    }
+}
+
+function ConvertTo-CycTaskSnapshotSid {
+    param([Parameter(Mandatory = $true)][string]$Identity)
+    $value = $Identity.Trim()
+    if ($value -match '^S-\d-\d+(?:-\d+)+$') { return $value }
+    try {
+        return ([System.Security.Principal.NTAccount]::new($value)).Translate(
+            [System.Security.Principal.SecurityIdentifier]
+        ).Value
+    } catch {
+        throw "Unable to resolve Scheduled Task identity '$Identity' to a SID."
     }
 }
 
 function Get-CycTaskSnapshots {
     $snapshots = @()
     foreach ($name in @($script:ControllerTaskName, $script:WorkerTaskName)) {
-        $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        $tasks = @(Get-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction SilentlyContinue)
+        if ($tasks.Count -gt 1) {
+            throw "Multiple root Scheduled Tasks found for $name."
+        }
+        $task = $tasks | Select-Object -First 1
         if ($task) {
+            $taskAction = @($task.Actions | Select-Object -First 1)
+            if ($taskAction.Count -ne 1) { throw "Scheduled Task $name has no single action to snapshot." }
+            $workingDirectoryProperty = $taskAction[0].PSObject.Properties['WorkingDirectory']
+            $triggerSids = @($task.Triggers | ForEach-Object {
+                    $userProperty = $_.PSObject.Properties['UserId']
+                    if ($null -ne $userProperty -and -not [string]::IsNullOrWhiteSpace([string]$userProperty.Value)) {
+                        ConvertTo-CycTaskSnapshotSid ([string]$userProperty.Value)
+                    }
+                })
+            if ($triggerSids.Count -ne 1) {
+                throw "Scheduled Task $name must have exactly one logon trigger identity to snapshot."
+            }
             $snapshots += [PSCustomObject]@{
                 name = $name
-                xml = Export-ScheduledTask -TaskName $name
+                xml = Export-ScheduledTask -TaskName $name -TaskPath '\'
+                taskPath = [string]$task.TaskPath
+                principalSid = ConvertTo-CycTaskSnapshotSid ([string]$task.Principal.UserId)
+                triggerSids = $triggerSids
+                action = [PSCustomObject]@{
+                    executable = [string]$taskAction[0].Execute
+                    arguments = [string]$taskAction[0].Arguments
+                    workingDirectory = if ($null -ne $workingDirectoryProperty) { [string]$workingDirectoryProperty.Value } else { '' }
+                }
                 wasRunning = ([string]$task.State -eq 'Running')
             }
         }
@@ -3760,8 +3918,8 @@ function Get-CycTaskSnapshots {
 function Stop-CycRuntime {
     param([Parameter(Mandatory = $true)][string]$InstallRoot)
     foreach ($name in @($script:WorkerTaskName, $script:ControllerTaskName)) {
-        if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
-            Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        if (Get-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction SilentlyContinue) {
+            Stop-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction SilentlyContinue
         }
     }
     $root = Resolve-NormalizedPath $InstallRoot
@@ -3805,13 +3963,65 @@ function Assert-CycListenPortsAvailable {
 
 function Restore-CycTaskSnapshots {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Snapshots)
+
+    if ($script:ProfileMatrixTaskGate -ne 'none') {
+        $validated = @()
+        $seen = @{}
+        $currentSid = [string]([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+        foreach ($snapshot in @($Snapshots)) {
+            if ($null -eq $snapshot -or $snapshot -is [System.Array]) {
+                throw 'Profile-matrix rollback received a non-object task snapshot.'
+            }
+            $name = [string]$snapshot.name
+            if ($name -notin @($script:ControllerTaskName, $script:WorkerTaskName) -or $seen.ContainsKey($name)) {
+                throw "Profile-matrix rollback received an invalid or duplicate task snapshot: $name"
+            }
+            $seen[$name] = $true
+            if ([string]$snapshot.taskPath -cne '\' -or
+                [string]$snapshot.principalSid -notmatch '^S-\d-\d+(?:-\d+)+$' -or
+                [string]$snapshot.principalSid -cne $currentSid -or
+                $snapshot.triggerSids -isnot [System.Array] -or @($snapshot.triggerSids).Count -ne 1 -or
+                [string]$snapshot.triggerSids[0] -notmatch '^S-\d-\d+(?:-\d+)+$' -or
+                [string]$snapshot.triggerSids[0] -cne $currentSid -or
+                $snapshot.action -is [System.Array] -or $null -eq $snapshot.action -or
+                [string]::IsNullOrWhiteSpace([string]$snapshot.action.executable) -or
+                [string]::IsNullOrWhiteSpace([string]$snapshot.action.workingDirectory) -or
+                $snapshot.wasRunning -isnot [bool]) {
+                throw "Profile-matrix rollback received an invalid task snapshot for $name."
+            }
+            if ([bool]$snapshot.wasRunning) {
+                throw 'Profile-matrix registration-only rollback cannot restore a running task.'
+            }
+            $validated += [PSCustomObject]@{
+                name = $name
+                taskPath = '\'
+                principalSid = [string]$snapshot.principalSid
+                triggerSids = @([string]$snapshot.triggerSids[0])
+                action = [PSCustomObject]@{
+                    executable = [string]$snapshot.action.executable
+                    arguments = [string]$snapshot.action.arguments
+                    workingDirectory = [string]$snapshot.action.workingDirectory
+                }
+                wasRunning = $false
+            }
+        }
+        # Validate the complete snapshot set before unregistering anything so
+        # malformed rollback data cannot destroy the pre-existing task state.
+        foreach ($name in @($script:WorkerTaskName, $script:ControllerTaskName)) {
+            Unregister-CycTask -Name $name
+        }
+        foreach ($snapshot in @($validated)) {
+            [void](Invoke-CycProfileMatrixTaskGate -Operation Restore -Name $snapshot.name -Snapshot $snapshot)
+        }
+        return
+    }
     foreach ($name in @($script:WorkerTaskName, $script:ControllerTaskName)) {
         Unregister-CycTask -Name $name
     }
     foreach ($snapshot in $Snapshots) {
-        Register-ScheduledTask -TaskName $snapshot.name -Xml $snapshot.xml -Force | Out-Null
+        Register-ScheduledTask -TaskName $snapshot.name -TaskPath '\' -Xml $snapshot.xml -Force | Out-Null
         if ($snapshot.wasRunning) {
-            Start-ScheduledTask -TaskName $snapshot.name
+            Start-ScheduledTask -TaskName $snapshot.name -TaskPath '\'
         }
     }
 }
@@ -3830,7 +4040,7 @@ function Wait-CycTaskStable {
     $lastObservedAction = $null
     $lastObservedProcess = $null
     do {
-        $task = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+        $task = Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction SilentlyContinue
         if ($task) {
             $lastObservedState = [string]$task.State
             $actionsProperty = $task.PSObject.Properties['Actions']
@@ -4663,7 +4873,11 @@ function Write-DurableAtomicJson {
     $utf8 = [System.Text.UTF8Encoding]::new($false)
     $bytes = $utf8.GetBytes(($Value | ConvertTo-Json -Depth $Depth))
     $stream = $null
+    $backupStream = $null
+    $backupCreated = $false
+    $backupPrepared = $false
     $committed = $false
+    $operationError = $null
     try {
         $stream = [System.IO.FileStream]::new(
             $temporary,
@@ -4679,6 +4893,23 @@ function Write-DurableAtomicJson {
         $stream = $null
 
         if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            # Windows PowerShell/.NET Framework requires the backup operand of
+            # File.Replace to already be a same-volume regular file.  Passing
+            # a merely planned path fails after the temporary JSON was
+            # durably written, so create and flush the unique sibling first.
+            $backupStream = [System.IO.FileStream]::new(
+                $backup,
+                [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::None,
+                1,
+                [System.IO.FileOptions]::WriteThrough
+            )
+            $backupCreated = $true
+            $backupStream.Flush($true)
+            $backupPrepared = $true
+            $backupStream.Dispose()
+            $backupStream = $null
             [System.IO.File]::Replace($temporary, $Path, $backup, $true)
         } else {
             [System.IO.File]::Move($temporary, $Path)
@@ -4688,18 +4919,41 @@ function Write-DurableAtomicJson {
         # Do not reopen the destination afterwards: an AV/share race after a
         # successful commit must never make callers compensate durable state.
         $committed = $true
+    } catch {
+        # Preserve the writer's primary failure even if best-effort cleanup
+        # below encounters a second, unrelated failure.
+        $operationError = $_
+        throw
     } finally {
-        if ($stream) { try { $stream.Dispose() } catch { } }
+        $cleanupError = $null
+        if ($stream) {
+            try { $stream.Dispose() } catch {
+                $cleanupError = $_
+            }
+        }
+        if ($backupStream) {
+            try { $backupStream.Dispose() } catch {
+                if ($null -eq $cleanupError) { $cleanupError = $_ }
+            }
+        }
         try {
             if (Test-Path -LiteralPath $temporary) {
                 Remove-Item -LiteralPath $temporary -Force
             }
-        } catch { }
+        } catch {
+            if ($null -eq $cleanupError) { $cleanupError = $_ }
+        }
         try {
-            if ($committed -and (Test-Path -LiteralPath $backup)) {
+            if (($committed -or $backupCreated -or $backupPrepared) -and
+                (Test-Path -LiteralPath $backup)) {
                 Remove-Item -LiteralPath $backup -Force
             }
-        } catch { }
+        } catch {
+            if ($null -eq $cleanupError) { $cleanupError = $_ }
+        }
+        if ($null -ne $cleanupError -and $null -eq $operationError) {
+            throw $cleanupError
+        }
     }
 }
 

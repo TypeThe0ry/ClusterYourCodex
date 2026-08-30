@@ -92,15 +92,29 @@ externally retained `issue2`, `issue3`, and `issue5` records. Every record needs
 HTTPS `url` and a 64-character `sha256`. Providers and host types identifying
 GitHub Actions or hosted runners are not accepted.
 
+Each `evidenceId` is a bounded portable filename component (letters, digits,
+`.`, `_`, and `-` only); path separators and traversal syntax are rejected
+before a raw-log path is constructed.
+
+Each `rawLog` must additionally bind the command and external node to
+ISO-8601 start/end times, `exitCode: 0`, non-negative passed/failed/ignored
+test counts with zero failures, and `cleanup: true`. The GA workflow downloads
+each URL with `scripts/Test-GARawLogs.ps1`, rejects redirects and oversized
+responses, recomputes the SHA-256 over the retained bytes, and cross-binds the
+result back to the corresponding issue record.
+
 The records contain a boolean `gates` map, and every required entry must be
 `true`. Issue #2 covers the Tauri desktop host/tray, native renderer proxy,
 per-user tasks, SID-scoped data ACL, bundled MCP/marketplace payload,
 transactional install/repair/upgrade/rollback/uninstall, clean Windows 11 VM,
 live Windows controller/worker round trip, and production Authenticode setup
-and helper. Issue #3 covers the Linux systemd user-service package, macOS
-LaunchAgent package, Linux x64/macOS x64/macOS arm64 release artifacts,
+and helper, signed N-1 to N upgrade, interrupted-upgrade rollback, downgrade
+policy, and absence of an open unwaived P0/P1 blocker. Issue #3 covers the
+Linux systemd user-service package, macOS LaunchAgent package, Linux x64/macOS
+x64/macOS arm64 release artifacts,
 platform-native shells and process groups, cross-platform path/ACL tests, and
-a live macOS run. Issue #5 covers Linux dedicated identity plus cgroup-v2
+a live macOS run plus the live Linux controller/worker round trip and
+macOS Developer ID signing/notarization. Issue #5 covers Linux dedicated identity plus cgroup-v2
 reconciliation, Windows isolated identity plus Job Object and protected
 external guard, macOS external reconciliation, denial of guard-state and
 worker-credential access, and restart-time residual-process reconciliation.
@@ -110,3 +124,11 @@ closed issue without those records and true gates remains blocked. The live
 issue snapshot also requires the canonical title, `state_reason=completed`,
 and the repository issue URL, so a duplicate or "not planned" closure cannot
 satisfy GA.
+
+The stable publisher additionally compares the requested attestation signer
+repository and workflow against the protected `production` environment values
+`CYC_GA_TRUSTED_BUILDER_REPO`, `CYC_GA_TRUSTED_BUILDER_WORKFLOW`, and
+`CYC_GA_TRUSTED_BUILDER_DIGEST`. Dispatch signer values must match these
+protected policy values exactly, and the publisher passes the pinned digest to
+`gh attestation verify`; the prerelease publisher cannot nominate itself as the
+stable builder.

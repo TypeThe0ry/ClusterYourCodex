@@ -512,6 +512,69 @@ function Assert-ProfileMatrixTaskAction {
     }
 }
 
+function Assert-ProfileMatrixTaskSnapshot {
+    param(
+        [Parameter(Mandatory = $true)]$Request,
+        [Parameter(Mandatory = $true)][string]$Sid,
+        [Parameter(Mandatory = $true)][string]$UserName
+    )
+
+    $snapshot = Get-ProfileMatrixTaskRequestProperty -Request $Request -Name 'snapshot'
+    if (($snapshot -is [System.Array]) -or $snapshot -isnot [pscustomobject]) {
+        throw 'profile-matrix task helper rejected a non-object task snapshot.'
+    }
+    $schemaProperty = $snapshot.PSObject.Properties['schemaVersion']
+    if ($null -eq $schemaProperty -or [string]$schemaProperty.Value -cne 'cyc.dev/windows-profile-matrix-task-snapshot/v1') {
+        throw 'profile-matrix task helper rejected an unknown task snapshot schema.'
+    }
+    if ($null -ne $snapshot.PSObject.Properties['xml']) {
+        throw 'profile-matrix task helper rejects raw XML in a restore request.'
+    }
+    $name = [string](Get-ProfileMatrixTaskRequestProperty -Request $snapshot -Name 'name')
+    if ($name -cne [string]$Request.taskName) {
+        throw 'profile-matrix task helper rejected a snapshot for a different task.'
+    }
+    $taskPath = [string](Get-ProfileMatrixTaskRequestProperty -Request $snapshot -Name 'taskPath')
+    if ($taskPath -cne '\') {
+        throw "profile-matrix task helper rejected a snapshot outside the root task path: $taskPath"
+    }
+    $principalSid = ConvertTo-ProfileMatrixSid ([string](Get-ProfileMatrixTaskRequestProperty -Request $snapshot -Name 'principalSid'))
+    if ($principalSid -cne $Sid) {
+        throw 'profile-matrix task helper rejected a snapshot with a different principal SID.'
+    }
+    $triggerSidsValue = Get-ProfileMatrixTaskRequestProperty -Request $snapshot -Name 'triggerSids'
+    if ($triggerSidsValue -isnot [System.Array] -or @($triggerSidsValue).Count -ne 1) {
+        throw 'profile-matrix task helper requires exactly one snapshot logon trigger SID.'
+    }
+    $triggerSids = @($triggerSidsValue | ForEach-Object {
+            ConvertTo-ProfileMatrixSid ([string]$_)
+        })
+    if ($triggerSids[0] -cne $Sid) {
+        throw 'profile-matrix task helper rejected a snapshot with a different trigger SID.'
+    }
+    $runningProperty = $snapshot.PSObject.Properties['wasRunning']
+    if ($null -eq $runningProperty -or $runningProperty.Value -isnot [bool]) {
+        throw 'profile-matrix task helper requires wasRunning to be a JSON boolean.'
+    }
+    if ([bool]$runningProperty.Value) {
+        throw 'profile-matrix registration-only rollback cannot restore a running task.'
+    }
+    $snapshotAction = Get-ProfileMatrixTaskRequestProperty -Request $snapshot -Name 'action'
+    $actionRequest = [pscustomobject]@{
+        taskName = [string]$Request.taskName
+        action = $snapshotAction
+    }
+    $action = Assert-ProfileMatrixTaskAction -Request $actionRequest -Sid $Sid -UserName $UserName
+    return [PSCustomObject]@{
+        name = $name
+        taskPath = $taskPath
+        principalSid = $principalSid
+        triggerSids = $triggerSids
+        action = $action
+        wasRunning = [bool]$runningProperty.Value
+    }
+}
+
 function ConvertTo-ProfileMatrixSid {
     param([Parameter(Mandatory = $true)][string]$Identity)
 
@@ -619,11 +682,12 @@ function Invoke-ProfileMatrixTaskHelperRequest {
     $request = $null
     $status = 'failed'
     $errorMessage = $null
+    $operation = 'unknown'
     $observedLogonType = $null
     $ownership = $null
     try {
         $request = Get-Content -LiteralPath $RequestPath -Raw -ErrorAction Stop | ConvertFrom-Json
-        if ([string]$request.schemaVersion -cne 'cyc.dev/windows-profile-matrix-task-request/v1' -or
+        if ([string]$request.schemaVersion -cne 'cyc.dev/windows-profile-matrix-task-request/v2' -or
             [string]$request.requestId -notmatch '^[0-9a-f]{32}$' -or
             [string]$request.sid -cne $Sid -or
             [string]$request.logonType -cne 'Interactive' -or
@@ -635,8 +699,20 @@ function Invoke-ProfileMatrixTaskHelperRequest {
             throw "profile-matrix task helper rejected account identity $([string]$request.account)."
         }
         $operation = [string]$request.operation
-        if ($operation -cne 'Register' -and $operation -cne 'Unregister') {
+        if ($operation -notin @('Register', 'Unregister', 'Restore')) {
             throw "profile-matrix task helper rejected operation $operation."
+        }
+        $actionProperty = $request.PSObject.Properties['action']
+        if ($null -eq $actionProperty -or
+            ($operation -eq 'Register' -and $null -eq $actionProperty.Value) -or
+            ($operation -ne 'Register' -and $null -ne $actionProperty.Value)) {
+            throw "profile-matrix task helper rejected action binding for $operation."
+        }
+        $snapshotProperty = $request.PSObject.Properties['snapshot']
+        if ($null -eq $snapshotProperty -or
+            ($operation -eq 'Restore' -and $null -eq $snapshotProperty.Value) -or
+            ($operation -ne 'Restore' -and $null -ne $snapshotProperty.Value)) {
+            throw "profile-matrix task helper rejected an unexpected snapshot for $operation."
         }
         if ($operation -eq 'Register') {
             $action = Assert-ProfileMatrixTaskAction -Request $request -Sid $Sid -UserName $UserName
@@ -656,6 +732,7 @@ function Invoke-ProfileMatrixTaskHelperRequest {
                 -ExecutionTimeLimit ([TimeSpan]::Zero)
             Register-ScheduledTask `
                 -TaskName ([string]$request.taskName) `
+                -TaskPath '\' `
                 -Action $taskAction `
                 -Trigger $trigger `
                 -Principal $principal `
@@ -668,7 +745,7 @@ function Invoke-ProfileMatrixTaskHelperRequest {
             if ($observedLogonType -notin @('Interactive', 'InteractiveToken', '3')) {
                 throw "profile-matrix task helper observed unexpected task logon type $observedLogonType."
             }
-        } else {
+        } elseif ($operation -eq 'Unregister') {
             $task = Get-ScheduledTask -TaskName ([string]$request.taskName) -TaskPath '\' -ErrorAction SilentlyContinue
             if ($null -ne $task) {
                 $ownership = Assert-ProfileMatrixTaskOwnership -Task $task -Sid $Sid
@@ -678,6 +755,43 @@ function Invoke-ProfileMatrixTaskHelperRequest {
             if ($null -ne (Get-ScheduledTask -TaskName ([string]$request.taskName) -TaskPath '\' -ErrorAction SilentlyContinue)) {
                 throw "profile-matrix task helper could not remove $([string]$request.taskName)."
             }
+        } else {
+            $snapshot = Assert-ProfileMatrixTaskSnapshot -Request $request -Sid $Sid -UserName $UserName
+            $action = $snapshot.action
+            $taskAction = New-ScheduledTaskAction `
+                -Execute $action.executable `
+                -Argument $action.arguments `
+                -WorkingDirectory $action.workingDirectory
+            $account = "$env:COMPUTERNAME\$UserName"
+            $trigger = New-ScheduledTaskTrigger -AtLogOn -User $account
+            $principal = New-ScheduledTaskPrincipal -UserId $account -LogonType Interactive -RunLevel Limited
+            $settings = New-ScheduledTaskSettingsSet `
+                -MultipleInstances IgnoreNew `
+                -AllowStartIfOnBatteries `
+                -DontStopIfGoingOnBatteries `
+                -StartWhenAvailable `
+                -RestartCount 3 `
+                -RestartInterval (New-TimeSpan -Minutes 1) `
+                -ExecutionTimeLimit ([TimeSpan]::Zero)
+            Register-ScheduledTask `
+                -TaskName ([string]$request.taskName) `
+                -TaskPath '\' `
+                -Action $taskAction `
+                -Trigger $trigger `
+                -Principal $principal `
+                -Settings $settings `
+                -Description 'ClusterYourCodex per-user background component' `
+                -Force | Out-Null
+            $task = Get-ScheduledTask -TaskName ([string]$request.taskName) -TaskPath '\' -ErrorAction Stop
+            $ownership = Assert-ProfileMatrixTaskOwnership -Task $task -Sid $Sid -ExpectedAction $action
+            if (-not [string]::Equals([string]$ownership.taskPath, [string]$snapshot.taskPath, [System.StringComparison]::Ordinal)) {
+                throw 'profile-matrix task helper observed a restored task outside the snapshot task path.'
+            }
+            if ([string]$ownership.principalSid -cne [string]$snapshot.principalSid -or
+                @($ownership.triggerSids | Where-Object { $_ -ceq $Sid }).Count -ne 1) {
+                throw 'profile-matrix task helper observed a restored task with different identity bindings.'
+            }
+            $restoredRunning = $false
         }
         $status = 'passed'
     } catch {
@@ -703,6 +817,7 @@ function Invoke-ProfileMatrixTaskHelperRequest {
             }
         } else { $null }
         runtime = 'not-started'
+        restoredRunning = if ($operation -ceq 'Restore' -and $status -ceq 'passed') { $false } else { $null }
         error = $errorMessage
         completedAtUtc = [DateTime]::UtcNow.ToString('o')
     }
@@ -749,7 +864,14 @@ function Get-ProfileMatrixExpectedCurrentCase {
     # The default four-case list is convenient for the full run. In
     # CurrentUserOnly mode a caller may also explicitly select exactly the
     # effective case, but never a case that contradicts the current token.
-    if (@($RequestedCases).Count -eq 4) { return $expected }
+    # Do not accept an arbitrary four-item list: count-only validation could
+    # silently discard the caller's requested cases and run a different case.
+    $requestedSet = @($RequestedCases | Sort-Object -Unique)
+    $defaultSet = @($allowedCaseNames | Sort-Object -Unique)
+    if ($requestedSet.Count -eq $defaultSet.Count -and
+        @($defaultSet | Where-Object { $requestedSet -notcontains $_ }).Count -eq 0) {
+        return $expected
+    }
     if (@($RequestedCases).Count -ne 1 -or $RequestedCases[0] -cne $expected) {
         throw "CurrentUserOnly requires the effective current-user case '$expected'."
     }
@@ -796,14 +918,10 @@ function Remove-ProfileMatrixUserProfile {
         [Parameter(Mandatory = $true)][string]$Sid,
         [Parameter(Mandatory = $true)][string]$UserName
     )
-    $profile = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction SilentlyContinue |
+    $profile = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop |
         Where-Object { [string]$_.SID -ceq $Sid } |
         Select-Object -First 1
     if ($null -eq $profile) { return }
-    if ([bool]$profile.Loaded) {
-        Write-Warning "profile $Sid remains loaded; leaving its directory for the OS to reclaim"
-        return
-    }
     $localPath = [string]$profile.LocalPath
     $base = Resolve-ProfileMatrixPath (Join-Path $env:SystemDrive 'Users')
     $resolved = Resolve-ProfileMatrixPath $localPath
@@ -812,13 +930,46 @@ function Remove-ProfileMatrixUserProfile {
         -not [string]::Equals($leaf, $UserName, [System.StringComparison]::Ordinal)) {
         throw "refusing to remove unexpected user profile path: $resolved"
     }
-    if (Test-Path -LiteralPath $resolved) {
-        Test-ProfileMatrixReparseFree -Root $resolved -AllowKnownCompatibilityJunctions
-        Remove-ProfileMatrixKnownCompatibilityJunctions -ProfileRoot $resolved
-        Test-ProfileMatrixReparseFree -Root $resolved
+    # Profile unload and WMI deletion can lag behind child-process reaping on
+    # Windows. Retry the complete removal/postcondition sequence for a bounded
+    # interval, and turn any residual state into a case failure instead of a
+    # warning that the matrix would otherwise report as passed.
+    $lastFailure = $null
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        try {
+            $current = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop |
+                Where-Object { [string]$_.SID -ceq $Sid } |
+                Select-Object -First 1
+            if ($null -ne $current) {
+                if ([bool]$current.Loaded) {
+                    throw "profile $Sid remains loaded"
+                }
+                if (-not [string]::Equals([string]$current.LocalPath, $localPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    throw "profile $Sid local path changed during cleanup"
+                }
+                Remove-CimInstance -InputObject $current -ErrorAction Stop
+            }
+            if (Test-Path -LiteralPath $resolved) {
+                Test-ProfileMatrixReparseFree -Root $resolved -AllowKnownCompatibilityJunctions
+                Remove-ProfileMatrixKnownCompatibilityJunctions -ProfileRoot $resolved
+                Test-ProfileMatrixReparseFree -Root $resolved
+                Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction Stop
+            }
+            $remaining = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop |
+                Where-Object { [string]$_.SID -ceq $Sid } |
+                Select-Object -First 1
+            if ($null -eq $remaining -and -not (Test-Path -LiteralPath $resolved)) {
+                return
+            }
+            throw "profile cleanup postcondition still has profile or directory state"
+        } catch {
+            $lastFailure = [string]$_.Exception.Message
+            if ($attempt -lt 19) {
+                Start-Sleep -Milliseconds 250
+            }
+        }
     }
-    try { Remove-CimInstance -InputObject $profile -ErrorAction Stop } catch { Write-Warning "profile WMI removal failed for ${Sid}: $($_.Exception.Message)" }
-    if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue }
+    throw "profile cleanup failed for $Sid after bounded retries: $lastFailure"
 }
 
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
