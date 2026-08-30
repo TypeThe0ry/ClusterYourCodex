@@ -7,6 +7,19 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.36] - 2026-08-30
+
+### Fixed
+
+- Accepted the Windows 11 `AppData\Local\History` compatibility junction
+  emitted by a fresh profile, binding it to the exact in-profile
+  `AppData\Local\Microsoft\Windows\History` target before cleanup.
+- Added an explicit static regression assertion for the History alias so the
+  Profile Matrix remains fail-closed for unknown reparse points.
+- Hardened the stable GA evidence contract with source-bound Issue #2 gates,
+  canonical closed-issue snapshot checks, HTTPS evidence-host validation, and
+  bounded evidence downloads. Tagged builds remain public GitHub prereleases.
+
 ## [0.1.0-preview.35] - 2026-08-30
 
 ### Fixed
@@ -426,7 +439,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.35...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.36...HEAD
+[0.1.0-preview.36]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.35...v0.1.0-preview.36
 [0.1.0-preview.35]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.34...v0.1.0-preview.35
 [0.1.0-preview.34]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.33...v0.1.0-preview.34
 [0.1.0-preview.33]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.32...v0.1.0-preview.33

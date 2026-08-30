@@ -1,6 +1,6 @@
 {
   "name": "@clusteryourcodex/codex-mcp",
-  "version": "0.1.0-preview.35",
+  "version": "0.1.0-preview.36",
   "private": true,
   "type": "module",
   "main": "dist/server.js",
