@@ -8,15 +8,16 @@ param(
 
     [switch]$KeepWorkRoot,
 
-    # The normal product task principal is InteractiveToken.  The profile
-    # matrix launches disposable accounts from a non-interactive CI session,
-    # so that harness explicitly requests the S4U test principal.  Bootstrap
-    # rejects S4U unless ProfileMatrixTestMode is also present; callers of this
-    # smoke harness therefore cannot silently change production semantics.
+    # The normal product task principal is InteractiveToken. The legacy
+    # ProfileMatrixTestMode/S4U switch remains explicitly guarded for older
+    # isolated harnesses, while the current disposable profile matrix uses an
+    # elevated parent registration gate and keeps the production principal.
     [ValidateSet('Interactive', 'S4U')]
     [string]$ScheduledTaskLogonType = 'Interactive',
 
-    [switch]$ProfileMatrixTestMode
+    [switch]$ProfileMatrixTestMode,
+
+    [switch]$ProfileMatrixTaskHelperMode
 )
 
 Set-StrictMode -Version Latest
@@ -290,6 +291,9 @@ if ($ProfileMatrixTestMode) {
         '-ScheduledTaskLogonType', $ScheduledTaskLogonType
     )
 }
+if ($ProfileMatrixTaskHelperMode) {
+    $common += '-ProfileMatrixTaskHelperMode'
+}
 # Do not append a serialized `-Confirm:$false` token here. Windows PowerShell
 # 5.1 treats that native argv token as a String when a script is launched with
 # `powershell.exe -File`, then fails to bind it to SwitchParameter. This child
@@ -398,6 +402,9 @@ try {
         '-SkipCodexIntegration',
         '-SkipUninstallRegistration'
     )
+    if ($ProfileMatrixTaskHelperMode) {
+        $uninstallArguments += '-ProfileMatrixTaskHelperMode'
+    }
     [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $uninstallArguments -LogRoot $logRoot -Label 'uninstall')
     $uninstalled = $true
     Assert-FreshTest (-not (Test-Path -LiteralPath $installRoot)) 'uninstall removes the isolated install root'
@@ -433,6 +440,9 @@ try {
                 '-SkipCodexIntegration',
                 '-SkipUninstallRegistration'
             )
+            if ($ProfileMatrixTaskHelperMode) {
+                $cleanupArguments += '-ProfileMatrixTaskHelperMode'
+            }
             [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $cleanupArguments -LogRoot $logRoot -Label 'cleanup')
         } catch {
             Write-Warning "fresh deployment cleanup failed: $($_.Exception.Message)"

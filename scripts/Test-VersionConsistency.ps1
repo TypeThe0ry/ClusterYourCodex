@@ -183,6 +183,14 @@ function Assert-CycReleaseWorkflowIdentity {
 
     $workflow = Get-CycText -Root $Root -RelativePath '.github/workflows/release.yml'
     $ciWorkflow = Get-CycText -Root $Root -RelativePath '.github/workflows/ci.yml'
+    $gaWorkflowScript = Join-Path $Root 'scripts/Test-GAReadiness.ps1'
+    if (-not (Test-Path -LiteralPath $gaWorkflowScript -PathType Leaf)) {
+        throw 'Protected stable GA readiness gate script is missing.'
+    }
+    & $gaWorkflowScript -RepositoryRoot $Root -ContractOnly | Out-Null
+    if (-not $?) {
+        throw 'Protected stable GA readiness gate contract failed.'
+    }
     $sourceTagBinding = 'CYC_SOURCE_TAG: ${{ github.ref_type == ''tag'' && github.ref_name || '''' }}'
     if ($workflow -notmatch '(?m)^\s*CYC_RELEASE_CHANNEL:\s*prerelease\s*$' -or
         -not $workflow.Contains($sourceTagBinding) -or
@@ -199,9 +207,9 @@ function Assert-CycReleaseWorkflowIdentity {
     if (-not $releaseJob.Success -or
         $releaseJob.Groups['body'].Value -notmatch "(?m)^\s*if:\s*github\.ref_type\s*==\s*'tag'\s*&&\s*needs\.release-identity\.outputs\.source_tag\s*!=\s*''\s*$" -or
         $releaseJob.Groups['body'].Value -notmatch '(?m)^\s*environment:\s*production\s*$' -or
-        $releaseJob.Groups['body'].Value -notmatch '(?m)^\s*draft:\s*true\s*$' -or
+        $releaseJob.Groups['body'].Value -notmatch '(?m)^\s*draft:\s*false\s*$' -or
         $releaseJob.Groups['body'].Value -notmatch '(?m)^\s*prerelease:\s*true\s*$') {
-        throw 'GitHub publishing must remain production-environment-gated, tag-bound, draft, and prerelease-only.'
+        throw 'GitHub publishing must remain production-environment-gated, tag-bound, public, and prerelease-only.'
     }
 
     $windows11AcceptanceJob = [System.Text.RegularExpressions.Regex]::Match(
@@ -225,7 +233,7 @@ function Assert-CycReleaseWorkflowIdentity {
     )
     if (-not $releaseIndexJob.Success -or
         $releaseIndexJob.Groups['body'].Value -notmatch '(?m)^\s*needs:\s*\[[^\]\r\n]*msrv[^\]\r\n]*windows11-acceptance[^\]\r\n]*\]\s*$') {
-        throw 'Release indexing and draft publication must be blocked by MSRV and Windows 11 compatibility acceptance.'
+        throw 'Release indexing and publication must be blocked by MSRV and Windows 11 compatibility acceptance.'
     }
 
     foreach ($workflowContract in @(
@@ -251,6 +259,7 @@ function Assert-CycReleaseWorkflowIdentity {
         'macos-aarch64',
         'runtimeGated = $true',
         'containmentReady = $false',
+        'liveReady = $false',
         'Expected nine preview artifact sidecars',
         "bomFormat = 'CycloneDX'",
         "specVersion = '1.6'",
@@ -402,6 +411,8 @@ if (-not $SkipNegativeTests) {
             'packaging/worker-kits/New-WorkerKit.ps1',
             '.github/workflows/ci.yml',
             '.github/workflows/release.yml',
+            '.github/workflows/ga.yml',
+            'scripts/Test-GAReadiness.ps1',
             'scripts/Test-GitHubActionPins.ps1'
         )) {
             $destination = Join-Path $fixture $relativePath
@@ -465,6 +476,29 @@ if (-not $SkipNegativeTests) {
         Copy-Item `
             -LiteralPath (Join-Path $RepositoryRoot '.github/workflows/release.yml') `
             -Destination $fixtureWorkflowPath `
+            -Force
+
+        $fixtureGaWorkflowPath = Join-Path $fixture '.github/workflows/ga.yml'
+        $gaWorkflowText = [System.IO.File]::ReadAllText($fixtureGaWorkflowPath)
+        $gaWorkflowAuto = $gaWorkflowText.Replace(
+            'workflow_dispatch:',
+            'push:'
+        )
+        if ($gaWorkflowAuto -ceq $gaWorkflowText) {
+            throw 'Negative GA workflow fixture could not be constructed.'
+        }
+        [System.IO.File]::WriteAllText(
+            $fixtureGaWorkflowPath,
+            $gaWorkflowAuto,
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+        Assert-CycExpectedFailure `
+            -Description 'stable GA workflow is not manual and fail-closed' `
+            -ExpectedMessagePattern "GA workflow contains 'workflow_dispatch:'" `
+            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired $true }
+        Copy-Item `
+            -LiteralPath (Join-Path $RepositoryRoot '.github/workflows/ga.yml') `
+            -Destination $fixtureGaWorkflowPath `
             -Force
 
 

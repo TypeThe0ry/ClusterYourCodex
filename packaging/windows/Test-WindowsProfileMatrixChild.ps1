@@ -16,7 +16,14 @@ param(
     [string]$ExpectedSid,
 
     [Parameter(Mandatory = $true)]
-    [string]$ReceiptPath
+    [string]$ReceiptPath,
+
+    # A disposable standard-user process has no Winlogon token and cannot
+    # reliably register an InteractiveToken task. The elevated matrix parent
+    # may own that one privileged operation through an explicit, evidenced
+    # request/response gate. CurrentUserOnly runs leave this switch off and
+    # exercise the ordinary production path directly.
+    [switch]$UseParentTaskHelper
 )
 
 Set-StrictMode -Version Latest
@@ -88,24 +95,57 @@ $logRoot = Join-Path $work 'logs'
 $freshWork = Join-Path $work 'fresh-deployment'
 $stdoutPath = Join-Path $logRoot 'fresh-deployment.stdout.log'
 $stderrPath = Join-Path $logRoot 'fresh-deployment.stderr.log'
+$taskGateEvidencePath = Join-Path $work 'task-gate.json'
+$taskRequestPath = Join-Path $work 'task-registration-request.json'
+$taskResponsePath = Join-Path $work 'task-registration-response.json'
+$taskHelperEvidencePath = Join-Path $work 'task-helper-evidence.json'
 $arguments = @(
     '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-File', $freshTest,
     '-PackageRoot', $package,
     '-WorkRoot', $freshWork,
     '-KeepWorkRoot',
-    # The parent launches this disposable account with CreateProcessWithLogonW
-    # from a non-interactive CI session.  A production InteractiveToken task
-    # would correctly refuse that missing Winlogon session, so the profile
-    # matrix uses bootstrap's explicitly guarded S4U test principal while the
-    # regular fresh-deployment and Setup tests continue to exercise
-    # InteractiveToken by default.
-    '-ProfileMatrixTestMode',
-    '-ScheduledTaskLogonType', 'S4U'
+    # Always request the production Interactive principal. For disposable
+    # accounts the parent helper owns registration; this child still verifies
+    # the persisted task definition through Test-FreshDeployment.
+    '-ScheduledTaskLogonType', 'Interactive'
 )
+if ($UseParentTaskHelper) {
+    $arguments += '-ProfileMatrixTaskHelperMode'
+}
 
 $startedAt = [DateTimeOffset]::UtcNow
-$output = @(& $windowsPowerShell @arguments 1> $stdoutPath 2> $stderrPath)
+$oldGate = [string]$env:CYC_PROFILE_MATRIX_TASK_GATE
+$oldGateEvidence = [string]$env:CYC_PROFILE_MATRIX_TASK_GATE_EVIDENCE
+$oldTaskRequest = [string]$env:CYC_PROFILE_MATRIX_TASK_REQUEST
+$oldTaskResponse = [string]$env:CYC_PROFILE_MATRIX_TASK_RESPONSE
+try {
+    if ($UseParentTaskHelper) {
+        $gate = [ordered]@{
+            schemaVersion = 'cyc.dev/windows-profile-matrix-task-gate/v1'
+            mode = 'parent-elevated-registration-only'
+            caseName = $CaseName
+            sid = [string]$identity.User.Value
+            requestedTaskLogonType = 'Interactive'
+            requestPath = $taskRequestPath
+            responsePath = $taskResponsePath
+            createdAtUtc = [DateTime]::UtcNow.ToString('o')
+        }
+        $gate | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $taskGateEvidencePath -Encoding UTF8
+        $env:CYC_PROFILE_MATRIX_TASK_GATE = 'parent-elevated-registration-v1'
+        $env:CYC_PROFILE_MATRIX_TASK_GATE_EVIDENCE = $taskGateEvidencePath
+        $env:CYC_PROFILE_MATRIX_TASK_REQUEST = $taskRequestPath
+        $env:CYC_PROFILE_MATRIX_TASK_RESPONSE = $taskResponsePath
+    }
+    $output = @(& $windowsPowerShell @arguments 1> $stdoutPath 2> $stderrPath)
+} finally {
+    if ($UseParentTaskHelper) {
+        $env:CYC_PROFILE_MATRIX_TASK_GATE = $oldGate
+        $env:CYC_PROFILE_MATRIX_TASK_GATE_EVIDENCE = $oldGateEvidence
+        $env:CYC_PROFILE_MATRIX_TASK_REQUEST = $oldTaskRequest
+        $env:CYC_PROFILE_MATRIX_TASK_RESPONSE = $oldTaskResponse
+    }
+}
 $exitCode = $LASTEXITCODE
 if ($exitCode -ne 0) {
     $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
@@ -127,8 +167,17 @@ $result = [ordered]@{
     localAppData = $localAppData
     temp = $temp
     nonAsciiProfile = [bool](Test-NonAscii $profile)
-    taskLogonType = 'S4U'
-    taskLogonTypeReason = 'non-interactive-profile-matrix-harness'
+    taskLogonType = 'Interactive'
+    taskLogonTypeReason = if ($UseParentTaskHelper) {
+        'production-principal-parent-elevated-registration-only'
+    } else {
+        'production-principal-runtime-verified'
+    }
+    taskRegistration = if ($UseParentTaskHelper) { 'parent-elevated-helper' } else { 'child-production-path' }
+    taskRuntime = if ($UseParentTaskHelper) { 'not-started' } else { 'started' }
+    taskGate = if ($UseParentTaskHelper) { 'parent-elevated-registration-v1' } else { 'none' }
+    taskGateEvidence = if ($UseParentTaskHelper) { $taskGateEvidencePath } else { $null }
+    taskHelperEvidence = if ($UseParentTaskHelper) { $taskHelperEvidencePath } else { $null }
     packageRoot = $package
     workRoot = $work
     freshDeploymentWorkRoot = $freshWork

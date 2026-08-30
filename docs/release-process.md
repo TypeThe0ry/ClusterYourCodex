@@ -47,12 +47,12 @@ agree exactly.
 6. Create the annotated prerelease tag.
 7. Approve the exact-tag `production-signing` deployment only after matching
    its SHA to the reviewed commit.
-8. Let the tag workflow build a draft/prerelease; never upload hand-repacked
+8. Let the tag workflow build a public prerelease; never upload hand-repacked
    binaries.
 9. Download published artifacts into a clean directory, verify sidecars/index,
    run fresh deployment and supported upgrade acceptance, and retain logs.
-10. Approve the final `production` draft-creation deployment only after all
-    producer and acceptance jobs have passed.
+10. Approve the final `production` prerelease-publication deployment only
+    after all producer and acceptance jobs have passed.
 11. Publish/retain as prerelease only after artifact acceptance.
 12. Update issues with the exact tag, commit, workflow run, exit codes, elapsed
    time, artifact hashes, cleanup state, and any unverified gate.
@@ -64,3 +64,30 @@ through the protected stable workflow with production signing and independent
 post-download verification. Missing signing credentials, clean Windows 11
 capacity, live worker capacity, or a required governance control blocks GA;
 it does not convert a partial result into success.
+
+## Protected stable GA readiness gate
+
+`.github/workflows/ga.yml` is the executable stable gate. It is deliberately
+`workflow_dispatch`-only: a tag push never creates a stable release by itself.
+The operator must dispatch it against an exact stable `vX.Y.Z` tag and provide
+an HTTPS URL plus SHA-256 digest for an externally captured
+`cyc.dev/ga-evidence/v1` manifest. The gate checks the tag and every product
+version surface, then reads the live state of Issues #2, #3, and #5 and the
+repository governance APIs. All three issues must be closed, the default branch
+must be protected, and the `production` environment must require review, a wait
+timer, administrator-bypass prevention, and its `v*` tag policy.
+
+The evidence manifest must bind to the exact stable tag and 40-character source
+SHA and contain passed, retained evidence for:
+
+- a clean Windows VM profile/lifecycle matrix;
+- a real macOS host running the LaunchAgent lifecycle and controller round trip;
+- valid, timestamped Authenticode signatures for Setup and the narrow elevated
+  helper; and
+- independent post-download checksum, release-index, and provenance verification.
+
+Each host record must identify a non-GitHub-hosted provider and an `evidenceId`.
+The macOS portable smoke in `release.yml`, the Windows ARM64 compatibility job,
+and the repository Authenticode contract test remain useful prerelease checks,
+but none can satisfy those external GA evidence fields. The readiness workflow
+is verification-only and intentionally contains no stable-release publisher.

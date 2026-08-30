@@ -77,15 +77,20 @@ param(
     [switch]$PlanOnly,
 
     # The product uses an interactive-token task so the controller stays in
-    # the initiating user's session.  The Windows profile-matrix harness runs
-    # disposable accounts from a non-interactive CI session, where an
-    # InteractiveToken task cannot obtain a Winlogon token.  It may opt into
-    # S4U only with the explicit test-mode marker below; production invocations
-    # fail closed if they request any non-interactive task principal.
+    # the initiating user's session. The disposable profile matrix has a
+    # separate parent-elevated registration gate because a
+    # CreateProcessWithLogonW child has no Winlogon token; production
+    # invocations still fail closed if they request a non-interactive principal.
     [ValidateSet('Interactive', 'S4U')]
     [string]$ScheduledTaskLogonType = 'Interactive',
 
-    [switch]$ProfileMatrixTestMode
+    [switch]$ProfileMatrixTestMode,
+
+    # Test-only bridge: the elevated profile-matrix parent may register the
+    # production Interactive task on behalf of a disposable child. The bridge
+    # is rejected unless this explicit switch and the bound IPC declaration are
+    # both present.
+    [switch]$ProfileMatrixTaskHelperMode
 )
 
 Set-StrictMode -Version Latest
@@ -99,7 +104,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
-$script:ProductVersion = '0.1.0-preview.26'
+$script:ProductVersion = '0.1.0-preview.27'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
@@ -137,6 +142,68 @@ if ($ProfileMatrixTestMode) {
     throw 'ScheduledTaskLogonType S4U is restricted to ProfileMatrixTestMode.'
 }
 $script:ScheduledTaskLogonType = $ScheduledTaskLogonType
+
+# A disposable profile launched with CreateProcessWithLogonW has no Winlogon
+# session.  Registering the production InteractiveToken task from that token
+# therefore returns Access is denied on clean Windows 11 images.  The profile
+# matrix can opt into a narrowly-scoped parent-helper gate: the elevated
+# matrix controller performs the exact same Interactive registration, while
+# this process verifies the request/response and deliberately skips runtime
+# start.  No normal product invocation can enter this path accidentally.
+$script:ProfileMatrixTaskGate = 'none'
+$script:ProfileMatrixTaskRuntime = 'started'
+$script:ProfileMatrixTaskGateEvidencePath = $null
+$script:ProfileMatrixTaskRequestPath = $null
+$script:ProfileMatrixTaskResponsePath = $null
+
+$profileMatrixGate = [string]$env:CYC_PROFILE_MATRIX_TASK_GATE
+if (-not [string]::IsNullOrWhiteSpace($profileMatrixGate)) {
+    if (-not $ProfileMatrixTaskHelperMode) {
+        throw 'Profile-matrix task helper mode requires its explicit test switch.'
+    }
+    if ($profileMatrixGate -cne 'parent-elevated-registration-v1') {
+        throw 'Unknown CYC_PROFILE_MATRIX_TASK_GATE value.'
+    }
+    $gateEvidencePath = [string]$env:CYC_PROFILE_MATRIX_TASK_GATE_EVIDENCE
+    $gateRequestPath = [string]$env:CYC_PROFILE_MATRIX_TASK_REQUEST
+    $gateResponsePath = [string]$env:CYC_PROFILE_MATRIX_TASK_RESPONSE
+    foreach ($gatePath in @($gateEvidencePath, $gateRequestPath, $gateResponsePath)) {
+        if ([string]::IsNullOrWhiteSpace($gatePath) -or
+            -not [System.IO.Path]::IsPathRooted($gatePath)) {
+            throw 'Profile-matrix task gate requires absolute evidence, request, and response paths.'
+        }
+    }
+    if (-not (Test-Path -LiteralPath $gateEvidencePath -PathType Leaf)) {
+        throw 'Profile-matrix task gate evidence declaration is missing.'
+    }
+    try {
+        $gateDeclaration = Get-Content -LiteralPath $gateEvidencePath -Raw -ErrorAction Stop | ConvertFrom-Json
+    } catch {
+        throw "Profile-matrix task gate evidence is not valid JSON: $($_.Exception.Message)"
+    }
+    $gateSchema = $gateDeclaration.PSObject.Properties['schemaVersion']
+    $gateMode = $gateDeclaration.PSObject.Properties['mode']
+    $gateSid = $gateDeclaration.PSObject.Properties['sid']
+    $gateLogonType = $gateDeclaration.PSObject.Properties['requestedTaskLogonType']
+    $gateRequest = $gateDeclaration.PSObject.Properties['requestPath']
+    $gateResponse = $gateDeclaration.PSObject.Properties['responsePath']
+    $currentSid = [string]([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+    if ($null -eq $gateSchema -or [string]$gateSchema.Value -cne 'cyc.dev/windows-profile-matrix-task-gate/v1' -or
+        $null -eq $gateMode -or [string]$gateMode.Value -cne 'parent-elevated-registration-only' -or
+        $null -eq $gateSid -or [string]$gateSid.Value -cne $currentSid -or
+        $null -eq $gateLogonType -or [string]$gateLogonType.Value -cne 'Interactive' -or
+        $null -eq $gateRequest -or [string]$gateRequest.Value -cne $gateRequestPath -or
+        $null -eq $gateResponse -or [string]$gateResponse.Value -cne $gateResponsePath) {
+        throw 'Profile-matrix task gate evidence does not bind the current SID, Interactive principal, and IPC paths.'
+    }
+    $script:ProfileMatrixTaskGate = 'parent-elevated-registration-v1'
+    $script:ProfileMatrixTaskRuntime = 'not-started'
+    $script:ProfileMatrixTaskGateEvidencePath = $gateEvidencePath
+    $script:ProfileMatrixTaskRequestPath = $gateRequestPath
+    $script:ProfileMatrixTaskResponsePath = $gateResponsePath
+} elseif ($ProfileMatrixTaskHelperMode) {
+    throw 'Profile-matrix task helper mode requires its bound IPC declaration.'
+}
 
 function Resolve-NormalizedPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -3564,6 +3631,63 @@ function Install-PlannedFiles {
     }
 }
 
+function Invoke-CycProfileMatrixTaskGate {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Register', 'Unregister')][string]$Operation,
+        [Parameter(Mandatory = $true)][string]$Name,
+        $Action
+    )
+
+    if ($script:ProfileMatrixTaskGate -cne 'parent-elevated-registration-v1') {
+        throw 'Profile-matrix task gate was requested without its validated parent-helper declaration.'
+    }
+    $requestId = [Guid]::NewGuid().ToString('N')
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $request = [ordered]@{
+        schemaVersion = 'cyc.dev/windows-profile-matrix-task-request/v1'
+        requestId = $requestId
+        operation = $Operation
+        taskName = $Name
+        sid = [string]$identity.User.Value
+        account = [string]$identity.Name
+        logonType = 'Interactive'
+        action = if ($null -ne $Action) {
+            [ordered]@{
+                executable = [string]$Action.executable
+                arguments = [string]$Action.arguments
+                workingDirectory = [string]$Action.workingDirectory
+            }
+        } else { $null }
+        requestedAtUtc = [DateTime]::UtcNow.ToString('o')
+    }
+    # Write-DurableAtomicJson is intentionally used for the request so the
+    # elevated controller never parses a partially-written command.
+    Write-DurableAtomicJson `
+        -Path $script:ProfileMatrixTaskRequestPath `
+        -Value $request `
+        -Depth 8
+
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(60)
+    do {
+        if (Test-Path -LiteralPath $script:ProfileMatrixTaskResponsePath -PathType Leaf) {
+            try {
+                $response = Get-Content -LiteralPath $script:ProfileMatrixTaskResponsePath -Raw -ErrorAction Stop | ConvertFrom-Json
+            } catch {
+                $response = $null
+            }
+            if ($null -ne $response -and
+                [string]$response.requestId -ceq $requestId) {
+                if ([string]$response.status -cne 'passed') {
+                    throw "Profile-matrix parent task helper failed $Operation for $($Name): $([string]$response.error)"
+                }
+                return $response
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+    throw "Profile-matrix parent task helper timed out for $Operation $Name. request=$($script:ProfileMatrixTaskRequestPath) response=$($script:ProfileMatrixTaskResponsePath)"
+}
+
 function Register-CycTask {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -3572,10 +3696,14 @@ function Register-CycTask {
         [string]$LogonType = $script:ScheduledTaskLogonType
     )
     if ($ProfileMatrixTestMode -and $LogonType -cne 'S4U') {
-        throw 'Profile-matrix task registration requires the S4U test principal.'
+        throw 'Legacy profile-matrix test mode requires the S4U test principal.'
     }
     if (-not $ProfileMatrixTestMode -and $LogonType -cne 'Interactive') {
         throw 'Production task registration requires the Interactive principal.'
+    }
+    if ($script:ProfileMatrixTaskGate -ne 'none') {
+        [void](Invoke-CycProfileMatrixTaskGate -Operation Register -Name $Name -Action $Action)
+        return
     }
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     $taskAction = New-ScheduledTaskAction `
@@ -3604,6 +3732,10 @@ function Register-CycTask {
 
 function Unregister-CycTask {
     param([Parameter(Mandatory = $true)][string]$Name)
+    if ($script:ProfileMatrixTaskGate -ne 'none') {
+        [void](Invoke-CycProfileMatrixTaskGate -Operation Unregister -Name $Name)
+        return
+    }
     if (Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue) {
         Stop-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName $Name -Confirm:$false
@@ -4634,6 +4766,11 @@ function Write-InstallManifest {
             [ordered]@{ relativePath = $_.relativePath; sha256 = $_.sha256; length = $_.length }
         })
         taskLogonType = $script:ScheduledTaskLogonType
+        taskRuntime = [ordered]@{
+            mode = $script:ProfileMatrixTaskRuntime
+            gate = $script:ProfileMatrixTaskGate
+            evidencePath = $script:ProfileMatrixTaskGateEvidencePath
+        }
         tasks = @($Plan.tasks | Where-Object enabled | ForEach-Object { $_.name })
         managedWorker = [ordered]@{
             enabled = $Plan.managedWorker.enabled
@@ -5473,16 +5610,18 @@ function Invoke-InstallOrRepairCore {
             -CodexResult $codexResult `
             -AgentsResult $agentsResult `
             -TlsIdentityResult $tlsIdentityResult
-        Start-ScheduledTask -TaskName $script:ControllerTaskName
-        Wait-CycTaskStable -Name $script:ControllerTaskName -StableSeconds 2
-        Wait-CycControllerReady
-        Wait-CycManagedWorkerListenerReady -ManagedWorker $Plan.managedWorker
-        Wait-CycTaskStable -Name $script:ControllerTaskName -StableSeconds 1
-        if ($Plan.tasks[1].enabled) {
-            Start-ScheduledTask -TaskName $script:WorkerTaskName
-            Wait-CycTaskStable -Name $script:WorkerTaskName -StableSeconds 3
-            Test-CycWorkerStatus -Action $Plan.tasks[1].action -Config $Plan.workerConfig
-            Wait-CycTaskStable -Name $script:WorkerTaskName -StableSeconds 1
+        if ($script:ProfileMatrixTaskGate -eq 'none') {
+            Start-ScheduledTask -TaskName $script:ControllerTaskName
+            Wait-CycTaskStable -Name $script:ControllerTaskName -StableSeconds 2
+            Wait-CycControllerReady
+            Wait-CycManagedWorkerListenerReady -ManagedWorker $Plan.managedWorker
+            Wait-CycTaskStable -Name $script:ControllerTaskName -StableSeconds 1
+            if ($Plan.tasks[1].enabled) {
+                Start-ScheduledTask -TaskName $script:WorkerTaskName
+                Wait-CycTaskStable -Name $script:WorkerTaskName -StableSeconds 3
+                Test-CycWorkerStatus -Action $Plan.tasks[1].action -Config $Plan.workerConfig
+                Wait-CycTaskStable -Name $script:WorkerTaskName -StableSeconds 1
+            }
         }
         Complete-CycAgentsInstallTransaction -Transaction $agentsTransaction
         [void](Complete-CycInstallCoreCommit -Plan $Plan -Action $Action)

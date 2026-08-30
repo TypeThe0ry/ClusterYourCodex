@@ -7,6 +7,15 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.27] - 2026-08-29
+
+### Fixed
+
+- Restored Windows 11 ARM64 disposable-profile acceptance by registering the production Interactive Scheduled Task principal without starting it from the non-interactive harness.
+- Narrowed profile cleanup compatibility handling to the OS-owned Documents `My Music`, `My Pictures`, and `My Videos` junctions after exact native mount-point target validation.
+- Hardened Linux hostile-isolation claim, execution, and reconciliation checks against residual processes sharing the dedicated execution identity and writable ancestor cgroup controls.
+- Made tagged preview releases public GitHub prereleases after their gated producer and acceptance jobs complete.
+
 ## [0.1.0-preview.26] - 2026-08-29
 
 ### Fixed
@@ -309,7 +318,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.26...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.27...HEAD
+[0.1.0-preview.27]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.26...v0.1.0-preview.27
 [0.1.0-preview.26]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.25...v0.1.0-preview.26
 [0.1.0-preview.25]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.24...v0.1.0-preview.25
 [0.1.0-preview.24]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.23...v0.1.0-preview.24

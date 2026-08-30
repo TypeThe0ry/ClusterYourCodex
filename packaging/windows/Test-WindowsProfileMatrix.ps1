@@ -113,24 +113,38 @@ function Normalize-ProfileMatrixLinkTarget {
 function Get-ProfileMatrixLinkTargets {
     param(
         [Parameter(Mandatory = $true)][System.IO.FileSystemInfo]$Item,
-        [Parameter(Mandatory = $true)][string]$BasePath
+        [Parameter(Mandatory = $true)][string]$BasePath,
+        [ref]$Invalid
     )
 
+    if ($null -ne $Invalid) { $Invalid.Value = $false }
     $observed = New-Object System.Collections.Generic.List[string]
     foreach ($propertyName in @('Target', 'ResolvedTarget', 'LinkTarget')) {
-        $property = $Item.PSObject.Properties[$propertyName]
-        if ($null -eq $property -or $null -eq $property.Value) { continue }
-        foreach ($rawValue in @($property.Value)) {
-            if ($null -eq $rawValue) { continue }
-            $candidate = $rawValue
-            # A provider can expose a link target as a FileSystemInfo object;
-            # prefer its full path over the object's formatted ToString().
-            $fullNameProperty = $candidate.PSObject.Properties['FullName']
-            if ($null -ne $fullNameProperty -and -not [string]::IsNullOrWhiteSpace([string]$fullNameProperty.Value)) {
-                $candidate = $fullNameProperty.Value
+        try {
+            $property = $Item.PSObject.Properties[$propertyName]
+            if ($null -eq $property -or $null -eq $property.Value) { continue }
+            foreach ($rawValue in @($property.Value)) {
+                if ($null -eq $rawValue) { continue }
+                $candidate = $rawValue
+                # A provider can expose a link target as a FileSystemInfo object;
+                # prefer its full path over the object's formatted ToString().
+                $fullNameProperty = $candidate.PSObject.Properties['FullName']
+                if ($null -ne $fullNameProperty -and -not [string]::IsNullOrWhiteSpace([string]$fullNameProperty.Value)) {
+                    $candidate = $fullNameProperty.Value
+                }
+                $normalized = Normalize-ProfileMatrixLinkTarget -BasePath $BasePath -Value $candidate
+                # A present but malformed projection is evidence against the
+                # allow-list. Do not silently discard GLOBALROOT/UNC/device or
+                # an otherwise ambiguous provider value just because another
+                # projection happened to look valid.
+                if ($null -eq $normalized) {
+                    if ($null -ne $Invalid) { $Invalid.Value = $true }
+                    continue
+                }
+                [void]$observed.Add($normalized)
             }
-            $normalized = Normalize-ProfileMatrixLinkTarget -BasePath $BasePath -Value $candidate
-            if ($null -ne $normalized) { [void]$observed.Add($normalized) }
+        } catch {
+            if ($null -ne $Invalid) { $Invalid.Value = $true }
         }
     }
     return @($observed | Sort-Object -Unique)
@@ -223,16 +237,16 @@ function Test-ProfileMatrixKnownCompatibilityJunction {
     )
 
     # A fresh Windows profile contains legacy-compatibility junctions such as
-    # "Application Data". They are created by the OS, not by the package
-    # under test. Keep the exception narrow: only a direct child of a real
-    # C:\Users\<name> profile root, only the documented junction name, and
+    # "Application Data" and the Documents\My * links. They are created by
+    # the OS, not by the package under test. Keep the exception narrow: only
+    # an explicitly named path below a real C:\Users\<name> profile root, and
     # only when its target is the exact in-profile destination we expect.
     $usersRoot = Resolve-ProfileMatrixPath (Join-Path $env:SystemDrive 'Users')
     $resolvedProfileRoot = Resolve-ProfileMatrixPath $ProfileRoot
     if (-not [string]::Equals((Split-Path -Parent $resolvedProfileRoot), $usersRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
         return $false
     }
-    if (-not [string]::Equals((Split-Path -Parent ([string]$Item.FullName)), $resolvedProfileRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    if (-not ([string]$Item.FullName).StartsWith($resolvedProfileRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
         return $false
     }
 
@@ -247,8 +261,12 @@ function Test-ProfileMatrixKnownCompatibilityJunction {
         'SendTo' = 'AppData\Roaming\Microsoft\Windows\SendTo'
         'Start Menu' = 'AppData\Roaming\Microsoft\Windows\Start Menu'
         'Templates' = 'AppData\Roaming\Microsoft\Windows\Templates'
+        'Documents\My Music' = 'Music'
+        'Documents\My Pictures' = 'Pictures'
+        'Documents\My Videos' = 'Videos'
     }
-    if (-not $knownTargets.ContainsKey([string]$Item.Name)) { return $false }
+    $relativeSource = ([string]$Item.FullName).Substring($resolvedProfileRoot.Length).TrimStart([char[]]@('\', '/'))
+    if (-not $knownTargets.ContainsKey($relativeSource)) { return $false }
     $linkTypeProperty = $Item.PSObject.Properties['LinkType']
     # Windows PowerShell 5.1 has no LinkType projection. If the property is
     # present, keep the old strict check; if it is absent/blank, the native
@@ -259,9 +277,13 @@ function Test-ProfileMatrixKnownCompatibilityJunction {
         return $false
     }
 
-    $expectedTarget = Resolve-ProfileMatrixPath (Join-Path $resolvedProfileRoot $knownTargets[[string]$Item.Name])
+    $expectedTarget = Resolve-ProfileMatrixPath (Join-Path $resolvedProfileRoot $knownTargets[$relativeSource])
     $basePath = Split-Path -Parent ([string]$Item.FullName)
-    $targets = @(Get-ProfileMatrixLinkTargets -Item $Item -BasePath $basePath)
+    $invalidTargetProjection = $false
+    $targets = @(Get-ProfileMatrixLinkTargets -Item $Item -BasePath $basePath -Invalid ([ref]$invalidTargetProjection))
+    if ($invalidTargetProjection -or $targets.Count -gt 1) {
+        return $false
+    }
     if ($targets.Count -eq 1) {
         # A projected target is useful on PowerShell 7, but still require a
         # native mount-point tag whenever fsutil is available. This prevents a
@@ -348,6 +370,221 @@ function ConvertTo-ProfileMatrixArgument {
     return '"' + $Value.Replace('"', '\"') + '"'
 }
 
+function Write-ProfileMatrixAtomicJson {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Value
+    )
+    $directory = Split-Path -Parent $Path
+    [void](New-Item -ItemType Directory -Path $directory -Force)
+    $temporary = Join-Path $directory ((Split-Path -Leaf $Path) + '.tmp-' + [Guid]::NewGuid().ToString('N'))
+    $utf8 = [System.Text.UTF8Encoding]::new($false)
+    try {
+        [System.IO.File]::WriteAllText($temporary, ($Value | ConvertTo-Json -Depth 12), $utf8)
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            [System.IO.File]::Replace($temporary, $Path, $null, $true)
+        } else {
+            [System.IO.File]::Move($temporary, $Path)
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Get-ProfileMatrixTaskRequestProperty {
+    param(
+        [Parameter(Mandatory = $true)]$Request,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    $property = $Request.PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value) {
+        throw "profile-matrix task request is missing '$Name'."
+    }
+    return $property.Value
+}
+
+function Get-ProfileMatrixProfilePathForSid {
+    param([Parameter(Mandatory = $true)][string]$Sid)
+    $profile = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop |
+        Where-Object { [string]$_.SID -ceq $Sid } |
+        Select-Object -First 1
+    if ($null -eq $profile -or [string]::IsNullOrWhiteSpace([string]$profile.LocalPath)) {
+        throw "profile-matrix task helper could not resolve profile path for SID $Sid."
+    }
+    return Resolve-ProfileMatrixPath ([string]$profile.LocalPath)
+}
+
+function Assert-ProfileMatrixTaskAction {
+    param(
+        [Parameter(Mandatory = $true)]$Request,
+        [Parameter(Mandatory = $true)][string]$Sid,
+        [Parameter(Mandatory = $true)][string]$UserName
+    )
+    $action = Get-ProfileMatrixTaskRequestProperty -Request $Request -Name 'action'
+    $executable = Resolve-ProfileMatrixPath ([string](Get-ProfileMatrixTaskRequestProperty -Request $action -Name 'executable'))
+    $arguments = [string](Get-ProfileMatrixTaskRequestProperty -Request $action -Name 'arguments')
+    $workingDirectory = Resolve-ProfileMatrixPath ([string](Get-ProfileMatrixTaskRequestProperty -Request $action -Name 'workingDirectory'))
+    if ($arguments.Contains("`r") -or $arguments.Contains("`n") -or $executable.Contains('"')) {
+        throw 'profile-matrix task helper rejected quoted or multiline action data.'
+    }
+    $profileRoot = Get-ProfileMatrixProfilePathForSid -Sid $Sid
+    $localAppData = Resolve-ProfileMatrixPath (Join-Path $profileRoot 'AppData\Local')
+    $programRoot = Split-Path -Parent $executable
+    $leaf = Split-Path -Leaf $executable
+    if (-not $executable.StartsWith($localAppData + '\ClusterYourCodex-fresh-', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $executable -notmatch '(?i)\\ClusterYourCodex-fresh-[0-9a-f]{32}\\program\\cyc-(controller|worker)\.exe$' -or
+        $workingDirectory -notmatch '(?i)\\ClusterYourCodex-fresh-[0-9a-f]{32}\\program$' -or
+        -not [string]::Equals($workingDirectory, $programRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "profile-matrix task helper rejected action outside the disposable profile install root: $executable"
+    }
+    $expectedLeaf = if ([string]$Request.taskName -ceq 'ClusterYourCodex Controller') { 'cyc-controller.exe' } else { 'cyc-worker.exe' }
+    if ([string]$leaf -cne $expectedLeaf) {
+        throw "profile-matrix task helper rejected $($Request.taskName) action $leaf."
+    }
+    foreach ($path in @($executable, $programRoot)) {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "profile-matrix task helper rejected a reparse-point action path: $path"
+        }
+    }
+    return [PSCustomObject]@{
+        executable = $executable
+        arguments = $arguments
+        workingDirectory = $workingDirectory
+    }
+}
+
+function Invoke-ProfileMatrixTaskHelperRequest {
+    param(
+        [Parameter(Mandatory = $true)][string]$CaseRoot,
+        [Parameter(Mandatory = $true)][string]$RequestPath,
+        [Parameter(Mandatory = $true)][string]$ResponsePath,
+        [Parameter(Mandatory = $true)][string]$EvidencePath,
+        [Parameter(Mandatory = $true)][string]$Sid,
+        [Parameter(Mandatory = $true)][string]$UserName
+    )
+    $resolvedCaseRoot = Resolve-ProfileMatrixPath $CaseRoot
+    foreach ($ipcPath in @($RequestPath, $ResponsePath, $EvidencePath)) {
+        $resolvedIpcPath = Resolve-ProfileMatrixPath $ipcPath
+        if (-not $resolvedIpcPath.StartsWith($resolvedCaseRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "profile-matrix task helper IPC path escaped its case root: $resolvedIpcPath"
+        }
+        if (Test-Path -LiteralPath $resolvedIpcPath) {
+            $ipcItem = Get-Item -LiteralPath $resolvedIpcPath -Force -ErrorAction Stop
+            if (($ipcItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "profile-matrix task helper IPC path is a reparse point: $resolvedIpcPath"
+            }
+        }
+    }
+    if (-not (Test-Path -LiteralPath $RequestPath -PathType Leaf)) { return $false }
+    $request = $null
+    $status = 'failed'
+    $errorMessage = $null
+    $observedLogonType = $null
+    try {
+        $request = Get-Content -LiteralPath $RequestPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        if ([string]$request.schemaVersion -cne 'cyc.dev/windows-profile-matrix-task-request/v1' -or
+            [string]$request.requestId -notmatch '^[0-9a-f]{32}$' -or
+            [string]$request.sid -cne $Sid -or
+            [string]$request.logonType -cne 'Interactive' -or
+            [string]$request.taskName -notin @('ClusterYourCodex Controller', 'ClusterYourCodex Worker')) {
+            throw 'profile-matrix task helper rejected an unbound task request.'
+        }
+        $account = "$env:COMPUTERNAME\$UserName"
+        if ([string]$request.account -cne $account) {
+            throw "profile-matrix task helper rejected account identity $([string]$request.account)."
+        }
+        $operation = [string]$request.operation
+        if ($operation -cne 'Register' -and $operation -cne 'Unregister') {
+            throw "profile-matrix task helper rejected operation $operation."
+        }
+        if ($operation -eq 'Register') {
+            $action = Assert-ProfileMatrixTaskAction -Request $request -Sid $Sid -UserName $UserName
+            $taskAction = New-ScheduledTaskAction `
+                -Execute $action.executable `
+                -Argument $action.arguments `
+                -WorkingDirectory $action.workingDirectory
+            $trigger = New-ScheduledTaskTrigger -AtLogOn -User $account
+            $principal = New-ScheduledTaskPrincipal -UserId $account -LogonType Interactive -RunLevel Limited
+            $settings = New-ScheduledTaskSettingsSet `
+                -MultipleInstances IgnoreNew `
+                -AllowStartIfOnBatteries `
+                -DontStopIfGoingOnBatteries `
+                -StartWhenAvailable `
+                -RestartCount 3 `
+                -RestartInterval (New-TimeSpan -Minutes 1) `
+                -ExecutionTimeLimit ([TimeSpan]::Zero)
+            Register-ScheduledTask `
+                -TaskName ([string]$request.taskName) `
+                -Action $taskAction `
+                -Trigger $trigger `
+                -Principal $principal `
+                -Settings $settings `
+                -Description 'ClusterYourCodex per-user background component' `
+                -Force | Out-Null
+            $task = Get-ScheduledTask -TaskName ([string]$request.taskName) -ErrorAction Stop
+            $observedLogonType = [string]$task.Principal.LogonType
+            if ($observedLogonType -notin @('Interactive', 'InteractiveToken', '3')) {
+                throw "profile-matrix task helper observed unexpected task logon type $observedLogonType."
+            }
+        } else {
+            $task = Get-ScheduledTask -TaskName ([string]$request.taskName) -ErrorAction SilentlyContinue
+            if ($null -ne $task) {
+                Stop-ScheduledTask -TaskName ([string]$request.taskName) -ErrorAction SilentlyContinue
+                Unregister-ScheduledTask -TaskName ([string]$request.taskName) -Confirm:$false -ErrorAction Stop
+            }
+            if ($null -ne (Get-ScheduledTask -TaskName ([string]$request.taskName) -ErrorAction SilentlyContinue)) {
+                throw "profile-matrix task helper could not remove $([string]$request.taskName)."
+            }
+        }
+        $status = 'passed'
+    } catch {
+        $errorMessage = [string]$_.Exception.Message
+    }
+    $requestId = if ($null -ne $request) { [string]$request.requestId } else { [Guid]::NewGuid().ToString('N') }
+    $record = [ordered]@{
+        schemaVersion = 'cyc.dev/windows-profile-matrix-task-helper/v1'
+        requestId = $requestId
+        operation = if ($null -ne $request) { [string]$request.operation } else { 'unknown' }
+        taskName = if ($null -ne $request) { [string]$request.taskName } else { 'unknown' }
+        sid = $Sid
+        status = $status
+        observedLogonType = $observedLogonType
+        runtime = 'not-started'
+        error = $errorMessage
+        completedAtUtc = [DateTime]::UtcNow.ToString('o')
+    }
+    try {
+        $history = @()
+        if (Test-Path -LiteralPath $EvidencePath -PathType Leaf) {
+            try { $history = @(Get-Content -LiteralPath $EvidencePath -Raw | ConvertFrom-Json) } catch { $history = @() }
+        }
+        Write-ProfileMatrixAtomicJson -Path $EvidencePath -Value @($history + $record)
+        Write-ProfileMatrixAtomicJson -Path $ResponsePath -Value $record
+    } finally {
+        Remove-Item -LiteralPath $RequestPath -Force -ErrorAction SilentlyContinue
+    }
+    return $true
+}
+
+function Remove-ProfileMatrixTaskHelperTasks {
+    param([Parameter(Mandatory = $true)][string]$Sid)
+    $profilePath = Get-ProfileMatrixProfilePathForSid -Sid $Sid
+    $localAppData = Resolve-ProfileMatrixPath (Join-Path $profilePath 'AppData\Local')
+    $ownedPrefix = $localAppData + '\ClusterYourCodex-fresh-'
+    foreach ($taskName in @('ClusterYourCodex Controller', 'ClusterYourCodex Worker')) {
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($null -eq $task) { continue }
+        $action = @($task.Actions | Select-Object -First 1)
+        $executable = if ($action.Count -gt 0) { [string]$action[0].Execute } else { '' }
+        if (-not $executable.StartsWith($ownedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-ProfileMatrixExpectedCurrentCase {
     param([Parameter(Mandatory = $true)][string[]]$RequestedCases)
 
@@ -374,17 +611,34 @@ function Remove-ProfileMatrixKnownCompatibilityJunctions {
     param([Parameter(Mandatory = $true)][string]$ProfileRoot)
 
     $resolved = Resolve-ProfileMatrixPath $ProfileRoot
-    foreach ($item in @(Get-ChildItem -LiteralPath $resolved -Force)) {
-        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
-            continue
+    $pending = New-Object System.Collections.Generic.Stack[string]
+    $links = New-Object System.Collections.Generic.List[string]
+    $pending.Push($resolved)
+    while ($pending.Count -gt 0) {
+        $current = $pending.Pop()
+        foreach ($item in @(Get-ChildItem -LiteralPath $current -Force)) {
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                if (-not (Test-ProfileMatrixKnownCompatibilityJunction -ProfileRoot $resolved -Item $item)) {
+                    throw "profile matrix refuses an unexpected profile reparse point during cleanup: $($item.FullName)"
+                }
+                # Record the link and never recurse through it. Nested
+                # Documents\My * junctions are removed before their parent
+                # directory is considered for the final recursive cleanup.
+                [void]$links.Add([string]$item.FullName)
+                continue
+            }
+            if ($item.PSIsContainer) { $pending.Push([string]$item.FullName) }
         }
-        if (-not (Test-ProfileMatrixKnownCompatibilityJunction -ProfileRoot $resolved -Item $item)) {
-            throw "profile matrix refuses an unexpected profile reparse point during cleanup: $($item.FullName)"
-        }
+    }
+    foreach ($linkPath in @($links | Sort-Object { $_.Length } -Descending)) {
         # Remove the link itself, never its target. Do this before the final
         # recursive profile deletion because Windows PowerShell 5.1 may walk
         # directory junctions when -Recurse is used.
-        Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $linkPath -PathType Container) {
+            Remove-Item -LiteralPath $linkPath -Force -ErrorAction Stop
+        } elseif (Test-Path -LiteralPath $linkPath) {
+            Remove-Item -LiteralPath $linkPath -Force -ErrorAction Stop
+        }
     }
 }
 
@@ -510,9 +764,42 @@ try {
                 $output = @(& $windowsPowerShell @childArguments 1> $stdoutPath 2> $stderrPath)
                 $exitCode = $LASTEXITCODE
             } else {
+                $childArguments += @('-UseParentTaskHelper')
                 $startArguments = $childArguments | ForEach-Object { ConvertTo-ProfileMatrixArgument ([string]$_) }
-                $process = Start-Process -FilePath $windowsPowerShell -ArgumentList $startArguments -Credential $credential -LoadUserProfile -WorkingDirectory $caseRoot -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -Wait -PassThru
+                $process = Start-Process -FilePath $windowsPowerShell -ArgumentList $startArguments -Credential $credential -LoadUserProfile -WorkingDirectory $caseRoot -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
                 $output = @()
+                # The disposable account cannot cross the task scheduler's
+                # InteractiveToken boundary. Keep registration in the
+                # elevated controller, but only for the exact request emitted
+                # by the child and only while that child is alive.
+                $taskRequestPath = Join-Path $caseRoot 'task-registration-request.json'
+                $taskResponsePath = Join-Path $caseRoot 'task-registration-response.json'
+                $taskHelperEvidencePath = Join-Path $caseRoot 'task-helper-evidence.json'
+                while (-not $process.HasExited) {
+                    [void](Invoke-ProfileMatrixTaskHelperRequest `
+                        -CaseRoot $caseRoot `
+                        -RequestPath $taskRequestPath `
+                        -ResponsePath $taskResponsePath `
+                        -EvidencePath $taskHelperEvidencePath `
+                        -Sid $sid `
+                        -UserName $userName)
+                    Start-Sleep -Milliseconds 100
+                }
+                # Drain one final request after the child exits so a request
+                # emitted immediately before process termination is never left
+                # without a durable helper response.
+                for ($drain = 0; $drain -lt 20; $drain++) {
+                    $handled = Invoke-ProfileMatrixTaskHelperRequest `
+                        -CaseRoot $caseRoot `
+                        -RequestPath $taskRequestPath `
+                        -ResponsePath $taskResponsePath `
+                        -EvidencePath $taskHelperEvidencePath `
+                        -Sid $sid `
+                        -UserName $userName
+                    if (-not $handled -and -not (Test-Path -LiteralPath $taskRequestPath -PathType Leaf)) { break }
+                    Start-Sleep -Milliseconds 100
+                }
+                $process.WaitForExit()
                 $exitCode = $process.ExitCode
             }
             if ($exitCode -ne 0) {
@@ -525,6 +812,13 @@ try {
             Assert-ProfileMatrix ([string]$receipt.status -ceq 'passed') "case $case receipt is passed"
             Assert-ProfileMatrix ([string]$receipt.caseName -ceq $case) "case $case receipt binds the case name"
             Assert-ProfileMatrix ([string]$receipt.sid -ceq $sid) "case $case receipt binds the expected SID"
+            if (-not $CurrentUserOnly) {
+                Assert-ProfileMatrix ([string]$receipt.taskRegistration -ceq 'parent-elevated-helper') "case $case uses the elevated task-registration helper"
+                Assert-ProfileMatrix ([string]$receipt.taskRuntime -ceq 'not-started') "case $case records that non-interactive task runtime was not started"
+                Assert-ProfileMatrix ([string]$receipt.taskGate -ceq 'parent-elevated-registration-v1') "case $case records the explicit task gate"
+                Assert-ProfileMatrix (Test-Path -LiteralPath ([string]$receipt.taskGateEvidence) -PathType Leaf) "case $case preserves task-gate evidence"
+                Assert-ProfileMatrix (Test-Path -LiteralPath ([string]$receipt.taskHelperEvidence) -PathType Leaf) "case $case preserves elevated-helper evidence"
+            }
             [void]$cases.Add($receipt)
         } catch {
             # Preserve the primary child/verification error so a later profile
@@ -532,6 +826,9 @@ try {
             $caseFailureRecord = $_
         } finally {
             if (-not $CurrentUserOnly) {
+                if ($null -ne $sid) {
+                    try { Remove-ProfileMatrixTaskHelperTasks -Sid $sid } catch { }
+                }
                 if ($isAdmin -and $null -ne $sid) {
                     try { Remove-LocalGroupMember -Group $adminGroup -Member $userName -ErrorAction SilentlyContinue } catch { }
                 }

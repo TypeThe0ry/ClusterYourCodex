@@ -35,6 +35,8 @@ const RECONCILIATION_RECEIPT_VERSION: &str = "cyc.dev/hostile-reconciliation/v1"
 const MAX_CONFIG_BYTES: usize = 128 * 1024;
 const MAX_RECEIPT_BYTES: usize = 64 * 1024;
 const MAX_RECEIPT_AGE_MINUTES: i64 = 15;
+#[cfg(any(target_os = "linux", test))]
+const LINUX_CGROUP_ROOT: &str = "/sys/fs/cgroup";
 #[cfg(target_os = "linux")]
 const RECONCILE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -448,6 +450,7 @@ impl HostileIsolation {
                     HostileIsolationBackend::LinuxCgroupV2DedicatedIdentity,
                 )?;
                 ensure_linux_cgroup_empty(&config.cgroup_path)?;
+                ensure_linux_identity_idle(config.execution_uid)?;
                 validate_linux_cgroup_control_boundary(config)?;
                 validate_linux_cgroup_resource_limit(config)
             }
@@ -520,7 +523,14 @@ impl HostileIsolation {
         match &self.backend {
             None => Ok(()),
             Some(IsolationBackend::Linux(config)) => {
-                ensure_linux_cgroup_empty(&config.cgroup_path)
+                // A hostile child must not be able to weaken its control plane
+                // during execution and leave a clean-but-compromised cgroup.
+                // Verify the process tree, cgroup controls, and resource limit
+                // together before accepting completion.
+                ensure_linux_cgroup_empty(&config.cgroup_path)?;
+                ensure_linux_identity_idle(config.execution_uid)?;
+                validate_linux_cgroup_control_boundary(config)?;
+                validate_linux_cgroup_resource_limit(config)
             }
             Some(IsolationBackend::Windows(config)) => {
                 let _ = config;
@@ -775,6 +785,10 @@ fn validate_linux_worker_boundaries(
     validate_linux_account(config.execution_uid, config.execution_gid)?;
     // A delegated cgroup is only a containment boundary when the hostile
     // identity cannot rewrite its control files. Validate this before claim.
+    // Residual processes using the dedicated identity are intentionally not
+    // checked here: a crash may leave them inside the configured cgroup, and
+    // reconcile_before_claim must be allowed to kill those residuals before
+    // the external-identity check rejects anything that remains outside it.
     validate_linux_cgroup_control_boundary(config)?;
     for (label, path) in [
         ("hostile isolation config", isolation_config),
@@ -843,6 +857,74 @@ fn validate_linux_account(uid: u32, gid: u32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn parse_linux_status_uids(status: &str) -> Result<Vec<u32>> {
+    let line = status
+        .lines()
+        .find(|line| line.starts_with("Uid:"))
+        .context("Linux process status omitted Uid")?;
+    let fields = line
+        .strip_prefix("Uid:")
+        .expect("matched Uid prefix")
+        .split_whitespace()
+        .map(|field| {
+            field
+                .parse::<u32>()
+                .context("Linux process status contained malformed Uid")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if fields.len() != 4 {
+        bail!("Linux process status Uid must contain real/effective/saved/fs identities");
+    }
+    Ok(fields)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_identity_pids(uid: u32) -> Result<Vec<u32>> {
+    let mut matches = Vec::new();
+    for entry in fs::read_dir("/proc").context("enumerate Linux processes for hostile identity")? {
+        let entry = entry.context("inspect Linux process directory entry")?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+        let status_path = entry.path().join("status");
+        let status = match fs::read_to_string(&status_path) {
+            Ok(status) => status,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("read Linux process identity from {}", status_path.display())
+                })
+            }
+        };
+        if parse_linux_status_uids(&status)?.contains(&uid) {
+            matches.push(pid);
+        }
+    }
+    matches.sort_unstable();
+    Ok(matches)
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_linux_identity_idle(uid: u32) -> Result<()> {
+    let pids = linux_identity_pids(uid)?;
+    if !pids.is_empty() {
+        bail!(
+            "hostile execution identity has processes outside the empty execution boundary: {:?}",
+            pids
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ensure_linux_identity_idle(_uid: u32) -> Result<()> {
+    bail!("linux hostile isolation requires a Linux worker")
+}
+
 #[cfg(target_os = "linux")]
 fn ensure_sensitive_file_inaccessible_to_identity(path: &Path, uid: u32, gid: u32) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
@@ -904,32 +986,76 @@ fn prepare_linux_cgroup(config: &LinuxIsolation) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn linux_cgroup_boundary_paths(cgroup_path: &Path) -> Result<Vec<PathBuf>> {
+    let root = Path::new(LINUX_CGROUP_ROOT);
+    if !cgroup_path.starts_with(root) || cgroup_path == root {
+        bail!("hostile cgroup path must be a child of {LINUX_CGROUP_ROOT}");
+    }
+
+    let mut paths = Vec::new();
+    let mut current = cgroup_path;
+    loop {
+        paths.push(current.to_path_buf());
+        if current == root {
+            break;
+        }
+        current = current
+            .parent()
+            .context("hostile cgroup path escaped the cgroup v2 hierarchy")?;
+    }
+    Ok(paths)
+}
+
 #[cfg(target_os = "linux")]
 fn validate_linux_cgroup_control_boundary(config: &LinuxIsolation) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    let cgroup = fs::symlink_metadata(&config.cgroup_path).with_context(|| {
-        format!(
-            "inspect hostile cgroup boundary {}",
-            config.cgroup_path.display()
-        )
-    })?;
-    if !cgroup.is_dir() || cgroup.file_type().is_symlink() || cgroup.uid() != 0 {
-        bail!("hostile cgroup directory must be root-owned and non-symlink");
-    }
-    if cgroup.mode() & 0o022 != 0 {
-        bail!("hostile cgroup directory is writable by group or other");
-    }
-    for name in ["cgroup.procs", "cgroup.kill", "pids.max"] {
-        let path = config.cgroup_path.join(name);
-        let metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("inspect hostile cgroup control {name}"))?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.uid() != 0 {
-            bail!("hostile cgroup control {name} must be a root-owned regular file");
+    // Prevent an execution identity from escaping by moving itself into an
+    // ancestor cgroup, or from changing an ancestor's kill/resource controls.
+    // Validating only the leaf cgroup is insufficient when a delegated parent
+    // is writable by the hostile identity.
+    for cgroup_path in linux_cgroup_boundary_paths(&config.cgroup_path)? {
+        let cgroup = fs::symlink_metadata(&cgroup_path).with_context(|| {
+            format!("inspect hostile cgroup boundary {}", cgroup_path.display())
+        })?;
+        if !cgroup.is_dir() || cgroup.file_type().is_symlink() || cgroup.uid() != 0 {
+            bail!(
+                "hostile cgroup boundary must be a root-owned non-symlink directory: {}",
+                cgroup_path.display()
+            );
         }
-        let mode = metadata.mode() & 0o777;
-        if mode & 0o002 != 0 || (metadata.gid() == config.execution_gid && mode & 0o020 != 0) {
-            bail!("hostile execution identity can write cgroup control {name}");
+        if cgroup.mode() & 0o022 != 0 {
+            bail!(
+                "hostile cgroup boundary is writable by group or other: {}",
+                cgroup_path.display()
+            );
+        }
+        let controls: &[&str] = if cgroup_path == config.cgroup_path {
+            &["cgroup.procs", "cgroup.kill", "pids.max"]
+        } else {
+            // Migration only requires a writable cgroup.procs. The cgroup
+            // v2 root intentionally omits leaf-only controls such as
+            // cgroup.kill and pids.max, so do not require them on ancestors.
+            &["cgroup.procs"]
+        };
+        for name in controls {
+            let path = cgroup_path.join(name);
+            let metadata = fs::symlink_metadata(&path)
+                .with_context(|| format!("inspect hostile cgroup control {}", path.display()))?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.uid() != 0 {
+                bail!(
+                    "hostile cgroup control must be a root-owned regular file: {}",
+                    path.display()
+                );
+            }
+            let mode = metadata.mode() & 0o777;
+            if mode & 0o002 != 0 || (metadata.gid() == config.execution_gid && mode & 0o020 != 0) {
+                bail!(
+                    "hostile execution identity can write cgroup control: {}",
+                    path.display()
+                );
+            }
         }
     }
     Ok(())
@@ -1041,6 +1167,7 @@ fn reconcile_linux_cgroup(config: &LinuxIsolation) -> Result<u32> {
             }
         }
     }
+    ensure_linux_identity_idle(config.execution_uid)?;
     Ok(u32::try_from(initial.len()).unwrap_or(u32::MAX))
 }
 
@@ -1057,7 +1184,14 @@ fn prepare_linux_execution_scope(
 ) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
+    // The claim-time check is not enough: the worker can wait before a
+    // queued job actually spawns. Revalidate the complete ancestor boundary
+    // and configured pids limit immediately before handing files to the hostile
+    // identity, then require an empty execution cgroup.
+    validate_linux_cgroup_control_boundary(config)?;
+    validate_linux_cgroup_resource_limit(config)?;
     ensure_linux_cgroup_empty(&config.cgroup_path)?;
+    ensure_linux_identity_idle(config.execution_uid)?;
     let scope = hostile_job_scope(cwd, stdout_path)?;
     for entry in walkdir::WalkDir::new(&scope).follow_links(false) {
         let entry = entry.context("enumerate hostile job scope for identity handoff")?;
@@ -1488,6 +1622,39 @@ mod tests {
     }
 
     #[test]
+    fn linux_status_uid_parser_requires_all_identity_fields() {
+        assert_eq!(
+            parse_linux_status_uids(
+                "Name:\ttest\nUid:\t1001\t1002\t1003\t1004\nGid:\t20\t20\t20\t20\n"
+            )
+            .unwrap(),
+            vec![1001, 1002, 1003, 1004]
+        );
+        assert!(parse_linux_status_uids("Name:\ttest\n").is_err());
+        assert!(parse_linux_status_uids("Uid:\t1001\t1002\n").is_err());
+        assert!(parse_linux_status_uids("Uid:\t1001\tbad\t1003\t1004\n").is_err());
+    }
+
+    #[test]
+    fn cgroup_boundary_paths_cover_leaf_to_cgroup_root() {
+        let node_id = Uuid::new_v4();
+        let leaf = PathBuf::from(format!(
+            "/sys/fs/cgroup/delegated/worker/cyc-hostile-{node_id}"
+        ));
+        assert_eq!(
+            linux_cgroup_boundary_paths(&leaf).unwrap(),
+            vec![
+                leaf.clone(),
+                PathBuf::from("/sys/fs/cgroup/delegated/worker"),
+                PathBuf::from("/sys/fs/cgroup/delegated"),
+                PathBuf::from(LINUX_CGROUP_ROOT),
+            ]
+        );
+        assert!(linux_cgroup_boundary_paths(Path::new(LINUX_CGROUP_ROOT)).is_err());
+        assert!(linux_cgroup_boundary_paths(Path::new("/tmp/cyc-hostile-test")).is_err());
+    }
+
+    #[test]
     fn process_scope_cannot_expand_beyond_exact_run_root() {
         let directory = tempfile::tempdir().unwrap();
         let jobs = directory.path().join("jobs");
@@ -1590,6 +1757,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires root, writable cgroup v2, and a dedicated test identity"]
     async fn linux_live_dedicated_identity_credential_and_residual_reconciliation() {
+        use std::os::unix::process::CommandExt;
         use std::sync::atomic::AtomicU8;
         use std::sync::Arc;
 
@@ -1664,6 +1832,32 @@ mod tests {
             .validate_worker_boundaries(&worker_config_path, &worker_config)
             .unwrap();
         isolation.reconcile_before_claim().unwrap();
+        isolation.verify_before_claim().unwrap();
+
+        // A dedicated identity is only a boundary while it is exclusive to
+        // this worker. A process with the execution UID outside the cgroup must
+        // block the next claim instead of being silently ignored.
+        let mut outside_identity = Command::new("sleep")
+            .arg("300")
+            .uid(uid)
+            .gid(gid)
+            .spawn()
+            .unwrap();
+        let outside_deadline = Instant::now() + Duration::from_secs(5);
+        while linux_identity_pids(uid).unwrap().is_empty() {
+            assert!(
+                Instant::now() < outside_deadline,
+                "outside identity process never became observable"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(isolation
+            .verify_before_claim()
+            .unwrap_err()
+            .to_string()
+            .contains("outside the empty execution boundary"));
+        outside_identity.kill().unwrap();
+        outside_identity.wait().unwrap();
         isolation.verify_before_claim().unwrap();
 
         let run_id = Uuid::new_v4();

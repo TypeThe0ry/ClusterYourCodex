@@ -108,15 +108,19 @@ The controller removes the disposable account and its profile by SID after the
 case, while retaining a job-owned JSON receipt and logs for CI diagnostics.
 
 A disposable profile launched by a non-interactive CI session cannot obtain the
-Winlogon token required by a production `InteractiveToken` task. Therefore the
-profile-matrix child passes both `-ProfileMatrixTestMode` and
-`-ScheduledTaskLogonType S4U` to the fresh-deployment harness. Bootstrap rejects
-S4U unless that explicit test-only marker is present, and the harness verifies
-the persisted Controller task principal after both Install and Repair. This
-keeps the normal lifecycle contract unchanged: ordinary fresh deployment,
-Setup, Repair, and user installs continue to register `InteractiveToken` tasks;
-S4U is not a supported production setting and is never inferred from a runner
-label, job name, or non-interactive host.
+Winlogon token required to register or start a production `InteractiveToken`
+task. The profile-matrix child therefore opts into the explicit
+`parent-elevated-registration-v1` test gate (which also requires the explicit
+`-ProfileMatrixTaskHelperMode` switch). Bootstrap keeps the production
+`Interactive` principal in its manifest, emits a durable request containing the
+exact disposable-profile action, and waits for the elevated matrix controller
+to validate and register the task. The controller records the request,
+response, observed principal, and cleanup in job-owned evidence, and the task
+is deliberately never started. Install, Repair, and Uninstall still run in the
+child profile; the normal fresh-deployment, Setup, Repair, and user-install
+paths continue to register and start `InteractiveToken` tasks directly. S4U is
+kept as an unused, explicitly guarded compatibility value and is never inferred
+from a runner label, job name, or non-interactive host.
 
 The profile/path matrix also treats compatibility junctions as an explicit
 allow-list, not as generic reparse points. On Windows PowerShell 5.1, where
