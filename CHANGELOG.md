@@ -7,6 +7,22 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.34] - 2026-08-30
+
+### Fixed
+
+- Extended the Windows profile-matrix compatibility-junction allow-list to
+  cover the nested `AppData\Local`, `AppData\LocalLow`, and `AppData\Roaming`
+  `Application Data` aliases emitted by a fresh Windows profile. Each alias
+  remains recursively discovered, mount-point-tag checked, and bound to an
+  exact target inside the same disposable profile before cleanup.
+- Added a packaging regression assertion for the nested aliases so a hosted
+  clean-profile run cannot regress into treating OS-created junctions as
+  package-owned reparse points.
+- Reissued the public candidate after preview.32 exposed the nested alias
+  during the Windows 11 ARM64 profile matrix; tagged builds remain public
+  GitHub prereleases while the independent GA gates are still open.
+
 ## [0.1.0-preview.33] - 2026-08-30
 
 ### Fixed
@@ -400,7 +416,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.33...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.34...HEAD
+[0.1.0-preview.34]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.33...v0.1.0-preview.34
 [0.1.0-preview.33]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.32...v0.1.0-preview.33
 [0.1.0-preview.32]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.31...v0.1.0-preview.32
 [0.1.0-preview.31]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.30...v0.1.0-preview.31

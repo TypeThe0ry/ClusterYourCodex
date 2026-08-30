@@ -264,6 +264,13 @@ function Test-ProfileMatrixKnownCompatibilityJunction {
         'Documents\My Music' = 'Music'
         'Documents\My Pictures' = 'Pictures'
         'Documents\My Videos' = 'Videos'
+        # Windows also materializes the legacy Application Data alias inside
+        # the per-user local profile roots. These are compatibility junctions
+        # created by the OS, not package content; keep the paths explicit and
+        # bind each target back to the same profile root.
+        'AppData\Local\Application Data' = 'AppData\Local'
+        'AppData\LocalLow\Application Data' = 'AppData\LocalLow'
+        'AppData\Roaming\Application Data' = 'AppData\Roaming'
     }
     $relativeSource = ([string]$Item.FullName).Substring($resolvedProfileRoot.Length).TrimStart([char[]]@('\', '/'))
     if (-not $knownTargets.ContainsKey($relativeSource)) { return $false }

@@ -4193,7 +4193,9 @@ exit 0
         $profileMatrixSource -match 'DosDevices') 'profile matrix normalizes NT/Win32 junction target prefixes'
     Assert-True ($profileMatrixSource -match 'AllowKnownCompatibilityJunctions') 'profile matrix scopes compatibility-junction allowance to the disposable profile cleanup path'
     Assert-True ($profileMatrixSource -match 'Remove-ProfileMatrixKnownCompatibilityJunctions') 'profile matrix removes known compatibility junctions before recursive profile cleanup'
-    Assert-True ($profileMatrixSource -match "'Application Data'" -and $profileMatrixSource -match "'Documents\\My Music'") 'profile matrix names the legacy and Documents compatibility junction allow-list explicitly'
+    Assert-True ($profileMatrixSource -match "'Application Data'" -and $profileMatrixSource -match "'Documents\\My Music'" -and
+        $profileMatrixSource -match "'AppData\\Local\\Application Data'" -and
+        $profileMatrixSource -match "'AppData\\LocalLow\\Application Data'") 'profile matrix names the legacy, nested local, and Documents compatibility junction allow-list explicitly'
     Assert-True ($profileMatrixSource -match '\$knownTargets' -and $profileMatrixSource -match 'LinkType') 'profile matrix validates compatibility-junction targets instead of allowing arbitrary reparse points'
     Assert-True ($profileMatrixSource -match 'ConvertFrom-ProfileMatrixFsutilReparseOutput') 'profile matrix has a deterministic native fsutil reparse transcript parser'
     Assert-True ($profileMatrixSource -match 'Get-ProfileMatrixNativeReparseInfo[\s\S]+fsutil\.exe[\s\S]+reparsepoint query') 'profile matrix uses the native fsutil fallback when PowerShell link metadata is absent'
