@@ -32,6 +32,8 @@ policy and evidence model.
       Windows executable/script that crosses a trust boundary.
 - [ ] macOS assets, if supported, have Developer ID signing and notarization.
 - [ ] SPDX/CycloneDX SBOM and third-party notices cover all package payloads.
+- [ ] `release-index.json.sig` verifies with the pinned production public key;
+      `unsigned=false` is never accepted as a self-declared trust decision.
 - [ ] Artifact attestation/provenance verifies independently after download.
 - [ ] Protected branch/tag rules and an approved production release environment
       are active.
@@ -45,10 +47,12 @@ policy and evidence model.
       is `prerelease: false`.
 
 The protected GA publisher enforces these checks mechanically: the stable
-`release-index.json` must be signed, carry a hashed attestation bundle whose
-subjects match every indexed payload, include a complete CycloneDX 1.6 SBOM and
-non-empty third-party notices artifact, and have an exact top-level file and
-`SHA256SUMS` set. The publisher cross-binds the external evidence manifest's
-`artifactVerification.indexSha256` to the downloaded index, verifies each
-payload with `gh attestation verify` against the exact stable tag/commit, and
-uploads only the validator's allow-listed release files.
+`release-index.json` must have a detached RSA-PKCS1-SHA256 signature verified by
+the pinned `scripts/stable-index-public-key.xml`, carry a hashed attestation
+bundle whose subjects match every indexed payload, include a schema-shaped
+CycloneDX 1.6 SBOM and UTF-8 `THIRD-PARTY-NOTICES.txt`, and have an exact
+top-level file and `SHA256SUMS` set. The publisher cross-binds the external
+evidence manifest's `artifactVerification.indexSha256` to the downloaded index,
+verifies each payload with `gh attestation verify` against the exact stable
+tag/commit and trusted signer identity, and uploads only the validator's
+allow-listed release files.

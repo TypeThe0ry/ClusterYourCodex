@@ -160,6 +160,13 @@ powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   `[CYC-LINUX-USER-SYSTEMD-UNAVAILABLE]`; root `--scope auto` uses system scope.
   A linger setting enabled by the failed preflight is rolled back when the
   subsequent user-bus probe cannot connect.
+- Linux performs the same exact-five-file and manifest payload contract checks
+  as the Windows and macOS installers before preinstall: the signed manifest
+  must identify `ClusterYourCodex Managed Worker`, the host's exact
+  `linux-x86_64` or `linux-aarch64` target, and the ordered `cyc-worker` plus
+  `install-worker.sh` worker/lifecycle entries with matching size and SHA-256.
+  A valid publisher signature over a contract-invalid manifest is rejected
+  before any worker, config, manifest, or systemd unit mutation.
 - Linux's opt-in dedicated-execution-identity/cgroup-v2 hostile-isolation
   mechanism passed an internal native P1 test. Independent review still
   requires additional escape, identity, resource, and reconciliation proofs,

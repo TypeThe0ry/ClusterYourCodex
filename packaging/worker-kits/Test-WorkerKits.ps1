@@ -36,6 +36,7 @@ $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ('cyc-worker-kit-test-'
 $previousSigningKeyPath = [string]$env:CYC_WORKER_KIT_SIGNING_KEY_PATH
 $previousSigningKeyId = [string]$env:CYC_WORKER_KIT_SIGNING_KEY_ID
 $previousTrustedPublicKeyPath = [string]$env:CYC_WORKER_KIT_TRUSTED_PUBLIC_KEY_PATH
+$previousTestPrivateKey = [string]$env:CYC_WORKER_KIT_TEST_PRIVATE_KEY
 try {
     [void](New-Item -ItemType Directory -Path $temporary)
     $opensslCommand = Get-Command openssl -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -60,6 +61,7 @@ try {
     $env:CYC_WORKER_KIT_SIGNING_KEY_PATH = $fixturePrivate
     $env:CYC_WORKER_KIT_SIGNING_KEY_ID = 'cyc-release-2026-02'
     $env:CYC_WORKER_KIT_TRUSTED_PUBLIC_KEY_PATH = $fixturePublicRaw
+    $env:CYC_WORKER_KIT_TEST_PRIVATE_KEY = $fixturePrivate
     $fakeWorker = Join-Path $temporary 'fake-worker.bin'
     [System.IO.File]::WriteAllBytes($fakeWorker, [byte[]](0..255))
     $windowsOutput = Join-Path $temporary 'windows'
@@ -149,6 +151,30 @@ try {
     function Stop-ScheduledTask {}
     function Unregister-ScheduledTask {}
     try {
+        $unexpectedKitFile = Join-Path $windowsSmokeKit 'unexpected.txt'
+        [System.IO.File]::WriteAllText($unexpectedKitFile, "unexpected`n", (New-Object System.Text.UTF8Encoding($false)))
+        $unexpectedFileRejected = $false
+        try {
+            $null = . $windowsSmokeInstaller `
+                -Action Install `
+                -BundleRoot $windowsSmokeKit `
+                -InstallRoot $windowsSmokeInstall `
+                -DataRoot $windowsSmokeData `
+                -WorkspaceRoot $windowsSmokeWorkspace `
+                -Scope User `
+                -Confirm:$false
+        } catch {
+            $unexpectedFileRejected = $true
+        } finally {
+            Remove-Item -LiteralPath $unexpectedKitFile -Force
+        }
+        if (-not $unexpectedFileRejected -or
+            (Test-Path -LiteralPath $windowsSmokeInstall) -or
+            (Test-Path -LiteralPath $windowsSmokeData) -or
+            (Test-Path -LiteralPath $windowsSmokeWorkspace)) {
+            throw 'Windows worker installer accepted an unexpected kit entry or mutated state before verification.'
+        }
+
         $preinstallReceipt = . $windowsSmokeInstaller `
             -Action Install `
             -BundleRoot $windowsSmokeKit `
@@ -647,6 +673,78 @@ upgrade="$root/linux-smoke-upgrade"
 bad="$root/linux-smoke-bad"
 chmod +x "$good/cyc-worker" "$good/install-worker.sh" "$upgrade/cyc-worker" "$upgrade/install-worker.sh" "$bad/cyc-worker" "$bad/install-worker.sh"
 
+# A cryptographically valid kit whose signed product identity is tampered must
+# still be rejected by the Linux contract verifier before any local state is
+# created. The previous verifier only checked schema/os/architecture text and
+# would accept this signed-but-contract-invalid manifest.
+invalid_contract="$root/linux-contract-invalid"
+cp -a -- "$good" "$invalid_contract"
+fixture_private="$(cygpath -u "$CYC_WORKER_KIT_TEST_PRIVATE_KEY")"
+test_python=''
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; assert sys.version_info >= (3, 8)' >/dev/null 2>&1; then
+    test_python="$(command -v "$candidate")"
+    break
+  fi
+done
+test -n "$test_python"
+"$test_python" - "$invalid_contract/worker-kit.json" <<'PY'
+import json
+import sys
+from collections import OrderedDict
+from pathlib import Path
+
+manifest_path = Path(sys.argv[1])
+manifest = json.loads(manifest_path.read_bytes().decode('utf-8'), object_pairs_hook=OrderedDict)
+manifest['product'] = 'Tampered Worker Product'
+manifest_path.write_bytes((json.dumps(manifest, ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8'))
+PY
+openssl pkeyutl -sign -rawin -inkey "$fixture_private" \
+  -in "$invalid_contract/worker-kit.json" -out "$invalid_contract/worker-kit.sig.raw"
+"$test_python" - "$invalid_contract/worker-kit.json" \
+  "$invalid_contract/worker-kit.sig.raw" \
+  "$invalid_contract/worker-kit.sig" \
+  "$invalid_contract/SHA256SUMS" <<'PY'
+import base64
+import hashlib
+import json
+import sys
+from collections import OrderedDict
+from pathlib import Path
+
+manifest_path, signature_raw_path, signature_path, checksums_path = map(Path, sys.argv[1:])
+signature = signature_raw_path.read_bytes()
+envelope = OrderedDict([
+    ('schemaVersion', 'cyc.dev/worker-kit-signature/v1'),
+    ('algorithm', 'Ed25519'),
+    ('keyId', 'cyc-release-2026-02'),
+    ('signedObject', 'worker-kit.json'),
+    ('manifestSha256', hashlib.sha256(manifest_path.read_bytes()).hexdigest()),
+    ('signature', base64.b64encode(signature).decode('ascii')),
+])
+signature_path.write_bytes((json.dumps(envelope, separators=(',', ':')) + '\n').encode('utf-8'))
+sum_names = ('cyc-worker', 'install-worker.sh', 'worker-kit.json', 'worker-kit.sig')
+checksums_path.write_bytes(
+    ''.join(f"{hashlib.sha256((checksums_path.parent / name).read_bytes()).hexdigest()}  {name}\n" for name in sum_names).encode('utf-8')
+)
+signature_raw_path.unlink()
+PY
+set +e
+HOME="$root/invalid-home" "$invalid_contract/install-worker.sh" install \
+  --bundle-root "$invalid_contract" \
+  --install-root "$root/invalid-install" \
+  --data-root "$root/invalid-data" \
+  --workspace-root "$root/invalid-workspace" \
+  --scope user \
+  >"$root/invalid-contract.stdout" 2>"$root/invalid-contract.stderr"
+invalid_contract_exit=$?
+set -e
+test "$invalid_contract_exit" -ne 0
+grep -q 'Worker-kit publisher signature verification failed.' "$root/invalid-contract.stderr"
+test ! -e "$root/invalid-install"
+test ! -e "$root/invalid-data"
+test ! -e "$root/invalid-workspace"
+
 # Root + auto resolves to system scope without probing or modifying a user
 # manager. This is an unpaired preinstall, so it must not touch systemd.
 root_login_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log")"
@@ -958,13 +1056,13 @@ test ! -e "$default_logs"
         }
     }
     $windowsSource = Get-Content -LiteralPath $windowsInstaller -Raw
-    foreach ($requiredPattern in @('SHA256SUMS', 'Get-WorkerTaskSnapshot', 'Restore-WorkerTask', 'New-WorkerTransaction', 'Restore-WorkerTransaction', 'TransactionSchema', 'AfterPair', 'AfterServiceRegistration', 'BeforeManifestWrite', 'Assert-DefaultDataPurgeTarget', 'Resolve-ServiceScope', 'Wait-WorkerTaskRunning', 'ServiceAccount', '--workspace-root', '--repair', 'configExistedBeforePair')) {
+    foreach ($requiredPattern in @('SHA256SUMS', 'Get-WorkerTaskSnapshot', 'Restore-WorkerTask', 'New-WorkerTransaction', 'Restore-WorkerTransaction', 'TransactionSchema', 'AfterPair', 'AfterServiceRegistration', 'BeforeManifestWrite', 'Assert-DefaultDataPurgeTarget', 'Resolve-ServiceScope', 'Wait-WorkerTaskRunning', 'ServiceAccount', '--workspace-root', '--repair', 'configExistedBeforePair', 'expectedKitNames', 'actualKitNames', 'exactly five normal files')) {
         if ($windowsSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "Windows worker installer is missing rollback/integrity guard: $requiredPattern"
         }
     }
     $linuxSource = Get-Content -LiteralPath $linuxInstaller -Raw
-    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'after-pair', 'after-service-registration', 'before-manifest-write', 'remove_service', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair')) {
+    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'after-pair', 'after-service-registration', 'before-manifest-write', 'remove_service', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest')) {
         if ($linuxSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "Linux worker installer is missing rollback/integrity guard: $requiredPattern"
         }
@@ -1021,6 +1119,7 @@ test ! -e "$default_logs"
     $env:CYC_WORKER_KIT_SIGNING_KEY_PATH = $previousSigningKeyPath
     $env:CYC_WORKER_KIT_SIGNING_KEY_ID = $previousSigningKeyId
     $env:CYC_WORKER_KIT_TRUSTED_PUBLIC_KEY_PATH = $previousTrustedPublicKeyPath
+    $env:CYC_WORKER_KIT_TEST_PRIVATE_KEY = $previousTestPrivateKey
     if (Test-Path -LiteralPath $temporary) {
         $resolved = [System.IO.Path]::GetFullPath($temporary)
         $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())

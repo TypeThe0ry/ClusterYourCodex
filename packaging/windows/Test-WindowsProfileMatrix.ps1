@@ -377,17 +377,49 @@ function Write-ProfileMatrixAtomicJson {
     )
     $directory = Split-Path -Parent $Path
     [void](New-Item -ItemType Directory -Path $directory -Force)
-    $temporary = Join-Path $directory ((Split-Path -Leaf $Path) + '.tmp-' + [Guid]::NewGuid().ToString('N'))
+    $leaf = Split-Path -Leaf $Path
+    $temporary = Join-Path $directory ($leaf + '.tmp-' + [Guid]::NewGuid().ToString('N'))
+    # File.Replace requires a real backup path on Windows PowerShell/.NET
+    # Framework; passing $null is interpreted as an invalid path and aborts
+    # the helper before it can emit its response.  Keep the backup sibling
+    # unique and remove it after a successful atomic commit.
+    $backup = Join-Path $directory ($leaf + '.bak-' + [Guid]::NewGuid().ToString('N'))
     $utf8 = [System.Text.UTF8Encoding]::new($false)
+    $bytes = $utf8.GetBytes(($Value | ConvertTo-Json -Depth 12))
+    $stream = $null
+    $committed = $false
     try {
-        [System.IO.File]::WriteAllText($temporary, ($Value | ConvertTo-Json -Depth 12), $utf8)
+        $stream = [System.IO.FileStream]::new(
+            $temporary,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None,
+            4096,
+            [System.IO.FileOptions]::WriteThrough
+        )
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+        $stream.Dispose()
+        $stream = $null
+
         if (Test-Path -LiteralPath $Path -PathType Leaf) {
-            [System.IO.File]::Replace($temporary, $Path, $null, $true)
+            [System.IO.File]::Replace($temporary, $Path, $backup, $true)
         } else {
             [System.IO.File]::Move($temporary, $Path)
         }
+        $committed = $true
     } finally {
-        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+        if ($stream) { try { $stream.Dispose() } catch { } }
+        try {
+            if (Test-Path -LiteralPath $temporary) {
+                Remove-Item -LiteralPath $temporary -Force
+            }
+        } catch { }
+        try {
+            if ($committed -and (Test-Path -LiteralPath $backup)) {
+                Remove-Item -LiteralPath $backup -Force
+            }
+        } catch { }
     }
 }
 
@@ -454,6 +486,87 @@ function Assert-ProfileMatrixTaskAction {
     }
 }
 
+function ConvertTo-ProfileMatrixSid {
+    param([Parameter(Mandatory = $true)][string]$Identity)
+
+    $value = $Identity.Trim()
+    if ($value -match '^S-\d-\d+(?:-\d+)+$') { return $value }
+    try {
+        return ([System.Security.Principal.NTAccount]::new($value)).Translate(
+            [System.Security.Principal.SecurityIdentifier]
+        ).Value
+    } catch {
+        throw "profile-matrix task helper could not resolve task identity '$Identity' to a SID."
+    }
+}
+
+function Assert-ProfileMatrixTaskOwnership {
+    param(
+        [Parameter(Mandatory = $true)]$Task,
+        [Parameter(Mandatory = $true)][string]$Sid,
+        $ExpectedAction
+    )
+
+    $taskPath = [string]$Task.TaskPath
+    if ($taskPath -cne '\') {
+        throw "profile-matrix task helper rejected task outside the root task path: $taskPath"
+    }
+    $principalUserId = [string]$Task.Principal.UserId
+    if ([string]::IsNullOrWhiteSpace($principalUserId) -or
+        (ConvertTo-ProfileMatrixSid -Identity $principalUserId) -cne $Sid) {
+        throw "profile-matrix task helper rejected task principal ownership for SID $Sid."
+    }
+
+    $triggerUsers = @(
+        foreach ($trigger in @($Task.Triggers)) {
+            $userProperty = $trigger.PSObject.Properties['UserId']
+            if ($null -ne $userProperty -and -not [string]::IsNullOrWhiteSpace([string]$userProperty.Value)) {
+                [string]$userProperty.Value
+            }
+        }
+    )
+    if ($triggerUsers.Count -eq 0 -or
+        (@($triggerUsers | Where-Object { (ConvertTo-ProfileMatrixSid -Identity $_) -ceq $Sid }).Count -eq 0)) {
+        throw "profile-matrix task helper rejected task logon trigger ownership for SID $Sid."
+    }
+
+    $taskAction = @($Task.Actions | Select-Object -First 1)
+    if ($taskAction.Count -eq 0) { throw 'profile-matrix task helper rejected a task without an action.' }
+    $taskExecutable = Resolve-ProfileMatrixPath ([string]$taskAction[0].Execute)
+    $taskArguments = [string]$taskAction[0].Arguments
+    $workingDirectoryProperty = $taskAction[0].PSObject.Properties['WorkingDirectory']
+    $taskWorkingDirectory = ''
+    if ($null -ne $workingDirectoryProperty -and
+        -not [string]::IsNullOrWhiteSpace([string]$workingDirectoryProperty.Value)) {
+        $taskWorkingDirectory = Resolve-ProfileMatrixPath ([string]$workingDirectoryProperty.Value)
+    }
+    $profileRoot = Get-ProfileMatrixProfilePathForSid -Sid $Sid
+    $localAppData = Resolve-ProfileMatrixPath (Join-Path $profileRoot 'AppData\Local')
+    $ownedPrefix = $localAppData + '\ClusterYourCodex-fresh-'
+    if (-not $taskExecutable.StartsWith($ownedPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $taskExecutable -notmatch '(?i)\\ClusterYourCodex-fresh-[0-9a-f]{32}\\program\\cyc-(controller|worker)\.exe$' -or
+        [string]::IsNullOrWhiteSpace($taskWorkingDirectory) -or
+        $taskWorkingDirectory -notmatch '(?i)\\ClusterYourCodex-fresh-[0-9a-f]{32}\\program$' -or
+        -not [string]::Equals($taskWorkingDirectory, (Split-Path -Parent $taskExecutable), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "profile-matrix task helper rejected task action outside the disposable profile install root: $taskExecutable"
+    }
+    if ($null -ne $ExpectedAction) {
+        if (-not [string]::Equals($taskExecutable, [string]$ExpectedAction.executable, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals($taskArguments, [string]$ExpectedAction.arguments, [System.StringComparison]::Ordinal) -or
+            -not [string]::Equals($taskWorkingDirectory, [string]$ExpectedAction.workingDirectory, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'profile-matrix task helper observed a task action different from the request.'
+        }
+    }
+    return [PSCustomObject]@{
+        taskPath = $taskPath
+        principalSid = (ConvertTo-ProfileMatrixSid -Identity $principalUserId)
+        triggerSids = @($triggerUsers | ForEach-Object { ConvertTo-ProfileMatrixSid -Identity $_ })
+        executable = $taskExecutable
+        arguments = $taskArguments
+        workingDirectory = $taskWorkingDirectory
+    }
+}
+
 function Invoke-ProfileMatrixTaskHelperRequest {
     param(
         [Parameter(Mandatory = $true)][string]$CaseRoot,
@@ -481,6 +594,7 @@ function Invoke-ProfileMatrixTaskHelperRequest {
     $status = 'failed'
     $errorMessage = $null
     $observedLogonType = $null
+    $ownership = $null
     try {
         $request = Get-Content -LiteralPath $RequestPath -Raw -ErrorAction Stop | ConvertFrom-Json
         if ([string]$request.schemaVersion -cne 'cyc.dev/windows-profile-matrix-task-request/v1' -or
@@ -522,18 +636,20 @@ function Invoke-ProfileMatrixTaskHelperRequest {
                 -Settings $settings `
                 -Description 'ClusterYourCodex per-user background component' `
                 -Force | Out-Null
-            $task = Get-ScheduledTask -TaskName ([string]$request.taskName) -ErrorAction Stop
+            $task = Get-ScheduledTask -TaskName ([string]$request.taskName) -TaskPath '\' -ErrorAction Stop
+            $ownership = Assert-ProfileMatrixTaskOwnership -Task $task -Sid $Sid -ExpectedAction $action
             $observedLogonType = [string]$task.Principal.LogonType
             if ($observedLogonType -notin @('Interactive', 'InteractiveToken', '3')) {
                 throw "profile-matrix task helper observed unexpected task logon type $observedLogonType."
             }
         } else {
-            $task = Get-ScheduledTask -TaskName ([string]$request.taskName) -ErrorAction SilentlyContinue
+            $task = Get-ScheduledTask -TaskName ([string]$request.taskName) -TaskPath '\' -ErrorAction SilentlyContinue
             if ($null -ne $task) {
-                Stop-ScheduledTask -TaskName ([string]$request.taskName) -ErrorAction SilentlyContinue
-                Unregister-ScheduledTask -TaskName ([string]$request.taskName) -Confirm:$false -ErrorAction Stop
+                $ownership = Assert-ProfileMatrixTaskOwnership -Task $task -Sid $Sid
+                Stop-ScheduledTask -TaskName ([string]$request.taskName) -TaskPath '\' -ErrorAction SilentlyContinue
+                Unregister-ScheduledTask -TaskName ([string]$request.taskName) -TaskPath '\' -Confirm:$false -ErrorAction Stop
             }
-            if ($null -ne (Get-ScheduledTask -TaskName ([string]$request.taskName) -ErrorAction SilentlyContinue)) {
+            if ($null -ne (Get-ScheduledTask -TaskName ([string]$request.taskName) -TaskPath '\' -ErrorAction SilentlyContinue)) {
                 throw "profile-matrix task helper could not remove $([string]$request.taskName)."
             }
         }
@@ -550,6 +666,16 @@ function Invoke-ProfileMatrixTaskHelperRequest {
         sid = $Sid
         status = $status
         observedLogonType = $observedLogonType
+        observedTaskPath = if ($null -ne $ownership) { [string]$ownership.taskPath } else { $null }
+        observedPrincipalSid = if ($null -ne $ownership) { [string]$ownership.principalSid } else { $null }
+        observedTriggerSids = if ($null -ne $ownership) { @($ownership.triggerSids) } else { @() }
+        observedAction = if ($null -ne $ownership) {
+            [ordered]@{
+                executable = [string]$ownership.executable
+                arguments = [string]$ownership.arguments
+                workingDirectory = [string]$ownership.workingDirectory
+            }
+        } else { $null }
         runtime = 'not-started'
         error = $errorMessage
         completedAtUtc = [DateTime]::UtcNow.ToString('o')
@@ -570,18 +696,15 @@ function Invoke-ProfileMatrixTaskHelperRequest {
 function Remove-ProfileMatrixTaskHelperTasks {
     param([Parameter(Mandatory = $true)][string]$Sid)
     $profilePath = Get-ProfileMatrixProfilePathForSid -Sid $Sid
-    $localAppData = Resolve-ProfileMatrixPath (Join-Path $profilePath 'AppData\Local')
-    $ownedPrefix = $localAppData + '\ClusterYourCodex-fresh-'
     foreach ($taskName in @('ClusterYourCodex Controller', 'ClusterYourCodex Worker')) {
-        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        $task = Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction SilentlyContinue
         if ($null -eq $task) { continue }
-        $action = @($task.Actions | Select-Object -First 1)
-        $executable = if ($action.Count -gt 0) { [string]$action[0].Execute } else { '' }
-        if (-not $executable.StartsWith($ownedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-            continue
+        [void](Assert-ProfileMatrixTaskOwnership -Task $task -Sid $Sid)
+        Stop-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $taskName -TaskPath '\' -Confirm:$false -ErrorAction Stop
+        if ($null -ne (Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction SilentlyContinue)) {
+            throw "profile-matrix task helper could not remove owned task $taskName."
         }
-        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
     }
 }
 
@@ -741,6 +864,7 @@ try {
         Add-ProfileMatrixUsersModify -Path $caseRoot
         $caseFailureRecord = $null
         $caseCleanupFailureMessage = $null
+        $process = $null
         try {
             if ($CurrentUserOnly) {
                 $sid = [string]$identity.User.Value
@@ -825,19 +949,67 @@ try {
             # cleanup problem cannot replace the useful root cause.
             $caseFailureRecord = $_
         } finally {
+            # A helper/IPC exception can happen while the disposable child is
+            # still waiting for a response. Terminate and reap it before
+            # touching the account/profile so no process keeps the profile
+            # loaded into the next matrix case.
+            if ($null -ne $process) {
+                try {
+                    if (-not $process.HasExited) {
+                        Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                        [void]$process.WaitForExit(10000)
+                    }
+                    if (-not $process.HasExited) {
+                        throw "profile matrix child process $($process.Id) did not exit after cleanup."
+                    }
+                } catch {
+                    $message = "child process cleanup failed: $([string]$_.Exception.Message)"
+                    if ([string]::IsNullOrWhiteSpace($caseCleanupFailureMessage)) {
+                        $caseCleanupFailureMessage = $message
+                    } else {
+                        $caseCleanupFailureMessage += "; $message"
+                    }
+                }
+            }
             if (-not $CurrentUserOnly) {
                 if ($null -ne $sid) {
-                    try { Remove-ProfileMatrixTaskHelperTasks -Sid $sid } catch { }
+                    try { Remove-ProfileMatrixTaskHelperTasks -Sid $sid } catch {
+                        $message = "task cleanup failed: $([string]$_.Exception.Message)"
+                        if ([string]::IsNullOrWhiteSpace($caseCleanupFailureMessage)) {
+                            $caseCleanupFailureMessage = $message
+                        } else {
+                            $caseCleanupFailureMessage += "; $message"
+                        }
+                    }
                 }
                 if ($isAdmin -and $null -ne $sid) {
-                    try { Remove-LocalGroupMember -Group $adminGroup -Member $userName -ErrorAction SilentlyContinue } catch { }
+                    try { Remove-LocalGroupMember -Group $adminGroup -Member $userName -ErrorAction Stop } catch {
+                        $message = "administrator membership cleanup failed: $([string]$_.Exception.Message)"
+                        if ([string]::IsNullOrWhiteSpace($caseCleanupFailureMessage)) {
+                            $caseCleanupFailureMessage = $message
+                        } else {
+                            $caseCleanupFailureMessage += "; $message"
+                        }
+                    }
                 }
-                try { Remove-LocalUser -Name $userName -ErrorAction SilentlyContinue } catch { }
+                try { Remove-LocalUser -Name $userName -ErrorAction Stop } catch {
+                    $message = "user cleanup failed: $([string]$_.Exception.Message)"
+                    if ([string]::IsNullOrWhiteSpace($caseCleanupFailureMessage)) {
+                        $caseCleanupFailureMessage = $message
+                    } else {
+                        $caseCleanupFailureMessage += "; $message"
+                    }
+                }
                 if ($null -ne $sid) {
                     try {
                         Remove-ProfileMatrixUserProfile -Sid $sid -UserName $userName
                     } catch {
-                        $caseCleanupFailureMessage = [string]$_.Exception.Message
+                        $message = [string]$_.Exception.Message
+                        if ([string]::IsNullOrWhiteSpace($caseCleanupFailureMessage)) {
+                            $caseCleanupFailureMessage = $message
+                        } else {
+                            $caseCleanupFailureMessage += "; $message"
+                        }
                     }
                 }
             }

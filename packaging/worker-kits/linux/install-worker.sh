@@ -93,6 +93,9 @@ normalize_path() {
 verify_worker_kit_signature() {
   local manifest_path="$1"
   local signature_path="$2"
+  local kit_root="$3"
+  local expected_target="$4"
+  local expected_arch="$5"
   local python_command=''
   for candidate in python3 python; do
     if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; assert sys.version_info >= (3, 8)' >/dev/null 2>&1; then
@@ -104,10 +107,13 @@ verify_worker_kit_signature() {
     printf 'Python 3.8+ is required for worker-kit Ed25519 verification.\n' >&2
     return 1
   }
-  "$python_command" - "$PUBLISHER_PUBLIC_KEY_BASE64" "$PUBLISHER_KEY_ID" "$manifest_path" "$signature_path" <<'PY'
+  "$python_command" - "$PUBLISHER_PUBLIC_KEY_BASE64" "$PUBLISHER_KEY_ID" \
+    "$manifest_path" "$signature_path" "$kit_root" "$expected_target" "$expected_arch" <<'PY'
 import base64
 import hashlib
 import json
+import os
+import stat
 import sys
 
 Q = 2**255 - 19
@@ -191,7 +197,20 @@ def canonical_json(path, ordered_fields):
 
 
 try:
-    public_key_text, key_id, manifest_path, signature_path = sys.argv[1:]
+    (public_key_text, key_id, manifest_path, signature_path,
+     kit_root, expected_target, expected_arch) = sys.argv[1:]
+    expected_names = {
+        'cyc-worker', 'install-worker.sh', 'worker-kit.json',
+        'worker-kit.sig', 'SHA256SUMS',
+    }
+    entries = list(os.scandir(kit_root))
+    if {entry.name for entry in entries} != expected_names or len(entries) != 5:
+        raise ValueError('worker-kit file set')
+    for entry in entries:
+        mode = entry.stat(follow_symlinks=False).st_mode
+        if not stat.S_ISREG(mode) or entry.is_symlink():
+            raise ValueError('worker-kit filesystem entry')
+
     public_key = base64.b64decode(public_key_text, validate=True)
     if len(public_key) != 32 or base64.b64encode(public_key).decode('ascii') != public_key_text:
         raise ValueError('publisher trust root')
@@ -199,11 +218,29 @@ try:
         manifest_path,
         ['schemaVersion', 'product', 'version', 'target', 'os', 'architecture', 'files'],
     )
-    if not isinstance(manifest['files'], list) or len(manifest['files']) != 2:
+    if (manifest['schemaVersion'] != 'cyc.dev/worker-kit/v1' or
+            manifest['product'] != 'ClusterYourCodex Managed Worker' or
+            manifest['target'] != expected_target or manifest['os'] != 'linux' or
+            manifest['architecture'] != expected_arch):
+        raise ValueError('manifest target')
+    expected_files = [('cyc-worker', 'worker'), ('install-worker.sh', 'lifecycle')]
+    if not isinstance(manifest['files'], list) or len(manifest['files']) != len(expected_files):
         raise ValueError('manifest files')
-    for entry in manifest['files']:
-        if not isinstance(entry, dict) or list(entry) != ['path', 'sizeBytes', 'sha256', 'role']:
+    for entry, (expected_path, expected_role) in zip(manifest['files'], expected_files):
+        if (not isinstance(entry, dict) or
+                list(entry) != ['path', 'sizeBytes', 'sha256', 'role'] or
+                entry['path'] != expected_path or entry['role'] != expected_role or
+                not isinstance(entry['sizeBytes'], int) or isinstance(entry['sizeBytes'], bool) or
+                entry['sizeBytes'] <= 0 or
+                not isinstance(entry['sha256'], str) or
+                len(entry['sha256']) != 64 or
+                any(char not in '0123456789abcdef' for char in entry['sha256'])):
             raise ValueError('manifest file fields')
+        path = os.path.join(kit_root, expected_path)
+        raw = open(path, 'rb').read()
+        if (entry['sizeBytes'] != len(raw) or
+                entry['sha256'] != hashlib.sha256(raw).hexdigest()):
+            raise ValueError('manifest payload digest')
     _, envelope = canonical_json(
         signature_path,
         ['schemaVersion', 'algorithm', 'keyId', 'signedObject', 'manifestSha256', 'signature'],
@@ -634,15 +671,17 @@ signature_length="$(printf '%s' "${BASH_REMATCH[2]}" | base64 --decode | wc -c)"
   printf 'Worker-kit publisher signature length is invalid.\n' >&2
   exit 1
 }
-verify_worker_kit_signature "${bundle_root}/worker-kit.json" "${bundle_root}/worker-kit.sig"
-grep -Eq "\"schemaVersion\"[[:space:]]*:[[:space:]]*\"${KIT_SCHEMA}\"" "${bundle_root}/worker-kit.json" || { printf 'Unsupported worker kit schema.\n' >&2; exit 1; }
-grep -Eq '"os"[[:space:]]*:[[:space:]]*"linux"' "${bundle_root}/worker-kit.json" || { printf 'Worker kit does not target Linux.\n' >&2; exit 1; }
 case "$(uname -m)" in
   x86_64|amd64) machine_arch='x86_64' ;;
   aarch64|arm64) machine_arch='aarch64' ;;
   *) printf 'Unsupported worker architecture: %s\n' "$(uname -m)" >&2; exit 1 ;;
 esac
-grep -Eq "\"architecture\"[[:space:]]*:[[:space:]]*\"${machine_arch}\"" "${bundle_root}/worker-kit.json" || { printf 'Worker kit architecture does not match this host.\n' >&2; exit 1; }
+verify_worker_kit_signature \
+  "${bundle_root}/worker-kit.json" \
+  "${bundle_root}/worker-kit.sig" \
+  "$bundle_root" \
+  "linux-${machine_arch}" \
+  "$machine_arch"
 
 unit_path="$(service_path)"
 if [[ ! -f "$marker_path" && ( -e "$worker_path" || -e "$unit_path" || -L "$worker_path" || -L "$unit_path" ) ]]; then

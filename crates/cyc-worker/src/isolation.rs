@@ -31,6 +31,13 @@ use crate::security::{
 
 pub const HOSTILE_ISOLATION_CONFIG_ENV: &str = "CYC_HOSTILE_ISOLATION_CONFIG";
 pub const HOSTILE_ISOLATION_CONFIG_VERSION: &str = "cyc.dev/hostile-isolation/v1";
+/// Version of the request exchanged with a platform external guard.
+///
+/// This is intentionally separate from [`HOSTILE_ISOLATION_CONFIG_VERSION`]:
+/// the config describes the worker policy, while this request is a one-shot
+/// command contract.  Keeping the versions separate prevents a guard from
+/// accidentally treating a policy document as an execution request.
+pub const EXTERNAL_GUARD_PROTOCOL_VERSION: &str = "cyc.dev/hostile-guard/v1";
 const RECONCILIATION_RECEIPT_VERSION: &str = "cyc.dev/hostile-reconciliation/v1";
 const MAX_CONFIG_BYTES: usize = 128 * 1024;
 const MAX_RECEIPT_BYTES: usize = 64 * 1024;
@@ -169,6 +176,117 @@ pub struct LaunchSpec {
     pub manages_cwd: bool,
 }
 
+/// Operation requested from a platform external guard.
+///
+/// The worker currently only constructs this contract.  The native Windows
+/// and macOS implementations remain runtime-gated until they can provide an
+/// independently verifiable OS proof.  Keeping the operation typed here lets
+/// the future native implementation share one exact request surface instead
+/// of assembling shell command strings at each call site.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalGuardOperation {
+    /// Kill/reconcile residual processes and write a fresh receipt before a
+    /// worker is allowed to claim work after startup/restart.
+    Reconcile,
+    /// Re-read the native containment state immediately before/after a run.
+    Verify,
+}
+
+/// A direct, shell-free invocation of a platform external guard.
+///
+/// `arguments` contains exactly one `--request-json` value.  The request is
+/// serialized as one argv element so paths containing spaces cannot be split
+/// by a shell.  `command()` clears inherited environment variables because a
+/// guard must not receive worker credentials or unrelated controller state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalGuardInvocation {
+    pub program: PathBuf,
+    pub arguments: Vec<OsString>,
+}
+
+impl ExternalGuardInvocation {
+    pub fn command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        command.env_clear().args(&self.arguments);
+        command
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExternalGuardRequest {
+    protocol: String,
+    operation: ExternalGuardOperation,
+    backend: HostileIsolationBackend,
+    node_id: Uuid,
+    worker_pid: u32,
+    execution_identity: String,
+    containment_name: String,
+    guard_executable: PathBuf,
+    guard_state_directory: PathBuf,
+    guard_state_file: PathBuf,
+}
+
+impl ExternalGuardRequest {
+    fn validate(&self) -> Result<()> {
+        if self.protocol != EXTERNAL_GUARD_PROTOCOL_VERSION {
+            bail!("unsupported external guard protocol version");
+        }
+        if self.node_id.is_nil() {
+            bail!("external guard node id must not be nil");
+        }
+        if self.worker_pid == 0 {
+            bail!("external guard worker PID must be non-zero");
+        }
+        let guard_executable =
+            absolute_clean_path(&self.guard_executable, "external guard executable")?;
+        let guard_state_directory = absolute_clean_path(
+            &self.guard_state_directory,
+            "external guard state directory",
+        )?;
+        let guard_state_file =
+            absolute_clean_path(&self.guard_state_file, "external guard state file")?;
+        require_direct_child(&guard_state_directory, &guard_state_file, "guardStateFile")?;
+        if guard_executable.starts_with(&guard_state_directory) {
+            bail!("external guard executable must not live inside its mutable state directory");
+        }
+        if self.containment_name.is_empty()
+            || self.containment_name.len() > 256
+            || self
+                .containment_name
+                .chars()
+                .any(|character| character.is_control())
+        {
+            bail!("external guard containment name is invalid");
+        }
+
+        match self.backend {
+            HostileIsolationBackend::WindowsJobObjectExternalGuard => {
+                validate_windows_sid(&self.execution_identity)?;
+                let expected = windows_job_object_name(self.node_id);
+                if self.containment_name != expected {
+                    bail!("Windows external guard containment name does not match node id");
+                }
+            }
+            HostileIsolationBackend::MacosExternalReconciliation => {
+                let (uid, gid) = parse_macos_execution_identity(&self.execution_identity)?;
+                validate_numeric_identity(uid, gid)?;
+                let expected = macos_process_group_name(self.node_id);
+                if self.containment_name != expected {
+                    bail!("macOS external guard containment name does not match node id");
+                }
+            }
+            HostileIsolationBackend::Disabled
+            | HostileIsolationBackend::LinuxCgroupV2DedicatedIdentity
+            | HostileIsolationBackend::Unsupported => {
+                bail!("external guard request names an unsupported backend");
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReconciliationReceipt {
@@ -182,6 +300,57 @@ struct ReconciliationReceipt {
     dedicated_identity: bool,
     protected_guard_state: bool,
     worker_state_isolated: bool,
+    /// Native identity/containment metadata returned by an external guard.
+    ///
+    /// Linux receipts are produced by the in-process cgroup implementation and
+    /// intentionally leave this absent.  Windows/macOS receipts must carry
+    /// it, and the strict validator below additionally binds it to the
+    /// configured node, identity, and deterministic containment name.  The
+    /// metadata is not accepted as a standalone readiness claim: the native
+    /// platform probe remains a separate runtime gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_guard: Option<NativeGuardAttestation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeGuardAttestation {
+    protocol: String,
+    guard_pid: u32,
+    guard_start_time: u64,
+    execution_identity: String,
+    containment_name: String,
+}
+
+impl NativeGuardAttestation {
+    fn validate(
+        &self,
+        node_id: Uuid,
+        backend: HostileIsolationBackend,
+        expected_identity: &str,
+        expected_containment_name: &str,
+    ) -> Result<()> {
+        if self.protocol != EXTERNAL_GUARD_PROTOCOL_VERSION {
+            bail!("external guard attestation protocol version is invalid");
+        }
+        if self.guard_pid == 0 || self.guard_start_time == 0 {
+            bail!("external guard attestation omitted a stable process identity");
+        }
+        if self.execution_identity != expected_identity {
+            bail!("external guard attestation identity does not match the configured identity");
+        }
+        if self.containment_name != expected_containment_name {
+            bail!("external guard attestation containment does not match node {node_id}");
+        }
+        if !matches!(
+            backend,
+            HostileIsolationBackend::WindowsJobObjectExternalGuard
+                | HostileIsolationBackend::MacosExternalReconciliation
+        ) {
+            bail!("native guard attestation names a non-external backend");
+        }
+        Ok(())
+    }
 }
 
 impl HostileIsolation {
@@ -323,6 +492,98 @@ impl HostileIsolation {
 
     pub fn enabled(&self) -> bool {
         self.backend.is_some()
+    }
+
+    /// Build the exact one-shot request that a native external guard would
+    /// receive for `operation`.
+    ///
+    /// This is deliberately an interface-only capability in the preview:
+    /// callers may inspect/build the request for integration tests, but the
+    /// runtime availability gate below still rejects Windows and macOS hostile
+    /// execution until a real native guard has produced an independently
+    /// checked proof.  In particular, constructing this value never changes
+    /// `inventory().ready`.
+    pub fn external_guard_invocation(
+        &self,
+        operation: ExternalGuardOperation,
+    ) -> Result<ExternalGuardInvocation> {
+        let request = match &self.backend {
+            Some(IsolationBackend::Windows(config)) => ExternalGuardRequest {
+                protocol: EXTERNAL_GUARD_PROTOCOL_VERSION.to_owned(),
+                operation,
+                backend: HostileIsolationBackend::WindowsJobObjectExternalGuard,
+                node_id: config.node_id,
+                worker_pid: std::process::id(),
+                execution_identity: config.execution_sid.clone(),
+                containment_name: windows_job_object_name(config.node_id),
+                guard_executable: config.guard_executable.clone(),
+                guard_state_directory: config.guard_state_directory.clone(),
+                guard_state_file: config.guard_state_file.clone(),
+            },
+            Some(IsolationBackend::Macos(config)) => ExternalGuardRequest {
+                protocol: EXTERNAL_GUARD_PROTOCOL_VERSION.to_owned(),
+                operation,
+                backend: HostileIsolationBackend::MacosExternalReconciliation,
+                node_id: config.node_id,
+                worker_pid: std::process::id(),
+                execution_identity: format!("{}:{}", config.execution_uid, config.execution_gid),
+                containment_name: macos_process_group_name(config.node_id),
+                guard_executable: config.guard_executable.clone(),
+                guard_state_directory: config.guard_state_directory.clone(),
+                guard_state_file: config.guard_state_file.clone(),
+            },
+            None => {
+                bail!("external guard invocation requested while hostile isolation is disabled")
+            }
+            Some(IsolationBackend::Linux(_)) => {
+                bail!("Linux cgroup hostile isolation does not use an external guard")
+            }
+        };
+        request.validate()?;
+        let request_json =
+            serde_json::to_string(&request).context("serialize external hostile guard request")?;
+        Ok(ExternalGuardInvocation {
+            program: request.guard_executable,
+            arguments: vec![
+                OsString::from("--request-json"),
+                OsString::from(request_json),
+            ],
+        })
+    }
+
+    /// Validate the protected receipt emitted by a platform external guard.
+    ///
+    /// This checks the durable protocol, freshness, configured identity, and
+    /// deterministic containment name.  It intentionally does not turn the
+    /// result into a readiness claim: the caller must also run the native OS
+    /// probe (named Job Object query on Windows or process-group inventory on
+    /// macOS), which is why the production availability gate remains closed in
+    /// this preview.
+    pub fn validate_external_guard_receipt(&self) -> Result<()> {
+        match &self.backend {
+            Some(IsolationBackend::Windows(config)) => validate_external_receipt_file(
+                &config.guard_state_file,
+                config.node_id,
+                HostileIsolationBackend::WindowsJobObjectExternalGuard,
+                &config.execution_sid,
+                &windows_job_object_name(config.node_id),
+            ),
+            Some(IsolationBackend::Macos(config)) => {
+                let execution_identity =
+                    format!("{}:{}", config.execution_uid, config.execution_gid);
+                validate_external_receipt_file(
+                    &config.guard_state_file,
+                    config.node_id,
+                    HostileIsolationBackend::MacosExternalReconciliation,
+                    &execution_identity,
+                    &macos_process_group_name(config.node_id),
+                )
+            }
+            None => bail!("external guard receipt requested while hostile isolation is disabled"),
+            Some(IsolationBackend::Linux(_)) => {
+                bail!("Linux cgroup hostile isolation does not use an external guard receipt")
+            }
+        }
     }
 
     pub fn inventory(&self) -> HostileIsolationInventory {
@@ -596,6 +857,7 @@ impl ReconciliationReceipt {
             dedicated_identity: true,
             protected_guard_state: true,
             worker_state_isolated: true,
+            native_guard: None,
         }
     }
 
@@ -614,7 +876,34 @@ impl ReconciliationReceipt {
         {
             bail!("hostile reconciliation receipt is invalid or incomplete");
         }
+        if matches!(
+            backend,
+            HostileIsolationBackend::WindowsJobObjectExternalGuard
+                | HostileIsolationBackend::MacosExternalReconciliation
+        ) && self.native_guard.is_none()
+        {
+            bail!("external hostile reconciliation receipt omitted native guard attestation");
+        }
         Ok(())
+    }
+
+    fn validate_external_attestation(
+        &self,
+        node_id: Uuid,
+        backend: HostileIsolationBackend,
+        expected_identity: &str,
+        expected_containment_name: &str,
+    ) -> Result<()> {
+        self.validate(node_id, backend)?;
+        self.native_guard
+            .as_ref()
+            .context("external hostile reconciliation receipt omitted native guard attestation")?
+            .validate(
+                node_id,
+                backend,
+                expected_identity,
+                expected_containment_name,
+            )
     }
 }
 
@@ -667,6 +956,36 @@ fn validate_receipt_file(
     let receipt: ReconciliationReceipt =
         serde_json::from_slice(&raw).context("parse hostile reconciliation receipt")?;
     receipt.validate(node_id, backend)
+}
+
+/// Validate an external guard receipt against the request contract.
+///
+/// This helper is intentionally not wired into the production backend gate
+/// yet.  A JSON receipt can prove only what it says; the caller must pair this
+/// check with a native OS query (named Job Object on Windows or the guard's
+/// process-group inventory on macOS) before changing the runtime gate.
+fn validate_external_receipt_file(
+    path: &Path,
+    node_id: Uuid,
+    backend: HostileIsolationBackend,
+    expected_identity: &str,
+    expected_containment_name: &str,
+) -> Result<()> {
+    ensure_protected_input(path)
+        .with_context(|| format!("refuse unprotected hostile guard state {}", path.display()))?;
+    let raw =
+        fs::read(path).with_context(|| format!("read hostile guard state {}", path.display()))?;
+    if raw.len() > MAX_RECEIPT_BYTES {
+        bail!("hostile guard state is unexpectedly large");
+    }
+    let receipt: ReconciliationReceipt =
+        serde_json::from_slice(&raw).context("parse hostile reconciliation receipt")?;
+    receipt.validate_external_attestation(
+        node_id,
+        backend,
+        expected_identity,
+        expected_containment_name,
+    )
 }
 
 fn prepare_guard_parent(path: &Path) -> Result<()> {
@@ -723,6 +1042,37 @@ fn validate_windows_sid(value: &str) -> Result<()> {
         bail!("hostile executionSid must be a canonical SID string");
     }
     Ok(())
+}
+
+fn windows_job_object_name(node_id: Uuid) -> String {
+    // A named kernel object lets a privileged external guard own the Job
+    // Object while the worker opens the same object for assignment/query.  A
+    // node UUID keeps independent workers from colliding; the `Global\\`
+    // namespace makes the name stable across service/session boundaries.
+    format!(r"Global\cyc-hostile-{node_id}")
+}
+
+fn macos_process_group_name(node_id: Uuid) -> String {
+    // macOS has no Windows-style named Job Object.  The guard uses this
+    // deterministic label in its protected receipt to bind process-group
+    // reconciliation to the worker/node rather than to an arbitrary PID.
+    format!("cyc-hostile-macos-{node_id}")
+}
+
+fn parse_macos_execution_identity(value: &str) -> Result<(u32, u32)> {
+    let (uid, gid) = value
+        .split_once(':')
+        .context("macOS external guard identity must be formatted as uid:gid")?;
+    if uid.is_empty() || gid.is_empty() || uid.contains(':') || gid.contains(':') {
+        bail!("macOS external guard identity must be formatted as uid:gid");
+    }
+    let uid = uid
+        .parse::<u32>()
+        .context("macOS external guard uid is malformed")?;
+    let gid = gid
+        .parse::<u32>()
+        .context("macOS external guard gid is malformed")?;
+    Ok((uid, gid))
 }
 
 fn validate_linux_cgroup_path(path: &Path, node_id: Uuid) -> Result<()> {
@@ -1346,6 +1696,257 @@ mod tests {
                 "accepted `{invalid}`"
             );
         }
+    }
+
+    #[test]
+    fn windows_external_guard_request_is_versioned_and_shell_free() {
+        let directory = tempfile::tempdir().unwrap();
+        let node_id = Uuid::new_v4();
+        let guard_directory = directory.path().join("guard-state");
+        let guard_executable = directory.path().join("bin").join("cyc-guard.exe");
+        fs::create_dir_all(guard_directory.parent().unwrap()).unwrap();
+        let isolation = HostileIsolation {
+            config_path: None,
+            backend: Some(IsolationBackend::Windows(WindowsIsolation {
+                node_id,
+                execution_sid: "S-1-5-21-1-2-3-1001".to_owned(),
+                guard_executable: guard_executable.clone(),
+                guard_state_directory: guard_directory.clone(),
+                guard_state_file: guard_directory.join("receipt.json"),
+            })),
+        };
+
+        let invocation = isolation
+            .external_guard_invocation(ExternalGuardOperation::Reconcile)
+            .unwrap();
+        assert_eq!(invocation.program, guard_executable);
+        assert_eq!(invocation.arguments.len(), 2);
+        assert_eq!(invocation.arguments[0], OsStr::new("--request-json"));
+
+        let request_json = invocation.arguments[1]
+            .to_str()
+            .expect("request JSON must be UTF-8");
+        let encoded: serde_json::Value = serde_json::from_str(request_json).unwrap();
+        for field in [
+            "protocol",
+            "operation",
+            "backend",
+            "nodeId",
+            "workerPid",
+            "executionIdentity",
+            "containmentName",
+            "guardExecutable",
+            "guardStateDirectory",
+            "guardStateFile",
+        ] {
+            assert!(
+                encoded.get(field).is_some(),
+                "missing request field {field}"
+            );
+        }
+        assert!(encoded.get("node_id").is_none());
+        let request: ExternalGuardRequest = serde_json::from_str(request_json).unwrap();
+        assert_eq!(request.protocol, EXTERNAL_GUARD_PROTOCOL_VERSION);
+        assert_eq!(request.operation, ExternalGuardOperation::Reconcile);
+        assert_eq!(
+            request.backend,
+            HostileIsolationBackend::WindowsJobObjectExternalGuard
+        );
+        assert_eq!(request.node_id, node_id);
+        assert_eq!(request.execution_identity, "S-1-5-21-1-2-3-1001");
+        assert_eq!(request.containment_name, windows_job_object_name(node_id));
+        assert!(request.guard_executable.is_absolute());
+        assert!(request.guard_state_directory.is_absolute());
+        assert!(request.guard_state_file.is_absolute());
+
+        // The command targets the configured executable directly and carries
+        // the whole request as one argv value; no cmd.exe/PowerShell wrapper
+        // can reinterpret paths or metacharacters.
+        let command = invocation.command();
+        assert_eq!(command.get_program(), guard_executable.as_os_str());
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            invocation
+                .arguments
+                .iter()
+                .map(OsString::as_os_str)
+                .collect::<Vec<_>>()
+        );
+        assert!(command.get_envs().next().is_none());
+        assert!(!isolation.inventory().ready);
+    }
+
+    #[test]
+    fn macos_external_guard_request_binds_uid_gid_and_process_group_scope() {
+        let directory = tempfile::tempdir().unwrap();
+        let node_id = Uuid::new_v4();
+        let guard_directory = directory.path().join("guard-state");
+        let guard_executable = directory.path().join("bin").join("cyc-guard");
+        let isolation = HostileIsolation {
+            config_path: None,
+            backend: Some(IsolationBackend::Macos(MacosIsolation {
+                node_id,
+                execution_uid: 501,
+                execution_gid: 20,
+                guard_executable: guard_executable.clone(),
+                guard_state_directory: guard_directory.clone(),
+                guard_state_file: guard_directory.join("receipt.json"),
+            })),
+        };
+
+        let invocation = isolation
+            .external_guard_invocation(ExternalGuardOperation::Verify)
+            .unwrap();
+        let request_json = invocation.arguments[1]
+            .to_str()
+            .expect("request JSON must be UTF-8");
+        let encoded: serde_json::Value = serde_json::from_str(request_json).unwrap();
+        for field in [
+            "protocol",
+            "operation",
+            "backend",
+            "nodeId",
+            "workerPid",
+            "executionIdentity",
+            "containmentName",
+            "guardExecutable",
+            "guardStateDirectory",
+            "guardStateFile",
+        ] {
+            assert!(
+                encoded.get(field).is_some(),
+                "missing request field {field}"
+            );
+        }
+        let request: ExternalGuardRequest = serde_json::from_str(request_json).unwrap();
+        assert_eq!(request.protocol, EXTERNAL_GUARD_PROTOCOL_VERSION);
+        assert_eq!(request.operation, ExternalGuardOperation::Verify);
+        assert_eq!(
+            request.backend,
+            HostileIsolationBackend::MacosExternalReconciliation
+        );
+        assert_eq!(request.node_id, node_id);
+        assert_eq!(request.execution_identity, "501:20");
+        assert_eq!(request.containment_name, macos_process_group_name(node_id));
+        assert_eq!(invocation.program, guard_executable);
+        assert_eq!(invocation.arguments[0], OsStr::new("--request-json"));
+        assert!(!isolation.inventory().ready);
+    }
+
+    #[test]
+    fn external_guard_request_rejects_identity_and_path_confusion() {
+        let directory = tempfile::tempdir().unwrap();
+        let node_id = Uuid::new_v4();
+        let state_directory = directory.path().join("state");
+
+        let mut windows = WindowsIsolation {
+            node_id,
+            execution_sid: "S-1-5".to_owned(),
+            guard_executable: directory.path().join("guard.exe"),
+            guard_state_directory: state_directory.clone(),
+            guard_state_file: state_directory.join("receipt.json"),
+        };
+        let isolation = HostileIsolation {
+            config_path: None,
+            backend: Some(IsolationBackend::Windows(windows.clone())),
+        };
+        assert!(isolation
+            .external_guard_invocation(ExternalGuardOperation::Verify)
+            .unwrap_err()
+            .to_string()
+            .contains("canonical SID"));
+
+        windows.execution_sid = "S-1-5-21-1-2-3-1001".to_owned();
+        windows.guard_executable = state_directory.join("guard.exe");
+        let isolation = HostileIsolation {
+            config_path: None,
+            backend: Some(IsolationBackend::Windows(windows.clone())),
+        };
+        assert!(isolation
+            .external_guard_invocation(ExternalGuardOperation::Verify)
+            .unwrap_err()
+            .to_string()
+            .contains("inside its mutable state directory"));
+
+        windows.guard_executable = directory.path().join("guard.exe");
+        windows.guard_state_file = state_directory.join("nested").join("receipt.json");
+        let isolation = HostileIsolation {
+            config_path: None,
+            backend: Some(IsolationBackend::Windows(windows)),
+        };
+        assert!(isolation
+            .external_guard_invocation(ExternalGuardOperation::Verify)
+            .unwrap_err()
+            .to_string()
+            .contains("direct child"));
+
+        let macos = MacosIsolation {
+            node_id,
+            execution_uid: 0,
+            execution_gid: 20,
+            guard_executable: directory.path().join("guard"),
+            guard_state_directory: state_directory.clone(),
+            guard_state_file: state_directory.join("receipt.json"),
+        };
+        let isolation = HostileIsolation {
+            config_path: None,
+            backend: Some(IsolationBackend::Macos(macos)),
+        };
+        assert!(isolation
+            .external_guard_invocation(ExternalGuardOperation::Verify)
+            .unwrap_err()
+            .to_string()
+            .contains("non-root"));
+    }
+
+    #[test]
+    fn external_receipts_require_native_attestation_metadata() {
+        let node_id = Uuid::new_v4();
+        let backend = HostileIsolationBackend::WindowsJobObjectExternalGuard;
+        let mut receipt = ReconciliationReceipt::clean(node_id, backend, 0);
+        assert!(receipt.validate(node_id, backend).is_err());
+
+        receipt.native_guard = Some(NativeGuardAttestation {
+            protocol: EXTERNAL_GUARD_PROTOCOL_VERSION.to_owned(),
+            guard_pid: 42,
+            guard_start_time: 7,
+            execution_identity: "S-1-5-21-1-2-3-1001".to_owned(),
+            containment_name: windows_job_object_name(node_id),
+        });
+        receipt
+            .validate_external_attestation(
+                node_id,
+                backend,
+                "S-1-5-21-1-2-3-1001",
+                &windows_job_object_name(node_id),
+            )
+            .unwrap();
+
+        let directory = tempfile::tempdir().unwrap();
+        let state_directory = directory.path().join("state");
+        prepare_private_directory(&state_directory).unwrap();
+        let receipt_path = state_directory.join("receipt.json");
+        let mut bytes = serde_json::to_vec(&receipt).unwrap();
+        bytes.push(b'\n');
+        write_protected_file(&receipt_path, &bytes).unwrap();
+        validate_external_receipt_file(
+            &receipt_path,
+            node_id,
+            backend,
+            "S-1-5-21-1-2-3-1001",
+            &windows_job_object_name(node_id),
+        )
+        .unwrap();
+
+        receipt.native_guard.as_mut().unwrap().guard_pid = 0;
+        assert!(receipt
+            .validate_external_attestation(
+                node_id,
+                backend,
+                "S-1-5-21-1-2-3-1001",
+                &windows_job_object_name(node_id),
+            )
+            .is_err());
     }
 
     #[test]

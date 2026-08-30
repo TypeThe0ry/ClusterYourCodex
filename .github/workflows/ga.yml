@@ -41,6 +41,10 @@ jobs:
       CYC_GA_EVIDENCE_URL: ${{ inputs.evidence_url }}
       CYC_GA_EVIDENCE_SHA256: ${{ inputs.evidence_sha256 }}
       GH_TOKEN: ${{ github.token }}
+      # The branch-protection REST endpoint requires Administration:read,
+      # which is unavailable to GITHUB_TOKEN. If configured, this token is
+      # used only for that endpoint; an absent token intentionally fails closed.
+      CYC_GA_GOVERNANCE_TOKEN: ${{ secrets.CYC_GA_GOVERNANCE_TOKEN }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -55,13 +59,19 @@ jobs:
             echo "source_tag must be a stable vX.Y.Z tag" >&2
             exit 1
           fi
+          if [[ "$(git cat-file -t "refs/tags/$CYC_GA_SOURCE_TAG")" != 'tag' ]]; then
+            echo "source_tag must resolve to an annotated tag" >&2
+            exit 1
+          fi
           head_commit="$(git rev-parse HEAD)"
+          tag_object="$(git rev-parse "refs/tags/$CYC_GA_SOURCE_TAG")"
           tag_commit="$(git rev-parse "refs/tags/$CYC_GA_SOURCE_TAG^{commit}")"
           if [[ "$tag_commit" != "$head_commit" ]]; then
             echo "source tag does not resolve to the checked-out commit" >&2
             exit 1
           fi
           echo "CYC_GA_SOURCE_COMMIT=$head_commit" >> "$GITHUB_ENV"
+          echo "CYC_GA_SOURCE_TAG_OBJECT=$tag_object" >> "$GITHUB_ENV"
           {
             echo "## Stable GA source"
             echo
@@ -118,6 +128,13 @@ jobs:
           set -euo pipefail
           gate_dir="$RUNNER_TEMP/cyc-ga-readiness"
           mkdir -p "$gate_dir"
+          gh_governance_api() {
+            if [[ -n "${CYC_GA_GOVERNANCE_TOKEN:-}" ]]; then
+              GH_TOKEN="$CYC_GA_GOVERNANCE_TOKEN" gh api "$@"
+            else
+              gh api "$@"
+            fi
+          }
           for number in 2 3 5; do
             if gh api "repos/$GITHUB_REPOSITORY/issues/$number" > "$gate_dir/issue-$number.json"; then
               :
@@ -132,30 +149,49 @@ jobs:
             '{issues: [$issue2[0], $issue3[0], $issue5[0]]}' \
             > "$gate_dir/issues.json"
 
-          # The branch endpoint exposes both the authoritative `protected`
-          # flag and `protection.enabled`. Do not depend on the separate
-          # /branches/{branch}/protection endpoint: its response omits the
-          # branch-level flag and may be unavailable to the read-only token.
-          if gh api "repos/$GITHUB_REPOSITORY/branches/main" > "$gate_dir/branch.json"; then
+          if gh api "repos/$GITHUB_REPOSITORY" > "$gate_dir/repository.json"; then
             :
           else
-            printf '{"protected":false,"apiError":true}\n' > "$gate_dir/branch.json"
+            printf '{"default_branch":"","apiError":true}\n' > "$gate_dir/repository.json"
+          fi
+          default_branch="$(jq -r '.default_branch // empty' "$gate_dir/repository.json")"
+          if [[ -z "$default_branch" ]]; then
+            echo 'repository metadata did not provide a default branch' >&2
+            exit 1
+          fi
+          encoded_branch="$(jq -rn --arg branch "$default_branch" '$branch | @uri')"
+          # The branch endpoint exposes both the authoritative `protected`
+          # flag and `protection.enabled`. The separate protection endpoint
+          # supplies the force-push/deletion/admin-enforcement controls.
+          if gh api "repos/$GITHUB_REPOSITORY/branches/$encoded_branch" > "$gate_dir/branch.json"; then
+            :
+          else
+            printf '{"name":"","protected":false,"protection":{"enabled":false},"apiError":true}\n' > "$gate_dir/branch.json"
+          fi
+          if gh_governance_api "repos/$GITHUB_REPOSITORY/branches/$encoded_branch/protection" > "$gate_dir/branch-protection.json"; then
+            :
+          else
+            printf '{"allow_force_pushes":{"enabled":true},"allow_deletions":{"enabled":true},"enforce_admins":{"enabled":false},"apiError":true}\n' > "$gate_dir/branch-protection.json"
           fi
           if gh api "repos/$GITHUB_REPOSITORY/environments/production" > "$gate_dir/production-environment.json"; then
             :
           else
             printf '{"name":"production","can_admins_bypass":true,"protection_rules":[],"apiError":true}\n' > "$gate_dir/production-environment.json"
           fi
+          # Test-GAReadiness requires a non-empty required_reviewers list and
+          # `prevent_self_review=true`; a missing or malformed snapshot fails closed.
           if gh api "repos/$GITHUB_REPOSITORY/environments/production/deployment-branch-policies" > "$gate_dir/deployment-policies.json"; then
             :
           else
             printf '{"branch_policies":[],"apiError":true}\n' > "$gate_dir/deployment-policies.json"
           fi
           jq -n \
+            --arg defaultBranch "$default_branch" \
             --slurpfile branch "$gate_dir/branch.json" \
+            --slurpfile branchProtection "$gate_dir/branch-protection.json" \
             --slurpfile environment "$gate_dir/production-environment.json" \
             --slurpfile policies "$gate_dir/deployment-policies.json" \
-            '{branchProtection: $branch[0], productionEnvironment: $environment[0], deploymentBranchPolicies: $policies[0]}' \
+            '{defaultBranch: $defaultBranch, branchProtection: ($branch[0] + {protectionDetails: $branchProtection[0]}), productionEnvironment: $environment[0], deploymentBranchPolicies: $policies[0]}' \
             > "$gate_dir/controls.json"
           echo "CYC_GA_ISSUE_SNAPSHOT_PATH=$gate_dir/issues.json" >> "$GITHUB_ENV"
           echo "CYC_GA_CONTROLS_PATH=$gate_dir/controls.json" >> "$GITHUB_ENV"
@@ -203,12 +239,23 @@ jobs:
     environment: production
     permissions:
       contents: write
+      issues: read
+      attestations: read
     env:
       CYC_GA_SOURCE_TAG: ${{ inputs.source_tag }}
       CYC_GA_EVIDENCE_URL: ${{ inputs.evidence_url }}
       CYC_GA_EVIDENCE_SHA256: ${{ inputs.evidence_sha256 }}
       CYC_STABLE_ASSET_URL: ${{ inputs.stable_assets_url }}
       CYC_STABLE_ASSET_SHA256: ${{ inputs.stable_assets_sha256 }}
+      # The branch-protection REST endpoint requires Administration:read;
+      # this optional token is scoped to governance probes only.
+      CYC_GA_GOVERNANCE_TOKEN: ${{ secrets.CYC_GA_GOVERNANCE_TOKEN }}
+      # These are reviewed policy constants. Keep them non-empty and update
+      # them together when the trusted builder or repository changes; the
+      # attestation step fails closed if they are malformed or inconsistent.
+      CYC_GA_ATTESTATION_SIGNER_REPO: TypeThe0ry/ClusterYourCodex
+      CYC_GA_ATTESTATION_SIGNER_WORKFLOW: TypeThe0ry/ClusterYourCodex/.github/workflows/release.yml
+      CYC_GA_ATTESTATION_CERT_IDENTITY: https://github.com/TypeThe0ry/ClusterYourCodex/.github/workflows/release.yml@refs/tags/${{ inputs.source_tag }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -220,10 +267,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "$(git cat-file -t "refs/tags/$CYC_GA_SOURCE_TAG")" != 'tag' ]]; then
+            echo "source_tag must resolve to an annotated tag" >&2
+            exit 1
+          fi
           head_commit="$(git rev-parse HEAD)"
+          tag_object="$(git rev-parse "refs/tags/$CYC_GA_SOURCE_TAG")"
           tag_commit="$(git rev-parse "refs/tags/$CYC_GA_SOURCE_TAG^{commit}")"
           test "$head_commit" = "$tag_commit"
           printf 'CYC_GA_SOURCE_COMMIT=%s\n' "$head_commit" >> "$GITHUB_ENV"
+          printf 'CYC_GA_SOURCE_TAG_OBJECT=%s\n' "$tag_object" >> "$GITHUB_ENV"
 
       - name: Download and verify externally built stable asset bundle
         shell: bash
@@ -237,9 +290,14 @@ jobs:
             echo "stable_assets_sha256 must be a 64-character SHA-256 digest" >&2
             exit 1
           fi
+          max_bundle_bytes=2147483648
+          max_zip_entries=512
+          max_entry_uncompressed_bytes=2147483648
+          max_total_uncompressed_bytes=8589934592
           bundle="$RUNNER_TEMP/clusteryourcodex-stable-assets.zip"
           curl --fail --location --proto '=https' --proto-redir '=https' \
-            --tlsv1.2 --retry 2 --output "$bundle" "$CYC_STABLE_ASSET_URL"
+            --tlsv1.2 --retry 2 --connect-timeout 20 --max-time 300 \
+            --max-filesize "$max_bundle_bytes" --output "$bundle" "$CYC_STABLE_ASSET_URL"
           actual_hash="$(sha256sum "$bundle" | awk '{print tolower($1)}')"
           expected_hash="$(printf '%s' "$CYC_STABLE_ASSET_SHA256" | tr '[:upper:]' '[:lower:]')"
           test "$actual_hash" = "$expected_hash"
@@ -247,19 +305,44 @@ jobs:
           # bundle is externally supplied, so reject traversal, absolute
           # paths, symlinks, and special files before unzip can touch the
           # runner filesystem.
-          python3 - "$bundle" <<'PY'
+          python3 - "$bundle" "$max_bundle_bytes" "$max_zip_entries" \
+            "$max_entry_uncompressed_bytes" "$max_total_uncompressed_bytes" <<'PY'
           import pathlib
           import stat
           import sys
           import zipfile
 
           archive = pathlib.Path(sys.argv[1])
+          max_bundle_bytes = int(sys.argv[2])
+          max_zip_entries = int(sys.argv[3])
+          max_entry_uncompressed_bytes = int(sys.argv[4])
+          max_total_uncompressed_bytes = int(sys.argv[5])
+          if archive.stat().st_size > max_bundle_bytes:
+              raise SystemExit('stable asset bundle exceeds the compressed-size budget')
           with zipfile.ZipFile(archive) as handle:
-              for entry in handle.infolist():
+              entries = handle.infolist()
+              if not entries:
+                  raise SystemExit('stable asset bundle ZIP is empty')
+              if len(entries) > max_zip_entries:
+                  raise SystemExit('stable asset bundle exceeds the ZIP entry budget')
+              total_uncompressed = 0
+              seen_names = set()
+              for entry in entries:
                   name = entry.filename.replace('\\', '/')
                   parts = [part for part in name.split('/') if part]
                   if not parts or name.startswith('/') or (len(name) >= 2 and name[1] == ':') or '..' in parts:
                       raise SystemExit(f'unsafe stable bundle ZIP path: {entry.filename!r}')
+                  normalized = name.rstrip('/').casefold()
+                  if normalized in seen_names:
+                      raise SystemExit(f'duplicate stable bundle ZIP path: {entry.filename!r}')
+                  seen_names.add(normalized)
+                  if entry.flag_bits & 0x1:
+                      raise SystemExit(f'encrypted stable bundle ZIP entry: {entry.filename!r}')
+                  if entry.file_size < 0 or entry.file_size > max_entry_uncompressed_bytes:
+                      raise SystemExit(f'stable bundle ZIP entry exceeds the per-entry budget: {entry.filename!r}')
+                  total_uncompressed += entry.file_size
+                  if total_uncompressed > max_total_uncompressed_bytes:
+                      raise SystemExit('stable asset bundle exceeds the total uncompressed-size budget')
                   mode = (entry.external_attr >> 16) & 0o170000
                   if stat.S_ISLNK(mode) or (mode and not name.endswith('/') and not stat.S_ISREG(mode)):
                       raise SystemExit(f'unsafe stable bundle ZIP entry type: {entry.filename!r}')
@@ -341,6 +424,20 @@ jobs:
           index="$CYC_STABLE_BUNDLE_ROOT/release-index.json"
           bundle="$CYC_STABLE_BUNDLE_ROOT/$CYC_STABLE_PROVENANCE_BUNDLE_NAME"
           test -f "$bundle"
+          : "${CYC_GA_ATTESTATION_SIGNER_REPO:?missing attestation signer repository policy constant}"
+          : "${CYC_GA_ATTESTATION_SIGNER_WORKFLOW:?missing attestation signer workflow policy constant}"
+          : "${CYC_GA_ATTESTATION_CERT_IDENTITY:?missing attestation certificate identity policy constant}"
+          if [[ ! "$CYC_GA_ATTESTATION_SIGNER_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo 'attestation signer repository constant is not an owner/repository name' >&2
+            exit 1
+          fi
+          case "$CYC_GA_ATTESTATION_SIGNER_WORKFLOW" in
+            "$CYC_GA_ATTESTATION_SIGNER_REPO"/.github/workflows/*.yml|"$CYC_GA_ATTESTATION_SIGNER_REPO"/.github/workflows/*.yaml) ;;
+            *) echo 'attestation signer workflow is outside the configured repository workflow directory' >&2; exit 1 ;;
+          esac
+          signer_workflow_path="${CYC_GA_ATTESTATION_SIGNER_WORKFLOW#"$CYC_GA_ATTESTATION_SIGNER_REPO"/}"
+          expected_cert_identity="https://github.com/$CYC_GA_ATTESTATION_SIGNER_REPO/$signer_workflow_path@refs/tags/$CYC_GA_SOURCE_TAG"
+          test "$CYC_GA_ATTESTATION_CERT_IDENTITY" = "$expected_cert_identity"
           attestation_dir="$RUNNER_TEMP/cyc-stable-attestations"
           mkdir -p "$attestation_dir"
           mapfile -t subjects < <(jq -r '.artifacts[].name' "$index")
@@ -350,6 +447,11 @@ jobs:
             gh attestation verify "$CYC_STABLE_BUNDLE_ROOT/$subject" \
               --bundle "$bundle" \
               --repo "$GITHUB_REPOSITORY" \
+              --signer-repo "$CYC_GA_ATTESTATION_SIGNER_REPO" \
+              --signer-workflow "$CYC_GA_ATTESTATION_SIGNER_WORKFLOW" \
+              --cert-identity "$CYC_GA_ATTESTATION_CERT_IDENTITY" \
+              --cert-oidc-issuer 'https://token.actions.githubusercontent.com' \
+              --deny-self-hosted-runners \
               --source-digest "$CYC_GA_SOURCE_COMMIT" \
               --source-ref "refs/tags/$CYC_GA_SOURCE_TAG" \
               --predicate-type 'https://slsa.dev/provenance/v1' \
@@ -358,14 +460,172 @@ jobs:
           done
           echo "Verified cryptographic provenance for ${#subjects[@]} indexed payload artifacts" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Refuse to overwrite an existing stable release
+      - name: Revalidate final governance, issues, tag, and release state before publish
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view "$CYC_GA_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          final_gate_dir="$RUNNER_TEMP/cyc-ga-final"
+          mkdir -p "$final_gate_dir"
+          gh_governance_api() {
+            if [[ -n "${CYC_GA_GOVERNANCE_TOKEN:-}" ]]; then
+              GH_TOKEN="$CYC_GA_GOVERNANCE_TOKEN" gh api "$@"
+            else
+              gh api "$@"
+            fi
+          }
+          for number in 2 3 5; do
+            if gh api "repos/$GITHUB_REPOSITORY/issues/$number" > "$final_gate_dir/issue-$number.json"; then
+              :
+            else
+              printf '{"number":%s,"state":"api-error"}\n' "$number" > "$final_gate_dir/issue-$number.json"
+            fi
+          done
+          jq -n \
+            --slurpfile issue2 "$final_gate_dir/issue-2.json" \
+            --slurpfile issue3 "$final_gate_dir/issue-3.json" \
+            --slurpfile issue5 "$final_gate_dir/issue-5.json" \
+            '{issues: [$issue2[0], $issue3[0], $issue5[0]]}' \
+            > "$final_gate_dir/issues.json"
+
+          if gh api "repos/$GITHUB_REPOSITORY" > "$final_gate_dir/repository.json"; then
+            :
+          else
+            printf '{"default_branch":"","apiError":true}\n' > "$final_gate_dir/repository.json"
+          fi
+          default_branch="$(jq -r '.default_branch // empty' "$final_gate_dir/repository.json")"
+          if [[ -z "$default_branch" ]]; then
+            echo 'final repository snapshot did not provide a default branch' >&2
+            exit 1
+          fi
+          encoded_branch="$(jq -rn --arg branch "$default_branch" '$branch | @uri')"
+          if gh api "repos/$GITHUB_REPOSITORY/branches/$encoded_branch" > "$final_gate_dir/branch.json"; then
+            :
+          else
+            printf '{"name":"","protected":false,"protection":{"enabled":false},"apiError":true}\n' > "$final_gate_dir/branch.json"
+          fi
+          if gh_governance_api "repos/$GITHUB_REPOSITORY/branches/$encoded_branch/protection" > "$final_gate_dir/branch-protection.json"; then
+            :
+          else
+            printf '{"allow_force_pushes":{"enabled":true},"allow_deletions":{"enabled":true},"enforce_admins":{"enabled":false},"apiError":true}\n' > "$final_gate_dir/branch-protection.json"
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/environments/production" > "$final_gate_dir/production-environment.json"; then
+            :
+          else
+            printf '{"name":"production","can_admins_bypass":true,"protection_rules":[],"apiError":true}\n' > "$final_gate_dir/production-environment.json"
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/environments/production/deployment-branch-policies" > "$final_gate_dir/deployment-policies.json"; then
+            :
+          else
+            printf '{"branch_policies":[],"apiError":true}\n' > "$final_gate_dir/deployment-policies.json"
+          fi
+          jq -S -n \
+            --arg defaultBranch "$default_branch" \
+            --slurpfile branch "$final_gate_dir/branch.json" \
+            --slurpfile branchProtection "$final_gate_dir/branch-protection.json" \
+            --slurpfile environment "$final_gate_dir/production-environment.json" \
+            --slurpfile policies "$final_gate_dir/deployment-policies.json" \
+            '{defaultBranch: $defaultBranch, branchProtection: ($branch[0] + {protectionDetails: $branchProtection[0]}), productionEnvironment: $environment[0], deploymentBranchPolicies: $policies[0]}' \
+            > "$final_gate_dir/controls.json"
+          final_snapshot="$final_gate_dir/final-snapshot.json"
+          jq -S -n \
+            --arg schemaVersion 'cyc.dev/ga-final-snapshot/v1' \
+            --arg tag "$CYC_GA_SOURCE_TAG" \
+            --arg commit "$CYC_GA_SOURCE_COMMIT" \
+            --arg indexSha256 "$CYC_STABLE_INDEX_SHA256" \
+            --arg bundleSha256 "$CYC_STABLE_ASSET_SHA256" \
+            --arg evidenceSha256 "$CYC_GA_EVIDENCE_SHA256" \
+            --slurpfile issues "$final_gate_dir/issues.json" \
+            --slurpfile controls "$final_gate_dir/controls.json" \
+            '{schemaVersion: $schemaVersion, sourceTag: $tag, sourceCommit: $commit, stableIndexSha256: $indexSha256, stableBundleSha256: $bundleSha256, evidenceSha256: $evidenceSha256, issues: $issues[0], controls: $controls[0]}' \
+            > "$final_snapshot"
+          final_snapshot_hash="$(sha256sum "$final_snapshot" | awk '{print tolower($1)}')"
+          printf 'CYC_GA_FINAL_SNAPSHOT_PATH=%s\n' "$final_snapshot" >> "$GITHUB_ENV"
+          printf 'CYC_GA_FINAL_SNAPSHOT_SHA256=%s\n' "$final_snapshot_hash" >> "$GITHUB_ENV"
+
+          set +e
+          final_result="$(pwsh -NoLogo -NoProfile -File "$GITHUB_WORKSPACE/scripts/Test-GAReadiness.ps1" \
+            -RepositoryRoot "$GITHUB_WORKSPACE" \
+            -ExpectedTag "$CYC_GA_SOURCE_TAG" \
+            -ExpectedCommit "$CYC_GA_SOURCE_COMMIT" \
+            -EvidencePath "$RUNNER_TEMP/cyc-ga-evidence.json" \
+            -IssueSnapshotPath "$final_gate_dir/issues.json" \
+            -ControlsPath "$final_gate_dir/controls.json" \
+            -Json 2>&1)"
+          final_result_status=$?
+          set -e
+          printf '%s\n' "$final_result" > "$final_gate_dir/ga-readiness-final.json"
+          if (( final_result_status != 0 )); then
+            cat "$final_gate_dir/ga-readiness-final.json" >&2
+            exit "$final_result_status"
+          fi
+
+          resolve_remote_tag_identity() {
+            local tag="$1"
+            local encoded_tag ref_json object_type object_sha tag_json depth tag_object_sha
+            encoded_tag="$(jq -rn --arg tag "$tag" '$tag | @uri')"
+            if ! ref_json="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$encoded_tag")"; then
+              return 1
+            fi
+            object_type="$(jq -r '.object.type // empty' <<< "$ref_json")"
+            object_sha="$(jq -r '.object.sha // empty' <<< "$ref_json")"
+            [[ "$object_type" == 'tag' ]] || return 1
+            [[ "$object_sha" =~ ^[0-9a-fA-F]{40}$ ]] || return 1
+            tag_object_sha="$object_sha"
+            for depth in 1 2 3 4; do
+              case "$object_type" in
+                commit)
+                  [[ "$object_sha" =~ ^[0-9a-fA-F]{40}$ ]] || return 1
+                  printf '%s %s\n' "$tag_object_sha" "$object_sha"
+                  return 0
+                  ;;
+                tag)
+                  [[ "$object_sha" =~ ^[0-9a-fA-F]{40}$ ]] || return 1
+                  if ! tag_json="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha")"; then
+                    return 1
+                  fi
+                  object_type="$(jq -r '.object.type // empty' <<< "$tag_json")"
+                  object_sha="$(jq -r '.object.sha // empty' <<< "$tag_json")"
+                  ;;
+                *)
+                  return 1
+                  ;;
+              esac
+            done
+            return 1
+          }
+          if ! remote_tag_identity="$(resolve_remote_tag_identity "$CYC_GA_SOURCE_TAG")"; then
+            echo 'unable to resolve the remote stable annotated tag before publish' >&2
+            exit 1
+          fi
+          read -r remote_tag_object remote_tag_commit <<< "$remote_tag_identity"
+          test "$(printf '%s' "$remote_tag_object" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$CYC_GA_SOURCE_TAG_OBJECT" | tr '[:upper:]' '[:lower:]')"
+          test "$(printf '%s' "$remote_tag_commit" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$CYC_GA_SOURCE_COMMIT" | tr '[:upper:]' '[:lower:]')"
+
+          release_probe="$final_gate_dir/release-probe.txt"
+          release_probe_error="$final_gate_dir/release-probe.err"
+          encoded_tag="$(jq -rn --arg tag "$CYC_GA_SOURCE_TAG" '$tag | @uri')"
+          set +e
+          gh release view "$CYC_GA_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2> "$release_probe_error"
+          release_view_status=$?
+          set -e
+          if (( release_view_status == 0 )); then
             echo "stable release already exists for $CYC_GA_SOURCE_TAG" >&2
             exit 1
           fi
+          set +e
+          gh api --include "repos/$GITHUB_REPOSITORY/releases/tags/$encoded_tag" > "$release_probe" 2>> "$release_probe_error"
+          release_api_status=$?
+          set -e
+          release_http_status="$(awk '$1 ~ /^HTTP\// {status=$2} END {print status}' "$release_probe")"
+          if [[ "$release_api_status" -eq 0 || "$release_http_status" != '404' ]]; then
+            echo "stable release lookup did not return an unambiguous HTTP 404" >&2
+            cat "$release_probe_error" >&2
+            exit 1
+          fi
+          {
+            echo "Final GA snapshot SHA-256: $final_snapshot_hash"
+            echo "Remote stable tag resolves to reviewed commit: $CYC_GA_SOURCE_COMMIT"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish true stable GitHub Release
         shell: bash
@@ -373,7 +633,7 @@ jobs:
           set -euo pipefail
           mapfile -t asset_names < <(
             jq -r '.artifacts[] | .name, .sidecar' "$CYC_STABLE_BUNDLE_ROOT/release-index.json"
-            printf '%s\n' 'release-index.json' 'release-index.json.sha256' 'SHA256SUMS'
+            printf '%s\n' 'release-index.json' 'release-index.json.sha256' 'release-index.json.sig' 'SHA256SUMS'
           )
           assets=()
           for name in "${asset_names[@]}"; do
@@ -391,9 +651,87 @@ jobs:
             --verify-tag \
             --latest \
             --title "ClusterYourCodex $CYC_GA_SOURCE_TAG" \
+            --notes "GA final governance/issues snapshot SHA-256: $CYC_GA_FINAL_SNAPSHOT_SHA256" \
             --generate-notes
-          release_json="$(gh release view "$CYC_GA_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease,isDraft,tagName)"
-          jq -e --arg tag "$CYC_GA_SOURCE_TAG" \
-            '.tagName == $tag and .isPrerelease == false and .isDraft == false' \
+      - name: Re-download and verify published stable assets and tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          post_dir="$RUNNER_TEMP/cyc-stable-release-download"
+          rm -rf "$post_dir"
+          mkdir -p "$post_dir"
+          gh release download "$CYC_GA_SOURCE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$post_dir" \
+            --clobber
+          if find "$post_dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit | grep -q .; then
+            echo 'downloaded stable release contains a directory or non-regular file' >&2
+            exit 1
+          fi
+          expected_assets="$RUNNER_TEMP/cyc-stable-release-expected-assets.txt"
+          actual_assets="$RUNNER_TEMP/cyc-stable-release-actual-assets.txt"
+          jq -er '.artifacts[] | .name, .sidecar' "$CYC_STABLE_BUNDLE_ROOT/release-index.json" > "$expected_assets"
+          printf '%s\n' 'release-index.json' 'release-index.json.sha256' 'release-index.json.sig' 'SHA256SUMS' >> "$expected_assets"
+          LC_ALL=C sort -u -o "$expected_assets" "$expected_assets"
+          find "$post_dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort -u > "$actual_assets"
+          if ! cmp -s "$expected_assets" "$actual_assets"; then
+            echo 'published stable release asset set differs from the validated stable bundle' >&2
+            exit 1
+          fi
+          while IFS= read -r name; do
+            test -f "$post_dir/$name"
+            test -f "$CYC_STABLE_BUNDLE_ROOT/$name"
+            if ! cmp -s "$post_dir/$name" "$CYC_STABLE_BUNDLE_ROOT/$name"; then
+              echo "published stable asset differs from the validated bundle: $name" >&2
+              exit 1
+            fi
+          done < "$expected_assets"
+          downloaded_index_hash="$(sha256sum "$post_dir/release-index.json" | awk '{print tolower($1)}')"
+          test "$downloaded_index_hash" = "$(printf '%s' "$CYC_STABLE_INDEX_SHA256" | tr '[:upper:]' '[:lower:]')"
+          release_json="$(gh release view "$CYC_GA_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease,isDraft,tagName,body)"
+          jq -e --arg tag "$CYC_GA_SOURCE_TAG" --arg snapshot "$CYC_GA_FINAL_SNAPSHOT_SHA256" \
+            '.tagName == $tag and .isPrerelease == false and .isDraft == false and (.body | contains("GA final governance/issues snapshot SHA-256: " + $snapshot))' \
             <<< "$release_json" >/dev/null
-          echo "$release_json" >> "$GITHUB_STEP_SUMMARY"
+
+          resolve_remote_tag_identity() {
+            local tag="$1"
+            local encoded_tag ref_json object_type object_sha tag_json depth tag_object_sha
+            encoded_tag="$(jq -rn --arg tag "$tag" '$tag | @uri')"
+            if ! ref_json="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$encoded_tag")"; then
+              return 1
+            fi
+            object_type="$(jq -r '.object.type // empty' <<< "$ref_json")"
+            object_sha="$(jq -r '.object.sha // empty' <<< "$ref_json")"
+            [[ "$object_type" == 'tag' ]] || return 1
+            [[ "$object_sha" =~ ^[0-9a-fA-F]{40}$ ]] || return 1
+            tag_object_sha="$object_sha"
+            for depth in 1 2 3 4; do
+              case "$object_type" in
+                commit)
+                  [[ "$object_sha" =~ ^[0-9a-fA-F]{40}$ ]] || return 1
+                  printf '%s %s\n' "$tag_object_sha" "$object_sha"
+                  return 0
+                  ;;
+                tag)
+                  [[ "$object_sha" =~ ^[0-9a-fA-F]{40}$ ]] || return 1
+                  if ! tag_json="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha")"; then
+                    return 1
+                  fi
+                  object_type="$(jq -r '.object.type // empty' <<< "$tag_json")"
+                  object_sha="$(jq -r '.object.sha // empty' <<< "$tag_json")"
+                  ;;
+                *)
+                  return 1
+                  ;;
+              esac
+            done
+            return 1
+          }
+          if ! remote_tag_identity="$(resolve_remote_tag_identity "$CYC_GA_SOURCE_TAG")"; then
+            echo 'unable to resolve the published stable annotated tag' >&2
+            exit 1
+          fi
+          read -r remote_tag_object remote_tag_commit <<< "$remote_tag_identity"
+          test "$(printf '%s' "$remote_tag_object" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$CYC_GA_SOURCE_TAG_OBJECT" | tr '[:upper:]' '[:lower:]')"
+          test "$(printf '%s' "$remote_tag_commit" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$CYC_GA_SOURCE_COMMIT" | tr '[:upper:]' '[:lower:]')"
+          echo "Published stable release assets and index re-verified; tag commit is $CYC_GA_SOURCE_COMMIT" >> "$GITHUB_STEP_SUMMARY"

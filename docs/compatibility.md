@@ -16,6 +16,26 @@
 The exact matrix in each published archive's `platform-status.json` is
 authoritative for that asset.
 
+## Managed Worker Kit contract
+
+The Windows, Linux, and macOS Worker Kit installers consume the same signed
+`cyc.dev/worker-kit/v1` envelope. Before touching an install root, data root,
+workspace, or service definition, each platform requires the exact five normal
+files (`cyc-worker`/`cyc-worker.exe`, its lifecycle script, `worker-kit.json`,
+`worker-kit.sig`, and `SHA256SUMS`), the target-specific product/OS/architecture,
+and the ordered worker/lifecycle entries in `manifest.files`. Each manifest
+entry is checked against the local payload's size and SHA-256; the detached
+signature and all four checksum entries are checked separately. The Linux
+systemd, macOS LaunchAgent, and Windows Scheduled Task layers therefore share
+one fail-closed payload contract even though their service activation and
+process-group cleanup remain native to each operating system.
+
+The repository Worker Kit test mutates a signed fixture's product identity and
+re-signs it, then asserts that Linux rejects the contract-invalid kit before
+creating any state. This is a local static/lifecycle regression check, not
+evidence of a live Linux, macOS, or Windows clean-host run. macOS LaunchAgent
+activation and Windows clean-VM evidence remain external acceptance gates.
+
 ## Controller topology
 
 The controller runs with the Codex execution session. A remote Mac can control

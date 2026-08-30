@@ -4202,6 +4202,22 @@ exit 0
     Assert-True ($profileMatrixSource -match 'tagMatches\.Count -ne 1[\s\S]+uniqueTargets\.Count -ne 1') 'profile matrix rejects ambiguous or malformed native reparse metadata'
     Assert-True ($profileMatrixSource -match 'invalidTargetProjection[\s\S]+return \$false') 'profile matrix rejects malformed link projections instead of ignoring them'
     Assert-True ($profileMatrixSource -match 'IPC path escaped its case root' -and $profileMatrixSource -match 'IPC path is a reparse point') 'profile matrix confines elevated-helper IPC to the case root without following links'
+    $profileAtomicWriter = [regex]::Match(
+        $profileMatrixSource,
+        'function Write-ProfileMatrixAtomicJson[\s\S]+?function Get-ProfileMatrixTaskRequestProperty'
+    )
+    Assert-True ($profileAtomicWriter.Success) 'profile matrix exposes a bounded atomic JSON writer contract'
+    Assert-True ($profileAtomicWriter.Value -match '\$backup\s*=\s*Join-Path' -and
+        $profileAtomicWriter.Value -match '\[System\.IO\.File\]::Replace\(\$temporary,\s*\$Path,\s*\$backup' -and
+        $profileAtomicWriter.Value -notmatch '\[System\.IO\.File\]::Replace\(\$temporary,\s*\$Path,\s*\$null') 'profile matrix atomic writer supplies a valid backup path to File.Replace'
+    Assert-True ($profileMatrixSource -match 'Stop-Process\s+-Id\s+\$process\.Id' -and
+        $profileMatrixSource -match '\$process\.WaitForExit\(10000\)' -and
+        $profileMatrixSource -match 'did not exit after cleanup') 'profile matrix reaps a child after helper/IPC failure before profile cleanup'
+    Assert-True ($profileMatrixSource -match 'Assert-ProfileMatrixTaskOwnership' -and
+        ([regex]::Matches($profileMatrixSource, '-TaskPath ''\\''').Count -ge 4)) 'profile matrix binds task ownership checks and task operations to the root task path'
+    Assert-True ($profileMatrixSource -match 'observedPrincipalSid' -and
+        $profileMatrixSource -match 'observedTriggerSids' -and
+        $profileMatrixSource -match 'observedAction') 'profile matrix helper evidence records the verified task identity and action binding'
     Assert-True ($profileMatrixSource -match 'primary child/verification error' -and
         $profileMatrixSource -match 'profile cleanup error') 'profile matrix preserves the primary case failure when cleanup also fails'
     Assert-True ($profileMatrixSource -match 'Stack\[string\]' -and $profileMatrixSource -match 'Get-ChildItem -LiteralPath \$current -Force') 'profile matrix walks regular directories without traversing allowed junctions'

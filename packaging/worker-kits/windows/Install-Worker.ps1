@@ -293,6 +293,14 @@ function Read-KitManifest {
     $path = Join-Path $Root 'worker-kit.json'
     $signaturePath = Join-Path $Root 'worker-kit.sig'
     $checksumsPath = Join-Path $Root 'SHA256SUMS'
+    $expectedKitNames = @('cyc-worker.exe', 'Install-Worker.ps1', 'worker-kit.json', 'worker-kit.sig', 'SHA256SUMS') | Sort-Object
+    $kitEntries = @(Get-ChildItem -LiteralPath $Root -Force)
+    $actualKitNames = @($kitEntries | ForEach-Object { $_.Name } | Sort-Object)
+    if ($kitEntries.Count -ne $expectedKitNames.Count -or
+        (($actualKitNames -join "`n") -cne ($expectedKitNames -join "`n")) -or
+        @($kitEntries | Where-Object { $_.PSIsContainer -or (Test-ReparsePoint $_) }).Count -ne 0) {
+        throw 'Worker kit file set must contain exactly five normal files.'
+    }
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'worker-kit.json is missing.' }
     if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) { throw 'worker-kit.sig is missing.' }
     if (-not (Test-Path -LiteralPath $checksumsPath -PathType Leaf)) { throw 'SHA256SUMS is missing.' }

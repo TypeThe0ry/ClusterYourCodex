@@ -150,13 +150,45 @@ function Assert-GaWorkflowContract {
         'stable-publisher:',
         'gh release create',
         'environment: production',
-        'branches/main',
-        'branchProtection: $branch[0]',
+        'attestations: read',
+        'CYC_GA_GOVERNANCE_TOKEN',
+        'default_branch',
+        '@uri',
+        'branches/$encoded_branch',
+        'branch-protection',
+        'defaultBranch: $defaultBranch',
+        'branchProtection: ($branch[0]',
+        'protected',
+        'protectionDetails',
         'protection.enabled',
+        'allow_force_pushes',
+        'allow_deletions',
+        'enforce_admins',
+        'prevent_self_review',
+        'git cat-file -t',
+        'source_tag must resolve to an annotated tag',
+        'CYC_GA_SOURCE_TAG_OBJECT',
+        'resolve_remote_tag_identity',
         'Cross-bind GA evidence to the downloaded stable index',
         'gh attestation verify',
+        'CYC_GA_ATTESTATION_SIGNER_REPO',
+        'CYC_GA_ATTESTATION_SIGNER_WORKFLOW',
+        'CYC_GA_ATTESTATION_CERT_IDENTITY',
+        '--signer-repo',
+        '--signer-workflow',
+        '--cert-identity',
+        '--cert-oidc-issuer',
+        '--deny-self-hosted-runners',
         '--source-digest',
-        '--source-ref'
+        '--source-ref',
+        'max_bundle_bytes',
+        'max-filesize',
+        'max_zip_entries',
+        'max_entry_uncompressed_bytes',
+        'max_total_uncompressed_bytes',
+        'release-index.json.sig',
+        'gh release download',
+        'CYC_GA_FINAL_SNAPSHOT_SHA256'
     )) {
         Assert-GaCondition $workflow.Contains($needle) "GA workflow contains '$needle'"
     }
@@ -192,14 +224,30 @@ function Assert-GaIssueSnapshot {
 function Assert-GaControlsSnapshot {
     param([Parameter(Mandatory = $true)][object]$Controls)
 
-    $protected = Get-GaProperty -Object $Controls -Path 'branchProtection.protected' -Description 'repository branch protection'
+    $defaultBranch = [string](Get-GaProperty -Object $Controls -Path 'defaultBranch' -Description 'repository metadata')
+    Assert-GaCondition (-not [string]::IsNullOrWhiteSpace($defaultBranch)) 'repository metadata defaultBranch must be present'
+    $branchProtection = Get-GaProperty -Object $Controls -Path 'branchProtection' -Description 'repository branch protection'
+    $branchName = [string](Get-GaProperty -Object $branchProtection -Path 'name' -Description 'repository branch protection')
+    Assert-GaCondition ($branchName.Equals($defaultBranch, [System.StringComparison]::Ordinal)) 'branch protection snapshot must describe the repository default branch'
+    $protected = Get-GaProperty -Object $branchProtection -Path 'protected' -Description 'repository branch protection'
     Assert-GaCondition (($protected -is [bool]) -and $protected) 'the default branch must be protected before GA'
-    $protectionApiError = $Controls.branchProtection.PSObject.Properties['apiError']
+    $protectionApiError = $branchProtection.PSObject.Properties['apiError']
     if ($null -ne $protectionApiError) {
         Assert-GaCondition (-not [bool]$protectionApiError.Value) 'branch protection API snapshot must not contain an error'
     }
-    $protectionEnabled = Get-GaProperty -Object $Controls -Path 'branchProtection.protection.enabled' -Description 'repository branch protection'
+    $protectionEnabled = Get-GaProperty -Object $branchProtection -Path 'protection.enabled' -Description 'repository branch protection'
     Assert-GaCondition (($protectionEnabled -is [bool]) -and $protectionEnabled) 'the default branch protection payload must be enabled before GA'
+    $protectionDetails = Get-GaProperty -Object $branchProtection -Path 'protectionDetails' -Description 'repository branch protection'
+    $protectionDetailsApiError = $protectionDetails.PSObject.Properties['apiError']
+    if ($null -ne $protectionDetailsApiError) {
+        Assert-GaCondition (-not [bool]$protectionDetailsApiError.Value) 'branch protection details API snapshot must not contain an error'
+    }
+    $allowForcePushes = Get-GaProperty -Object $protectionDetails -Path 'allow_force_pushes.enabled' -Description 'repository branch protection'
+    Assert-GaCondition (($allowForcePushes -is [bool]) -and -not $allowForcePushes) 'the default branch must prohibit force pushes before GA'
+    $allowDeletions = Get-GaProperty -Object $protectionDetails -Path 'allow_deletions.enabled' -Description 'repository branch protection'
+    Assert-GaCondition (($allowDeletions -is [bool]) -and -not $allowDeletions) 'the default branch must prohibit deletions before GA'
+    $enforceAdmins = Get-GaProperty -Object $protectionDetails -Path 'enforce_admins.enabled' -Description 'repository branch protection'
+    Assert-GaCondition (($enforceAdmins -is [bool]) -and $enforceAdmins) 'the default branch must enforce protection for administrators before GA'
 
     $environment = Get-GaProperty -Object $Controls -Path 'productionEnvironment' -Description 'production environment'
     $environmentName = [string](Get-GaProperty -Object $environment -Path 'name' -Description 'production environment')
@@ -210,9 +258,26 @@ function Assert-GaControlsSnapshot {
     $rules = @(Get-GaProperty -Object $environment -Path 'protection_rules' -Description 'production environment')
     Assert-GaCondition ($rules.Count -gt 0) 'production environment must have protection rules'
     $reviewerRules = @($rules | Where-Object { [string]$_.type -ceq 'required_reviewers' })
-    Assert-GaCondition ($reviewerRules.Count -gt 0) 'production environment must require a reviewer'
-    $reviewersProperty = $reviewerRules[0].PSObject.Properties['reviewers']
-    Assert-GaCondition ($null -ne $reviewersProperty -and @($reviewersProperty.Value).Count -gt 0) 'production environment required_reviewers rule must name at least one reviewer'
+    Assert-GaCondition ($reviewerRules.Count -eq 1) 'production environment must have exactly one required_reviewers rule'
+    $reviewerRule = $reviewerRules[0]
+    $reviewersProperty = $reviewerRule.PSObject.Properties['reviewers']
+    $reviewersValue = $null
+    if ($null -ne $reviewersProperty) {
+        $reviewersValue = $reviewersProperty.Value
+    }
+    $reviewerCount = 0
+    $hasNullReviewer = $false
+    if ($null -ne $reviewersValue) {
+        if ($reviewersValue -is [System.Array]) {
+            $reviewerCount = $reviewersValue.Length
+            $hasNullReviewer = $reviewersValue -contains $null
+        } else {
+            $reviewerCount = 1
+        }
+    }
+    Assert-GaCondition ($null -ne $reviewersProperty -and $reviewersValue -is [System.Array] -and $reviewerCount -gt 0 -and -not $hasNullReviewer) 'production environment required_reviewers rule must contain a non-empty reviewer list'
+    $preventSelfReviewProperty = $reviewerRule.PSObject.Properties['prevent_self_review']
+    Assert-GaCondition ($null -ne $preventSelfReviewProperty -and $preventSelfReviewProperty.Value -is [bool] -and [bool]$preventSelfReviewProperty.Value) 'production environment required_reviewers rule must prevent self-review'
     $waitRules = @($rules | Where-Object { [string]$_.type -ceq 'wait_timer' })
     Assert-GaCondition ($waitRules.Count -gt 0) 'production environment must have a wait timer'
     $waitTimerProperty = $waitRules[0].PSObject.Properties['wait_timer']
@@ -246,10 +311,7 @@ if ($ContractOnly) {
 
     $versionCheckPath = Join-Path $RepositoryRoot 'scripts/Test-VersionConsistency.ps1'
     Assert-GaCondition (Test-Path -LiteralPath $versionCheckPath -PathType Leaf) 'version consistency gate exists'
-    $versionOutput = @(& $versionCheckPath -SourceTag $ExpectedTag -SkipNegativeTests -Json)
-    if ($LASTEXITCODE -ne 0) {
-        throw "GA readiness assertion failed: stable version consistency gate exited with $LASTEXITCODE."
-    }
+    $versionOutput = @(& $versionCheckPath -RepositoryRoot $RepositoryRoot -SourceTag $ExpectedTag -SkipNegativeTests -Json)
     $versionResult = $versionOutput -join "`n" | ConvertFrom-Json
     Assert-GaString -Object $versionResult -Path 'releaseChannel' -Expected 'stable' -Description 'stable version identity'
     Assert-GaString -Object $versionResult -Path 'productVersion' -Expected $ExpectedTag.Substring(1) -Description 'stable version identity'

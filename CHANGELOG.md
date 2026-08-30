@@ -7,6 +7,25 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.31] - 2026-08-30
+
+### Fixed
+
+- Fixed Windows profile-matrix IPC persistence on Windows PowerShell/.NET by
+  using a flushed, create-new temporary file and a real same-directory backup
+  path for `File.Replace`; child processes are reaped before profile cleanup,
+  and cleanup failures remain visible alongside the primary case failure.
+- Added strict Scheduled Task ownership and action evidence checks so the
+  elevated profile-matrix helper can only register and remove the exact root
+  task bound to the disposable profile SID and package directory.
+- Hardened Linux Worker Kit preinstall validation to require the exact signed
+  five-file kit, target-specific manifest identity, ordered payload entries, and
+  local size/digest matches before any worker or systemd state is changed.
+- Tightened the protected GA publisher's final governance snapshot, annotated
+  tag binding, attestation signer policy, detached stable-index signature, and
+  post-publication byte-for-byte asset re-download checks. Public tagged builds
+  remain GitHub prereleases until the true stable GA gates pass.
+
 ## [0.1.0-preview.30] - 2026-08-30
 
 ### Fixed
@@ -350,7 +369,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.30...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.31...HEAD
+[0.1.0-preview.31]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.30...v0.1.0-preview.31
 [0.1.0-preview.30]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.29...v0.1.0-preview.30
 [0.1.0-preview.29]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.28...v0.1.0-preview.29
 [0.1.0-preview.28]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.27...v0.1.0-preview.28
