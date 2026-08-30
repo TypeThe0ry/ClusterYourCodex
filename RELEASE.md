@@ -43,3 +43,12 @@ policy and evidence model.
 - [ ] No open unwaived P0/P1 blocker applies to the declared stable scope.
 - [ ] Stable tag was built through the gated stable path and the GitHub release
       is `prerelease: false`.
+
+The protected GA publisher enforces these checks mechanically: the stable
+`release-index.json` must be signed, carry a hashed attestation bundle whose
+subjects match every indexed payload, include a complete CycloneDX 1.6 SBOM and
+non-empty third-party notices artifact, and have an exact top-level file and
+`SHA256SUMS` set. The publisher cross-binds the external evidence manifest's
+`artifactVerification.indexSha256` to the downloaded index, verifies each
+payload with `gh attestation verify` against the exact stable tag/commit, and
+uploads only the validator's allow-listed release files.

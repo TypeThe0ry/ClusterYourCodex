@@ -149,7 +149,14 @@ function Assert-GaWorkflowContract {
         'Test-StableAssetBundle.ps1',
         'stable-publisher:',
         'gh release create',
-        'environment: production'
+        'environment: production',
+        'branches/main',
+        'branchProtection: $branch[0]',
+        'protection.enabled',
+        'Cross-bind GA evidence to the downloaded stable index',
+        'gh attestation verify',
+        '--source-digest',
+        '--source-ref'
     )) {
         Assert-GaCondition $workflow.Contains($needle) "GA workflow contains '$needle'"
     }
@@ -187,6 +194,12 @@ function Assert-GaControlsSnapshot {
 
     $protected = Get-GaProperty -Object $Controls -Path 'branchProtection.protected' -Description 'repository branch protection'
     Assert-GaCondition (($protected -is [bool]) -and $protected) 'the default branch must be protected before GA'
+    $protectionApiError = $Controls.branchProtection.PSObject.Properties['apiError']
+    if ($null -ne $protectionApiError) {
+        Assert-GaCondition (-not [bool]$protectionApiError.Value) 'branch protection API snapshot must not contain an error'
+    }
+    $protectionEnabled = Get-GaProperty -Object $Controls -Path 'branchProtection.protection.enabled' -Description 'repository branch protection'
+    Assert-GaCondition (($protectionEnabled -is [bool]) -and $protectionEnabled) 'the default branch protection payload must be enabled before GA'
 
     $environment = Get-GaProperty -Object $Controls -Path 'productionEnvironment' -Description 'production environment'
     $environmentName = [string](Get-GaProperty -Object $environment -Path 'name' -Description 'production environment')
@@ -196,12 +209,18 @@ function Assert-GaControlsSnapshot {
 
     $rules = @(Get-GaProperty -Object $environment -Path 'protection_rules' -Description 'production environment')
     Assert-GaCondition ($rules.Count -gt 0) 'production environment must have protection rules'
-    Assert-GaCondition (@($rules | Where-Object { [string]$_.type -ceq 'required_reviewers' }).Count -gt 0) 'production environment must require a reviewer'
-    Assert-GaCondition (@($rules | Where-Object { [string]$_.type -ceq 'wait_timer' }).Count -gt 0) 'production environment must have a wait timer'
+    $reviewerRules = @($rules | Where-Object { [string]$_.type -ceq 'required_reviewers' })
+    Assert-GaCondition ($reviewerRules.Count -gt 0) 'production environment must require a reviewer'
+    $reviewersProperty = $reviewerRules[0].PSObject.Properties['reviewers']
+    Assert-GaCondition ($null -ne $reviewersProperty -and @($reviewersProperty.Value).Count -gt 0) 'production environment required_reviewers rule must name at least one reviewer'
+    $waitRules = @($rules | Where-Object { [string]$_.type -ceq 'wait_timer' })
+    Assert-GaCondition ($waitRules.Count -gt 0) 'production environment must have a wait timer'
+    $waitTimerProperty = $waitRules[0].PSObject.Properties['wait_timer']
+    Assert-GaCondition ($null -ne $waitTimerProperty -and ($waitTimerProperty.Value -is [int] -or $waitTimerProperty.Value -is [long]) -and [long]$waitTimerProperty.Value -gt 0) 'production environment wait_timer must be a positive number of minutes'
 
     $policies = @(Get-GaProperty -Object $Controls -Path 'deploymentBranchPolicies.branch_policies' -Description 'production deployment branch policy')
     $tagPolicies = @($policies | Where-Object { [string]$_.type -ceq 'tag' -and [string]$_.name -ceq 'v*' })
-    Assert-GaCondition ($tagPolicies.Count -gt 0) "production environment must allow only the configured v* tag policy"
+    Assert-GaCondition ($tagPolicies.Count -eq 1 -and $policies.Count -eq 1) "production environment must allow exactly the configured v* tag policy"
 }
 
 Assert-GaWorkflowContract

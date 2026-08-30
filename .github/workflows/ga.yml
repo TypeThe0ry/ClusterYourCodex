@@ -132,10 +132,14 @@ jobs:
             '{issues: [$issue2[0], $issue3[0], $issue5[0]]}' \
             > "$gate_dir/issues.json"
 
-          if gh api "repos/$GITHUB_REPOSITORY/branches/main/protection" > "$gate_dir/branch-protection.json"; then
+          # The branch endpoint exposes both the authoritative `protected`
+          # flag and `protection.enabled`. Do not depend on the separate
+          # /branches/{branch}/protection endpoint: its response omits the
+          # branch-level flag and may be unavailable to the read-only token.
+          if gh api "repos/$GITHUB_REPOSITORY/branches/main" > "$gate_dir/branch.json"; then
             :
           else
-            printf '{"protected":false,"apiError":true}\n' > "$gate_dir/branch-protection.json"
+            printf '{"protected":false,"apiError":true}\n' > "$gate_dir/branch.json"
           fi
           if gh api "repos/$GITHUB_REPOSITORY/environments/production" > "$gate_dir/production-environment.json"; then
             :
@@ -148,7 +152,7 @@ jobs:
             printf '{"branch_policies":[],"apiError":true}\n' > "$gate_dir/deployment-policies.json"
           fi
           jq -n \
-            --slurpfile branch "$gate_dir/branch-protection.json" \
+            --slurpfile branch "$gate_dir/branch.json" \
             --slurpfile environment "$gate_dir/production-environment.json" \
             --slurpfile policies "$gate_dir/deployment-policies.json" \
             '{branchProtection: $branch[0], productionEnvironment: $environment[0], deploymentBranchPolicies: $policies[0]}' \
@@ -201,6 +205,8 @@ jobs:
       contents: write
     env:
       CYC_GA_SOURCE_TAG: ${{ inputs.source_tag }}
+      CYC_GA_EVIDENCE_URL: ${{ inputs.evidence_url }}
+      CYC_GA_EVIDENCE_SHA256: ${{ inputs.evidence_sha256 }}
       CYC_STABLE_ASSET_URL: ${{ inputs.stable_assets_url }}
       CYC_STABLE_ASSET_SHA256: ${{ inputs.stable_assets_sha256 }}
       GH_TOKEN: ${{ github.token }}
@@ -281,15 +287,76 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $result = (& ./scripts/Test-StableAssetBundle.ps1 `
+          $resultLines = @(& ./scripts/Test-StableAssetBundle.ps1 `
             -BundleRoot $env:CYC_STABLE_BUNDLE_ROOT `
             -ExpectedTag $env:CYC_GA_SOURCE_TAG `
             -ExpectedCommit $env:CYC_GA_SOURCE_COMMIT `
             -Json)
-          if ($LASTEXITCODE -ne 0) {
-            throw "Stable asset bundle verification failed with exit code $LASTEXITCODE."
+          $exitCode = $LASTEXITCODE
+          $reportPath = Join-Path $env:RUNNER_TEMP 'cyc-stable-bundle-verification.json'
+          $resultLines | Set-Content -LiteralPath $reportPath -Encoding UTF8
+          if ($exitCode -ne 0) {
+            throw "Stable asset bundle verification failed with exit code $exitCode."
           }
+          $result = ($resultLines -join "`n") | ConvertFrom-Json
+          if ([string]$result.status -cne 'passed') {
+            throw 'Stable asset bundle verification did not return status=passed.'
+          }
+          "CYC_STABLE_INDEX_SHA256=$([string]$result.indexSha256)" | Add-Content -LiteralPath $env:GITHUB_ENV
+          "CYC_STABLE_PROVENANCE_BUNDLE_NAME=$([string]$result.provenanceBundleName)" | Add-Content -LiteralPath $env:GITHUB_ENV
           $result | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+
+      - name: Cross-bind GA evidence to the downloaded stable index
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$CYC_GA_EVIDENCE_URL" in
+            https://*) ;;
+            *) echo 'evidence_url must use HTTPS' >&2; exit 1 ;;
+          esac
+          if [[ ! "$CYC_GA_EVIDENCE_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo 'evidence_sha256 must be a 64-character SHA-256 digest' >&2
+            exit 1
+          fi
+          evidence_path="$RUNNER_TEMP/cyc-ga-evidence.json"
+          curl --fail --location --proto '=https' --proto-redir '=https' \
+            --tlsv1.2 --retry 2 --output "$evidence_path" "$CYC_GA_EVIDENCE_URL"
+          evidence_hash="$(sha256sum "$evidence_path" | awk '{print tolower($1)}')"
+          expected_evidence_hash="$(printf '%s' "$CYC_GA_EVIDENCE_SHA256" | tr '[:upper:]' '[:lower:]')"
+          test "$evidence_hash" = "$expected_evidence_hash"
+          bundle_index_hash="$(sha256sum "$CYC_STABLE_BUNDLE_ROOT/release-index.json" | awk '{print tolower($1)}')"
+          test "$bundle_index_hash" = "$(printf '%s' "$CYC_STABLE_INDEX_SHA256" | tr '[:upper:]' '[:lower:]')"
+          evidence_index_hash="$(jq -r '.artifactVerification.indexSha256 // empty' "$evidence_path" | tr '[:upper:]' '[:lower:]')"
+          [[ "$evidence_index_hash" =~ ^[0-9a-f]{64}$ ]]
+          test "$evidence_index_hash" = "$bundle_index_hash"
+          jq -e --arg tag "$CYC_GA_SOURCE_TAG" --arg commit "$CYC_GA_SOURCE_COMMIT" \
+            '.schemaVersion == "cyc.dev/ga-evidence/v1" and .status == "passed" and .sourceTag == $tag and (.sourceCommit | ascii_downcase) == ($commit | ascii_downcase)' \
+            "$evidence_path" >/dev/null
+          echo "GA evidence and stable release-index are bound to $bundle_index_hash" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify every stable payload attestation cryptographically
+        shell: bash
+        run: |
+          set -euo pipefail
+          index="$CYC_STABLE_BUNDLE_ROOT/release-index.json"
+          bundle="$CYC_STABLE_BUNDLE_ROOT/$CYC_STABLE_PROVENANCE_BUNDLE_NAME"
+          test -f "$bundle"
+          attestation_dir="$RUNNER_TEMP/cyc-stable-attestations"
+          mkdir -p "$attestation_dir"
+          mapfile -t subjects < <(jq -r '.artifacts[].name' "$index")
+          [[ ${#subjects[@]} -gt 0 ]]
+          for subject in "${subjects[@]}"; do
+            output="$attestation_dir/$(printf '%s' "$subject" | sha256sum | awk '{print $1}').json"
+            gh attestation verify "$CYC_STABLE_BUNDLE_ROOT/$subject" \
+              --bundle "$bundle" \
+              --repo "$GITHUB_REPOSITORY" \
+              --source-digest "$CYC_GA_SOURCE_COMMIT" \
+              --source-ref "refs/tags/$CYC_GA_SOURCE_TAG" \
+              --predicate-type 'https://slsa.dev/provenance/v1' \
+              --format json > "$output"
+            jq -e 'type == "array" and length > 0' "$output" >/dev/null
+          done
+          echo "Verified cryptographic provenance for ${#subjects[@]} indexed payload artifacts" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Refuse to overwrite an existing stable release
         shell: bash
@@ -304,7 +371,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t assets < <(find "$CYC_STABLE_BUNDLE_ROOT" -mindepth 1 -maxdepth 1 -type f -print | sort)
+          mapfile -t asset_names < <(
+            jq -r '.artifacts[] | .name, .sidecar' "$CYC_STABLE_BUNDLE_ROOT/release-index.json"
+            printf '%s\n' 'release-index.json' 'release-index.json.sha256' 'SHA256SUMS'
+          )
+          assets=()
+          for name in "${asset_names[@]}"; do
+            test -f "$CYC_STABLE_BUNDLE_ROOT/$name"
+            assets+=("$CYC_STABLE_BUNDLE_ROOT/$name")
+          done
           if [[ ${#assets[@]} -eq 0 ]]; then
             echo 'stable asset bundle contains no publishable files' >&2
             exit 1

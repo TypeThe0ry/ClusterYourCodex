@@ -96,3 +96,18 @@ bundle's stable `release-index.json`, sidecars, and attested provenance, then ca
 `gh release create --verify-tag` without `--prerelease` and verifies
 `isPrerelease=false` and `isDraft=false`. No stable publisher can run when any
 evidence, issue, or governance gate fails.
+
+The stable bundle validator is intentionally stricter than the preview index
+check. It requires a signed (`unsigned=false`) stable index, an HTTPS provenance
+receipt with a locally hashed attestation bundle, an exact top-level file set
+(payloads, their sidecars, index metadata, checksum file, and the receipt), and
+an exact `SHA256SUMS` set. The index's provenance subjects must cover exactly the
+indexed payload digests and byte counts. A CycloneDX 1.6 SBOM must be indexed,
+parse successfully, and contain one SHA-256 component for every non-SBOM
+payload. A non-empty third-party notices artifact is also required. The
+publisher re-downloads the GA evidence manifest and compares its
+`artifactVerification.indexSha256` with the downloaded stable index before it
+invokes `gh attestation verify` for every payload using the exact source tag and
+commit. Only the validated payloads, sidecars, and required release metadata are
+uploaded; the attestation receipt remains verification input rather than an
+unindexed extra release asset.
