@@ -420,10 +420,12 @@ jobs:
                 (string_value($value) | length) > 0;
               def sha256($value):
                 (string_value($value) | test("^[0-9a-fA-F]{64}$"));
+              def valid_https_url($value):
+                (string_value($value) | test("^https://[^/?#[:space:]]+([/?#]|$)"));
               def valid_raw_log($record):
                 (($record.rawLog | type) == "object")
                 and nonempty_string($record.rawLog.url)
-                and (string_value($record.rawLog.url) | startswith("https://"))
+                and valid_https_url($record.rawLog.url)
                 and sha256($record.rawLog.sha256);
               def all_gates($record; $gates):
                 ([$gates[] as $gate | ($record.gates[$gate] // false) == true] | all);

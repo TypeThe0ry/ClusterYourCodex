@@ -96,6 +96,8 @@ Describe 'GA evidence issue acceptance contract' {
         $workflowSource | Should Match 'valid_issue_evidence'
         $workflowSource | Should Match '\.issue3'
         $workflowSource | Should Match '\.issue5'
+        $workflowSource | Should Match 'valid_https_url'
+        ($workflowSource.IndexOf('test("^https://[^/?#[:space:]]+([/?#]|$)")') -ge 0) | Should Be $true
     }
 
     It 'accepts a complete source-bound issue 3 evidence record' {
