@@ -7,6 +7,28 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.40] - 2026-08-31
+
+### Fixed
+
+- Hardened Windows profile-matrix task registration and rollback with a
+  structured v2 IPC contract, operation-bound responses, schema-validated
+  snapshots, root task-path scoping, and production-only raw XML restoration.
+- Made the fresh-deployment lifecycle harness ownership-safe: isolated roots
+  now require a schema-bound marker, pre-existing roots are rejected, cleanup
+  is armed before child lifecycle calls, and lifecycle postconditions are
+  proven before and after synthetic-root removal.
+- Added bounded profile cleanup retries and exact-case-set validation so a
+  delayed Windows profile unload or a mismatched matrix request cannot be
+  reported as a passing acceptance run.
+- Extended GA readiness with source-bound retained raw logs, strict Issue
+  #2/#3/#5 gate objects, protected external stable-builder attestation inputs,
+  and digest/path cross-checks. Public preview tags remain non-draft
+  prereleases; stable publication remains a separate evidence-gated path.
+- Extended the worker pairing transaction lock wait without weakening the
+  underlying lock or changing its critical section, eliminating the observed
+  concurrent repair timeout flake under slow ACL/file replacement.
+
 ## [0.1.0-preview.39] - 2026-08-30
 
 ### Fixed
@@ -475,7 +497,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.39...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.40...HEAD
+[0.1.0-preview.40]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.39...v0.1.0-preview.40
 [0.1.0-preview.39]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.38...v0.1.0-preview.39
 [0.1.0-preview.38]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.37...v0.1.0-preview.38
 [0.1.0-preview.37]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.36...v0.1.0-preview.37
