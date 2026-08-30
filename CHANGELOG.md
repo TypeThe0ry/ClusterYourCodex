@@ -7,6 +7,18 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.37] - 2026-08-30
+
+### Fixed
+
+- Reaped the installed `cyc.exe` CLI probe before the Repair tamper fixture;
+  Windows reports its executable as ProcessName `cyc`, so the lifecycle smoke
+  now inventories and stops it alongside the controller and worker binaries.
+- Added regression assertions that both initial-install and first-Repair probe
+  phases leave no owned process holding an install-file handle.
+- Reissued the candidate as a public prerelease after preview.35 exposed the
+  Windows clean-profile file-lock failure; stable GA evidence remains separate.
+
 ## [0.1.0-preview.36] - 2026-08-30
 
 ### Fixed
@@ -439,7 +451,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.36...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.37...HEAD
+[0.1.0-preview.37]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.36...v0.1.0-preview.37
 [0.1.0-preview.36]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.35...v0.1.0-preview.36
 [0.1.0-preview.35]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.34...v0.1.0-preview.35
 [0.1.0-preview.34]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.33...v0.1.0-preview.34
