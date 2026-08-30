@@ -9,6 +9,18 @@ $workflowSource = Get-Content -LiteralPath $workflowPath -Raw
 $expectedCommitForTest = ('a' * 40) -join ''
 $rawLogShaForTest = ('b' * 64) -join ''
 
+$issue2GateNamesForTest = @(
+    'tauriDesktopHostTray',
+    'rendererNativeControllerProxy',
+    'perUserScheduledTasks',
+    'sidScopedDataDirAcl',
+    'bundledMcpInstallerMarketplace',
+    'installRepairUpgradeRollbackUninstall',
+    'cleanWindows11Vm',
+    'liveWindowsControllerWorkerRoundTrip',
+    'productionAuthenticodeSetupHelper'
+)
+
 $issue3GateNamesForTest = @(
     'linuxSystemdUserServicePackage',
     'macosLaunchAgentPackage',
@@ -47,7 +59,7 @@ function New-TestIssueEvidence {
     )
 
     $gates = [ordered]@{}
-    foreach ($gate in ($issue3GateNamesForTest + $issue5GateNamesForTest | Select-Object -Unique)) {
+    foreach ($gate in ($issue2GateNamesForTest + $issue3GateNamesForTest + $issue5GateNamesForTest | Select-Object -Unique)) {
         $gates[$gate] = $true
     }
     $record = [ordered]@{
@@ -55,7 +67,7 @@ function New-TestIssueEvidence {
         sourceCommit = $expectedCommitForTest
         provider = $Provider
         hostType = $HostType
-        evidenceId = 'ga-issue3-live-20260830'
+        evidenceId = 'ga-issue2-live-20260830'
         rawLog = [ordered]@{
             url = 'https://evidence.example.invalid/ga/issue3.log'
             sha256 = $rawLogShaForTest
@@ -84,12 +96,13 @@ Describe 'GA evidence issue acceptance contract' {
     }
 
     It 'wires both issue records and their canonical fields into the gate' {
+        $readinessSource | Should Match 'Assert-GaIssueEvidence -Evidence \$evidence -Path ''issue2'''
         $readinessSource | Should Match 'Assert-GaIssueEvidence -Evidence \$evidence -Path ''issue3'''
         $readinessSource | Should Match 'Assert-GaIssueEvidence -Evidence \$evidence -Path ''issue5'''
         foreach ($field in @('sourceCommit', 'provider', 'hostType', 'evidenceId', 'rawLog', 'sha256', 'gates')) {
             $readinessSource | Should Match ([regex]::Escape($field))
         }
-        foreach ($gate in ($issue3GateNamesForTest + $issue5GateNamesForTest | Select-Object -Unique)) {
+        foreach ($gate in ($issue2GateNamesForTest + $issue3GateNamesForTest + $issue5GateNamesForTest | Select-Object -Unique)) {
             $readinessSource | Should Match ([regex]::Escape($gate))
             $workflowSource | Should Match ([regex]::Escape($gate))
         }
@@ -107,6 +120,15 @@ Describe 'GA evidence issue acceptance contract' {
             -RequiredGates $issue3GateNamesForTest
         $result.status | Should Be 'passed'
         $result.rawLog.sha256 | Should Be $rawLogShaForTest
+    }
+
+    It 'accepts a complete source-bound issue 2 evidence record' {
+        $record = New-TestIssueEvidence -Provider 'windows-lab' -HostType 'windows-clean-vm'
+        $result = Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue2 = $record }) `
+            -Path 'issue2' -Description 'Issue #2 test evidence' -ExpectedCommit $expectedCommitForTest `
+            -RequiredGates $issue2GateNamesForTest
+        $result.status | Should Be 'passed'
+        $result.gates.cleanWindows11Vm | Should Be $true
     }
 
     It 'accepts a complete source-bound issue 5 evidence record' {
@@ -188,5 +210,24 @@ Describe 'GA evidence issue acceptance contract' {
                 -Path 'issue3' -Description 'Issue #3 test evidence' -ExpectedCommit $expectedCommitForTest `
                 -RequiredGates $issue3GateNamesForTest
         }
+    }
+
+    It 'requires canonical completed issue snapshots' {
+        $validSnapshot = [pscustomobject]@{
+            issues = @(
+                [pscustomobject]@{ number = 2; state = 'closed'; state_reason = 'completed'; title = 'Windows one-click installer and desktop host'; html_url = 'https://github.com/TypeThe0ry/ClusterYourCodex/issues/2' }
+                [pscustomobject]@{ number = 3; state = 'closed'; state_reason = 'completed'; title = 'Heterogeneous Linux and macOS worker packages'; html_url = 'https://github.com/TypeThe0ry/ClusterYourCodex/issues/3' }
+                [pscustomobject]@{ number = 5; state = 'closed'; state_reason = 'completed'; title = 'Opt-in hostile-workload isolation and external process reconciliation'; html_url = 'https://github.com/TypeThe0ry/ClusterYourCodex/issues/5' }
+            )
+        }
+        Assert-GaIssueSnapshot -Snapshot $validSnapshot
+
+        $notPlanned = ($validSnapshot | ConvertTo-Json -Depth 10) | ConvertFrom-Json
+        $notPlanned.issues[0].state_reason = 'not planned'
+        Assert-TestThrows { Assert-GaIssueSnapshot -Snapshot $notPlanned }
+
+        $wrongTitle = ($validSnapshot | ConvertTo-Json -Depth 10) | ConvertFrom-Json
+        $wrongTitle.issues[1].title = 'unrelated issue'
+        Assert-TestThrows { Assert-GaIssueSnapshot -Snapshot $wrongTitle }
     }
 }

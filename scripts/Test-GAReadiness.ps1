@@ -25,6 +25,7 @@ if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
     $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 }
 $RepositoryRoot = [System.IO.Path]::GetFullPath($RepositoryRoot)
+$GaMaximumEvidenceBytes = 64MB
 
 function Assert-GaCondition {
     param(
@@ -54,6 +55,7 @@ function Get-GaJson {
     Assert-GaCondition (Test-Path -LiteralPath $Path -PathType Leaf) "$Description exists: $Path"
     $item = Get-Item -LiteralPath $Path -Force
     Assert-GaCondition (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) "$Description is not a reparse point: $Path"
+    Assert-GaCondition ([long]$item.Length -le [long]$GaMaximumEvidenceBytes) "$Description exceeds the $([long]$GaMaximumEvidenceBytes)-byte size limit: $Path"
     try {
         return [System.IO.File]::ReadAllText($Path) | ConvertFrom-Json
     } catch {
@@ -135,6 +137,18 @@ function Assert-GaExternalEvidence {
     Assert-GaCondition (-not [string]::IsNullOrWhiteSpace($evidenceId)) "$Description.evidenceId must identify retained raw evidence"
     return $node
 }
+
+$GaIssue2GateNames = @(
+    'tauriDesktopHostTray',
+    'rendererNativeControllerProxy',
+    'perUserScheduledTasks',
+    'sidScopedDataDirAcl',
+    'bundledMcpInstallerMarketplace',
+    'installRepairUpgradeRollbackUninstall',
+    'cleanWindows11Vm',
+    'liveWindowsControllerWorkerRoundTrip',
+    'productionAuthenticodeSetupHelper'
+)
 
 $GaIssue3GateNames = @(
     'linuxSystemdUserServicePackage',
@@ -264,10 +278,15 @@ function Assert-GaWorkflowContract {
         'gh release download',
         'CYC_GA_FINAL_SNAPSHOT_SHA256',
         'valid_issue_evidence',
+        '.issue2',
         '.issue3',
         '.issue5',
         'rawLog.url',
         'rawLog.sha256',
+        '--connect-timeout 20',
+        '--max-time 300',
+        '--max-filesize 67108864',
+        'tauriDesktopHostTray',
         'linuxSystemdUserServicePackage',
         'linuxDedicatedExecutionIdentity'
     )) {
@@ -294,11 +313,25 @@ function Assert-GaIssueSnapshot {
         $nodes = @($Snapshot)
     }
 
+    $expectedTitles = @{
+        2 = 'Windows one-click installer and desktop host'
+        3 = 'Heterogeneous Linux and macOS worker packages'
+        5 = 'Opt-in hostile-workload isolation and external process reconciliation'
+    }
     foreach ($number in @(2, 3, 5)) {
         $matches = @($nodes | Where-Object { [string]$_.number -ceq [string]$number })
         Assert-GaCondition ($matches.Count -eq 1) "live issue snapshot contains exactly one issue #$number"
-        $state = [string](Get-GaProperty -Object $matches[0] -Path 'state' -Description "issue #$number")
+        $issue = $matches[0]
+        Assert-GaCondition ($null -eq $issue.PSObject.Properties['pull_request']) "issue #$number snapshot entry must be an issue, not a pull request"
+        $state = [string](Get-GaProperty -Object $issue -Path 'state' -Description "issue #$number")
         Assert-GaCondition ($state.Equals('closed', [System.StringComparison]::OrdinalIgnoreCase)) "issue #$number must be closed before GA (observed '$state')"
+        $stateReason = [string](Get-GaProperty -Object $issue -Path 'state_reason' -Description "issue #$number")
+        Assert-GaCondition ($stateReason.Equals('completed', [System.StringComparison]::OrdinalIgnoreCase)) "issue #$number must be closed with state_reason=completed before GA (observed '$stateReason')"
+        $title = [string](Get-GaProperty -Object $issue -Path 'title' -Description "issue #$number")
+        Assert-GaCondition ($title.Equals([string]$expectedTitles[$number], [System.StringComparison]::Ordinal)) "issue #$number title does not match the canonical acceptance issue"
+        $htmlUrl = [string](Get-GaProperty -Object $issue -Path 'html_url' -Description "issue #$number")
+        $expectedUrl = "https://github.com/TypeThe0ry/ClusterYourCodex/issues/$number"
+        Assert-GaCondition ($htmlUrl.Equals($expectedUrl, [System.StringComparison]::OrdinalIgnoreCase)) "issue #$number html_url is not the canonical repository issue URL"
     }
 }
 
@@ -434,6 +467,12 @@ if ($ContractOnly) {
         message = 'Windows clean VM, macOS LaunchAgent, Authenticode, and independent artifact evidence are retained and source-bound'
     })
 
+    [void](Assert-GaIssueEvidence -Evidence $evidence -Path 'issue2' -Description 'Issue #2 Windows installer and desktop-host evidence' -ExpectedCommit $ExpectedCommit -RequiredGates $GaIssue2GateNames)
+    [void]$checks.Add([ordered]@{
+        name = 'issue-2-evidence'
+        status = 'passed'
+        message = 'Issue #2 evidence is source-bound, externally retained, and every acceptance gate is true'
+    })
     [void](Assert-GaIssueEvidence -Evidence $evidence -Path 'issue3' -Description 'Issue #3 heterogeneous worker-package evidence' -ExpectedCommit $ExpectedCommit -RequiredGates $GaIssue3GateNames)
     [void]$checks.Add([ordered]@{
         name = 'issue-3-evidence'
