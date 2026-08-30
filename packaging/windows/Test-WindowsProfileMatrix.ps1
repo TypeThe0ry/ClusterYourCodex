@@ -379,14 +379,15 @@ function Write-ProfileMatrixAtomicJson {
     [void](New-Item -ItemType Directory -Path $directory -Force)
     $leaf = Split-Path -Leaf $Path
     $temporary = Join-Path $directory ($leaf + '.tmp-' + [Guid]::NewGuid().ToString('N'))
-    # File.Replace requires a real backup path on Windows PowerShell/.NET
-    # Framework; passing $null is interpreted as an invalid path and aborts
-    # the helper before it can emit its response.  Keep the backup sibling
+    # Windows PowerShell/.NET Framework requires a real, same-volume backup
+    # path for File.Replace; a null or merely planned (nonexistent) path can
+    # abort the helper before it emits its response. Keep the backup sibling
     # unique and remove it after a successful atomic commit.
     $backup = Join-Path $directory ($leaf + '.bak-' + [Guid]::NewGuid().ToString('N'))
     $utf8 = [System.Text.UTF8Encoding]::new($false)
     $bytes = $utf8.GetBytes(($Value | ConvertTo-Json -Depth 12))
     $stream = $null
+    $backupPrepared = $false
     $committed = $false
     try {
         $stream = [System.IO.FileStream]::new(
@@ -403,6 +404,20 @@ function Write-ProfileMatrixAtomicJson {
         $stream = $null
 
         if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            # Windows PowerShell/.NET Framework requires the backup operand of
+            # File.Replace to already be a same-volume regular file.  Passing
+            # a merely planned path produces the misleading "path is not of a
+            # legal form" ArgumentException after all earlier checks passed.
+            $backupStream = [System.IO.FileStream]::new(
+                $backup,
+                [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::None,
+                1,
+                [System.IO.FileOptions]::WriteThrough
+            )
+            try { $backupStream.Flush($true) } finally { $backupStream.Dispose() }
+            $backupPrepared = $true
             [System.IO.File]::Replace($temporary, $Path, $backup, $true)
         } else {
             [System.IO.File]::Move($temporary, $Path)
@@ -416,7 +431,7 @@ function Write-ProfileMatrixAtomicJson {
             }
         } catch { }
         try {
-            if ($committed -and (Test-Path -LiteralPath $backup)) {
+            if (($committed -or $backupPrepared) -and (Test-Path -LiteralPath $backup)) {
                 Remove-Item -LiteralPath $backup -Force
             }
         } catch { }

@@ -7,6 +7,22 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.32] - 2026-08-30
+
+### Fixed
+
+- Corrected Windows profile-matrix atomic JSON persistence for Windows
+  PowerShell/.NET Framework by pre-creating a same-volume backup file before
+  calling `File.Replace`, eliminating the misleading legal-path failure seen
+  in the preview.30 ARM64 compatibility run.
+- Kept profile child-process reaping, recursive compatibility-junction
+  validation, strict task ownership evidence, and fail-closed cleanup from the
+  previous preview while preserving the primary failure when cleanup also
+  fails.
+- Reissued the public candidate as preview.32 after cancelling the affected
+  preview.31 workflow; tagged public builds remain GitHub prereleases until
+  the independent stable GA gates pass.
+
 ## [0.1.0-preview.31] - 2026-08-30
 
 ### Fixed
@@ -369,7 +385,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.31...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.32...HEAD
+[0.1.0-preview.32]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.31...v0.1.0-preview.32
 [0.1.0-preview.31]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.30...v0.1.0-preview.31
 [0.1.0-preview.30]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.29...v0.1.0-preview.30
 [0.1.0-preview.29]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.28...v0.1.0-preview.29

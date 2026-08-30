@@ -4210,6 +4210,9 @@ exit 0
     Assert-True ($profileAtomicWriter.Value -match '\$backup\s*=\s*Join-Path' -and
         $profileAtomicWriter.Value -match '\[System\.IO\.File\]::Replace\(\$temporary,\s*\$Path,\s*\$backup' -and
         $profileAtomicWriter.Value -notmatch '\[System\.IO\.File\]::Replace\(\$temporary,\s*\$Path,\s*\$null') 'profile matrix atomic writer supplies a valid backup path to File.Replace'
+    Assert-True ($profileAtomicWriter.Value -match '\$backupStream\s*=\s*\[System\.IO\.FileStream\]::new' -and
+        $profileAtomicWriter.Value -match '\$backupStream[\s\S]+\[System\.IO\.FileMode\]::CreateNew' -and
+        $profileAtomicWriter.Value -match '\$backupPrepared\s*=\s*\$true') 'profile matrix atomic writer pre-creates a same-volume backup placeholder before File.Replace'
     Assert-True ($profileMatrixSource -match 'Stop-Process\s+-Id\s+\$process\.Id' -and
         $profileMatrixSource -match '\$process\.WaitForExit\(10000\)' -and
         $profileMatrixSource -match 'did not exit after cleanup') 'profile matrix reaps a child after helper/IPC failure before profile cleanup'
