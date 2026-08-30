@@ -1763,7 +1763,10 @@ jobs:
     if: github.ref_type == 'tag' && needs.release-identity.outputs.source_tag != ''
     needs: [release-identity, release-index]
     runs-on: ubuntu-latest
-    environment: production
+    # Keep public prerelease publication separate from the protected stable
+    # production environment.  The stable GA workflow remains the only path
+    # that targets `production` and can create a non-prerelease release.
+    environment: preview-publication
     permissions:
       contents: write
     steps:

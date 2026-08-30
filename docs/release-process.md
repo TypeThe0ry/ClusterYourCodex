@@ -51,9 +51,12 @@ agree exactly.
    binaries.
 9. Download published artifacts into a clean directory, verify sidecars/index,
    run fresh deployment and supported upgrade acceptance, and retain logs.
-10. Approve the final `production` prerelease-publication deployment only
-    after all producer and acceptance jobs have passed.
-11. Publish/retain as prerelease only after artifact acceptance.
+10. Let the final `preview-publication` job run only after all producer and
+    acceptance jobs have passed. It is deliberately separate from the
+    protected stable `production` environment and can publish only a
+    `prerelease: true` release.
+11. Publish/retain as prerelease only after artifact acceptance; the stable
+    `production` environment is reserved for the independent GA workflow.
 12. Update issues with the exact tag, commit, workflow run, exit codes, elapsed
    time, artifact hashes, cleanup state, and any unverified gate.
 

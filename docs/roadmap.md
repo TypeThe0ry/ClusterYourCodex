@@ -52,7 +52,7 @@ Status vocabulary:
 |---|---|
 | Production Authenticode / macOS signing as applicable | GA blocker |
 | Release-asset SBOM + tagged provenance | prerelease workflow implemented; full dependency/payload SBOM, notices, and independent verification remain GA blockers |
-| Protected branch/tag/environment governance | prerelease `production-signing` and `production` environments require review, disable administrator bypass, wait, and accept only `v*` tags; a separate protected stable branch/tag workflow remains a GA blocker |
+| Protected branch/tag/environment governance | `production-signing` and stable `production` environments require review, disable administrator bypass, wait, and accept only `v*` tags; prerelease publication uses a separate `preview-publication` environment and remains `prerelease: true`; a protected stable branch/tag workflow remains a GA blocker |
 | Clean Windows 11 standard/admin/profile matrix | GA blocker |
 | Signed `N-1 -> N` migration and rollback | GA blocker |
 | Windows-controller -> Windows/Linux-worker live GUI/MCP E2E | GA blocker |

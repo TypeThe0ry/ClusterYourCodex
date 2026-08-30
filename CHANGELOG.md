@@ -7,6 +7,17 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.39] - 2026-08-30
+
+### Fixed
+
+- Separated public prerelease publication into the dedicated
+  `preview-publication` environment. Tagged previews no longer deadlock on
+  the stable `production` environment's prevent-self-review rule, while the
+  independent GA workflow keeps `production` protected and stable-only.
+- Updated the release-process, roadmap, and version-consistency contracts to
+  enforce the preview/stable environment boundary.
+
 ## [0.1.0-preview.38] - 2026-08-30
 
 ### Fixed
@@ -464,7 +475,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.38...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.39...HEAD
+[0.1.0-preview.39]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.38...v0.1.0-preview.39
 [0.1.0-preview.38]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.37...v0.1.0-preview.38
 [0.1.0-preview.37]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.36...v0.1.0-preview.37
 [0.1.0-preview.36]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.35...v0.1.0-preview.36

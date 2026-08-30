@@ -206,10 +206,10 @@ function Assert-CycReleaseWorkflowIdentity {
     )
     if (-not $releaseJob.Success -or
         $releaseJob.Groups['body'].Value -notmatch "(?m)^\s*if:\s*github\.ref_type\s*==\s*'tag'\s*&&\s*needs\.release-identity\.outputs\.source_tag\s*!=\s*''\s*$" -or
-        $releaseJob.Groups['body'].Value -notmatch '(?m)^\s*environment:\s*production\s*$' -or
+        $releaseJob.Groups['body'].Value -notmatch '(?m)^\s*environment:\s*preview-publication\s*$' -or
         $releaseJob.Groups['body'].Value -notmatch '(?m)^\s*draft:\s*false\s*$' -or
         $releaseJob.Groups['body'].Value -notmatch '(?m)^\s*prerelease:\s*true\s*$') {
-        throw 'GitHub publishing must remain production-environment-gated, tag-bound, public, and prerelease-only.'
+        throw 'GitHub preview publishing must remain preview-publication-environment-bound, tag-bound, public, and prerelease-only.'
     }
 
     $windows11AcceptanceJob = [System.Text.RegularExpressions.Regex]::Match(
