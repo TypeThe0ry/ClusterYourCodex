@@ -7,6 +7,21 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.33] - 2026-08-30
+
+### Fixed
+
+- Added a fail-closed canonical GA evidence contract for Issue #3 and Issue
+  #5. Readiness and the protected stable publisher now require source-bound,
+  externally retained evidence with HTTPS/SHA-256 raw logs and every
+  platform-specific acceptance gate set to boolean `true`.
+- Added Pester coverage for issue evidence shape, source binding, external
+  provider restrictions, raw-log integrity, and missing or false acceptance
+  gates. Closing a GitHub issue alone cannot satisfy stable-release readiness.
+- Kept tagged public builds as non-draft GitHub prereleases; a stable Release
+  remains blocked until the independent Windows, macOS, hostile-isolation, and
+  governance gates have real retained evidence.
+
 ## [0.1.0-preview.32] - 2026-08-30
 
 ### Fixed
@@ -385,7 +400,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.32...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.33...HEAD
+[0.1.0-preview.33]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.32...v0.1.0-preview.33
 [0.1.0-preview.32]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.31...v0.1.0-preview.32
 [0.1.0-preview.31]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.30...v0.1.0-preview.31
 [0.1.0-preview.30]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.29...v0.1.0-preview.30

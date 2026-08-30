@@ -136,6 +136,80 @@ function Assert-GaExternalEvidence {
     return $node
 }
 
+$GaIssue3GateNames = @(
+    'linuxSystemdUserServicePackage',
+    'macosLaunchAgentPackage',
+    'linuxX64ReleaseArtifact',
+    'macosX64ReleaseArtifact',
+    'macosArm64ReleaseArtifact',
+    'platformNativeShells',
+    'platformNativeProcessGroups',
+    'crossPlatformPathAclTests',
+    'liveMacosRun'
+)
+
+$GaIssue5GateNames = @(
+    'linuxDedicatedExecutionIdentity',
+    'linuxCgroupV2Reconciliation',
+    'windowsIsolatedExecutionIdentity',
+    'windowsJobObject',
+    'windowsProtectedExternalGuard',
+    'macosExternalReconciliation',
+    'jobsCannotAlterGuardState',
+    'jobsCannotReadWorkerCredentials',
+    'restartResidualProcessReconciliation'
+)
+
+function Assert-GaIssueEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object]$Evidence,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Description,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+        [Parameter(Mandatory = $true)][string[]]$RequiredGates
+    )
+
+    $node = Get-GaProperty -Object $Evidence -Path $Path -Description $Description
+    Assert-GaCondition (($node -is [pscustomobject]) -and -not ($node -is [System.Array])) "$Description must be a JSON object"
+    [void](Assert-GaString -Object $node -Path 'status' -Expected 'passed' -Description $Description)
+
+    $sourceCommitValue = Get-GaProperty -Object $node -Path 'sourceCommit' -Description $Description
+    Assert-GaCondition ($sourceCommitValue -is [string]) "$Description.sourceCommit must be a string"
+    $sourceCommit = [string]$sourceCommitValue
+    Assert-GaCondition ($sourceCommit -match '^[0-9a-fA-F]{40}$') "$Description.sourceCommit must be a full 40-character commit SHA"
+    Assert-GaCondition ($sourceCommit.Equals($ExpectedCommit, [System.StringComparison]::OrdinalIgnoreCase)) "$Description.sourceCommit must match the reviewed stable source commit"
+
+    foreach ($field in @('provider', 'hostType', 'evidenceId')) {
+        $value = Get-GaProperty -Object $node -Path $field -Description $Description
+        Assert-GaCondition ($value -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$value)) "$Description.$field must be a non-empty string"
+    }
+    $provider = [string](Get-GaProperty -Object $node -Path 'provider' -Description $Description)
+    $hostType = [string](Get-GaProperty -Object $node -Path 'hostType' -Description $Description)
+    Assert-GaCondition ($provider -notmatch '(?i)github|actions|hosted|runner') "$Description must identify an external provider, not a GitHub-hosted runner (provider='$provider')"
+    Assert-GaCondition ($hostType -notmatch '(?i)github|actions|hosted|runner') "$Description must identify an external host, not a GitHub-hosted runner (hostType='$hostType')"
+    $evidenceId = [string](Get-GaProperty -Object $node -Path 'evidenceId' -Description $Description)
+    Assert-GaCondition ($evidenceId -match '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$') "$Description.evidenceId must be a bounded retained-evidence identifier"
+
+    $rawLog = Get-GaProperty -Object $node -Path 'rawLog' -Description $Description
+    Assert-GaCondition (($rawLog -is [pscustomobject]) -and -not ($rawLog -is [System.Array])) "$Description.rawLog must be a JSON object"
+    $rawLogUrlValue = Get-GaProperty -Object $rawLog -Path 'url' -Description $Description
+    Assert-GaCondition ($rawLogUrlValue -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$rawLogUrlValue)) "$Description.rawLog.url must be a non-empty string"
+    $rawLogUri = $null
+    $validRawLogUri = [System.Uri]::TryCreate([string]$rawLogUrlValue, [System.UriKind]::Absolute, [ref]$rawLogUri)
+    Assert-GaCondition $validRawLogUri "$Description.rawLog.url must be an absolute URL"
+    Assert-GaCondition ($rawLogUri.Scheme.Equals('https', [System.StringComparison]::OrdinalIgnoreCase)) "$Description.rawLog.url must use HTTPS"
+    Assert-GaCondition (-not [string]::IsNullOrWhiteSpace($rawLogUri.Host)) "$Description.rawLog.url must include a host"
+    $rawLogShaValue = Get-GaProperty -Object $rawLog -Path 'sha256' -Description $Description
+    Assert-GaCondition ($rawLogShaValue -is [string] -and [string]$rawLogShaValue -match '^[0-9a-fA-F]{64}$') "$Description.rawLog.sha256 must be a 64-character SHA-256 digest"
+
+    $gates = Get-GaProperty -Object $node -Path 'gates' -Description $Description
+    Assert-GaCondition (($gates -is [pscustomobject]) -and -not ($gates -is [System.Array])) "$Description.gates must be a JSON object"
+    foreach ($gate in $RequiredGates) {
+        Assert-GaTrue -Object $node -Path "gates.$gate" -Description $Description
+    }
+    return $node
+}
+
 function Assert-GaWorkflowContract {
     $workflow = Get-GaText -RelativePath '.github/workflows/ga.yml'
     foreach ($needle in @(
@@ -188,7 +262,14 @@ function Assert-GaWorkflowContract {
         'max_total_uncompressed_bytes',
         'release-index.json.sig',
         'gh release download',
-        'CYC_GA_FINAL_SNAPSHOT_SHA256'
+        'CYC_GA_FINAL_SNAPSHOT_SHA256',
+        'valid_issue_evidence',
+        '.issue3',
+        '.issue5',
+        'rawLog.url',
+        'rawLog.sha256',
+        'linuxSystemdUserServicePackage',
+        'linuxDedicatedExecutionIdentity'
     )) {
         Assert-GaCondition $workflow.Contains($needle) "GA workflow contains '$needle'"
     }
@@ -351,6 +432,19 @@ if ($ContractOnly) {
         name = 'external-evidence'
         status = 'passed'
         message = 'Windows clean VM, macOS LaunchAgent, Authenticode, and independent artifact evidence are retained and source-bound'
+    })
+
+    [void](Assert-GaIssueEvidence -Evidence $evidence -Path 'issue3' -Description 'Issue #3 heterogeneous worker-package evidence' -ExpectedCommit $ExpectedCommit -RequiredGates $GaIssue3GateNames)
+    [void]$checks.Add([ordered]@{
+        name = 'issue-3-evidence'
+        status = 'passed'
+        message = 'Issue #3 evidence is source-bound, externally retained, and every acceptance gate is true'
+    })
+    [void](Assert-GaIssueEvidence -Evidence $evidence -Path 'issue5' -Description 'Issue #5 hostile-workload isolation evidence' -ExpectedCommit $ExpectedCommit -RequiredGates $GaIssue5GateNames)
+    [void]$checks.Add([ordered]@{
+        name = 'issue-5-evidence'
+        status = 'passed'
+        message = 'Issue #5 evidence is source-bound, externally retained, and every acceptance gate is true'
     })
 
     $issues = Get-GaJson -Path $IssueSnapshotPath -Description 'live issue snapshot'

@@ -81,3 +81,25 @@ cleanup, not hostile-workload guards.
   Windows 11 profile acceptance, live two-worker E2E, governance, and all
   declared-scope issue gates pass. The prerelease release-asset SBOM and tagged
   provenance do not satisfy those broader GA gates.
+
+### GA evidence manifest contract
+
+Stable publication requires more than closed GitHub issues. The externally
+captured `cyc.dev/ga-evidence/v1` manifest must include source-bound,
+externally retained `issue3` and `issue5` records. Every record needs
+`status: "passed"`, the reviewed `sourceCommit`, non-empty `provider`,
+`hostType`, and `evidenceId`, plus a `rawLog` object containing an absolute
+HTTPS `url` and a 64-character `sha256`. Providers and host types identifying
+GitHub Actions or hosted runners are not accepted.
+
+The records contain a boolean `gates` map, and every required entry must be
+`true`. Issue #3 covers the Linux systemd user-service package, macOS
+LaunchAgent package, Linux x64/macOS x64/macOS arm64 release artifacts,
+platform-native shells and process groups, cross-platform path/ACL tests, and
+a live macOS run. Issue #5 covers Linux dedicated identity plus cgroup-v2
+reconciliation, Windows isolated identity plus Job Object and protected
+external guard, macOS external reconciliation, denial of guard-state and
+worker-credential access, and restart-time residual-process reconciliation.
+The exact gate keys are enforced by `scripts/Test-GAReadiness.ps1` and are
+rechecked by `.github/workflows/ga.yml` before the stable publisher runs; a
+closed issue without those records and true gates remains blocked.

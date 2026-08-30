@@ -86,7 +86,36 @@ SHA and contain passed, retained evidence for:
   helper; and
 - independent post-download checksum, release-index, and provenance verification.
 
-Each host record must identify a non-GitHub-hosted provider and an `evidenceId`.
+Issue closure is only a live repository-state gate; it is not evidence that an
+acceptance item ran. The manifest must also contain top-level `issue3` and
+`issue5` objects. Each issue object is accepted only when all of these fields
+are present and valid:
+
+- `status` is exactly `passed`;
+- `sourceCommit` is the exact reviewed 40-character source SHA;
+- `provider` and `hostType` are non-empty external identifiers and do not name
+  GitHub Actions, a hosted runner, or an equivalent hosted execution surface;
+- `evidenceId` is a bounded identifier for retained evidence; and
+- `rawLog.url` is an absolute HTTPS URL and `rawLog.sha256` is its 64-character
+  SHA-256 digest.
+
+The `gates` object is fail-closed: every required gate is a JSON boolean with
+value `true`; a missing, non-boolean, or false gate fails the manifest. Issue
+#3 requires `linuxSystemdUserServicePackage`, `macosLaunchAgentPackage`,
+`linuxX64ReleaseArtifact`, `macosX64ReleaseArtifact`,
+`macosArm64ReleaseArtifact`, `platformNativeShells`,
+`platformNativeProcessGroups`, `crossPlatformPathAclTests`, and `liveMacosRun`.
+Issue #5 requires `linuxDedicatedExecutionIdentity`,
+`linuxCgroupV2Reconciliation`, `windowsIsolatedExecutionIdentity`,
+`windowsJobObject`, `windowsProtectedExternalGuard`,
+`macosExternalReconciliation`, `jobsCannotAlterGuardState`,
+`jobsCannotReadWorkerCredentials`, and
+`restartResidualProcessReconciliation`. The readiness script and the stable
+publisher's cross-bind step validate the same fields independently, so a
+closed Issue #3 or #5 with absent or unverifiable evidence cannot pass.
+
+Each other host record must identify a non-GitHub-hosted provider and an
+`evidenceId`.
 The macOS portable smoke in `release.yml`, the Windows ARM64 compatibility job,
 and the repository Authenticode contract test remain useful prerelease checks,
 but none can satisfy those external GA evidence fields. The protected GA workflow

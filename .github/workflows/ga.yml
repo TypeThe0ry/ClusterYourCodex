@@ -413,9 +413,61 @@ jobs:
           [[ "$evidence_index_hash" =~ ^[0-9a-f]{64}$ ]]
           test "$evidence_index_hash" = "$bundle_index_hash"
           jq -e --arg tag "$CYC_GA_SOURCE_TAG" --arg commit "$CYC_GA_SOURCE_COMMIT" \
-            '.schemaVersion == "cyc.dev/ga-evidence/v1" and .status == "passed" and .sourceTag == $tag and (.sourceCommit | ascii_downcase) == ($commit | ascii_downcase)' \
+            '
+              def string_value($value):
+                if (($value | type) == "string") then $value else "" end;
+              def nonempty_string($value):
+                (string_value($value) | length) > 0;
+              def sha256($value):
+                (string_value($value) | test("^[0-9a-fA-F]{64}$"));
+              def valid_raw_log($record):
+                (($record.rawLog | type) == "object")
+                and nonempty_string($record.rawLog.url)
+                and (string_value($record.rawLog.url) | startswith("https://"))
+                and sha256($record.rawLog.sha256);
+              def all_gates($record; $gates):
+                ([$gates[] as $gate | ($record.gates[$gate] // false) == true] | all);
+              def valid_issue_evidence($record; $gates):
+                (($record | type) == "object")
+                and ($record.status == "passed")
+                and (string_value($record.sourceCommit) | test("^[0-9a-fA-F]{40}$"))
+                and ((string_value($record.sourceCommit) | ascii_downcase) == ($commit | ascii_downcase))
+                and nonempty_string($record.provider)
+                and ((string_value($record.provider) | test("github|actions|hosted|runner"; "i")) | not)
+                and nonempty_string($record.hostType)
+                and ((string_value($record.hostType) | test("github|actions|hosted|runner"; "i")) | not)
+                and (string_value($record.evidenceId) | test("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"))
+                and valid_raw_log($record)
+                and all_gates($record; $gates);
+              .schemaVersion == "cyc.dev/ga-evidence/v1"
+              and .status == "passed"
+              and .sourceTag == $tag
+              and (string_value(.sourceCommit) | ascii_downcase) == ($commit | ascii_downcase)
+              and valid_issue_evidence(.issue3; [
+                "linuxSystemdUserServicePackage",
+                "macosLaunchAgentPackage",
+                "linuxX64ReleaseArtifact",
+                "macosX64ReleaseArtifact",
+                "macosArm64ReleaseArtifact",
+                "platformNativeShells",
+                "platformNativeProcessGroups",
+                "crossPlatformPathAclTests",
+                "liveMacosRun"
+              ])
+              and valid_issue_evidence(.issue5; [
+                "linuxDedicatedExecutionIdentity",
+                "linuxCgroupV2Reconciliation",
+                "windowsIsolatedExecutionIdentity",
+                "windowsJobObject",
+                "windowsProtectedExternalGuard",
+                "macosExternalReconciliation",
+                "jobsCannotAlterGuardState",
+                "jobsCannotReadWorkerCredentials",
+                "restartResidualProcessReconciliation"
+              ])
+            ' \
             "$evidence_path" >/dev/null
-          echo "GA evidence and stable release-index are bound to $bundle_index_hash" >> "$GITHUB_STEP_SUMMARY"
+          echo "GA evidence, issue3/issue5 acceptance gates, and stable release-index are source-bound to $bundle_index_hash" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify every stable payload attestation cryptographically
         shell: bash
