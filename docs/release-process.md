@@ -112,6 +112,13 @@ non-negative `tests.passed`/`tests.failed`/`tests.ignored` counts with
 redirects, enforces the size limit, recomputes SHA-256 over the downloaded
 bytes, and retains a per-log verification record. A URL plus a syntactically
 valid digest is therefore insufficient without the matching downloaded bytes.
+The manifest and stable-bundle endpoints are additionally checked by
+`scripts/Test-ExternalHttpsUrl.py`: they must resolve to globally routable
+addresses, contain no embedded credentials or fragments, and return directly
+over HTTPS (`curl --max-redirs 0`). Raw-log materialization refuses existing
+targets, reparse points, and directories, writes to a fresh same-directory
+temporary file, and atomically publishes the result without overwriting an
+existing evidence file.
 
 The `gates` object is fail-closed: every required gate is a JSON boolean with
 value `true`; a missing, non-boolean, or false gate fails the manifest. Issue
@@ -137,8 +144,14 @@ Issue #5 requires `linuxDedicatedExecutionIdentity`,
 publisher's cross-bind step validate the same fields independently, so a
 closed Issue #2, #3, or #5 with absent or unverifiable evidence cannot pass.
 
-Each other host record must identify a non-GitHub-hosted provider and an
-`evidenceId`.
+Each other top-level host record must identify a non-GitHub-hosted provider,
+`hostType`, source commit, and an `evidenceId`; unknown scalar metadata is
+rejected so a new record cannot silently bypass the same identity checks. The
+workflow contract is checked structurally (trigger, inputs, job dependencies,
+environments, permissions, and publisher placement), and both the readiness
+script and its version helper must exit with code zero before their JSON is
+accepted. Stable bundle ZIP validation rejects empty or `.` path components,
+namespace/device paths, and case-folded duplicate names before extraction.
 The macOS portable smoke in `release.yml`, the Windows ARM64 compatibility job,
 and the repository Authenticode contract test remain useful prerelease checks,
 but none can satisfy those external GA evidence fields. The protected GA workflow

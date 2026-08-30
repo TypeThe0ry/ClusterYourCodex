@@ -104,7 +104,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
-$script:ProductVersion = '0.1.0-preview.40'
+$script:ProductVersion = '0.1.0-preview.41'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
@@ -4059,7 +4059,7 @@ function Wait-CycTaskStable {
                 }
             }
             try {
-                $taskInfo = Get-ScheduledTaskInfo -TaskName $Name -ErrorAction Stop
+                $taskInfo = Get-ScheduledTaskInfo -TaskName $Name -TaskPath '\' -ErrorAction Stop
                 $lastObservedResult = [long]$taskInfo.LastTaskResult
                 $lastObservedRunTime = [string]$taskInfo.LastRunTime
             } catch {
@@ -4073,7 +4073,7 @@ function Wait-CycTaskStable {
         if ($task -and [string]$task.State -eq 'Running') {
             if (-not $runningSince) { $runningSince = [DateTime]::UtcNow }
             if (([DateTime]::UtcNow - $runningSince).TotalSeconds -ge $StableSeconds) {
-                $taskInfo = Get-ScheduledTaskInfo -TaskName $Name -ErrorAction Stop
+                $taskInfo = Get-ScheduledTaskInfo -TaskName $Name -TaskPath '\' -ErrorAction Stop
                 $lastResult = [long]$taskInfo.LastTaskResult
                 if ($lastResult -notin @(0, 267009)) {
                     throw "Scheduled Task reported failure while running: $Name (result=$lastResult, state=$lastObservedState, lastRun=$lastObservedRunTime, process=$lastObservedProcess, action=$lastObservedAction)"
@@ -5865,13 +5865,13 @@ function Invoke-InstallOrRepairCore {
             -AgentsResult $agentsResult `
             -TlsIdentityResult $tlsIdentityResult
         if ($script:ProfileMatrixTaskGate -eq 'none') {
-            Start-ScheduledTask -TaskName $script:ControllerTaskName
+            Start-ScheduledTask -TaskName $script:ControllerTaskName -TaskPath '\'
             Wait-CycTaskStable -Name $script:ControllerTaskName -StableSeconds 2
             Wait-CycControllerReady
             Wait-CycManagedWorkerListenerReady -ManagedWorker $Plan.managedWorker
             Wait-CycTaskStable -Name $script:ControllerTaskName -StableSeconds 1
             if ($Plan.tasks[1].enabled) {
-                Start-ScheduledTask -TaskName $script:WorkerTaskName
+                Start-ScheduledTask -TaskName $script:WorkerTaskName -TaskPath '\'
                 Wait-CycTaskStable -Name $script:WorkerTaskName -StableSeconds 3
                 Test-CycWorkerStatus -Action $Plan.tasks[1].action -Config $Plan.workerConfig
                 Wait-CycTaskStable -Name $script:WorkerTaskName -StableSeconds 1

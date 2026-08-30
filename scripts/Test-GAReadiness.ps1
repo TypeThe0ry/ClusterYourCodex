@@ -140,6 +140,41 @@ function Assert-GaExternalEvidence {
     return $node
 }
 
+$GaEvidenceCoreTopLevelNames = @(
+    'schemaVersion',
+    'status',
+    'productVersion',
+    'sourceTag',
+    'sourceCommit',
+    'issue2',
+    'issue3',
+    'issue5',
+    'windowsCleanVm',
+    'macosLaunchAgent',
+    'windowsAuthenticode',
+    'artifactVerification'
+)
+
+function Assert-GaEvidenceHostRecordSet {
+    param(
+        [Parameter(Mandatory = $true)][object]$Evidence,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit
+    )
+
+    # Keep the evidence schema closed for metadata while allowing a future
+    # external-host record to be added only when it follows the same identity
+    # contract. This makes the documentation's "each other host record"
+    # requirement executable instead of relying on three hard-coded paths.
+    foreach ($property in @($Evidence.PSObject.Properties)) {
+        if ($property.Name -in $GaEvidenceCoreTopLevelNames) {
+            continue
+        }
+        Assert-GaCondition ($property.Name -match '^[A-Za-z][A-Za-z0-9_-]{0,63}$') "external GA evidence has an invalid top-level record name '$($property.Name)'"
+        Assert-GaCondition (($property.Value -is [pscustomobject]) -and -not ($property.Value -is [System.Array])) "external GA evidence host record '$($property.Name)' must be a JSON object"
+        [void](Assert-GaExternalEvidence -Evidence $Evidence -Path $property.Name -Description "external GA evidence host record '$($property.Name)'" -ExpectedCommit $ExpectedCommit)
+    }
+}
+
 $GaIssue2GateNames = @(
     'tauriDesktopHostTray',
     'rendererNativeControllerProxy',
@@ -288,8 +323,171 @@ function Assert-GaIssueEvidence {
     return $node
 }
 
+function Get-GaYamlLines {
+    param([Parameter(Mandatory = $true)][string]$Text)
+
+    $lines = New-Object System.Collections.Generic.List[object]
+    $rawLines = $Text -split '\r?\n'
+    for ($index = 0; $index -lt $rawLines.Count; $index++) {
+        $raw = [string]$rawLines[$index]
+        if ($raw -match '^\s*$' -or $raw -match '^\s*#') {
+            continue
+        }
+        Assert-GaCondition ($raw -notmatch "`t") "GA workflow line $($index + 1) must use spaces, not tabs"
+        $indent = $raw.Length - $raw.TrimStart(' ').Length
+        [void]$lines.Add([pscustomobject]@{
+                Index = $index
+                Indent = $indent
+                Content = $raw.Substring($indent)
+                Raw = $raw
+            })
+    }
+    return $lines.ToArray()
+}
+
+function Get-GaYamlSection {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Lines,
+        [Parameter(Mandatory = $true)][int]$Indent,
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $headerPattern = '^' + [regex]::Escape($Key) + '\s*:\s*(?:#.*)?$'
+    $headers = @($Lines | Where-Object {
+            $_.Indent -eq $Indent -and $_.Content -match $headerPattern
+        })
+    Assert-GaCondition ($headers.Count -eq 1) "$Description must contain exactly one '${Key}:' mapping at indent $Indent (observed $($headers.Count))"
+    $header = $headers[0]
+    $next = @($Lines | Where-Object {
+            $_.Index -gt $header.Index -and $_.Indent -le $Indent
+        } | Select-Object -First 1)
+    $endIndex = if ($next.Count -eq 0) { [int]::MaxValue } else { [int]$next[0].Index }
+    return [pscustomobject]@{
+        Header = $header
+        Lines = @($Lines | Where-Object {
+                $_.Index -gt $header.Index -and $_.Index -lt $endIndex
+            })
+        EndIndex = $endIndex
+    }
+}
+
+function Assert-GaYamlScalar {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Lines,
+        [Parameter(Mandatory = $true)][int]$Indent,
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $true)][string]$Expected,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $pattern = '^' + [regex]::Escape($Key) + '\s*:\s*(?<value>.*?)\s*$'
+    $matches = @()
+    foreach ($line in $Lines) {
+        if ($line.Indent -ne $Indent) {
+            continue
+        }
+        $match = [regex]::Match($line.Content, $pattern)
+        if ($match.Success) {
+            $matches += [pscustomobject]@{ Value = [string]$match.Groups['value'].Value; Line = $line }
+        }
+    }
+    Assert-GaCondition ($matches.Count -eq 1) "$Description must contain exactly one '${Key}:' scalar at indent $Indent (observed $($matches.Count))"
+    Assert-GaCondition ($matches[0].Value.Equals($Expected, [System.StringComparison]::Ordinal)) "$Description.$Key must equal '$Expected' (observed '$($matches[0].Value)')"
+}
+
+function Assert-GaWorkflowSemanticContract {
+    param([Parameter(Mandatory = $true)][string]$Workflow)
+
+    $lines = @(Get-GaYamlLines -Text $Workflow)
+    $on = Get-GaYamlSection -Lines $lines -Indent 0 -Key 'on' -Description 'GA workflow trigger'
+    $triggerHeaders = @($on.Lines | Where-Object {
+            $_.Indent -eq 2 -and $_.Content -match '^([A-Za-z0-9_-]+)\s*:'
+        })
+    Assert-GaCondition ($triggerHeaders.Count -eq 1 -and $triggerHeaders[0].Content -match '^workflow_dispatch\s*:') 'GA workflow must expose exactly one workflow_dispatch trigger'
+    Assert-GaCondition (@($on.Lines | Where-Object {
+                $_.Indent -eq 2 -and $_.Content -match '^push\s*:'
+            }).Count -eq 0) 'GA workflow must not define a push trigger in any YAML form'
+
+    $dispatch = Get-GaYamlSection -Lines $on.Lines -Indent 2 -Key 'workflow_dispatch' -Description 'GA workflow trigger'
+    $inputs = Get-GaYamlSection -Lines $dispatch.Lines -Indent 4 -Key 'inputs' -Description 'GA workflow dispatch inputs'
+    $expectedInputs = @(
+        'source_tag',
+        'evidence_url',
+        'evidence_sha256',
+        'stable_assets_url',
+        'stable_assets_sha256',
+        'attestation_signer_repo',
+        'attestation_signer_workflow',
+        'attestation_cert_identity',
+        'attestation_signer_digest'
+    )
+    $inputHeaders = @($inputs.Lines | Where-Object {
+            $_.Indent -eq 6 -and $_.Content -match '^([A-Za-z0-9_-]+)\s*:'
+        })
+    $actualInputs = @($inputHeaders | ForEach-Object {
+            ([regex]::Match($_.Content, '^([A-Za-z0-9_-]+)\s*:')).Groups[1].Value
+        })
+    Assert-GaCondition ($actualInputs.Count -eq $expectedInputs.Count -and
+        @($actualInputs | Where-Object { $_ -notin $expectedInputs }).Count -eq 0 -and
+        @($expectedInputs | Where-Object { $_ -notin $actualInputs }).Count -eq 0) 'GA workflow dispatch inputs must exactly match the reviewed stable gate contract'
+    foreach ($inputName in $expectedInputs) {
+        $inputSection = Get-GaYamlSection -Lines $inputs.Lines -Indent 6 -Key $inputName -Description 'GA workflow dispatch inputs'
+        Assert-GaYamlScalar -Lines $inputSection.Lines -Indent 8 -Key 'required' -Expected 'true' -Description "GA workflow input $inputName"
+        Assert-GaYamlScalar -Lines $inputSection.Lines -Indent 8 -Key 'type' -Expected 'string' -Description "GA workflow input $inputName"
+    }
+
+    $jobs = Get-GaYamlSection -Lines $lines -Indent 0 -Key 'jobs' -Description 'GA workflow jobs'
+    $jobHeaders = @($jobs.Lines | Where-Object {
+            $_.Indent -eq 2 -and $_.Content -match '^([A-Za-z0-9_-]+)\s*:'
+        })
+    $jobNames = @($jobHeaders | ForEach-Object {
+            ([regex]::Match($_.Content, '^([A-Za-z0-9_-]+)\s*:')).Groups[1].Value
+        })
+    Assert-GaCondition ($jobNames.Count -eq 2 -and $jobNames -contains 'ga-readiness' -and $jobNames -contains 'stable-publisher') 'GA workflow must contain exactly ga-readiness and stable-publisher jobs'
+
+    $readiness = Get-GaYamlSection -Lines $jobs.Lines -Indent 2 -Key 'ga-readiness' -Description 'GA readiness job'
+    Assert-GaYamlScalar -Lines $readiness.Lines -Indent 4 -Key 'runs-on' -Expected 'ubuntu-latest' -Description 'GA readiness job'
+    Assert-GaYamlScalar -Lines $readiness.Lines -Indent 4 -Key 'environment' -Expected 'production' -Description 'GA readiness job'
+    $readinessPermissions = Get-GaYamlSection -Lines $readiness.Lines -Indent 4 -Key 'permissions' -Description 'GA readiness job permissions'
+    Assert-GaYamlScalar -Lines $readinessPermissions.Lines -Indent 6 -Key 'contents' -Expected 'read' -Description 'GA readiness job permissions'
+    Assert-GaYamlScalar -Lines $readinessPermissions.Lines -Indent 6 -Key 'issues' -Expected 'read' -Description 'GA readiness job permissions'
+    Assert-GaCondition (@($readinessPermissions.Lines | Where-Object { $_.Indent -eq 6 -and $_.Content -match '^([A-Za-z0-9_-]+)\s*:' }).Count -eq 2) 'GA readiness job permissions must not grant extra scopes'
+
+    $publisher = Get-GaYamlSection -Lines $jobs.Lines -Indent 2 -Key 'stable-publisher' -Description 'stable publisher job'
+    Assert-GaYamlScalar -Lines $publisher.Lines -Indent 4 -Key 'if' -Expected "needs.ga-readiness.result == 'success'" -Description 'stable publisher job'
+    Assert-GaYamlScalar -Lines $publisher.Lines -Indent 4 -Key 'needs' -Expected '[ga-readiness]' -Description 'stable publisher job'
+    Assert-GaYamlScalar -Lines $publisher.Lines -Indent 4 -Key 'runs-on' -Expected 'ubuntu-latest' -Description 'stable publisher job'
+    Assert-GaYamlScalar -Lines $publisher.Lines -Indent 4 -Key 'environment' -Expected 'production' -Description 'stable publisher job'
+    $publisherPermissions = Get-GaYamlSection -Lines $publisher.Lines -Indent 4 -Key 'permissions' -Description 'stable publisher job permissions'
+    foreach ($permission in @(@('contents', 'write'), @('issues', 'read'), @('attestations', 'read'))) {
+        Assert-GaYamlScalar -Lines $publisherPermissions.Lines -Indent 6 -Key $permission[0] -Expected $permission[1] -Description 'stable publisher job permissions'
+    }
+    Assert-GaCondition (@($publisherPermissions.Lines | Where-Object { $_.Indent -eq 6 -and $_.Content -match '^([A-Za-z0-9_-]+)\s*:' }).Count -eq 3) 'stable publisher job permissions must not grant extra scopes'
+
+    $readinessText = ($readiness.Lines | ForEach-Object { $_.Raw }) -join "`n"
+    $publisherText = ($publisher.Lines | ForEach-Object { $_.Raw }) -join "`n"
+    Assert-GaCondition ($readinessText -notmatch '(?m)^\s*gh release create\b') 'GA readiness job must not publish a release'
+    Assert-GaCondition ($publisherText -match 'gh release create[\s\S]+--verify-tag') 'stable publisher must create only the exact verified tag'
+    Assert-GaCondition ($publisherText -match 'isPrerelease == false[\s\S]+isDraft == false') 'stable publisher must verify a public non-prerelease release after upload'
+}
+
 function Assert-GaWorkflowContract {
-    $workflow = Get-GaText -RelativePath '.github/workflows/ga.yml'
+    param([string]$WorkflowText)
+
+    $workflow = if ([string]::IsNullOrWhiteSpace($WorkflowText)) {
+        Get-GaText -RelativePath '.github/workflows/ga.yml'
+    } else {
+        $WorkflowText
+    }
+    # Contract fixtures intentionally pass workflow text without copying every
+    # repository helper.  Require the validator file for the real repository
+    # contract, while keeping text-only negative fixtures focused on the
+    # workflow mutation they are exercising.
+    if ([string]::IsNullOrWhiteSpace($WorkflowText)) {
+        $externalUrlValidatorPath = Join-Path $RepositoryRoot 'scripts/Test-ExternalHttpsUrl.py'
+        Assert-GaCondition (Test-Path -LiteralPath $externalUrlValidatorPath -PathType Leaf) 'external HTTPS URL validator exists'
+    }
     foreach ($needle in @(
         'workflow_dispatch:',
         'source_tag:',
@@ -379,6 +577,8 @@ function Assert-GaWorkflowContract {
         'tauriDesktopHostTray',
         'linuxSystemdUserServicePackage',
         'linuxDedicatedExecutionIdentity'
+        'Test-ExternalHttpsUrl.py'
+        '--max-redirs 0'
     )) {
         Assert-GaCondition $workflow.Contains($needle) "GA workflow contains '$needle'"
     }
@@ -388,6 +588,7 @@ function Assert-GaWorkflowContract {
     Assert-GaCondition ($workflow -match '(?m)^\s*required:\s*true\s*$') 'GA workflow has required manual inputs'
     Assert-GaCondition ($workflow -match 'gh release create[\s\S]+--verify-tag') 'GA workflow contains a protected stable publisher with exact-tag verification'
     Assert-GaCondition ($workflow -match 'isPrerelease == false[\s\S]+isDraft == false') 'GA workflow verifies the published release is stable and public'
+    Assert-GaWorkflowSemanticContract -Workflow $workflow
 }
 
 function Assert-GaIssueSnapshot {
@@ -538,6 +739,8 @@ if ($ContractOnly) {
     $versionCheckPath = Join-Path $RepositoryRoot 'scripts/Test-VersionConsistency.ps1'
     Assert-GaCondition (Test-Path -LiteralPath $versionCheckPath -PathType Leaf) 'version consistency gate exists'
     $versionOutput = @(& $versionCheckPath -RepositoryRoot $RepositoryRoot -SourceTag $ExpectedTag -SkipNegativeTests -Json)
+    $versionExitCode = $LASTEXITCODE
+    Assert-GaCondition ($versionExitCode -eq 0) "version consistency gate exited with code $versionExitCode"
     $versionResult = $versionOutput -join "`n" | ConvertFrom-Json
     [void](Assert-GaString -Object $versionResult -Path 'releaseChannel' -Expected 'stable' -Description 'stable version identity')
     [void](Assert-GaString -Object $versionResult -Path 'productVersion' -Expected $ExpectedTag.Substring(1) -Description 'stable version identity')
@@ -554,6 +757,7 @@ if ($ContractOnly) {
     [void](Assert-GaString -Object $evidence -Path 'sourceTag' -Expected $ExpectedTag -Description 'external GA evidence manifest')
     $evidenceCommit = [string](Get-GaProperty -Object $evidence -Path 'sourceCommit' -Description 'external GA evidence manifest')
     Assert-GaCondition ($evidenceCommit.Equals($ExpectedCommit, [System.StringComparison]::OrdinalIgnoreCase)) 'external GA evidence sourceCommit matches the reviewed stable source commit'
+    Assert-GaEvidenceHostRecordSet -Evidence $evidence -ExpectedCommit $ExpectedCommit
 
     $rawVerification = Get-GaJson -Path $RawLogVerificationPath -Description 'downloaded GA raw-log verification'
     [void](Assert-GaString -Object $rawVerification -Path 'schemaVersion' -Expected 'cyc.dev/ga-raw-log-verification/v1' -Description 'downloaded GA raw-log verification')

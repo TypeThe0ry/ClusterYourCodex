@@ -9,6 +9,8 @@ dist/
 apps/desktop/src-tauri/gen/
 .edge-smoke-profile/
 *.tsbuildinfo
+__pycache__/
+*.py[cod]
 vite.config.js
 vite.config.d.ts
 ui-smoke.png

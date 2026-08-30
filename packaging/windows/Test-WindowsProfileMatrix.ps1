@@ -398,6 +398,7 @@ function Write-ProfileMatrixAtomicJson {
     $utf8 = [System.Text.UTF8Encoding]::new($false)
     $bytes = $utf8.GetBytes(($Value | ConvertTo-Json -Depth 12))
     $stream = $null
+    $backupCreated = $false
     $backupPrepared = $false
     $committed = $false
     try {
@@ -427,6 +428,7 @@ function Write-ProfileMatrixAtomicJson {
                 1,
                 [System.IO.FileOptions]::WriteThrough
             )
+            $backupCreated = $true
             try { $backupStream.Flush($true) } finally { $backupStream.Dispose() }
             $backupPrepared = $true
             [System.IO.File]::Replace($temporary, $Path, $backup, $true)
@@ -442,7 +444,7 @@ function Write-ProfileMatrixAtomicJson {
             }
         } catch { }
         try {
-            if (($committed -or $backupPrepared) -and (Test-Path -LiteralPath $backup)) {
+            if (($committed -or $backupCreated -or $backupPrepared) -and (Test-Path -LiteralPath $backup)) {
                 Remove-Item -LiteralPath $backup -Force
             }
         } catch { }
@@ -821,15 +823,23 @@ function Invoke-ProfileMatrixTaskHelperRequest {
         error = $errorMessage
         completedAtUtc = [DateTime]::UtcNow.ToString('o')
     }
+    $requestRemoved = $false
     try {
         $history = @()
         if (Test-Path -LiteralPath $EvidencePath -PathType Leaf) {
             try { $history = @(Get-Content -LiteralPath $EvidencePath -Raw | ConvertFrom-Json) } catch { $history = @() }
         }
         Write-ProfileMatrixAtomicJson -Path $EvidencePath -Value @($history + $record)
+        # Consume the request before publishing the response. The child may
+        # observe the response and immediately publish its next request; an
+        # unconditional finally-time delete would then remove that new request.
+        Remove-Item -LiteralPath $RequestPath -Force -ErrorAction Stop
+        $requestRemoved = $true
         Write-ProfileMatrixAtomicJson -Path $ResponsePath -Value $record
     } finally {
-        Remove-Item -LiteralPath $RequestPath -Force -ErrorAction SilentlyContinue
+        if (-not $requestRemoved) {
+            Remove-Item -LiteralPath $RequestPath -Force -ErrorAction SilentlyContinue
+        }
     }
     return $true
 }
@@ -982,44 +992,53 @@ if (-not $CurrentUserOnly) {
     Assert-ProfileMatrix $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator) 'profile matrix requires an elevated controller'
 }
 
-$package = Resolve-ProfileMatrixPath $PackageRoot
-Assert-ProfileMatrix (Test-Path -LiteralPath $package -PathType Container) "package root exists: $package"
-Test-ProfileMatrixReparseFree -Root $package
-$work = Resolve-ProfileMatrixPath $WorkRoot
-$workExistedAtStart = Test-Path -LiteralPath $work
-if ($workExistedAtStart -and -not $KeepWorkRoot) {
-    throw "work root already exists; choose a fresh path or pass -KeepWorkRoot: $work"
-}
-if ($workExistedAtStart) { Test-ProfileMatrixReparseFree -Root $work }
-[void](New-Item -ItemType Directory -Path $work -Force)
-Add-ProfileMatrixUsersModify -Path $work
-$stage = Join-Path $work 'package'
-if (Test-Path -LiteralPath $stage) {
-    Test-ProfileMatrixReparseFree -Root $stage
-    Remove-Item -LiteralPath $stage -Recurse -Force
-}
-[void](New-Item -ItemType Directory -Path $stage -Force)
-Add-ProfileMatrixUsersModify -Path $stage
-& (Join-Path $env:SystemRoot 'System32\robocopy.exe') $package $stage /E /COPY:DAT /DCOPY:DAT /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP *> (Join-Path $work 'package-copy.log')
-$copyExit = $LASTEXITCODE
-if ($copyExit -gt 7) { throw "profile matrix package staging failed with robocopy exit $copyExit" }
-Test-ProfileMatrixReparseFree -Root $stage
-
-$windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$child = Join-Path $PSScriptRoot 'Test-WindowsProfileMatrixChild.ps1'
-Assert-ProfileMatrix (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf) 'Windows PowerShell 5.1 is installed'
-Assert-ProfileMatrix (Test-Path -LiteralPath $child -PathType Leaf) 'profile matrix child harness exists'
-$adminGroup = Get-ProfileMatrixAdminGroupName
 $cases = New-Object System.Collections.Generic.List[object]
 $startedAt = [DateTimeOffset]::UtcNow
+$package = $null
+$work = $null
+$stage = $null
+$workExistedAtStart = $false
+$result = $null
+$resultPath = $null
 $failure = $null
-$runCases = if ($CurrentUserOnly) {
-    @(Get-ProfileMatrixExpectedCurrentCase -RequestedCases $CaseName)
-} else {
-    @($CaseName)
-}
+$failureMessage = $null
 
 try {
+    $package = Resolve-ProfileMatrixPath $PackageRoot
+    Assert-ProfileMatrix (Test-Path -LiteralPath $package -PathType Container) "package root exists: $package"
+    Test-ProfileMatrixReparseFree -Root $package
+    $work = Resolve-ProfileMatrixPath $WorkRoot
+    $workExistedAtStart = Test-Path -LiteralPath $work
+    if ($workExistedAtStart -and -not $KeepWorkRoot) {
+        throw "work root already exists; choose a fresh path or pass -KeepWorkRoot: $work"
+    }
+    if ($workExistedAtStart) { Test-ProfileMatrixReparseFree -Root $work }
+    [void](New-Item -ItemType Directory -Path $work -Force)
+    Add-ProfileMatrixUsersModify -Path $work
+    $stage = Join-Path $work 'package'
+    if (Test-Path -LiteralPath $stage) {
+        Test-ProfileMatrixReparseFree -Root $stage
+        Remove-Item -LiteralPath $stage -Recurse -Force
+    }
+    [void](New-Item -ItemType Directory -Path $stage -Force)
+    Add-ProfileMatrixUsersModify -Path $stage
+    & (Join-Path $env:SystemRoot 'System32\robocopy.exe') $package $stage /E /COPY:DAT /DCOPY:DAT /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP *> (Join-Path $work 'package-copy.log')
+    $copyExit = $LASTEXITCODE
+    if ($copyExit -gt 7) { throw "profile matrix package staging failed with robocopy exit $copyExit" }
+    Test-ProfileMatrixReparseFree -Root $stage
+
+    $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $child = Join-Path $PSScriptRoot 'Test-WindowsProfileMatrixChild.ps1'
+    Assert-ProfileMatrix (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf) 'Windows PowerShell 5.1 is installed'
+    Assert-ProfileMatrix (Test-Path -LiteralPath $child -PathType Leaf) 'profile matrix child harness exists'
+    $adminGroup = Get-ProfileMatrixAdminGroupName
+    $runCases = if ($CurrentUserOnly) {
+        @(Get-ProfileMatrixExpectedCurrentCase -RequestedCases $CaseName)
+    } else {
+        @($CaseName)
+    }
+
+    try {
     foreach ($case in $runCases) {
         $caseId = [Guid]::NewGuid().ToString('N')
         $shortId = $caseId.Substring(0, 6)
@@ -1200,27 +1219,107 @@ try {
         if ($null -ne $caseFailureRecord) { throw $caseFailureRecord }
     }
 } catch {
-    $failure = $_
+    if ($null -eq $failure) {
+        $failure = $_
+        $failureMessage = [string]$_.Exception.Message
+    } elseif ([string]::IsNullOrWhiteSpace($failureMessage)) {
+        $failureMessage = [string]$failure.Exception.Message
+    }
 }
 
-$endedAt = [DateTimeOffset]::UtcNow
-$result = [ordered]@{
-    schemaVersion = 'cyc.dev/windows-profile-matrix/v1'
-    status = if ($null -eq $failure) { 'passed' } else { 'failed' }
-    packageRoot = $package
-    stagedPackageRoot = $stage
-    workRoot = $work
-    startedAt = $startedAt.ToString('o')
-    endedAt = $endedAt.ToString('o')
-    cases = $cases.ToArray()
-    error = if ($null -eq $failure) { $null } else { [string]$failure.Exception.Message }
+try {
+    $endedAt = [DateTimeOffset]::UtcNow
+    $result = [ordered]@{
+        schemaVersion = 'cyc.dev/windows-profile-matrix/v1'
+        status = if ($null -eq $failure) { 'passed' } else { 'failed' }
+        packageRoot = $package
+        stagedPackageRoot = $stage
+        workRoot = $work
+        startedAt = $startedAt.ToString('o')
+        endedAt = $endedAt.ToString('o')
+        cases = $cases.ToArray()
+        error = if ($null -eq $failure) { $null } else { $failureMessage }
+    }
+    if ($null -ne $work -and (Test-Path -LiteralPath $work -PathType Container)) {
+        $resultPath = Join-Path $work 'profile-matrix.json'
+        $result | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $resultPath -Encoding UTF8
+    }
+} catch {
+    if ($null -eq $failure) {
+        $failure = $_
+        $failureMessage = [string]$_.Exception.Message
+    } else {
+        $failureMessage = "$failureMessage; result publication error: $([string]$_.Exception.Message)"
+    }
 }
-$resultPath = Join-Path $work 'profile-matrix.json'
-$result | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $resultPath -Encoding UTF8
-$result | ConvertTo-Json -Depth 12 -Compress
 
-if ($null -ne $failure) { throw $failure }
-if (-not $KeepWorkRoot -and (Test-Path -LiteralPath $work)) {
-    Test-ProfileMatrixReparseFree -Root $work
-    Remove-Item -LiteralPath $work -Recurse -Force
+} catch {
+    if ($null -eq $failure) {
+        $failure = $_
+        $failureMessage = [string]$_.Exception.Message
+    } elseif ([string]::IsNullOrWhiteSpace($failureMessage)) {
+        $failureMessage = [string]$failure.Exception.Message
+    } else {
+        $failureMessage += "; profile matrix orchestration error: $([string]$_.Exception.Message)"
+    }
+} finally {
+    # WorkRoot belongs to this controller only when it was absent before the
+    # run. Keep cleanup in an outer finally so setup, case execution, and
+    # result publication failures cannot bypass it. Never replace the primary
+    # error with a later cleanup failure.
+    if (-not $KeepWorkRoot -and -not $workExistedAtStart -and
+        $null -ne $work -and -not [string]::IsNullOrWhiteSpace([string]$work) -and
+        (Test-Path -LiteralPath $work)) {
+        try {
+            Test-ProfileMatrixReparseFree -Root $work
+            Remove-Item -LiteralPath $work -Recurse -Force
+        } catch {
+            $cleanupMessage = [string]$_.Exception.Message
+            if ($null -eq $failure) {
+                $failure = $_
+                $failureMessage = $cleanupMessage
+            } else {
+                if ([string]::IsNullOrWhiteSpace($failureMessage)) {
+                    $failureMessage = [string]$failure.Exception.Message
+                }
+                $failureMessage += "; profile matrix work-root cleanup error: $cleanupMessage"
+            }
+        }
+    }
+}
+
+if ($null -ne $result) {
+    $result.status = if ($null -eq $failure) { 'passed' } else { 'failed' }
+    $result.error = if ($null -eq $failure) { $null } else { $failureMessage }
+    if ($null -ne $work -and (Test-Path -LiteralPath $work -PathType Container)) {
+        try {
+            if ([string]::IsNullOrWhiteSpace([string]$resultPath)) {
+                $resultPath = Join-Path $work 'profile-matrix.json'
+            }
+            $result | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $resultPath -Encoding UTF8
+        } catch {
+            $message = [string]$_.Exception.Message
+            if ($null -eq $failure) {
+                $failure = $_
+                $failureMessage = "result publication error: $message"
+                $result.status = 'failed'
+                $result.error = $failureMessage
+            } else {
+                if ([string]::IsNullOrWhiteSpace($failureMessage)) {
+                    $failureMessage = [string]$failure.Exception.Message
+                }
+                $failureMessage += "; result publication error: $message"
+                $result.status = 'failed'
+                $result.error = $failureMessage
+            }
+        }
+    }
+    $result | ConvertTo-Json -Depth 12 -Compress
+}
+
+if ($null -ne $failure) {
+    if ([string]::IsNullOrWhiteSpace($failureMessage)) {
+        throw $failure
+    }
+    throw $failureMessage
 }

@@ -7,6 +7,25 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.41] - 2026-08-31
+
+### Fixed
+
+- Hardened the protected GA workflow with an indentation-aware semantic
+  contract, exact manual inputs and job dependencies, explicit helper exit-code
+  checks, globally routable HTTPS endpoint validation, redirect rejection, and
+  stable-bundle ZIP path normalization.
+- Made retained GA raw-log materialization fail closed against existing files,
+  reparse points, path traversal, private/loopback hosts, and partial writes by
+  using fresh same-directory files and atomic publication.
+- Completed Windows profile-matrix lifecycle hardening: parent-owned task
+  registration consumes IPC requests before publishing responses, orphan
+  backups are cleaned, newly created work roots are removed on every failure
+  path, and scheduled-task principals/triggers are bound to the expected SID
+  and root task path.
+- Kept every tagged build public and prerelease; stable publication remains
+  blocked on the independent external GA evidence and issue-completion gates.
+
 ## [0.1.0-preview.40] - 2026-08-31
 
 ### Fixed
@@ -497,7 +516,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.40...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.41...HEAD
+[0.1.0-preview.41]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.40...v0.1.0-preview.41
 [0.1.0-preview.40]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.39...v0.1.0-preview.40
 [0.1.0-preview.39]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.38...v0.1.0-preview.39
 [0.1.0-preview.38]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.37...v0.1.0-preview.38

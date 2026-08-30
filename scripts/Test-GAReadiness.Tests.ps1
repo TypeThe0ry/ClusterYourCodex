@@ -138,6 +138,8 @@ Describe 'GA evidence issue acceptance contract' {
         $workflowSource | Should Match '--signer-digest'
         ([regex]::Matches($workflowSource, '-RawLogVerificationPath')).Count | Should Be 2
         $workflowSource | Should Match 'resultLines = @\(& ./scripts/Test-GAReadiness\.ps1'
+        $workflowSource | Should Match 'Test-ExternalHttpsUrl\.py'
+        $workflowSource | Should Match '--max-redirs 0'
         $workflowSource | Should Match 'ConvertFrom-Json'
         $workflowSource | Should Match 'readinessDirectory = Join-Path \$env:RUNNER_TEMP'
         $workflowSource | Should Not Match 'outputDirectory = Join-Path \$env:RUNNER_TEMP ''cyc-ga-readiness\\raw-logs'''
@@ -149,12 +151,73 @@ Describe 'GA evidence issue acceptance contract' {
         $rawLogSource | Should Match 'MaximumRawLogBytes'
         $rawLogSource | Should Match 'Get-FileHash -Algorithm SHA256'
         $rawLogSource | Should Match '\$actualHash -ceq \$expectedHash'
+        $rawLogSource | Should Match '\[IO\.FileMode\]::CreateNew'
+        $rawLogSource | Should Match 'Write-RawLogAtomicText'
+        $rawLogSource | Should Match 'refusing to overwrite an existing raw log destination'
+        $rawLogSource | Should Match 'raw log destination is not a reparse point or directory'
+        $rawLogSource | Should Match 'Assert-RawLogExternalHost'
+        $rawLogSource | Should Match 'globally routable addresses'
+        $rawLogSource | Should Match 'raw log URL must not contain a fragment'
         $rawLogSource | Should Match 'issue2'
         $rawLogSource | Should Match 'issue3'
         $rawLogSource | Should Match 'issue5'
         $readinessSource | Should Match 'rawVerificationRootPrefix'
         $readinessSource | Should Match 'downloaded raw-log URL matches'
         $readinessSource | Should Match 'downloaded GA raw-log file hash matches'
+    }
+
+    It 'keeps the workflow contract semantic and checks helper exit codes' {
+        $workflowSource | Should Match 'readinessExitCode = \$LASTEXITCODE'
+        $readinessSource | Should Match 'versionExitCode = \$LASTEXITCODE'
+        $readinessSource | Should Match 'Assert-GaWorkflowSemanticContract'
+
+        $missingDispatch = $workflowSource -replace '(?m)^  workflow_dispatch:\s*$', '  push: {}'
+        Assert-TestThrows { Assert-GaWorkflowContract -WorkflowText $missingDispatch }
+
+        $optionalInput = [regex]::Replace($workflowSource, '(?m)^        required:\s*true\s*$', '        required: false', 1)
+        Assert-TestThrows { Assert-GaWorkflowContract -WorkflowText $optionalInput }
+
+        $wrongPublisherDependency = $workflowSource -replace '(?m)^    if: needs\.ga-readiness\.result == ''success''\s*$', '    if: always()'
+        Assert-TestThrows { Assert-GaWorkflowContract -WorkflowText $wrongPublisherDependency }
+    }
+
+    It 'ignores whitespace-only and indented comment YAML lines' {
+        $lines = @(Get-GaYamlLines -Text "  # ignored comment`n   `n  key: value`n")
+        $lines.Count | Should Be 1
+        $lines[0].Content | Should Be 'key: value'
+    }
+
+    It 'rejects ambiguous stable bundle ZIP path spellings' {
+        $workflowSource | Should Match 'path_name = name\[:-1\]'
+        $workflowSource | Should Match 'any\(part in'
+        $workflowSource | Should Match 'for part in parts'
+        $workflowSource | Should Match "normalized = '/'\.join\(lowered_parts\)"
+    }
+
+    It 'validates every additional external host record and rejects unknown metadata' {
+        $base = [ordered]@{
+            schemaVersion = 'cyc.dev/ga-evidence/v1'
+            status = 'passed'
+            productVersion = '0.1.0'
+            sourceTag = 'v0.1.0'
+            sourceCommit = $expectedCommitForTest
+            issue2 = [pscustomobject]@{}
+            issue3 = [pscustomobject]@{}
+            issue5 = [pscustomobject]@{}
+            windowsCleanVm = [pscustomobject]@{}
+            macosLaunchAgent = [pscustomobject]@{}
+            windowsAuthenticode = [pscustomobject]@{}
+            artifactVerification = [pscustomobject]@{}
+            externalBuilder = New-TestIssueEvidence -Provider 'external-builder' -HostType 'linux-native'
+        }
+        $evidence = (($base | ConvertTo-Json -Depth 12) | ConvertFrom-Json)
+        Assert-GaEvidenceHostRecordSet -Evidence $evidence -ExpectedCommit $expectedCommitForTest
+
+        $withUnknown = [ordered]@{}
+        foreach ($entry in $base.GetEnumerator()) { $withUnknown[$entry.Key] = $entry.Value }
+        $withUnknown.unexpectedMetadata = 'not-a-host-record'
+        $evidence = (($withUnknown | ConvertTo-Json -Depth 12) | ConvertFrom-Json)
+        Assert-TestThrows { Assert-GaEvidenceHostRecordSet -Evidence $evidence -ExpectedCommit $expectedCommitForTest }
     }
 
     It 'accepts a complete source-bound issue 3 evidence record' {

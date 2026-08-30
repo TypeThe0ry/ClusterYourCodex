@@ -123,12 +123,13 @@ jobs:
             https://*) ;;
             *) echo "evidence_url must use HTTPS" >&2; exit 1 ;;
           esac
+          python3 ./scripts/Test-ExternalHttpsUrl.py "$CYC_GA_EVIDENCE_URL"
           if [[ ! "$CYC_GA_EVIDENCE_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
             echo "evidence_sha256 must be a 64-character SHA-256 digest" >&2
             exit 1
           fi
           evidence_path="$RUNNER_TEMP/cyc-ga-evidence.json"
-          curl --fail --location --proto '=https' --proto-redir '=https' \
+          curl --fail --location --max-redirs 0 --proto '=https' --proto-redir '=https' \
             --tlsv1.2 --retry 2 --connect-timeout 20 --max-time 300 \
             --max-filesize 67108864 --output "$evidence_path" "$CYC_GA_EVIDENCE_URL"
           if [[ "$(stat -c '%s' "$evidence_path")" -gt 67108864 ]]; then
@@ -249,6 +250,10 @@ jobs:
               -IssueSnapshotPath $env:CYC_GA_ISSUE_SNAPSHOT_PATH `
               -ControlsPath $env:CYC_GA_CONTROLS_PATH `
               -Json)
+            $readinessExitCode = $LASTEXITCODE
+            if ($readinessExitCode -ne 0) {
+              throw "GA readiness gate process exited with code $readinessExitCode."
+            }
             if ($resultLines.Count -eq 0) {
               throw 'GA readiness gate produced no JSON result.'
             }
@@ -332,6 +337,7 @@ jobs:
             https://*) ;;
             *) echo "stable_assets_url must use HTTPS" >&2; exit 1 ;;
           esac
+          python3 ./scripts/Test-ExternalHttpsUrl.py "$CYC_STABLE_ASSET_URL"
           if [[ ! "$CYC_STABLE_ASSET_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
             echo "stable_assets_sha256 must be a 64-character SHA-256 digest" >&2
             exit 1
@@ -341,7 +347,7 @@ jobs:
           max_entry_uncompressed_bytes=2147483648
           max_total_uncompressed_bytes=8589934592
           bundle="$RUNNER_TEMP/clusteryourcodex-stable-assets.zip"
-          curl --fail --location --proto '=https' --proto-redir '=https' \
+          curl --fail --location --max-redirs 0 --proto '=https' --proto-redir '=https' \
             --tlsv1.2 --retry 2 --connect-timeout 20 --max-time 300 \
             --max-filesize "$max_bundle_bytes" --output "$bundle" "$CYC_STABLE_ASSET_URL"
           actual_hash="$(sha256sum "$bundle" | awk '{print tolower($1)}')"
@@ -375,10 +381,20 @@ jobs:
               seen_names = set()
               for entry in entries:
                   name = entry.filename.replace('\\', '/')
-                  parts = [part for part in name.split('/') if part]
-                  if not parts or name.startswith('/') or (len(name) >= 2 and name[1] == ':') or '..' in parts:
+                  # Normalize only the separator representation. Empty and
+                  # current-directory components are rejected instead of
+                  # silently collapsing them, so the duplicate key matches
+                  # the path that a downstream extractor will materialize.
+                  path_name = name[:-1] if name.endswith('/') else name
+                  parts = path_name.split('/') if path_name else []
+                  lowered_parts = [part.casefold() for part in parts]
+                  namespace_parts = {'globalroot', 'device'}
+                  if (not parts or any(part in ('', '.') for part in parts) or
+                      '..' in parts or name.startswith('/') or
+                      (len(name) >= 2 and name[1] == ':') or
+                      any(part in namespace_parts or part.startswith('volume{') for part in lowered_parts)):
                       raise SystemExit(f'unsafe stable bundle ZIP path: {entry.filename!r}')
-                  normalized = name.rstrip('/').casefold()
+                  normalized = '/'.join(lowered_parts)
                   if normalized in seen_names:
                       raise SystemExit(f'duplicate stable bundle ZIP path: {entry.filename!r}')
                   seen_names.add(normalized)

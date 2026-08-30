@@ -416,6 +416,7 @@ if (-not $SkipNegativeTests) {
             '.github/workflows/release.yml',
             '.github/workflows/ga.yml',
             'scripts/Test-GAReadiness.ps1',
+            'scripts/Test-ExternalHttpsUrl.py',
             'scripts/Test-GitHubActionPins.ps1'
         )) {
             $destination = Join-Path $fixture $relativePath

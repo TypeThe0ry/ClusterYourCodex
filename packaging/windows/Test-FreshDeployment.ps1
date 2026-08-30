@@ -365,20 +365,56 @@ function Normalize-FreshTaskLogonType {
     }
 }
 
+function ConvertTo-FreshSid {
+    param([Parameter(Mandatory = $true)][string]$Identity)
+
+    $value = $Identity.Trim()
+    if ($value -match '^S-\d-\d+(?:-\d+)+$') { return $value }
+    try {
+        return ([System.Security.Principal.NTAccount]::new($value)).Translate(
+            [System.Security.Principal.SecurityIdentifier]
+        ).Value
+    } catch {
+        throw "fresh deployment could not resolve task identity '$Identity' to a SID."
+    }
+}
+
 function Assert-FreshTaskPrincipal {
     param(
         [Parameter(Mandatory = $true)]$Task,
         [Parameter(Mandatory = $true)][string]$ExpectedLogonType,
-        [Parameter(Mandatory = $true)][string]$Label
+        [Parameter(Mandatory = $true)][string]$Label,
+        [string]$ExpectedSid
     )
+
+    if ([string]::IsNullOrWhiteSpace($ExpectedSid)) {
+        $ExpectedSid = [string]([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+    }
+    $ExpectedSid = ConvertTo-FreshSid -Identity $ExpectedSid
 
     $principalProperty = $Task.PSObject.Properties['Principal']
     Assert-FreshTest ($null -ne $principalProperty -and $null -ne $principalProperty.Value) "$Label exposes its task principal"
+    $principalUserProperty = $principalProperty.Value.PSObject.Properties['UserId']
+    Assert-FreshTest ($null -ne $principalUserProperty -and
+        -not [string]::IsNullOrWhiteSpace([string]$principalUserProperty.Value)) "$Label exposes its task principal identity"
+    $principalSid = ConvertTo-FreshSid -Identity ([string]$principalUserProperty.Value)
+    Assert-FreshTest ($principalSid -ceq $ExpectedSid) "$Label principal identity matches the current SID (expected=$ExpectedSid observed=$principalSid)"
     $logonProperty = $principalProperty.Value.PSObject.Properties['LogonType']
     Assert-FreshTest ($null -ne $logonProperty) "$Label exposes its task logon type"
     $rawLogonType = [string]$logonProperty.Value
     $observed = Normalize-FreshTaskLogonType -Value $rawLogonType
     Assert-FreshTest ($observed -ceq $ExpectedLogonType) "$Label uses the expected task logon type (expected=$ExpectedLogonType observed=$rawLogonType)"
+
+    $triggerSids = @(
+        foreach ($trigger in @($Task.Triggers)) {
+            $triggerUserProperty = $trigger.PSObject.Properties['UserId']
+            if ($null -ne $triggerUserProperty -and
+                -not [string]::IsNullOrWhiteSpace([string]$triggerUserProperty.Value)) {
+                ConvertTo-FreshSid -Identity ([string]$triggerUserProperty.Value)
+            }
+        }
+    )
+    Assert-FreshTest ($triggerSids.Count -eq 1 -and $triggerSids[0] -ceq $ExpectedSid) "$Label has exactly one logon trigger bound to the current SID (expected=$ExpectedSid observed=$($triggerSids -join ', '))"
     return $observed
 }
 
@@ -436,6 +472,7 @@ $dataRoot = Resolve-FreshPath (Join-Path $isolatedRoot 'data')
 $workerConfig = Resolve-FreshPath (Join-Path $dataRoot 'worker\config.json')
 $installedManifestPath = Join-Path $dataRoot '.installer\install-manifest.json'
 $isolatedRootExistedAtStart = Test-Path -LiteralPath $isolatedRoot
+$expectedTaskSid = [string]([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
 
 Assert-FreshTest (Test-Path -LiteralPath $package -PathType Container) "package root exists: $package"
 Assert-FreshTest (Test-Path -LiteralPath $payload -PathType Container) 'package payload exists'
@@ -526,6 +563,7 @@ try {
     $observedTaskLogonType = Assert-FreshTaskPrincipal `
         -Task $installedControllerTasks[0] `
         -ExpectedLogonType $expectedTaskLogonType `
+        -ExpectedSid $expectedTaskSid `
         -Label 'controller task'
     Assert-FreshTest ([string]$installedControllerTasks[0].TaskPath -eq '\') 'controller task is registered at the expected task path'
     $installedControllerActions = @($installedControllerTasks[0].Actions)
@@ -573,6 +611,7 @@ try {
     [void](Assert-FreshTaskPrincipal `
         -Task $repairedControllerTasks[0] `
         -ExpectedLogonType $expectedTaskLogonType `
+        -ExpectedSid $expectedTaskSid `
         -Label 'repaired controller task')
     $repairedCliSha256 = (Get-FileHash -LiteralPath $installedCliPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-FreshTest ($repairedCliSha256 -ceq $installedCliSha256) 'repair restores the exact packaged CLI bytes'
