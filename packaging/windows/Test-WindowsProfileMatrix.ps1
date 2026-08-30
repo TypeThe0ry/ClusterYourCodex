@@ -253,6 +253,10 @@ function Test-ProfileMatrixKnownCompatibilityJunction {
     $knownTargets = @{
         'Application Data' = 'AppData\Roaming'
         'Cookies' = 'AppData\Local\Microsoft\Windows\INetCookies'
+        # Windows 11 may materialize the legacy History alias under Local.
+        # It is an OS-created compatibility junction, not package content;
+        # bind it to the exact same-profile destination before cleanup.
+        'AppData\Local\History' = 'AppData\Local\Microsoft\Windows\History'
         'Local Settings' = 'AppData\Local'
         'My Documents' = 'Documents'
         'NetHood' = 'AppData\Roaming\Microsoft\Windows\Network Shortcuts'

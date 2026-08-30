@@ -4196,7 +4196,8 @@ exit 0
     Assert-True ($profileMatrixSource -match "'Application Data'" -and $profileMatrixSource -match "'Documents\\My Music'" -and
         $profileMatrixSource -match "'AppData\\Local\\Application Data'" -and
         $profileMatrixSource -match "'AppData\\LocalLow\\Application Data'" -and
-        $profileMatrixSource -match "'AppData\\Roaming\\Application Data'") 'profile matrix names the legacy, nested local, roaming, and Documents compatibility junction allow-list explicitly'
+        $profileMatrixSource -match "'AppData\\Roaming\\Application Data'" -and
+        $profileMatrixSource -match "'AppData\\Local\\History'") 'profile matrix names the legacy, nested local, roaming, History, and Documents compatibility junction allow-list explicitly'
     Assert-True ($profileMatrixSource -match '\$knownTargets' -and $profileMatrixSource -match 'LinkType') 'profile matrix validates compatibility-junction targets instead of allowing arbitrary reparse points'
     Assert-True ($profileMatrixSource -match 'ConvertFrom-ProfileMatrixFsutilReparseOutput') 'profile matrix has a deterministic native fsutil reparse transcript parser'
     Assert-True ($profileMatrixSource -match 'Get-ProfileMatrixNativeReparseInfo[\s\S]+fsutil\.exe[\s\S]+reparsepoint query') 'profile matrix uses the native fsutil fallback when PowerShell link metadata is absent'
