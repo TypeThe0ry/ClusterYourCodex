@@ -7,6 +7,16 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.35] - 2026-08-30
+
+### Fixed
+
+- Closed the Windows packaging regression-coverage gap by explicitly locking
+  the nested `AppData\Roaming\Application Data` compatibility junction in the
+  static Profile Matrix guard alongside the Local and LocalLow aliases.
+- Kept the candidate as a public GitHub prerelease while preview.34 remains
+  available for comparison and the independent stable GA gates stay open.
+
 ## [0.1.0-preview.34] - 2026-08-30
 
 ### Fixed
@@ -416,7 +426,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.34...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.35...HEAD
+[0.1.0-preview.35]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.34...v0.1.0-preview.35
 [0.1.0-preview.34]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.33...v0.1.0-preview.34
 [0.1.0-preview.33]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.32...v0.1.0-preview.33
 [0.1.0-preview.32]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.31...v0.1.0-preview.32
