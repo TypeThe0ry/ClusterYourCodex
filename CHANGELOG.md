@@ -7,6 +7,19 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.38] - 2026-08-30
+
+### Fixed
+
+- Tightened the worker API schema for `stateUpdateResponse.run` by binding it
+  to the concrete `Run` wire contract, including strict run-state,
+  placement-explanation, rejection-code, and artifact fields.
+- Added a protocol regression test and JSON Schema validation coverage so
+  missing required run fields and unknown sensitive fields fail closed.
+- Revalidated the full Rust workspace on the P1 worker at the exact candidate
+  commit; tagged builds remain public GitHub prereleases while stable GA gates
+  are still open.
+
 ## [0.1.0-preview.37] - 2026-08-30
 
 ### Fixed
@@ -451,7 +464,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.37...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.38...HEAD
+[0.1.0-preview.38]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.37...v0.1.0-preview.38
 [0.1.0-preview.37]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.36...v0.1.0-preview.37
 [0.1.0-preview.36]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.35...v0.1.0-preview.36
 [0.1.0-preview.35]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.34...v0.1.0-preview.35

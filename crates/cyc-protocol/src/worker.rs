@@ -1755,6 +1755,50 @@ mod tests {
     }
 
     #[test]
+    fn worker_schema_tracks_state_update_run_wire() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../schemas/worker-api.schema.json"))
+                .expect("worker API schema is JSON");
+        let definitions = schema["$defs"].as_object().expect("schema definitions");
+        let response = &definitions["stateUpdateResponse"];
+        assert_eq!(response["properties"]["run"]["$ref"], "#/$defs/run");
+
+        let run = &definitions["run"];
+        assert_eq!(run["type"], "object");
+        assert_eq!(run["additionalProperties"], false);
+        assert_eq!(
+            run["required"],
+            serde_json::json!(["id", "jobId", "state", "createdAt", "artifactIds"])
+        );
+        for property in [
+            "id",
+            "jobId",
+            "nodeId",
+            "state",
+            "createdAt",
+            "startedAt",
+            "finishedAt",
+            "exitCode",
+            "error",
+            "placement",
+            "artifactIds",
+        ] {
+            assert!(
+                run["properties"].get(property).is_some(),
+                "missing {property}"
+            );
+        }
+        assert_eq!(
+            run["properties"]["placement"]["$ref"],
+            "#/$defs/placementExplain"
+        );
+        assert_eq!(
+            definitions["placementExplain"]["additionalProperties"],
+            false
+        );
+    }
+
+    #[test]
     fn public_constants_remain_versioned() {
         assert_eq!(crate::API_VERSION, "cyc.dev/v1");
         assert_eq!(WORKER_API_VERSION, "cyc.dev/worker/v1");

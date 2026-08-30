@@ -248,15 +248,116 @@
         "evidence": { "$ref": "#/$defs/runEvidence" }
       }
     },
+    "placementExplain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "candidates"],
+      "properties": {
+        "policy": { "enum": ["balanced", "performance", "manual"] },
+        "selectedNodeId": { "$ref": "#/$defs/uuid" },
+        "candidates": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/placementCandidateExplain" },
+          "default": []
+        }
+      }
+    },
+    "placementCandidateExplain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodeId", "nodeName", "eligible", "scoreComponents", "rejectionReasons"],
+      "properties": {
+        "nodeId": { "$ref": "#/$defs/uuid" },
+        "nodeName": { "type": "string" },
+        "eligible": { "type": "boolean" },
+        "score": { "type": "integer" },
+        "scoreComponents": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scoreComponent" },
+          "default": []
+        },
+        "rejectionReasons": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/placementRejection" },
+          "default": []
+        }
+      }
+    },
+    "scoreComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value", "detail"],
+      "properties": {
+        "key": { "type": "string" },
+        "value": { "type": "integer" },
+        "detail": { "type": "string" }
+      }
+    },
+    "placementRejection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "detail"],
+      "properties": {
+        "code": {
+          "enum": [
+            "disabled",
+            "offline",
+            "draining",
+            "stale_node",
+            "manual_node_required",
+            "manual_node_mismatch",
+            "wrong_os",
+            "wrong_architecture",
+            "missing_capability",
+            "insufficient_cpu",
+            "insufficient_memory",
+            "insufficient_disk",
+            "gpu_required",
+            "gpu_unavailable",
+            "gpu_vendor_mismatch",
+            "insufficient_vram",
+            "exclusive_gpu_unavailable",
+            "policy_job_kind_denied",
+            "battery_disallowed",
+            "cpu_limit_exceeded",
+            "cpu_ewma_limit_exceeded",
+            "memory_limit_exceeded",
+            "temperature_limit_exceeded",
+            "slot_limit_reached",
+            "containment_limit_reached"
+          ]
+        },
+        "detail": { "type": "string" }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "jobId", "state", "createdAt", "artifactIds"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "jobId": { "$ref": "#/$defs/uuid" },
+        "nodeId": { "$ref": "#/$defs/uuid" },
+        "state": { "$ref": "#/$defs/jobState" },
+        "createdAt": { "$ref": "#/$defs/dateTime" },
+        "startedAt": { "$ref": "#/$defs/dateTime" },
+        "finishedAt": { "$ref": "#/$defs/dateTime" },
+        "exitCode": { "type": "integer" },
+        "error": { "type": "string" },
+        "placement": { "$ref": "#/$defs/placementExplain" },
+        "artifactIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/uuid" },
+          "default": []
+        }
+      }
+    },
     "stateUpdateResponse": {
       "type": "object",
       "additionalProperties": false,
       "required": ["run", "stateVersion", "cancelRequested"],
       "properties": {
-        "run": {
-          "type": "object",
-          "description": "Existing cyc-protocol Run wire object."
-        },
+        "run": { "$ref": "#/$defs/run" },
         "stateVersion": { "type": "integer", "minimum": 0 },
         "cancelRequested": { "type": "boolean" }
       }
