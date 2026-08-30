@@ -265,6 +265,9 @@ function Assert-CycReleaseWorkflowIdentity {
         "specVersion = '1.6'",
         'unsigned = $true',
         'unattested = -not $taggedForAttestation',
+        'provenanceSubjectRoot',
+        'subject-path: provenance-subjects/*',
+        'bundleSha256 = $bundleHash',
         'actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f'
     )) {
         if (-not $workflow.Contains($requiredReleaseContract)) {

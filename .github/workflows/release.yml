@@ -708,7 +708,84 @@ jobs:
           $archiveRoot = Join-Path $PWD 'release-assets'
           New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
           $archive = Join-Path $archiveRoot "$name.zip"
-          Compress-Archive -LiteralPath $stage -DestinationPath $archive
+          # Compress-Archive silently skips dot-prefixed hidden files/directories
+          # on Windows. The integration payload intentionally contains hidden
+          # Codex marketplace/plugin entries, so create every entry explicitly.
+          Add-Type -AssemblyName System.IO.Compression
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
+          $sourceRoot = (Get-Item -LiteralPath $stage -Force).FullName.TrimEnd('\')
+          $rootName = (Get-Item -LiteralPath $sourceRoot -Force).Name
+          $zip = [System.IO.Compression.ZipFile]::Open($archive, [System.IO.Compression.ZipArchiveMode]::Create)
+          try {
+            [void]$zip.CreateEntry("$rootName/", [System.IO.Compression.CompressionLevel]::NoCompression)
+            foreach ($entry in @(Get-ChildItem -LiteralPath $sourceRoot -Force -Recurse | Sort-Object FullName)) {
+              if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "refusing to archive a reparse point: $($entry.FullName)"
+              }
+              $relative = $entry.FullName.Substring($sourceRoot.Length + 1).Replace('\', '/')
+              $entryName = "$rootName/$relative"
+              if ($entry.PSIsContainer) {
+                [void]$zip.CreateEntry(($entryName.TrimEnd('/') + '/'), [System.IO.Compression.CompressionLevel]::NoCompression)
+              } else {
+                [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                  $zip,
+                  $entry.FullName,
+                  $entryName,
+                  [System.IO.Compression.CompressionLevel]::Optimal
+                )
+              }
+            }
+          } finally {
+            $zip.Dispose()
+          }
+          $extractRoot = Join-Path $env:RUNNER_TEMP ('cyc-integration-archive-' + [Guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
+          try {
+            Expand-Archive -LiteralPath $archive -DestinationPath $extractRoot -Force
+            $extractedStage = Join-Path $extractRoot $rootName
+            $expectedFiles = @(Get-ChildItem -LiteralPath $sourceRoot -File -Recurse -Force |
+              Sort-Object FullName | ForEach-Object {
+                [pscustomobject]@{
+                  RelativePath = $_.FullName.Substring($sourceRoot.Length + 1).Replace('\', '/')
+                  Length = [long]$_.Length
+                  Sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+                }
+              })
+            $actualFiles = @(Get-ChildItem -LiteralPath $extractedStage -File -Recurse -Force |
+              Sort-Object FullName | ForEach-Object {
+                [pscustomobject]@{
+                  RelativePath = $_.FullName.Substring($extractedStage.Length + 1).Replace('\', '/')
+                  Length = [long]$_.Length
+                  Sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+                }
+              })
+            if ($expectedFiles.Count -ne $actualFiles.Count) {
+              throw "integration archive file count mismatch: expected $($expectedFiles.Count), got $($actualFiles.Count)"
+            }
+            for ($index = 0; $index -lt $expectedFiles.Count; $index++) {
+              $expected = $expectedFiles[$index]
+              $actual = $actualFiles[$index]
+              if ($expected.RelativePath -cne $actual.RelativePath -or
+                  $expected.Length -ne $actual.Length -or
+                  $expected.Sha256 -cne $actual.Sha256) {
+                throw "integration archive tree/bytes mismatch at $($expected.RelativePath)"
+              }
+            }
+            foreach ($required in @(
+              'marketplace/.agents/plugins/marketplace.json',
+              'marketplace/plugins/cluster-your-codex/.codex-plugin/plugin.json',
+              'marketplace/plugins/cluster-your-codex/.mcp.json'
+            )) {
+              if (-not ($actualFiles.RelativePath -ccontains $required)) {
+                throw "integration archive is missing required hidden entry: $required"
+              }
+            }
+          } finally {
+            if (Test-Path -LiteralPath $extractRoot) {
+              Remove-Item -LiteralPath $extractRoot -Recurse -Force
+            }
+          }
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
           "$hash  $(Split-Path $archive -Leaf)" |
             Set-Content -NoNewline -Encoding ascii "$archive.sha256"
@@ -1572,8 +1649,30 @@ jobs:
           })
 
           $sortedRecords = @($records | Sort-Object name)
-          $indexPath = Join-Path $outputRoot 'release-index.json'
           $taggedForAttestation = -not [string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)
+          # Attest the immutable payload files before the release index is
+          # finalized. The index records the resulting receipt and is
+          # intentionally metadata, not an attestation subject; otherwise
+          # writing the receipt would change the index digest after attestation.
+          $provenanceSubjectRoot = Join-Path $PWD 'provenance-subjects'
+          $provenanceSubjects = @($sortedRecords | ForEach-Object {
+            [ordered]@{
+              name = [string]$_.name
+              bytes = [long]$_.bytes
+              sha256 = [string]$_.sha256
+            }
+          })
+          if ($taggedForAttestation) {
+            New-Item -ItemType Directory -Force -Path $provenanceSubjectRoot | Out-Null
+            foreach ($subject in $provenanceSubjects) {
+              $subjectPath = Join-Path $outputRoot $subject.name
+              if (-not (Test-Path -LiteralPath $subjectPath -PathType Leaf)) {
+                throw "provenance subject is missing before attestation: $($subject.name)"
+              }
+              Copy-Item -LiteralPath $subjectPath -Destination (Join-Path $provenanceSubjectRoot $subject.name) -Force
+            }
+          }
+          $indexPath = Join-Path $outputRoot 'release-index.json'
           [ordered]@{
             schemaVersion = 'cyc.dev/release-index/v1'
             releaseKind = 'developer-preview'
@@ -1591,9 +1690,15 @@ jobs:
               sha256 = $sbomHash
             }
             provenance = [ordered]@{
-              provider = if ($taggedForAttestation) { 'github-artifact-attestations' } else { $null }
-              predicateType = if ($taggedForAttestation) { 'https://slsa.dev/provenance/v1' } else { $null }
-              attested = $taggedForAttestation
+              provider = $null
+              predicateType = $null
+              attested = $false
+              attestationId = $null
+              attestationUrl = $null
+              bundleName = $null
+              bundleSha256 = $null
+              subjectCount = [int]$provenanceSubjects.Count
+              subjects = $provenanceSubjects
             }
             artifacts = $sortedRecords
           } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $indexPath -Encoding UTF8
@@ -1604,11 +1709,11 @@ jobs:
           $combined += "$indexHash  release-index.json"
           $combined | Set-Content -LiteralPath (Join-Path $outputRoot 'SHA256SUMS') -Encoding ASCII
       - id: provenance
-        name: Attest every final tagged prerelease asset with GitHub build provenance
+        name: Attest every tagged prerelease payload asset with GitHub build provenance
         if: github.ref_type == 'tag' && needs.release-identity.outputs.source_tag != ''
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
         with:
-          subject-path: release-assets/*
+          subject-path: provenance-subjects/*
       - name: Verify tagged provenance evidence exists before publication
         if: github.ref_type == 'tag' && needs.release-identity.outputs.source_tag != ''
         shell: pwsh
@@ -1624,6 +1729,29 @@ jobs:
               -not (Test-Path -LiteralPath $env:CYC_ATTESTATION_BUNDLE -PathType Leaf)) {
             throw 'GitHub build-provenance attestation did not return complete evidence.'
           }
+          $bundleHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:CYC_ATTESTATION_BUNDLE).Hash.ToLowerInvariant()
+          $bundleName = [System.IO.Path]::GetFileName([string]$env:CYC_ATTESTATION_BUNDLE)
+          if ([string]::IsNullOrWhiteSpace($bundleName)) {
+            throw 'GitHub build-provenance attestation returned an invalid bundle filename.'
+          }
+          $indexPath = Join-Path $PWD 'release-assets/release-index.json'
+          $index = Get-Content -LiteralPath $indexPath -Raw | ConvertFrom-Json
+          $index.unattested = $false
+          $index.provenance.provider = 'github-artifact-attestations'
+          $index.provenance.predicateType = 'https://slsa.dev/provenance/v1'
+          $index.provenance.attested = $true
+          $index.provenance.attestationId = [string]$env:CYC_ATTESTATION_ID
+          $index.provenance.attestationUrl = [string]$env:CYC_ATTESTATION_URL
+          $index.provenance.bundleName = $bundleName
+          $index.provenance.bundleSha256 = $bundleHash
+          $index.provenance.subjectCount = @($index.provenance.subjects).Count
+          $index | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $indexPath -Encoding UTF8
+          $indexHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $indexPath).Hash.ToLowerInvariant()
+          "$indexHash  release-index.json" |
+            Set-Content -NoNewline -Encoding ASCII (Join-Path $PWD 'release-assets/release-index.json.sha256')
+          $combined = @($index.artifacts | Sort-Object name | ForEach-Object { "$($_.sha256)  $($_.name)" })
+          $combined += "$indexHash  release-index.json"
+          $combined | Set-Content -LiteralPath (Join-Path $PWD 'release-assets/SHA256SUMS') -Encoding ASCII
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ClusterYourCodex-release-index-preview

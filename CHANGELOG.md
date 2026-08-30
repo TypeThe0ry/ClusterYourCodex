@@ -7,6 +7,15 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.28] - 2026-08-30
+
+### Fixed
+
+- Replaced Windows `Compress-Archive` integration packaging with explicit hidden-entry ZIP creation so `.agents`, `.codex-plugin`, and `.mcp.json` survive extraction.
+- Added post-archive integration tree, byte, and required-hidden-entry verification before any preview artifact is uploaded.
+- Bound tagged prerelease provenance to an immutable payload subject set and record the attestation id, URL, bundle digest, subject count, and subject digests in `release-index.json`.
+- Clarified that tagged previews are public prereleases; stable publication remains behind the protected GA evidence workflow.
+
 ## [0.1.0-preview.27] - 2026-08-29
 
 ### Fixed
@@ -318,7 +327,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.27...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.28...HEAD
+[0.1.0-preview.28]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.27...v0.1.0-preview.28
 [0.1.0-preview.27]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.26...v0.1.0-preview.27
 [0.1.0-preview.26]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.25...v0.1.0-preview.26
 [0.1.0-preview.25]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.24...v0.1.0-preview.25

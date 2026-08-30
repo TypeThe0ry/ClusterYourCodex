@@ -343,8 +343,9 @@ SHA-256 sidecar. The release-index job downloads all producer artifacts,
 requires and verifies exactly nine producer sidecars, rejects missing or
 duplicate expected assets, and generates a CycloneDX 1.6 release-asset SBOM
 with its own sidecar, a combined `SHA256SUMS`, and `release-index.json` plus its
-sidecar. A tagged draft prerelease depends on that index job and publishes only
-its verified assembled output.
+sidecar. A tagged public prerelease depends on that index job and publishes only
+its verified assembled output; every tagged preview remains `prerelease: true`
+until the separate protected GA workflow approves a stable release.
 
 All native Rust release jobs run full-workspace `cargo fmt`, `cargo clippy`, and
 `cargo test` before their release build. Windows, Linux, macOS Intel, and macOS
@@ -356,9 +357,12 @@ the Windows bootstrap lifecycle tests before creating its archive.
 
 These remain code-unsigned developer previews. Tagged prerelease runs generate
 a CycloneDX 1.6 **release-asset inventory** SBOM and use GitHub artifact build
-provenance for the final `release-assets/*`; the release index records
-`unattested=false` only after complete attestation evidence exists. Manual
-`workflow_dispatch` artifacts remain explicitly `unattested=true`. These
+provenance for the immutable payload assets staged under `provenance-subjects/*`;
+the release index records the attestation id, URL, bundle digest, subject count,
+and subject digests, and flips to `unattested=false` only after complete
+attestation evidence exists. The index and checksum files are integrity metadata
+written after the payload attestation. Manual `workflow_dispatch` artifacts
+remain explicitly `unattested=true`. These
 controls do not claim Authenticode, Apple signing/notarization, a full
 dependency/payload SBOM, third-party notices, independent post-download
 provenance verification, automatic update support, or stable-release support.
