@@ -143,7 +143,12 @@ function Assert-GaWorkflowContract {
         'source_tag:',
         'evidence_url:',
         'evidence_sha256:',
+        'stable_assets_url:',
+        'stable_assets_sha256:',
         'Test-GAReadiness.ps1',
+        'Test-StableAssetBundle.ps1',
+        'stable-publisher:',
+        'gh release create',
         'environment: production'
     )) {
         Assert-GaCondition $workflow.Contains($needle) "GA workflow contains '$needle'"
@@ -152,6 +157,8 @@ function Assert-GaWorkflowContract {
     Assert-GaCondition ($workflow -notmatch '(?m)^\s*runs-on:\s*(?:macos|windows)[^\r\n]*$') 'GA workflow does not use macOS/Windows hosted runners as live acceptance evidence'
     Assert-GaCondition ($workflow -notmatch '(?i)macos-latest|windows-latest|windows-11-arm|softprops/action-gh-release') 'GA workflow does not turn hosted smoke or a prerelease publisher into GA evidence'
     Assert-GaCondition ($workflow -match '(?m)^\s*required:\s*true\s*$') 'GA workflow has required manual inputs'
+    Assert-GaCondition ($workflow -match 'gh release create[\s\S]+--verify-tag') 'GA workflow contains a protected stable publisher with exact-tag verification'
+    Assert-GaCondition ($workflow -match 'isPrerelease == false[\s\S]+isDraft == false') 'GA workflow verifies the published release is stable and public'
 }
 
 function Assert-GaIssueSnapshot {
@@ -202,7 +209,7 @@ $checks = New-Object System.Collections.Generic.List[object]
 [void]$checks.Add([ordered]@{
     name = 'workflow-contract'
     status = 'passed'
-    message = 'manual stable gate requires external evidence and has no hosted acceptance/publisher path'
+    message = 'manual stable gate requires external evidence and routes publication through the protected stable publisher'
 })
 
 if ($ContractOnly) {

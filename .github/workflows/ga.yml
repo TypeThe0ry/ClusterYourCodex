@@ -15,6 +15,14 @@ on:
         description: SHA-256 digest of the external GA evidence manifest
         required: true
         type: string
+      stable_assets_url:
+        description: HTTPS URL of the externally built stable asset bundle (.zip)
+        required: true
+        type: string
+      stable_assets_sha256:
+        description: SHA-256 digest of the externally built stable asset bundle
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -182,3 +190,135 @@ jobs:
           path: ${{ runner.temp }}/cyc-ga-readiness/*
           if-no-files-found: warn
           retention-days: 30
+
+  stable-publisher:
+    name: Publish verified stable release
+    if: needs.ga-readiness.result == 'success'
+    needs: [ga-readiness]
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: write
+    env:
+      CYC_GA_SOURCE_TAG: ${{ inputs.source_tag }}
+      CYC_STABLE_ASSET_URL: ${{ inputs.stable_assets_url }}
+      CYC_STABLE_ASSET_SHA256: ${{ inputs.stable_assets_sha256 }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_tag }}
+          fetch-depth: 0
+
+      - name: Verify exact stable source tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          head_commit="$(git rev-parse HEAD)"
+          tag_commit="$(git rev-parse "refs/tags/$CYC_GA_SOURCE_TAG^{commit}")"
+          test "$head_commit" = "$tag_commit"
+          printf 'CYC_GA_SOURCE_COMMIT=%s\n' "$head_commit" >> "$GITHUB_ENV"
+
+      - name: Download and verify externally built stable asset bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$CYC_STABLE_ASSET_URL" in
+            https://*) ;;
+            *) echo "stable_assets_url must use HTTPS" >&2; exit 1 ;;
+          esac
+          if [[ ! "$CYC_STABLE_ASSET_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "stable_assets_sha256 must be a 64-character SHA-256 digest" >&2
+            exit 1
+          fi
+          bundle="$RUNNER_TEMP/clusteryourcodex-stable-assets.zip"
+          curl --fail --location --proto '=https' --proto-redir '=https' \
+            --tlsv1.2 --retry 2 --output "$bundle" "$CYC_STABLE_ASSET_URL"
+          actual_hash="$(sha256sum "$bundle" | awk '{print tolower($1)}')"
+          expected_hash="$(printf '%s' "$CYC_STABLE_ASSET_SHA256" | tr '[:upper:]' '[:lower:]')"
+          test "$actual_hash" = "$expected_hash"
+          # Validate ZIP names and file types before extraction. The stable
+          # bundle is externally supplied, so reject traversal, absolute
+          # paths, symlinks, and special files before unzip can touch the
+          # runner filesystem.
+          python3 - "$bundle" <<'PY'
+          import pathlib
+          import stat
+          import sys
+          import zipfile
+
+          archive = pathlib.Path(sys.argv[1])
+          with zipfile.ZipFile(archive) as handle:
+              for entry in handle.infolist():
+                  name = entry.filename.replace('\\', '/')
+                  parts = [part for part in name.split('/') if part]
+                  if not parts or name.startswith('/') or (len(name) >= 2 and name[1] == ':') or '..' in parts:
+                      raise SystemExit(f'unsafe stable bundle ZIP path: {entry.filename!r}')
+                  mode = (entry.external_attr >> 16) & 0o170000
+                  if stat.S_ISLNK(mode) or (mode and not name.endswith('/') and not stat.S_ISREG(mode)):
+                      raise SystemExit(f'unsafe stable bundle ZIP entry type: {entry.filename!r}')
+          PY
+          extract="$RUNNER_TEMP/clusteryourcodex-stable-assets"
+          rm -rf "$extract"
+          mkdir -p "$extract"
+          unzip -q "$bundle" -d "$extract"
+          if find "$extract" \( -type l -o -type b -o -type c -o -type p \) -print -quit | grep -q .; then
+            echo 'stable asset bundle extraction produced a link or special file' >&2
+            exit 1
+          fi
+          mapfile -t roots < <(find "$extract" -mindepth 1 -maxdepth 1 -type d -print | sort)
+          if [[ ${#roots[@]} -eq 1 && -f "${roots[0]}/release-index.json" ]]; then
+            bundle_root="${roots[0]}"
+          elif [[ -f "$extract/release-index.json" ]]; then
+            bundle_root="$extract"
+          else
+            echo 'stable asset bundle must contain one root with release-index.json' >&2
+            exit 1
+          fi
+          printf 'CYC_STABLE_BUNDLE_ROOT=%s\n' "$bundle_root" >> "$GITHUB_ENV"
+
+      - name: Verify stable bundle identity, sidecars, and provenance
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $result = (& ./scripts/Test-StableAssetBundle.ps1 `
+            -BundleRoot $env:CYC_STABLE_BUNDLE_ROOT `
+            -ExpectedTag $env:CYC_GA_SOURCE_TAG `
+            -ExpectedCommit $env:CYC_GA_SOURCE_COMMIT `
+            -Json)
+          if ($LASTEXITCODE -ne 0) {
+            throw "Stable asset bundle verification failed with exit code $LASTEXITCODE."
+          }
+          $result | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+
+      - name: Refuse to overwrite an existing stable release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$CYC_GA_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "stable release already exists for $CYC_GA_SOURCE_TAG" >&2
+            exit 1
+          fi
+
+      - name: Publish true stable GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find "$CYC_STABLE_BUNDLE_ROOT" -mindepth 1 -maxdepth 1 -type f -print | sort)
+          if [[ ${#assets[@]} -eq 0 ]]; then
+            echo 'stable asset bundle contains no publishable files' >&2
+            exit 1
+          fi
+          # No --prerelease flag is supplied: this job is the only path that
+          # creates a stable release, and it runs behind the production gate.
+          gh release create "$CYC_GA_SOURCE_TAG" "${assets[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --latest \
+            --title "ClusterYourCodex $CYC_GA_SOURCE_TAG" \
+            --generate-notes
+          release_json="$(gh release view "$CYC_GA_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease,isDraft,tagName)"
+          jq -e --arg tag "$CYC_GA_SOURCE_TAG" \
+            '.tagName == $tag and .isPrerelease == false and .isDraft == false' \
+            <<< "$release_json" >/dev/null
+          echo "$release_json" >> "$GITHUB_STEP_SUMMARY"

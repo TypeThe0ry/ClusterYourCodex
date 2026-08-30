@@ -7,6 +7,16 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.29] - 2026-08-30
+
+### Added
+
+- Added the protected GA stable publisher path, requiring an externally built stable bundle with exact source, sidecars, release-index, and attested provenance before `gh release create` verifies a public non-prerelease release.
+
+### Fixed
+
+- Strengthened stable bundle verification so every `SHA256SUMS` entry is parsed, unique, present, and digest-checked before publication.
+
 ## [0.1.0-preview.28] - 2026-08-30
 
 ### Fixed
@@ -327,7 +337,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.28...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.29...HEAD
+[0.1.0-preview.29]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.28...v0.1.0-preview.29
 [0.1.0-preview.28]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.27...v0.1.0-preview.28
 [0.1.0-preview.27]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.26...v0.1.0-preview.27
 [0.1.0-preview.26]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.25...v0.1.0-preview.26

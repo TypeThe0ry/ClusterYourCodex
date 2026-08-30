@@ -89,5 +89,10 @@ SHA and contain passed, retained evidence for:
 Each host record must identify a non-GitHub-hosted provider and an `evidenceId`.
 The macOS portable smoke in `release.yml`, the Windows ARM64 compatibility job,
 and the repository Authenticode contract test remain useful prerelease checks,
-but none can satisfy those external GA evidence fields. The readiness workflow
-is verification-only and intentionally contains no stable-release publisher.
+but none can satisfy those external GA evidence fields. The protected GA workflow
+also requires an HTTPS URL and SHA-256 for an externally built stable asset bundle.
+After the readiness job passes, a second `production`-protected job validates that
+bundle's stable `release-index.json`, sidecars, and attested provenance, then calls
+`gh release create --verify-tag` without `--prerelease` and verifies
+`isPrerelease=false` and `isDraft=false`. No stable publisher can run when any
+evidence, issue, or governance gate fails.
