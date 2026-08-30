@@ -7,6 +7,19 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.30] - 2026-08-30
+
+### Fixed
+
+- Hardened the protected stable GA path: branch protection snapshots now use
+  the authoritative branch endpoint and fail closed on API errors.
+- Bound stable bundles to an exact top-level asset set, complete `SHA256SUMS`,
+  a signed CycloneDX 1.6 SBOM, non-empty third-party notices, and provenance
+  subjects whose digests and byte counts match every indexed payload.
+- Added stable-publisher cross-binding of the external GA evidence index hash
+  and cryptographic `gh attestation verify` checks for every stable payload;
+  tagged public builds remain prereleases until those gates pass.
+
 ## [0.1.0-preview.29] - 2026-08-30
 
 ### Added
@@ -337,7 +350,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.29...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.30...HEAD
+[0.1.0-preview.30]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.29...v0.1.0-preview.30
 [0.1.0-preview.29]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.28...v0.1.0-preview.29
 [0.1.0-preview.28]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.27...v0.1.0-preview.28
 [0.1.0-preview.27]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.26...v0.1.0-preview.27

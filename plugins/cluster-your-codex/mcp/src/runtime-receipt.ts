@@ -5,7 +5,7 @@ import nodePath from "node:path";
 import { resolveControllerTokenFile, type TokenPathEnvironment } from "./token-source.js";
 
 export const MCP_RUNTIME_API_VERSION = "cyc.dev/mcp-runtime/v1" as const;
-export const MCP_BRIDGE_VERSION = "0.1.0-preview.29" as const;
+export const MCP_BRIDGE_VERSION = "0.1.0-preview.30" as const;
 const HEARTBEAT_INTERVAL_MS = 5_000;
 
 export interface ControllerVerificationLoopOptions {
