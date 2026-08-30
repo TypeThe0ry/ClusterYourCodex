@@ -867,7 +867,10 @@ function Get-SetupSilentListeners {
 
 function Get-SetupSilentProductProcesses {
     return @(
-        Get-Process -Name @('ClusterYourCodex', 'cyc-controller', 'cyc-worker') -ErrorAction SilentlyContinue |
+        # The CLI binary is named cyc.exe, whose ProcessName is "cyc". Keep
+        # it in the owned-process inventory so a probe cannot retain a file
+        # handle that later prevents the repair fixture from opening cyc.exe.
+        Get-Process -Name @('ClusterYourCodex', 'cyc', 'cyc-controller', 'cyc-worker') -ErrorAction SilentlyContinue |
             ForEach-Object {
                 $candidateProcess = $_
                 $path = $null
@@ -1203,7 +1206,7 @@ function Invoke-SetupSilentProbes {
 
 function Stop-SetupSilentOwnedProcesses {
     param([Parameter(Mandatory = $true)][string]$InstallRoot)
-    foreach ($process in Get-Process -Name @('ClusterYourCodex', 'cyc-controller', 'cyc-worker') -ErrorAction SilentlyContinue) {
+    foreach ($process in Get-Process -Name @('ClusterYourCodex', 'cyc', 'cyc-controller', 'cyc-worker') -ErrorAction SilentlyContinue) {
         $path = $null
         try { $path = Resolve-SetupSilentPath $process.Path } catch { $path = $null }
         if ($path -and $path.StartsWith($InstallRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -1433,6 +1436,15 @@ try {
     foreach ($probe in @(Invoke-SetupSilentProbes -InstallRoot $installRoot -WorkRoot $work -LogRoot $logRoot -Prefix 'installed')) {
         $operations.Add($probe)
     }
+    # A CLI probe normally exits with the process handle already released, but
+    # Windows can leave a short-lived child alive after the parent exits. Reap
+    # every process whose executable is inside this disposable install before
+    # opening cyc.exe as the deterministic Repair tamper fixture.
+    Stop-SetupSilentOwnedProcesses -InstallRoot $installRoot
+    $ownedProcessesAfterInstallProbes = @(Get-SetupSilentProductProcesses | Where-Object {
+        $_.path -and $_.path.StartsWith($installRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
+    })
+    Assert-SetupSilent ($ownedProcessesAfterInstallProbes.Count -eq 0) 'install probes leave no owned product process before Repair tamper'
 
     $certificatePath = Resolve-SetupSilentPath ([string]$manifest.managedWorker.certificatePath)
     $privateKeyPath = Resolve-SetupSilentPath ([string]$manifest.managedWorker.privateKeyPath)
@@ -1503,6 +1515,11 @@ try {
     foreach ($probe in @(Invoke-SetupSilentProbes -InstallRoot $installRoot -WorkRoot $work -LogRoot $logRoot -Prefix 'repaired')) {
         $operations.Add($probe)
     }
+    Stop-SetupSilentOwnedProcesses -InstallRoot $installRoot
+    $ownedProcessesAfterFirstRepairProbes = @(Get-SetupSilentProductProcesses | Where-Object {
+        $_.path -and $_.path.StartsWith($installRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
+    })
+    Assert-SetupSilent ($ownedProcessesAfterFirstRepairProbes.Count -eq 0) 'first Repair probes leave no owned product process before the second tamper'
 
     $secondTamperBytes = [System.Text.Encoding]::UTF8.GetBytes("`ncyc-second-repair-regression-$([Guid]::NewGuid().ToString('N'))")
     $secondTamperStream = [System.IO.File]::Open($cliPath, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)

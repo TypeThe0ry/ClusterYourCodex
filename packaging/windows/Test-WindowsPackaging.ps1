@@ -4108,6 +4108,8 @@ exit 0
         Assert-True ([string]$bareSid -ceq $currentIdentitySid) 'Windows resolves the bare local account representation returned by ScheduledTasks CIM'
     }
     Assert-True ($setupSilentSource -notmatch '(?<!@)\(Get-SetupSilent(?:TaskSnapshot|FirewallSnapshot|Listeners|ProductProcesses)\)\.Count') 'silent Setup smoke array-wraps zero-or-one item function output before Count'
+    Assert-True ($setupSilentSource -match "Get-Process -Name @\('ClusterYourCodex', 'cyc', 'cyc-controller', 'cyc-worker'\)") 'silent Setup smoke inventories and reaps the cyc.exe CLI process by its Windows ProcessName'
+    Assert-True ($setupSilentSource -match 'Invoke-SetupSilentProbes[\s\S]+Stop-SetupSilentOwnedProcesses[\s\S]+before Repair tamper') 'silent Setup smoke reaps probe processes before mutating the installed CLI'
     Assert-True ($setupSilentSource -match 'EnvironmentVariables[\s\S]+CYC_SETUP_DIAGNOSTIC_LOG') 'silent Setup smoke injects the structured lifecycle diagnostic path into Setup.exe'
     Assert-True ($setupSilentSource -match 'Read-SetupSilentJson[\s\S]+ReadAllBytes[\s\S]+UTF8Encoding\(\$false,\s*\$true\)') 'silent Setup reads lifecycle diagnostics as strict UTF-8 independently of the Windows ANSI code page'
     Assert-True ($setupSilentSource -match 'primaryFailure\s*=\s*if\s*\(\$primaryFailure\)') 'silent Setup cleanup receipt preserves the primary failure independently of cleanup'
