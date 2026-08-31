@@ -430,9 +430,9 @@ try {
             [void](Assert-CycTaskSnapshotOwnership `
                 -Snapshot $taskProbeSnapshot `
                 -InstallRoot $taskProbeRoot `
-                -ExpectedSid $taskProbeForeignSid)
+                -ExpectedSid $taskProbeSid)
         } `
-        -Pattern 'initiating SID' `
+        -Pattern 'principal SID' `
         -Message 'task ownership rejects a different principal SID'
     $wrongRootSnapshot = [PSCustomObject]@{
         name = $taskProbeSnapshot.name
