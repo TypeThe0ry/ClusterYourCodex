@@ -489,10 +489,12 @@ mod tests {
                 // first PowerShell process while Defender/JIT initialization
                 // is cold. This is only a failure ceiling: the normal path
                 // still returns immediately when the process exits.
-                // PowerShell can take over a minute to cold-start on hosted
-                // Windows runners; keep this ceiling test-only and leave
+                // PowerShell can take several minutes to cold-start on hosted
+                // Windows runners when Defender/JIT initialization and the
+                // suspended-to-contained resume path contend for the first
+                // process slot. Keep this ceiling test-only and leave
                 // production step timeouts unchanged.
-                timeout: Duration::from_secs(180),
+                timeout: Duration::from_secs(300),
                 stdout_path: stdout.clone(),
                 stderr_path: logs.join("step.stderr.log"),
                 log_budget: Arc::new(LogBudget::new(16 * 1024)),

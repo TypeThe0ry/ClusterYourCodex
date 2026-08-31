@@ -7,6 +7,14 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.48] - 2026-09-01
+
+### Fixed
+
+- Raised the Windows-only PowerShell containment integration-test ceiling to
+  five minutes to absorb hosted-runner Defender/JIT cold-start variance while
+  keeping production step timeouts unchanged.
+
 ## [0.1.0-preview.47] - 2026-09-01
 
 ### Fixed
@@ -591,7 +599,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.47...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.48...HEAD
+[0.1.0-preview.48]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.47...v0.1.0-preview.48
 [0.1.0-preview.47]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.46...v0.1.0-preview.47
 [0.1.0-preview.46]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.45...v0.1.0-preview.46
 [0.1.0-preview.45]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.44...v0.1.0-preview.45
