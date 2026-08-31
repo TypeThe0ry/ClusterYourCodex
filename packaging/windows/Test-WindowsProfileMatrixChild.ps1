@@ -69,7 +69,12 @@ $receipt = Resolve-ProfileMatrixPath $ReceiptPath
 $expectedAdmin = $CaseName.StartsWith('administrator-', [System.StringComparison]::Ordinal)
 $expectedNonAscii = $CaseName.EndsWith('-non-ascii', [System.StringComparison]::Ordinal)
 $adminSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
-$isAdmin = $principal.IsInRole($adminSid)
+# A newly created local administrator normally receives a filtered, non-
+# elevated token. WindowsPrincipal.IsInRole can therefore return false even
+# though the Administrators SID is present as a deny-only group. Membership is
+# the profile-matrix contract; keep elevation as a separate observation.
+$adminGroupPresent = @($identity.Groups | Where-Object { $_.Value -ceq $adminSid.Value }).Count -gt 0
+$isAdmin = $principal.IsInRole($adminSid) -or $adminGroupPresent
 $isElevated = $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 
 Assert-ProfileMatrix (Test-Path -LiteralPath $package -PathType Container) "package root exists: $package"

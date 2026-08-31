@@ -23,6 +23,9 @@ are versioned independently from the product.
   the digest through invocation and receipt attestation validation; hostile
   runtime scheduling remains fail-closed until the production containment gates
   are independently accepted.
+- Made the Windows profile matrix recognize Administrators membership in a
+  filtered, non-elevated token while retaining a separate elevation signal;
+  administrator cases now remain stable on UAC-filtered ARM64 runners.
 
 ## [0.1.0-preview.42] - 2026-08-31
 
