@@ -21,6 +21,42 @@ static PROCESS_EXECUTION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new(
 #[cfg(target_os = "linux")]
 static LINUX_SUBREAPER: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 
+/// Explicit per-request environment entries are normally supplied by trusted
+/// worker code, but hostile execution must not be able to use that escape hatch
+/// to reintroduce the same secret-bearing names removed from the ambient
+/// environment by `security::sanitized_environment`.
+///
+/// Keep this deny-list in lockstep with `security::is_allowed_environment_name`.
+/// The trusted execution path deliberately bypasses this filter so existing
+/// request-specific environment behavior remains unchanged there.
+fn is_sensitive_environment_name(name: &OsStr) -> bool {
+    let upper = name.to_string_lossy().to_ascii_uppercase();
+    upper.starts_with("CYC_")
+        || upper.starts_with("AWS_")
+        || upper.starts_with("AZURE_")
+        || upper.starts_with("GOOGLE_")
+        || upper.starts_with("GCP_")
+        || upper.starts_with("CLOUDSDK_")
+        || upper.starts_with("DOCKER_AUTH")
+        || upper.starts_with("SSH_")
+        || upper.starts_with("GIT_ASKPASS")
+        || upper.starts_with("GITLAB_")
+        || upper.contains("TOKEN")
+        || upper.contains("PASSWORD")
+        || upper.contains("SECRET")
+        || upper.contains("CREDENTIAL")
+}
+
+fn request_environment_for_child(
+    environment: &[(OsString, OsString)],
+    hostile_mode: bool,
+) -> impl Iterator<Item = (OsString, OsString)> + '_ {
+    environment
+        .iter()
+        .filter(move |(name, _)| !hostile_mode || !is_sensitive_environment_name(name))
+        .cloned()
+}
+
 #[cfg(test)]
 pub async fn test_exclusive_child_process_guard() -> tokio::sync::MutexGuard<'static, ()> {
     PROCESS_EXECUTION_LOCK
@@ -389,7 +425,10 @@ async fn run_process_locked(
         .stderr(Stdio::piped())
         .env_clear()
         .envs(sanitized_environment())
-        .envs(request.environment.iter().cloned());
+        .envs(request_environment_for_child(
+            &request.environment,
+            hostile_isolation.enabled(),
+        ));
     if !launch.manages_cwd {
         command.current_dir(&request.cwd);
     }
@@ -1338,6 +1377,32 @@ pub fn os(value: impl AsRef<OsStr>) -> OsString {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn hostile_mode_filters_explicit_sensitive_environment_but_trusted_preserves_it() {
+        let environment = vec![
+            (os("PATH"), os("/usr/bin")),
+            (os("GIT_CONFIG_NOSYSTEM"), os("1")),
+            (os("CYC_WORKER_TOKEN"), os("worker-secret")),
+            (os("AWS_ACCESS_KEY_ID"), os("access-key")),
+            (os("my_password"), os("password")),
+            (os("GITHUB_TOKEN"), os("token")),
+            (os("DOCKER_AUTH_CONFIG"), os("docker-secret")),
+            (os("SSH_AUTH_SOCK"), os("/tmp/ssh-agent")),
+        ];
+
+        let hostile = request_environment_for_child(&environment, true).collect::<Vec<_>>();
+        assert_eq!(
+            hostile,
+            vec![
+                (os("PATH"), os("/usr/bin")),
+                (os("GIT_CONFIG_NOSYSTEM"), os("1")),
+            ]
+        );
+
+        let trusted = request_environment_for_child(&environment, false).collect::<Vec<_>>();
+        assert_eq!(trusted, environment);
+    }
 
     #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     #[tokio::test]
