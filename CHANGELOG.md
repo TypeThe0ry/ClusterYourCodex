@@ -7,6 +7,17 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.46] - 2026-09-01
+
+### Fixed
+
+- Bound Windows profile-matrix administrator setup to the created local-user
+  SID and wait for consecutive Administrators-group observations before
+  creating the child logon token, eliminating ARM64 x64-emulation races that
+  misclassified administrator profiles as standard users.
+- Retained administrator-membership evidence in the profile-matrix receipt
+  and added static regression coverage for the SID-bound propagation gate.
+
 ## [0.1.0-preview.45] - 2026-09-01
 
 ### Fixed
@@ -569,7 +580,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.45...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.46...HEAD
+[0.1.0-preview.46]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.45...v0.1.0-preview.46
 [0.1.0-preview.45]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.44...v0.1.0-preview.45
 [0.1.0-preview.44]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.43...v0.1.0-preview.44
 [0.1.0-preview.43]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.42...v0.1.0-preview.43

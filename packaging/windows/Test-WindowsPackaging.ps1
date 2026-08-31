@@ -4497,6 +4497,10 @@ exit 0
         $profileMatrixSource -match 'child receipt' -and
         $profileMatrixSource -match '\$rawExitCode' -and
         $profileMatrixSource -match 'candidateExitCode') 'profile matrix handles null Start-Process exit-code projections with a receipt-backed fallback'
+    Assert-True ($profileMatrixSource -match 'Wait-ProfileMatrixAdminMembership' -and
+        $profileMatrixSource -match 'Get-LocalGroupMember -SID' -and
+        $profileMatrixSource -match 'administrator-membership\.json') 'profile matrix waits for SID-bound administrator membership propagation and preserves evidence'
+    Assert-True ($profileMatrixSource -match 'Add-LocalGroupMember[\s\S]+-Member \$newUser') 'profile matrix binds administrator membership to the created LocalUser object'
     Assert-True ($profileMatrixSource -match 'Assert-ProfileMatrixTaskOwnership' -and
         ([regex]::Matches($profileMatrixSource, '-TaskPath ''\\''').Count -ge 4)) 'profile matrix binds task ownership checks and task operations to the root task path'
     Assert-True ($profileMatrixSource -match 'observedPrincipalSid' -and

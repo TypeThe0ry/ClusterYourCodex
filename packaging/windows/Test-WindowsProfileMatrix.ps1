@@ -591,6 +591,128 @@ function ConvertTo-ProfileMatrixSid {
     }
 }
 
+function Get-ProfileMatrixLocalPrincipalSid {
+    param([Parameter(Mandatory = $true)]$Principal)
+
+    # Microsoft.PowerShell.LocalAccounts returns LocalPrincipal objects on
+    # Windows PowerShell 5.1 and a slightly different projection on the
+    # ARM64 PowerShell host. Prefer the native SID property, then resolve the
+    # displayed account name as a deterministic fallback. Never compare
+    # localized names when the security identifier is available.
+    $sidProperty = $Principal.PSObject.Properties['SID']
+    if ($null -ne $sidProperty -and $null -ne $sidProperty.Value) {
+        $rawSid = $sidProperty.Value
+        if ($rawSid -is [System.Security.Principal.SecurityIdentifier]) {
+            return $rawSid.Value
+        }
+        $sidText = ([string]$rawSid).Trim()
+        if ($sidText -match '^S-\d-\d+(?:-\d+)+$') {
+            return $sidText
+        }
+    }
+    $nameProperty = $Principal.PSObject.Properties['Name']
+    if ($null -ne $nameProperty -and -not [string]::IsNullOrWhiteSpace([string]$nameProperty.Value)) {
+        try {
+            return ([System.Security.Principal.NTAccount]::new([string]$nameProperty.Value)).Translate(
+                [System.Security.Principal.SecurityIdentifier]
+            ).Value
+        } catch {
+            # An unresolved member is evidence against the expected
+            # membership; the caller records it and keeps polling.
+        }
+    }
+    return $null
+}
+
+function Wait-ProfileMatrixAdminMembership {
+    param(
+        [Parameter(Mandatory = $true)][string]$GroupName,
+        [Parameter(Mandatory = $true)][string]$MemberSid,
+        [Parameter(Mandatory = $true)][string]$MemberName,
+        [Parameter(Mandatory = $true)][string]$EvidencePath
+    )
+
+    $groupSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $startedAt = [DateTimeOffset]::UtcNow
+    $observedSids = @()
+    $observedNames = @()
+    $lastError = $null
+    $stableMatches = 0
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        try {
+            # Query the group by its well-known SID so localized group names
+            # and x64-emulated LocalAccounts projections cannot change the
+            # meaning of this acceptance check.
+            $members = @(Get-LocalGroupMember -SID $groupSid -ErrorAction Stop)
+            $observedSids = @(
+                $members |
+                    ForEach-Object { Get-ProfileMatrixLocalPrincipalSid -Principal $_ } |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+                    Sort-Object -Unique
+            )
+            $observedNames = @(
+                $members |
+                    ForEach-Object { [string]$_.Name } |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                    Sort-Object -Unique
+            )
+            if (@($observedSids | Where-Object { $_ -ceq $MemberSid }).Count -gt 0) {
+                $stableMatches++
+            } else {
+                $stableMatches = 0
+            }
+            # Require two consecutive observations. This closes the small SAM
+            # propagation window seen when a disposable account is added to
+            # Administrators immediately before LogonUser/Start-Process.
+            if ($stableMatches -ge 2) {
+                $endedAt = [DateTimeOffset]::UtcNow
+                $record = [ordered]@{
+                    schemaVersion = 'cyc.dev/windows-profile-matrix-admin-membership/v1'
+                    status = 'passed'
+                    groupName = $GroupName
+                    groupSid = $groupSid.Value
+                    memberName = $MemberName
+                    memberSid = $MemberSid
+                    attempts = $attempt + 1
+                    stableMatches = $stableMatches
+                    observedMemberSids = @($observedSids)
+                    observedMemberNames = @($observedNames)
+                    startedAt = $startedAt.ToString('o')
+                    endedAt = $endedAt.ToString('o')
+                }
+                Write-ProfileMatrixAtomicJson -Path $EvidencePath -Value $record
+                # Give the logon/token path one additional scheduler turn after
+                # the membership has converged before launching the child.
+                Start-Sleep -Milliseconds 500
+                return $record
+            }
+        } catch {
+            $lastError = [string]$_.Exception.Message
+            $stableMatches = 0
+        }
+        if ($attempt -lt 39) { Start-Sleep -Milliseconds 250 }
+    }
+
+    $endedAt = [DateTimeOffset]::UtcNow
+    $failure = [ordered]@{
+        schemaVersion = 'cyc.dev/windows-profile-matrix-admin-membership/v1'
+        status = 'failed'
+        groupName = $GroupName
+        groupSid = $groupSid.Value
+        memberName = $MemberName
+        memberSid = $MemberSid
+        attempts = 40
+        stableMatches = $stableMatches
+        observedMemberSids = @($observedSids)
+        observedMemberNames = @($observedNames)
+        startedAt = $startedAt.ToString('o')
+        endedAt = $endedAt.ToString('o')
+        error = $lastError
+    }
+    try { Write-ProfileMatrixAtomicJson -Path $EvidencePath -Value $failure } catch { }
+    throw "administrator membership did not converge for $MemberName ($MemberSid) in $GroupName; observed=$($observedSids -join ',') error=$lastError"
+}
+
 function Assert-ProfileMatrixTaskOwnership {
     param(
         [Parameter(Mandatory = $true)]$Task,
@@ -1048,6 +1170,7 @@ try {
         $password = $null
         $credential = $null
         $sid = $null
+        $membershipEvidencePath = $null
         $caseRoot = Join-Path $work $case
         if (Test-Path -LiteralPath $caseRoot) {
             Test-ProfileMatrixReparseFree -Root $caseRoot
@@ -1068,7 +1191,22 @@ try {
                 $password = ConvertTo-ProfileMatrixSecureString
                 $newUser = New-LocalUser -Name $userName -Password $password -Description 'ClusterYourCodex profile-matrix account' -AccountNeverExpires -UserMayNotChangePassword -PasswordNeverExpires -ErrorAction Stop
                 $sid = [string]$newUser.SID.Value
-                if ($isAdmin) { Add-LocalGroupMember -Group $adminGroup -Member $userName -ErrorAction Stop }
+                if ($isAdmin) {
+                    # Bind membership to the LocalUser/SID object rather than
+                    # a localized or otherwise ambiguous display name. Then
+                    # wait for two consecutive SAM observations before
+                    # creating the child logon token; ARM64 x64 emulation can
+                    # otherwise launch a token before the group change is
+                    # visible and falsely report an administrator case as a
+                    # standard user.
+                    Add-LocalGroupMember -Group $adminGroup -Member $newUser -ErrorAction Stop
+                    $membershipEvidencePath = Join-Path $caseRoot 'administrator-membership.json'
+                    [void](Wait-ProfileMatrixAdminMembership `
+                        -GroupName $adminGroup `
+                        -MemberSid $sid `
+                        -MemberName "$env:COMPUTERNAME\$userName" `
+                        -EvidencePath $membershipEvidencePath)
+                }
                 $credential = [System.Management.Automation.PSCredential]::new("$env:COMPUTERNAME\$userName", $password)
             }
             $childArguments = @(
@@ -1157,6 +1295,14 @@ try {
             Assert-ProfileMatrix ([string]$receipt.status -ceq 'passed') "case $case receipt is passed"
             Assert-ProfileMatrix ([string]$receipt.caseName -ceq $case) "case $case receipt binds the case name"
             Assert-ProfileMatrix ([string]$receipt.sid -ceq $sid) "case $case receipt binds the expected SID"
+            if ($isAdmin) {
+                Assert-ProfileMatrix ($null -ne $membershipEvidencePath -and
+                    (Test-Path -LiteralPath $membershipEvidencePath -PathType Leaf)) "case $case preserves administrator membership evidence"
+                $membershipEvidence = Get-Content -LiteralPath $membershipEvidencePath -Raw | ConvertFrom-Json
+                Assert-ProfileMatrix ([string]$membershipEvidence.status -ceq 'passed') "case $case administrator membership evidence is passed"
+                Assert-ProfileMatrix ([string]$membershipEvidence.memberSid -ceq $sid) "case $case administrator membership evidence binds the expected SID"
+                $receipt | Add-Member -NotePropertyName administratorMembershipEvidence -NotePropertyValue $membershipEvidencePath -Force
+            }
             if (-not $CurrentUserOnly) {
                 Assert-ProfileMatrix ([string]$receipt.taskRegistration -ceq 'parent-elevated-helper') "case $case uses the elevated task-registration helper"
                 Assert-ProfileMatrix ([string]$receipt.taskRuntime -ceq 'not-started') "case $case records that non-interactive task runtime was not started"
