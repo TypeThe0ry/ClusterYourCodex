@@ -16,6 +16,13 @@ are versioned independently from the product.
   with mismatched roots now fail closed before service or file mutation.
 - Added sentinel and zero-call regression coverage for path-binding failures so
   unrelated same-named files and services remain untouched.
+- Bound Windows Scheduled Task lifecycle operations to the current user SID,
+  owned install root, executable, and working directory; foreign-principal and
+  foreign-root fixtures now fail closed before mutation.
+- Pinned the external hostile-isolation guard executable by SHA-256 and bound
+  the digest through invocation and receipt attestation validation; hostile
+  runtime scheduling remains fail-closed until the production containment gates
+  are independently accepted.
 
 ## [0.1.0-preview.42] - 2026-08-31
 
