@@ -220,8 +220,26 @@ only after pairing (when explicitly requested), config health, service
 registration/start, the running smoke check, and atomic manifest replacement
 all succeed. A caught failure restores the old bytes and service state before
 returning; an interrupted invocation is recovered at the start of the next
-lifecycle call. Install and repair are idempotent. Uninstall removes only
-manifest-owned
+lifecycle call. Install and repair are idempotent.
+
+### Lifecycle path binding
+
+After the ownership marker and `install-manifest.json` exist, the manifest is
+the authoritative binding for lifecycle cleanup and repair. Linux requires the
+invocation's normalized `installRoot`, `dataRoot`, and `workspaceRoot` to match
+the recorded roots before it can recover a transaction, stop/remove a systemd
+unit, remove the worker, or write a replacement. The macOS preview applies the
+same check to those roots plus `logsRoot` and the HOME-derived `launchAgent`
+path. A mismatch fails before any service/LaunchAgent operation or worker,
+config, manifest, log, or workspace mutation, so a same-named path elsewhere
+cannot be mistaken for the owned installation.
+
+Treat a root change as an explicit migration or new installation, not as a
+repair/uninstall override. Existing paired data and workspaces are preserved by
+default; explicit data purge remains separately constrained to the installer
+owned default roots.
+
+Uninstall removes only manifest-owned
 binaries and service definitions; paired data and workspaces are preserved by
 default. Purging data is a separate explicit operation and is limited to the
 installer's default owned data root.

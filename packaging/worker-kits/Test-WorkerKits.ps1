@@ -848,6 +848,68 @@ for injection in after-pair after-service-registration before-manifest-write; do
   test ! -e "$data/.repair-transaction"
 done
 
+# Existing ownership is bound to the install manifest roots. A lifecycle call
+# with a different install/workspace root must fail before service removal and
+# leave unrelated same-named files untouched.
+bound_install_root="$(dirname "$worker")"
+bound_workspace_root="$data/workspace"
+bound_systemctl_lines="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')"
+bound_loginctl_lines="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log" | tr -d '[:space:]')"
+bound_worker_hash="$(sha256sum "$worker" | awk '{print $1}')"
+bound_config_hash="$(sha256sum "$data/config.json" | awk '{print $1}')"
+bound_manifest_hash="$(sha256sum "$data/install-manifest.json" | awk '{print $1}')"
+bound_unit_hash="$(sha256sum "$unit" | awk '{print $1}')"
+bound_credential_hash="$(sha256sum "$baseline_credential_path" | awk '{print $1}')"
+
+assert_linux_manifest_binding_failure() {
+  local label="$1" requested_install_root="$2" requested_workspace_root="$3" sentinel="$4"
+  set +e
+  "$good/install-worker.sh" uninstall --bundle-root "$good" \
+    --install-root "$requested_install_root" \
+    --data-root "$data" \
+    --workspace-root "$requested_workspace_root" \
+    --scope user \
+    >"$root/$label.stdout" 2>"$root/$label.stderr"
+  local binding_exit=$?
+  set -e
+  test "$binding_exit" -ne 0
+  test ! -s "$root/$label.stdout"
+  grep -q 'Installer paths do not match the existing owned installation.' "$root/$label.stderr"
+  test "$(sha256sum "$worker" | awk '{print $1}')" = "$bound_worker_hash"
+  test "$(sha256sum "$data/config.json" | awk '{print $1}')" = "$bound_config_hash"
+  test "$(sha256sum "$data/install-manifest.json" | awk '{print $1}')" = "$bound_manifest_hash"
+  test "$(sha256sum "$unit" | awk '{print $1}')" = "$bound_unit_hash"
+  test "$(sha256sum "$baseline_credential_path" | awk '{print $1}')" = "$bound_credential_hash"
+  test "$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')" = "$bound_systemctl_lines"
+  test "$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log" | tr -d '[:space:]')" = "$bound_loginctl_lines"
+  test -f "$CYC_FAKE_SYSTEMD_ROOT/service-enabled"
+  test -f "$CYC_FAKE_SYSTEMD_ROOT/service-active"
+  test ! -e "$data/.repair-transaction"
+  test -f "$sentinel"
+  test "$(cat "$sentinel")" = 'LINUX_PATH_BINDING_SENTINEL'
+}
+
+wrong_install_root="$root/linux-wrong-install"
+mkdir -p "$wrong_install_root"
+printf '%s\n' 'LINUX_PATH_BINDING_SENTINEL' >"$wrong_install_root/cyc-worker"
+chmod +x "$wrong_install_root/cyc-worker"
+assert_linux_manifest_binding_failure \
+  linux-wrong-install \
+  "$wrong_install_root" \
+  "$bound_workspace_root" \
+  "$wrong_install_root/cyc-worker"
+
+wrong_workspace_root="$root/linux-wrong-workspace"
+mkdir -p "$wrong_workspace_root"
+printf '%s\n' 'LINUX_PATH_BINDING_SENTINEL' >"$wrong_workspace_root/worker-sentinel"
+assert_linux_manifest_binding_failure \
+  linux-wrong-workspace \
+  "$bound_install_root" \
+  "$wrong_workspace_root" \
+  "$wrong_workspace_root/worker-sentinel"
+
+before="$(sha256sum "$worker" | awk '{print $1}')"
+
 # Routine Ready -> Repair keeps the existing identity and credential while it
 # atomically swaps the binary/unit and returns a paired, running receipt.
 routine_config_before="$(sha256sum "$data/config.json" | awk '{print $1}')"
@@ -921,7 +983,19 @@ set -euo pipefail
 [[ "${1:-}" == -a && "${2:-}" == 256 && $# -eq 3 ]] || exit 2
 sha256sum "$3"
 SHASUM_WRAPPER
-chmod +x "$root/fake-macos-bin/python3" "$root/fake-macos-bin/uname" "$root/fake-macos-bin/shasum"
+cat >"$root/fake-macos-bin/launchctl" <<'LAUNCHCTL_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$CYC_FAKE_LAUNCHCTL_LOG"
+case "${1:-}" in
+  print) exit 1 ;;
+  bootout|bootstrap|kickstart) exit 0 ;;
+  *) exit 0 ;;
+esac
+LAUNCHCTL_WRAPPER
+export CYC_FAKE_LAUNCHCTL_LOG="$root/fake-launchctl.log"
+: >"$CYC_FAKE_LAUNCHCTL_LOG"
+chmod +x "$root/fake-macos-bin/python3" "$root/fake-macos-bin/uname" "$root/fake-macos-bin/shasum" "$root/fake-macos-bin/launchctl"
 export PATH="$root/fake-macos-bin:$PATH"
 
 good="$root/macos-smoke-good"
@@ -1011,6 +1085,74 @@ test "$credential_before" = "$(find "$data_root" -maxdepth 1 -name '*.credential
 test "$(shasum -a 256 "$install_root/cyc-worker" | awk '{print $1}')" != "$baseline_worker"
 test ! -e "$HOME/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
 
+# Existing ownership is bound to every macOS lifecycle root. Changing the
+# install, logs, or HOME-derived LaunchAgent root must fail before any
+# uninstall operation touches the paired installation or the sentinel.
+mac_install_root="$install_root"
+mac_workspace_root="$workspace_root"
+mac_launch_agent_path="$HOME/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
+mac_launchctl_lines="$(wc -l <"$CYC_FAKE_LAUNCHCTL_LOG" | tr -d '[:space:]')"
+mac_worker_hash="$(shasum -a 256 "$install_root/cyc-worker" | awk '{print $1}')"
+mac_config_hash="$(shasum -a 256 "$data_root/config.json" | awk '{print $1}')"
+mac_manifest_hash="$(shasum -a 256 "$data_root/install-manifest.json" | awk '{print $1}')"
+
+assert_macos_manifest_binding_failure() {
+  local label="$1" requested_home="$2" requested_install_root="$3" requested_logs_root="$4" sentinel="$5"
+  set +e
+  HOME="$requested_home" "$upgrade/install-worker.sh" uninstall --bundle-root "$upgrade" \
+    --install-root "$requested_install_root" \
+    --data-root "$data_root" \
+    --workspace-root "$workspace_root" \
+    --logs-root "$requested_logs_root" \
+    --scope user \
+    >"$root/$label.stdout" 2>"$root/$label.stderr"
+  local binding_exit=$?
+  set -e
+  test "$binding_exit" -ne 0
+  test ! -s "$root/$label.stdout"
+  grep -q 'Installer paths do not match the existing owned installation.' "$root/$label.stderr"
+  test "$(shasum -a 256 "$install_root/cyc-worker" | awk '{print $1}')" = "$mac_worker_hash"
+  test "$(shasum -a 256 "$data_root/config.json" | awk '{print $1}')" = "$mac_config_hash"
+  test "$(shasum -a 256 "$data_root/install-manifest.json" | awk '{print $1}')" = "$mac_manifest_hash"
+  test "$(wc -l <"$CYC_FAKE_LAUNCHCTL_LOG" | tr -d '[:space:]')" = "$mac_launchctl_lines"
+  test ! -e "$data_root/.repair-transaction"
+  test -f "$sentinel"
+  test "$(cat "$sentinel")" = 'MACOS_PATH_BINDING_SENTINEL'
+  test ! -e "$mac_launch_agent_path"
+}
+
+wrong_macos_install_root="$root/macos-wrong-install"
+mkdir -p "$wrong_macos_install_root"
+printf '%s\n' 'MACOS_PATH_BINDING_SENTINEL' >"$wrong_macos_install_root/cyc-worker"
+chmod +x "$wrong_macos_install_root/cyc-worker"
+assert_macos_manifest_binding_failure \
+  macos-wrong-install \
+  "$HOME" \
+  "$wrong_macos_install_root" \
+  "$logs_root" \
+  "$wrong_macos_install_root/cyc-worker"
+
+wrong_macos_logs_root="$root/macos-wrong-logs"
+mkdir -p "$wrong_macos_logs_root"
+printf '%s\n' 'MACOS_PATH_BINDING_SENTINEL' >"$wrong_macos_logs_root/log-sentinel"
+assert_macos_manifest_binding_failure \
+  macos-wrong-logs \
+  "$HOME" \
+  "$mac_install_root" \
+  "$wrong_macos_logs_root" \
+  "$wrong_macos_logs_root/log-sentinel"
+
+wrong_macos_home="$root/macos-wrong-home"
+wrong_macos_launch_agent="$wrong_macos_home/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
+mkdir -p "$(dirname "$wrong_macos_launch_agent")"
+printf '%s\n' 'MACOS_PATH_BINDING_SENTINEL' >"$wrong_macos_launch_agent"
+assert_macos_manifest_binding_failure \
+  macos-wrong-launchagent \
+  "$wrong_macos_home" \
+  "$mac_install_root" \
+  "$logs_root" \
+  "$wrong_macos_launch_agent"
+
 # Uninstall is repeatable and preserves paired data, workspace, and logs by
 # default while removing only installer-owned executable/service material.
 uninstall_one="$($upgrade/install-worker.sh uninstall --bundle-root "$upgrade" "${common[@]}")"
@@ -1062,7 +1204,7 @@ test ! -e "$default_logs"
         }
     }
     $linuxSource = Get-Content -LiteralPath $linuxInstaller -Raw
-    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'after-pair', 'after-service-registration', 'before-manifest-write', 'remove_service', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest')) {
+    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'after-pair', 'after-service-registration', 'before-manifest-write', 'remove_service', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot')) {
         if ($linuxSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "Linux worker installer is missing rollback/integrity guard: $requiredPattern"
         }
@@ -1104,7 +1246,14 @@ test ! -e "$default_logs"
         '--repair',
         'config_existed_before_pair',
         'runtimeGated',
-        'containmentReady'
+        'containmentReady',
+        'validate_owned_manifest',
+        'Installer paths do not match the existing owned installation.',
+        'installRoot',
+        'dataRoot',
+        'workspaceRoot',
+        'logsRoot',
+        'launchAgent'
     )) {
         if ($macosSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "macOS worker installer is missing lifecycle/gating guard: $requiredPattern"

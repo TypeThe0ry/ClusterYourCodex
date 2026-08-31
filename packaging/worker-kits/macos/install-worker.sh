@@ -556,6 +556,53 @@ remove_transaction() {
   rm -rf "$value"
 }
 
+validate_owned_manifest() {
+  local raw byte_count expected
+  if [[ ! -f "$install_manifest" || -L "$install_manifest" ]]; then
+    printf 'Owned worker install manifest is missing or unsafe.\n' >&2
+    return 1
+  fi
+  byte_count="$(wc -c <"$install_manifest" | tr -d '[:space:]')"
+  if [[ ! "$byte_count" =~ ^[0-9]+$ || "$byte_count" -le 0 || "$byte_count" -gt 1048576 ]]; then
+    printf 'Owned worker install manifest is not a bounded normal file.\n' >&2
+    return 1
+  fi
+  raw="$(cat "$install_manifest")"
+  if [[ "$raw" == *$'\n'* || "$raw" == *$'\r'* ]]; then
+    printf 'Owned worker install manifest is not a single-line record.\n' >&2
+    return 1
+  fi
+  [[ "$raw" == *"\"schemaVersion\":\"${SCHEMA}\""* ]] || {
+    printf 'Owned worker install manifest has an unexpected schema.\n' >&2
+    return 1
+  }
+  expected="$(json_escape "$install_root")"
+  [[ "$raw" == *"\"installRoot\":\"${expected}\""* ]] || {
+    printf 'Installer paths do not match the existing owned installation.\n' >&2
+    return 1
+  }
+  expected="$(json_escape "$data_root")"
+  [[ "$raw" == *"\"dataRoot\":\"${expected}\""* ]] || {
+    printf 'Installer paths do not match the existing owned installation.\n' >&2
+    return 1
+  }
+  expected="$(json_escape "$workspace_root")"
+  [[ "$raw" == *"\"workspaceRoot\":\"${expected}\""* ]] || {
+    printf 'Installer paths do not match the existing owned installation.\n' >&2
+    return 1
+  }
+  expected="$(json_escape "$logs_root")"
+  [[ "$raw" == *"\"logsRoot\":\"${expected}\""* ]] || {
+    printf 'Installer paths do not match the existing owned installation.\n' >&2
+    return 1
+  }
+  expected="$(json_escape "$launch_agent_path")"
+  [[ "$raw" == *"\"launchAgent\":\"${expected}\""* ]] || {
+    printf 'Installer paths do not match the existing owned installation.\n' >&2
+    return 1
+  }
+}
+
 begin_transaction() {
   local staging candidate
   [[ ! -e "$transaction_root" && ! -L "$transaction_root" ]] || {
@@ -692,6 +739,10 @@ elif [[ -f "$marker_path" ]]; then
     printf 'Worker ownership marker has an unexpected value.\n' >&2
     exit 1
   fi
+fi
+
+if [[ "$installation_owned_before" -eq 1 && ( -e "$install_manifest" || -L "$install_manifest" ) ]]; then
+  validate_owned_manifest
 fi
 
 if [[ -e "$transaction_root" || -L "$transaction_root" ]]; then
