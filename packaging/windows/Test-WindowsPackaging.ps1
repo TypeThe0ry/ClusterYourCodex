@@ -425,10 +425,19 @@ try {
         -Snapshot $taskProbeSnapshot `
         -InstallRoot $taskProbeRoot `
         -ExpectedSid $taskProbeSid)
+    $foreignTaskSnapshot = [PSCustomObject]@{
+        name = $taskProbeSnapshot.name
+        xml = $taskProbeSnapshot.xml
+        taskPath = $taskProbeSnapshot.taskPath
+        principalSid = $taskProbeForeignSid
+        triggerSids = @($taskProbeForeignSid)
+        action = $taskProbeSnapshot.action
+        wasRunning = $taskProbeSnapshot.wasRunning
+    }
     Assert-ThrowsLike `
         -Action {
             [void](Assert-CycTaskSnapshotOwnership `
-                -Snapshot $taskProbeSnapshot `
+                -Snapshot $foreignTaskSnapshot `
                 -InstallRoot $taskProbeRoot `
                 -ExpectedSid $taskProbeSid)
         } `
