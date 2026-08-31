@@ -1206,14 +1206,42 @@ function Invoke-SetupSilentProbes {
 
 function Stop-SetupSilentOwnedProcesses {
     param([Parameter(Mandatory = $true)][string]$InstallRoot)
-    foreach ($process in Get-Process -Name @('ClusterYourCodex', 'cyc', 'cyc-controller', 'cyc-worker') -ErrorAction SilentlyContinue) {
-        $path = $null
-        try { $path = Resolve-SetupSilentPath $process.Path } catch { $path = $null }
-        if ($path -and $path.StartsWith($InstallRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
-            Stop-Process -Id $process.Id -Force -ErrorAction Stop
-            Wait-Process -Id $process.Id -Timeout 15 -ErrorAction SilentlyContinue
+    $installPrefix = $InstallRoot + [System.IO.Path]::DirectorySeparatorChar
+
+    # A controller task is configured with a bounded restart policy in the
+    # production bootstrap.  Killing its process alone can therefore race the
+    # scheduler and leave a fresh controller alive while the harness is about
+    # to open cyc.exe for the next repair fixture.  Stop only tasks whose
+    # single executable is proven to live below this disposable install root;
+    # an unexpected task definition remains untouched and the caller's
+    # fail-closed inventory assertion will report the residual process.
+    foreach ($name in @($script:WorkerTaskName, $script:ControllerTaskName)) {
+        foreach ($task in @(Get-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction SilentlyContinue)) {
+            $actions = @($task.Actions)
+            if ($actions.Count -ne 1) { continue }
+            $execute = $null
+            try { $execute = Resolve-SetupSilentPath ([string]$actions[0].Execute) } catch { $execute = $null }
+            if ($execute -and $execute.StartsWith($installPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                Stop-ScheduledTask -TaskName $name -TaskPath $task.TaskPath -ErrorAction SilentlyContinue
+            }
         }
     }
+
+    # Re-enumerate after every termination.  This closes the race between the
+    # initial process snapshot and a task restart/short-lived child, while
+    # retaining the exact executable-path ownership check for every kill.
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(20)
+    do {
+        $ownedProcesses = @(Get-SetupSilentProductProcesses | Where-Object {
+            $_.path -and $_.path.StartsWith($installPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($ownedProcesses.Count -eq 0) { return }
+        foreach ($process in $ownedProcesses) {
+            try { Stop-Process -Id ([int]$process.id) -Force -ErrorAction Stop } catch { }
+            try { Wait-Process -Id ([int]$process.id) -Timeout 15 -ErrorAction SilentlyContinue } catch { }
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
 }
 
 function Remove-SetupSilentOwnedTasks {
