@@ -58,6 +58,67 @@ function Test-ProfileMatrixDescendantPath {
     return $Child.StartsWith($parentRoot, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
+function ConvertTo-ProfileMatrixMemberSid {
+    param([Parameter(Mandatory = $true)]$Member)
+
+    # A filtered UAC token can omit the Administrators SID entirely from the
+    # WindowsIdentity.Groups projection. Resolve the member object itself by
+    # SID so the acceptance check remains independent of localized names and
+    # token filtering.
+    $sidProperty = $Member.PSObject.Properties['SID']
+    if ($null -ne $sidProperty -and $null -ne $sidProperty.Value) {
+        $rawSid = $sidProperty.Value
+        if ($rawSid -is [System.Security.Principal.SecurityIdentifier]) {
+            return $rawSid.Value
+        }
+        $sidText = ([string]$rawSid).Trim()
+        if ($sidText -match '^S-\d-\d+(?:-\d+)+$') {
+            return $sidText
+        }
+    }
+    $nameProperty = $Member.PSObject.Properties['Name']
+    if ($null -ne $nameProperty -and -not [string]::IsNullOrWhiteSpace([string]$nameProperty.Value)) {
+        try {
+            return ([System.Security.Principal.NTAccount]::new([string]$nameProperty.Value)).Translate(
+                [System.Security.Principal.SecurityIdentifier]
+            ).Value
+        } catch {
+            # Keep the unresolved member in the query diagnostics; only an
+            # exact SID match can satisfy the administrator case.
+        }
+    }
+    return $null
+}
+
+function Get-ProfileMatrixLocalAdministratorMembership {
+    param(
+        [Parameter(Mandatory = $true)][System.Security.Principal.SecurityIdentifier]$AdminGroupSid,
+        [Parameter(Mandatory = $true)][string]$ExpectedSid
+    )
+
+    $observedSids = @()
+    $queryError = $null
+    try {
+        # Query the local SAM by the well-known Administrators SID. This is a
+        # ground-truth fallback for ARM64/x64-emulated logons whose filtered
+        # token does not expose the deny-only group through WindowsIdentity.
+        $members = @(Get-LocalGroupMember -SID $AdminGroupSid -ErrorAction Stop)
+        $observedSids = @(
+            $members |
+                ForEach-Object { ConvertTo-ProfileMatrixMemberSid -Member $_ } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+                Sort-Object -Unique
+        )
+    } catch {
+        $queryError = [string]$_.Exception.Message
+    }
+    return [pscustomobject]@{
+        isMember = @($observedSids | Where-Object { $_ -ceq $ExpectedSid }).Count -gt 0
+        observedSids = @($observedSids)
+        queryError = $queryError
+    }
+}
+
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
 $profile = Resolve-ProfileMatrixPath $env:USERPROFILE
@@ -72,16 +133,39 @@ $adminSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
 # A newly created local administrator normally receives a filtered, non-
 # elevated token. WindowsPrincipal.IsInRole can therefore return false even
 # though the Administrators SID is present as a deny-only group. Membership is
-# the profile-matrix contract; keep elevation as a separate observation.
-$adminGroupPresent = @($identity.Groups | Where-Object { $_.Value -ceq $adminSid.Value }).Count -gt 0
-$isAdmin = $principal.IsInRole($adminSid) -or $adminGroupPresent
-$isElevated = $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+# the profile-matrix contract; keep elevation as a separate observation. Some
+# ARM64/x64-emulated logons omit even the deny-only SID from Groups, so the
+# local SAM query below is the authoritative fallback for that projection.
+$tokenGroupSids = @(
+    $identity.Groups |
+        ForEach-Object { [string]$_.Value } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Sort-Object -Unique
+)
+$adminGroupPresent = @($tokenGroupSids | Where-Object { $_ -ceq $adminSid.Value }).Count -gt 0
+$tokenAdminRole = [bool]$principal.IsInRole($adminSid)
+$localAdminMembership = Get-ProfileMatrixLocalAdministratorMembership `
+    -AdminGroupSid $adminSid `
+    -ExpectedSid ([string]$identity.User.Value)
+$isAdmin = $tokenAdminRole -or $adminGroupPresent -or [bool]$localAdminMembership.isMember
+$isElevated = [bool]$principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+$adminMembershipSource = if ($tokenAdminRole) {
+    'token-is-in-role'
+} elseif ($adminGroupPresent) {
+    'token-group-sid'
+} elseif ($localAdminMembership.isMember) {
+    'local-group-sid'
+} elseif (-not [string]::IsNullOrWhiteSpace([string]$localAdminMembership.queryError)) {
+    'query-error'
+} else {
+    'none'
+}
 
 Assert-ProfileMatrix (Test-Path -LiteralPath $package -PathType Container) "package root exists: $package"
 Assert-ProfileMatrix (Test-Path -LiteralPath $work -PathType Container) "work root exists: $work"
 Assert-ProfileMatrix (-not [string]::IsNullOrWhiteSpace([string]$identity.User.Value)) 'current identity has a SID'
 Assert-ProfileMatrix ([string]$identity.User.Value -ceq $ExpectedSid) "current identity SID matches expected SID (expected=$ExpectedSid observed=$([string]$identity.User.Value))"
-Assert-ProfileMatrix ($isAdmin -eq $expectedAdmin) "administrator membership matches case (expected=$expectedAdmin observed=$isAdmin)"
+Assert-ProfileMatrix ($isAdmin -eq $expectedAdmin) "administrator membership matches case (expected=$expectedAdmin observed=$isAdmin source=$adminMembershipSource localQueryError=$([string]$localAdminMembership.queryError))"
 if ($expectedNonAscii) {
     Assert-ProfileMatrix (Test-NonAscii $profile) "USERPROFILE is non-ASCII for $CaseName (observed=$profile)"
 } else {
@@ -167,6 +251,13 @@ $result = [ordered]@{
     expectedSid = $ExpectedSid
     account = [string]$identity.Name
     isAdministrator = [bool]$isAdmin
+    administratorMembershipSource = $adminMembershipSource
+    administratorMembershipTokenRole = [bool]$tokenAdminRole
+    administratorMembershipTokenGroup = [bool]$adminGroupPresent
+    administratorMembershipTokenGroupSids = @($tokenGroupSids)
+    administratorMembershipLocalGroup = [bool]$localAdminMembership.isMember
+    administratorMembershipObservedSids = @($localAdminMembership.observedSids)
+    administratorMembershipQueryError = $localAdminMembership.queryError
     isElevated = [bool]$isElevated
     userProfile = $profile
     localAppData = $localAppData

@@ -106,6 +106,11 @@ private staged package copy. Credentials are held only in-memory as a
 `PSCredential`; they are never placed in command arguments, files, or logs.
 The controller removes the disposable account and its profile by SID after the
 case, while retaining a job-owned JSON receipt and logs for CI diagnostics.
+For UAC-filtered or ARM64/x64-emulated logon tokens whose
+`WindowsIdentity.Groups` projection omits the Administrators SID, the child
+cross-checks the local SAM by the well-known Administrators SID and records the
+membership source and observed SIDs in its receipt; a failed SAM query remains
+fail-closed for administrator cases.
 
 A disposable profile launched by a non-interactive CI session cannot obtain the
 Winlogon token required to register or start a production `InteractiveToken`

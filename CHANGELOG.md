@@ -7,6 +7,17 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.47] - 2026-09-01
+
+### Fixed
+
+- Cross-check administrator profile cases against the well-known local
+  Administrators SID when ARM64/x64-emulated filtered tokens omit that group
+  from `WindowsIdentity.Groups`, and retain token/SAM membership evidence in
+  the child receipt.
+- Added static regression coverage for both membership evidence paths and
+  fail-closed query-error handling.
+
 ## [0.1.0-preview.46] - 2026-09-01
 
 ### Fixed
@@ -580,7 +591,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.46...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.47...HEAD
+[0.1.0-preview.47]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.46...v0.1.0-preview.47
 [0.1.0-preview.46]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.45...v0.1.0-preview.46
 [0.1.0-preview.45]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.44...v0.1.0-preview.45
 [0.1.0-preview.44]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.43...v0.1.0-preview.44

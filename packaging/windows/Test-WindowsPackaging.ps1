@@ -4516,6 +4516,11 @@ exit 0
     Assert-True ($profileMatrixChildSource -match 'USERPROFILE') 'profile matrix child records the effective USERPROFILE'
     Assert-True ($profileMatrixChildSource -match 'LOCALAPPDATA') 'profile matrix child records the effective LOCALAPPDATA'
     Assert-True ($profileMatrixChildSource -match 'isAdministrator') 'profile matrix child records administrator membership'
+    Assert-True ($profileMatrixChildSource -match 'Get-LocalGroupMember[\s\S]+-SID' -and
+        $profileMatrixChildSource -match 'administratorMembershipSource' -and
+        $profileMatrixChildSource -match 'administratorMembershipLocalGroup' -and
+        $profileMatrixChildSource -match 'administratorMembershipTokenGroupSids' -and
+        $profileMatrixChildSource -match "'query-error'") 'profile matrix child uses a SID-backed local-group fallback when a filtered token omits administrator membership and records both evidence paths'
     Assert-True ($profileMatrixChildSource -match 'nonAsciiProfile') 'profile matrix child records non-ASCII profile evidence'
     Assert-True ($profileMatrixChildSource -match "'-ScheduledTaskLogonType', 'Interactive'") 'profile matrix child registers the production Interactive task principal'
     Assert-True ($profileMatrixChildSource -match "taskLogonType = 'Interactive'") 'profile matrix child receipt records the production task principal'
