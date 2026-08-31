@@ -426,18 +426,53 @@ function Read-KitManifest {
 }
 
 function Get-WorkerTaskSnapshot {
-    $task = Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue
-    if (-not $task) { return $null }
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string]$Config,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][ValidateSet('User', 'System')][string]$ResolvedScope
+    )
+    $tasks = @(Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue |
+        Where-Object { $null -ne $_ })
+    if ($tasks.Count -eq 0) { return $null }
+    $rootTasks = @($tasks | Where-Object {
+        $null -ne $_.PSObject.Properties['TaskPath'] -and [string]$_.TaskPath -ceq '\'
+    })
+    if ($rootTasks.Count -ne 1 -or $tasks.Count -ne $rootTasks.Count) {
+        throw 'Worker scheduled task name is already claimed outside the installer-owned root task path.'
+    }
+    $task = $rootTasks[0]
+    Assert-WorkerTaskOwnership `
+        -Task $task `
+        -Executable $Executable `
+        -Config $Config `
+        -WorkingDirectory $WorkingDirectory `
+        -ResolvedScope $ResolvedScope
     return [PSCustomObject]@{
-        Xml = Export-ScheduledTask -TaskName $script:TaskName
+        Xml = Export-ScheduledTask -TaskName $script:TaskName -TaskPath '\'
         WasRunning = ([string]$task.State -eq 'Running')
     }
 }
 
 function Restore-WorkerTask {
-    param([Parameter(Mandatory = $true)]$Snapshot)
-    Register-ScheduledTask -TaskName $script:TaskName -Xml $Snapshot.Xml -Force | Out-Null
-    if ($Snapshot.WasRunning) { Start-ScheduledTask -TaskName $script:TaskName }
+    param(
+        [Parameter(Mandatory = $true)]$Snapshot,
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string]$Config,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][ValidateSet('User', 'System')][string]$ResolvedScope
+    )
+    Register-ScheduledTask -TaskName $script:TaskName -TaskPath '\' -Xml $Snapshot.Xml -Force | Out-Null
+    $restored = Get-WorkerTaskSnapshot `
+        -Executable $Executable `
+        -Config $Config `
+        -WorkingDirectory $WorkingDirectory `
+        -ResolvedScope $ResolvedScope
+    if ($null -eq $restored) { throw 'Worker scheduled task rollback did not restore an owned task.' }
+    if ($Snapshot.WasRunning) {
+        Start-ScheduledTask -TaskName $script:TaskName -TaskPath '\'
+        Wait-WorkerTaskRunning -TaskName $script:TaskName
+    }
 }
 
 function Register-WorkerTask {
@@ -469,7 +504,13 @@ function Register-WorkerTask {
         $settingsParameters.DontStopIfGoingOnBatteries = $true
     }
     $settings = New-ScheduledTaskSettingsSet @settingsParameters
-    Register-ScheduledTask -TaskName $script:TaskName -Action $taskAction -Trigger $trigger -Principal $principal -Settings $settings -Description 'ClusterYourCodex managed worker' -Force | Out-Null
+    Register-ScheduledTask -TaskName $script:TaskName -TaskPath '\' -Action $taskAction -Trigger $trigger -Principal $principal -Settings $settings -Description 'ClusterYourCodex managed worker' -Force | Out-Null
+    $registered = Get-WorkerTaskSnapshot `
+        -Executable $Executable `
+        -Config $Config `
+        -WorkingDirectory $WorkingDirectory `
+        -ResolvedScope $ResolvedScope
+    if ($null -eq $registered) { throw 'Worker scheduled task registration did not produce an owned task.' }
 }
 
 function Test-IsAdministrator {
@@ -490,6 +531,62 @@ function Resolve-ServiceScope {
     return $RequestedScope
 }
 
+function Resolve-AccountSid {
+    param([Parameter(Mandatory = $true)][string]$Account)
+    if ([string]::IsNullOrWhiteSpace($Account)) { return $null }
+    if ($Account -match '^S-[0-9-]+$') {
+        try { return (New-Object System.Security.Principal.SecurityIdentifier($Account)).Value } catch { return $null }
+    }
+    if ($Account -ieq 'SYSTEM' -or $Account -ieq 'NT AUTHORITY\SYSTEM') {
+        return 'S-1-5-18'
+    }
+    try {
+        $translated = (New-Object System.Security.Principal.NTAccount($Account)).Translate(
+            [System.Security.Principal.SecurityIdentifier]
+        )
+        return $translated.Value
+    } catch {
+        return $null
+    }
+}
+
+function Get-ExpectedWorkerTaskPrincipalSid {
+    param([Parameter(Mandatory = $true)][ValidateSet('User', 'System')][string]$ResolvedScope)
+    if ($ResolvedScope -eq 'System') { return 'S-1-5-18' }
+    return [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+}
+
+function Assert-WorkerTaskOwnership {
+    param(
+        [Parameter(Mandatory = $true)]$Task,
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string]$Config,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][ValidateSet('User', 'System')][string]$ResolvedScope
+    )
+    if ([string]$Task.TaskPath -cne '\') {
+        throw 'Worker scheduled task is outside the installer-owned root task path.'
+    }
+    $actions = @($Task.Actions)
+    if ($actions.Count -ne 1) { throw 'Worker scheduled task action set is not installer-owned.' }
+    $action = $actions[0]
+    $actualExecutable = Resolve-NormalizedPath ([string]$action.Execute)
+    $actualWorkingDirectory = Resolve-NormalizedPath ([string]$action.WorkingDirectory)
+    $expectedArguments = 'run --config "' + $Config + '"'
+    if (-not [string]::Equals($actualExecutable, $Executable, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$action.Arguments, $expectedArguments, [System.StringComparison]::Ordinal) -or
+        -not [string]::Equals($actualWorkingDirectory, $WorkingDirectory, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Worker scheduled task action is not bound to the installer-owned worker roots.'
+    }
+    $principal = if ($null -ne $Task.Principal) { [string]$Task.Principal.UserId } else { '' }
+    $actualPrincipalSid = Resolve-AccountSid $principal
+    $expectedPrincipalSid = Get-ExpectedWorkerTaskPrincipalSid -ResolvedScope $ResolvedScope
+    if ([string]::IsNullOrWhiteSpace($actualPrincipalSid) -or
+        -not [string]::Equals($actualPrincipalSid, $expectedPrincipalSid, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Worker scheduled task principal is not bound to the current installer identity.'
+    }
+}
+
 function Wait-WorkerTaskRunning {
     param(
         [Parameter(Mandatory = $true)][string]$TaskName,
@@ -497,19 +594,37 @@ function Wait-WorkerTaskRunning {
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
-        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+        $task = Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
         if ([string]$task.State -eq 'Running') { return }
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
-    $details = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
+    $details = Get-ScheduledTaskInfo -TaskName $TaskName -TaskPath '\' -ErrorAction SilentlyContinue
     $lastResult = if ($details) { [string]$details.LastTaskResult } else { 'unknown' }
     throw "Worker task did not remain running (state=$([string]$task.State), lastResult=$lastResult)."
 }
 
 function Stop-AndRemoveTask {
-    if (Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue) {
-        Stop-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $script:TaskName -Confirm:$false
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string]$Config,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][ValidateSet('User', 'System')][string]$ResolvedScope
+    )
+    $snapshot = Get-WorkerTaskSnapshot `
+        -Executable $Executable `
+        -Config $Config `
+        -WorkingDirectory $WorkingDirectory `
+        -ResolvedScope $ResolvedScope
+    if ($null -ne $snapshot) {
+        Stop-ScheduledTask -TaskName $script:TaskName -TaskPath '\' -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $script:TaskName -TaskPath '\' -Confirm:$false
+        if ($null -ne (Get-WorkerTaskSnapshot `
+                -Executable $Executable `
+                -Config $Config `
+                -WorkingDirectory $WorkingDirectory `
+                -ResolvedScope $ResolvedScope)) {
+            throw 'Worker scheduled task remained after installer-owned removal.'
+        }
     }
 }
 
@@ -664,7 +779,9 @@ function Restore-WorkerTransaction {
         [Parameter(Mandatory = $true)][string]$TransactionRoot,
         [Parameter(Mandatory = $true)][string]$DataRoot,
         [Parameter(Mandatory = $true)][string]$InstallManifestPath,
-        [Parameter(Mandatory = $true)][string]$WorkerBinaryPath
+        [Parameter(Mandatory = $true)][string]$WorkerBinaryPath,
+        [Parameter(Mandatory = $true)][string]$WorkspaceRoot,
+        [Parameter(Mandatory = $true)][ValidateSet('User', 'System')][string]$ResolvedScope
     )
     Assert-TransactionTreeSafe -TransactionRoot $TransactionRoot -DataRoot $DataRoot
     $statePath = Join-Path $TransactionRoot 'state.json'
@@ -676,7 +793,11 @@ function Restore-WorkerTransaction {
     $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
     if ($state.schemaVersion -ne $script:TransactionSchema) { throw 'Unsupported worker repair transaction state.' }
 
-    Stop-AndRemoveTask
+    Stop-AndRemoveTask `
+        -Executable $WorkerBinaryPath `
+        -Config (Join-Path $DataRoot 'config.json') `
+        -WorkingDirectory $WorkspaceRoot `
+        -ResolvedScope $ResolvedScope
 
     foreach ($current in @(Get-WorkerIdentityFiles -DataRoot $DataRoot)) {
         if (Test-ReparsePoint $current) { throw 'Refusing to replace a reparse point in worker identity storage.' }
@@ -728,7 +849,12 @@ function Restore-WorkerTransaction {
             Xml = [System.IO.File]::ReadAllText($taskXmlPath)
             WasRunning = [bool]$state.taskWasRunning
         }
-        Restore-WorkerTask -Snapshot $taskSnapshot
+        Restore-WorkerTask `
+            -Snapshot $taskSnapshot `
+            -Executable $WorkerBinaryPath `
+            -Config (Join-Path $DataRoot 'config.json') `
+            -WorkingDirectory $WorkspaceRoot `
+            -ResolvedScope $ResolvedScope
     }
     Remove-WorkerTransaction -TransactionRoot $TransactionRoot -DataRoot $DataRoot
 }
@@ -794,7 +920,13 @@ if (Test-Path -LiteralPath $transactionPath) {
         if (Test-ReparsePoint $commitItem) { throw 'Worker repair commit marker is a reparse point.' }
         Remove-WorkerTransaction -TransactionRoot $transactionPath -DataRoot $data
     } else {
-        Restore-WorkerTransaction -TransactionRoot $transactionPath -DataRoot $data -InstallManifestPath $manifestPath -WorkerBinaryPath $workerPath
+        Restore-WorkerTransaction `
+            -TransactionRoot $transactionPath `
+            -DataRoot $data `
+            -InstallManifestPath $manifestPath `
+            -WorkerBinaryPath $workerPath `
+            -WorkspaceRoot $workspace `
+            -ResolvedScope $resolvedScope
     }
 }
 if ($ownedInstallation -and (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
@@ -806,18 +938,27 @@ if ($ownedInstallation -and (Test-Path -LiteralPath $manifestPath -PathType Leaf
     if ($recordedManifest.schemaVersion -ne $script:Schema -or
         -not [string]::Equals((Resolve-NormalizedPath $recordedManifest.installRoot), $install, [System.StringComparison]::OrdinalIgnoreCase) -or
         -not [string]::Equals((Resolve-NormalizedPath $recordedManifest.dataRoot), $data, [System.StringComparison]::OrdinalIgnoreCase) -or
-        -not [string]::Equals((Resolve-NormalizedPath $recordedManifest.workspaceRoot), $workspace, [System.StringComparison]::OrdinalIgnoreCase)) {
+        -not [string]::Equals((Resolve-NormalizedPath $recordedManifest.workspaceRoot), $workspace, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals((Resolve-NormalizedPath $recordedManifest.workerBinary), $workerPath, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw 'Installer paths do not match the existing owned installation.'
     }
 }
-$previousTask = Get-WorkerTaskSnapshot
+$previousTask = Get-WorkerTaskSnapshot `
+    -Executable $workerPath `
+    -Config $configPath `
+    -WorkingDirectory $workspace `
+    -ResolvedScope $resolvedScope
 
 if ($Action -eq 'Uninstall') {
     if (-not $ownedInstallation) {
         [PSCustomObject]@{ schemaVersion = $script:Schema; action = 'uninstall'; succeeded = $true; alreadyAbsent = $true; dataPreserved = $true } | ConvertTo-Json
         return
     }
-    Stop-AndRemoveTask
+    Stop-AndRemoveTask `
+        -Executable $workerPath `
+        -Config $configPath `
+        -WorkingDirectory $workspace `
+        -ResolvedScope $resolvedScope
     if (Test-Path -LiteralPath $workerPath -PathType Leaf) { Remove-Item -LiteralPath $workerPath -Force }
     if (Test-Path -LiteralPath $install -PathType Container) {
         $remaining = @(Get-ChildItem -LiteralPath $install -Force)
@@ -870,7 +1011,11 @@ try {
         -TaskSnapshot $previousTask
     $transactionActive = $true
 
-    Stop-AndRemoveTask
+    Stop-AndRemoveTask `
+        -Executable $workerPath `
+        -Config $configPath `
+        -WorkingDirectory $workspace `
+        -ResolvedScope $resolvedScope
     if (Test-Path -LiteralPath $workerPath) {
         $existingWorker = Get-Item -LiteralPath $workerPath -Force
         if ($existingWorker.PSIsContainer -or (Test-ReparsePoint $existingWorker)) {
@@ -922,7 +1067,7 @@ try {
     }
     if ($paired -and -not $PairOnly) {
         Register-WorkerTask -Executable $workerPath -Config $configPath -WorkingDirectory $workspace -ResolvedScope $resolvedScope -PermitBattery ([bool]$AllowOnBattery)
-        Start-ScheduledTask -TaskName $script:TaskName
+        Start-ScheduledTask -TaskName $script:TaskName -TaskPath '\'
         Wait-WorkerTaskRunning -TaskName $script:TaskName
         Invoke-FailureInjection -Expected 'AfterServiceRegistration' -Actual $FailureInjection
         $service = 'scheduled_task'
@@ -964,7 +1109,13 @@ try {
     $originalFailure = $_
     if ($transactionActive -and -not $transactionCommitted) {
         try {
-            Restore-WorkerTransaction -TransactionRoot $transactionPath -DataRoot $data -InstallManifestPath $manifestPath -WorkerBinaryPath $workerPath
+            Restore-WorkerTransaction `
+                -TransactionRoot $transactionPath `
+                -DataRoot $data `
+                -InstallManifestPath $manifestPath `
+                -WorkerBinaryPath $workerPath `
+                -WorkspaceRoot $workspace `
+                -ResolvedScope $resolvedScope
             $transactionActive = $false
         } catch {
             throw 'Worker repair failed and the protected rollback transaction could not be restored.'

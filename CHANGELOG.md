@@ -19,6 +19,9 @@ are versioned independently from the product.
 - Bound Windows Scheduled Task lifecycle operations to the current user SID,
   owned install root, executable, and working directory; foreign-principal and
   foreign-root fixtures now fail closed before mutation.
+- Applied the same root-task-path, SID, executable, arguments, and working
+  directory ownership preflight to the standalone Windows worker kit; a
+  same-named foreign task is rejected before stop, unregister, or rollback.
 - Pinned the external hostile-isolation guard executable by SHA-256 and bound
   the digest through invocation and receipt attestation validation; hostile
   runtime scheduling remains fail-closed until the production containment gates

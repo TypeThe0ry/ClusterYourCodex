@@ -147,9 +147,9 @@ try {
     $windowsSmokeData = Join-Path $temporary 'windows-smoke-data'
     $windowsSmokeWorkspace = Join-Path $temporary 'windows-smoke-workspace'
     $windowsSmokeInstaller = Join-Path $windowsSmokeKit 'Install-Worker.ps1'
-    function Get-ScheduledTask { return $null }
-    function Stop-ScheduledTask {}
-    function Unregister-ScheduledTask {}
+    function Get-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction) return $null }
+    function Stop-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction) }
+    function Unregister-ScheduledTask { param($TaskName, $TaskPath, [switch]$Confirm) }
     try {
         $unexpectedKitFile = Join-Path $windowsSmokeKit 'unexpected.txt'
         [System.IO.File]::WriteAllText($unexpectedKitFile, "unexpected`n", (New-Object System.Text.UTF8Encoding($false)))
@@ -311,32 +311,49 @@ internal static class Program
     $script:FakeTaskRunning = $false
     $script:FakeTaskXml = $null
     $script:FakeTaskGeneration = 0
+    $script:FakeTaskPath = '\'
+    $script:FakeTaskAction = $null
+    $script:FakeTaskPrincipal = $null
+    $script:FakeTaskStopCount = 0
+    $script:FakeTaskUnregisterCount = 0
+    $script:FakeTaskRegisterCount = 0
     function Get-ScheduledTask {
-        param($TaskName, $ErrorAction)
+        param($TaskName, $TaskPath, $ErrorAction)
         if (-not $script:FakeTaskExists) { return $null }
-        return [PSCustomObject]@{ State = if ($script:FakeTaskRunning) { 'Running' } else { 'Ready' } }
+        if ($PSBoundParameters.ContainsKey('TaskPath') -and [string]$TaskPath -cne [string]$script:FakeTaskPath) { return $null }
+        return [PSCustomObject]@{
+            State = if ($script:FakeTaskRunning) { 'Running' } else { 'Ready' }
+            TaskPath = $script:FakeTaskPath
+            Actions = @($script:FakeTaskAction)
+            Principal = $script:FakeTaskPrincipal
+        }
     }
-    function Export-ScheduledTask { param($TaskName) return $script:FakeTaskXml }
-    function Stop-ScheduledTask { param($TaskName, $ErrorAction) $script:FakeTaskRunning = $false }
-    function Unregister-ScheduledTask { param($TaskName, [switch]$Confirm) $script:FakeTaskExists = $false; $script:FakeTaskRunning = $false }
-    function Start-ScheduledTask { param($TaskName) if (-not $script:FakeTaskExists) { throw 'Fake task is absent.' }; $script:FakeTaskRunning = $true }
-    function Get-ScheduledTaskInfo { param($TaskName, $ErrorAction) return [PSCustomObject]@{ LastTaskResult = 0 } }
-    function New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDirectory) return [PSCustomObject]@{} }
+    function Export-ScheduledTask { param($TaskName, $TaskPath) if ([string]$TaskPath -cne [string]$script:FakeTaskPath) { throw 'Fake task path mismatch.' }; return $script:FakeTaskXml }
+    function Stop-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction) $script:FakeTaskStopCount++; $script:FakeTaskRunning = $false }
+    function Unregister-ScheduledTask { param($TaskName, $TaskPath, [switch]$Confirm) $script:FakeTaskUnregisterCount++; $script:FakeTaskExists = $false; $script:FakeTaskRunning = $false }
+    function Start-ScheduledTask { param($TaskName, $TaskPath) if (-not $script:FakeTaskExists) { throw 'Fake task is absent.' }; $script:FakeTaskRunning = $true }
+    function Get-ScheduledTaskInfo { param($TaskName, $TaskPath, $ErrorAction) return [PSCustomObject]@{ LastTaskResult = 0 } }
+    function New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDirectory) return [PSCustomObject]@{ Execute = $Execute; Arguments = $Argument; WorkingDirectory = $WorkingDirectory } }
     function New-ScheduledTaskTrigger { param([switch]$AtStartup, [switch]$AtLogOn, $User) return [PSCustomObject]@{} }
-    function New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) return [PSCustomObject]@{} }
+    function New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) return [PSCustomObject]@{ UserId = $UserId } }
     function New-ScheduledTaskSettingsSet {
         param($MultipleInstances, $StartWhenAvailable, $RestartCount, $RestartInterval, $ExecutionTimeLimit, $AllowStartIfOnBatteries, $DontStopIfGoingOnBatteries)
         return [PSCustomObject]@{}
     }
     function Register-ScheduledTask {
-        param($TaskName, $Xml, $Action, $Trigger, $Principal, $Settings, $Description, [switch]$Force)
+        param($TaskName, $TaskPath, $Xml, $Action, $Trigger, $Principal, $Settings, $Description, [switch]$Force)
+        if ([string]$TaskPath -cne '\') { throw 'Fake task must be registered in the root task path.' }
+        $script:FakeTaskRegisterCount++
         $script:FakeTaskExists = $true
         $script:FakeTaskRunning = $false
+        $script:FakeTaskPath = [string]$TaskPath
         if ($PSBoundParameters.ContainsKey('Xml')) {
             $script:FakeTaskXml = [string]$Xml
         } else {
             $script:FakeTaskGeneration++
             $script:FakeTaskXml = "<Task generation=`"$($script:FakeTaskGeneration)`" />"
+            $script:FakeTaskAction = $Action
+            $script:FakeTaskPrincipal = $Principal
         }
         return [PSCustomObject]@{}
     }
@@ -375,6 +392,58 @@ internal static class Program
             manifest = (Get-FileHash -LiteralPath $installedManifest -Algorithm SHA256).Hash
             taskXml = $script:FakeTaskXml
         }
+
+        # A same-named task outside the root task path, or with a foreign
+        # principal/action, must be rejected before stop/unregister or any
+        # installer-owned file is mutated.
+        $baselineTaskPath = $script:FakeTaskPath
+        $baselineTaskAction = $script:FakeTaskAction
+        $baselineTaskPrincipal = $script:FakeTaskPrincipal
+        $baselineTaskStopCount = $script:FakeTaskStopCount
+        $baselineTaskUnregisterCount = $script:FakeTaskUnregisterCount
+        $baselineTaskRegisterCount = $script:FakeTaskRegisterCount
+        function Assert-ForeignWorkerTaskRejected {
+            param([Parameter(Mandatory = $true)][string]$Label)
+            $beforeWorker = (Get-FileHash -LiteralPath $installedWorker -Algorithm SHA256).Hash
+            $beforeConfig = (Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash
+            $beforeManifest = (Get-FileHash -LiteralPath $installedManifest -Algorithm SHA256).Hash
+            $rejected = $false
+            try {
+                $null = . $windowsUpgradeInstaller `
+                    -Action Repair `
+                    -BundleRoot $windowsUpgradeKit `
+                    -InstallRoot $windowsTransactionInstall `
+                    -DataRoot $windowsTransactionData `
+                    -WorkspaceRoot $windowsTransactionWorkspace `
+                    -Scope User `
+                    -Confirm:$false
+            } catch {
+                $rejected = $true
+            }
+            if (-not $rejected) { throw "Foreign worker task fixture was accepted: $Label" }
+            if ((Get-FileHash -LiteralPath $installedWorker -Algorithm SHA256).Hash -ne $beforeWorker -or
+                (Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash -ne $beforeConfig -or
+                (Get-FileHash -LiteralPath $installedManifest -Algorithm SHA256).Hash -ne $beforeManifest -or
+                $script:FakeTaskStopCount -ne $baselineTaskStopCount -or
+                $script:FakeTaskUnregisterCount -ne $baselineTaskUnregisterCount -or
+                $script:FakeTaskRegisterCount -ne $baselineTaskRegisterCount -or
+                -not $script:FakeTaskExists) {
+                throw "Foreign worker task fixture mutated installer state: $Label"
+            }
+        }
+        $script:FakeTaskPath = '\Foreign\'
+        Assert-ForeignWorkerTaskRejected -Label 'foreign task path'
+        $script:FakeTaskPath = $baselineTaskPath
+        $script:FakeTaskPrincipal = [PSCustomObject]@{ UserId = 'S-1-5-21-1-2-3-9999' }
+        Assert-ForeignWorkerTaskRejected -Label 'foreign task principal'
+        $script:FakeTaskPrincipal = $baselineTaskPrincipal
+        $script:FakeTaskAction = [PSCustomObject]@{
+            Execute = $installedWorker
+            Arguments = 'run --config "' + $installedConfig + '"'
+            WorkingDirectory = (Join-Path $temporary 'foreign-worker-workspace')
+        }
+        Assert-ForeignWorkerTaskRejected -Label 'foreign task working directory'
+        $script:FakeTaskAction = $baselineTaskAction
 
         foreach ($injection in @('AfterPair', 'AfterServiceRegistration', 'BeforeManifestWrite')) {
             $arguments = @{
@@ -438,7 +507,7 @@ internal static class Program
             'Get-ScheduledTask', 'Export-ScheduledTask', 'Stop-ScheduledTask', 'Unregister-ScheduledTask',
             'Start-ScheduledTask', 'Get-ScheduledTaskInfo', 'New-ScheduledTaskAction',
             'New-ScheduledTaskTrigger', 'New-ScheduledTaskPrincipal', 'New-ScheduledTaskSettingsSet',
-            'Register-ScheduledTask'
+            'Register-ScheduledTask', 'Assert-ForeignWorkerTaskRejected'
         )) {
             Remove-Item -LiteralPath ("Function:\" + $functionName) -Force -ErrorAction SilentlyContinue
         }
@@ -1198,7 +1267,7 @@ test ! -e "$default_logs"
         }
     }
     $windowsSource = Get-Content -LiteralPath $windowsInstaller -Raw
-    foreach ($requiredPattern in @('SHA256SUMS', 'Get-WorkerTaskSnapshot', 'Restore-WorkerTask', 'New-WorkerTransaction', 'Restore-WorkerTransaction', 'TransactionSchema', 'AfterPair', 'AfterServiceRegistration', 'BeforeManifestWrite', 'Assert-DefaultDataPurgeTarget', 'Resolve-ServiceScope', 'Wait-WorkerTaskRunning', 'ServiceAccount', '--workspace-root', '--repair', 'configExistedBeforePair', 'expectedKitNames', 'actualKitNames', 'exactly five normal files')) {
+    foreach ($requiredPattern in @('SHA256SUMS', 'Get-WorkerTaskSnapshot', 'Restore-WorkerTask', 'New-WorkerTransaction', 'Restore-WorkerTransaction', 'TransactionSchema', 'AfterPair', 'AfterServiceRegistration', 'BeforeManifestWrite', 'Assert-DefaultDataPurgeTarget', 'Resolve-ServiceScope', 'Resolve-AccountSid', 'Assert-WorkerTaskOwnership', 'Wait-WorkerTaskRunning', 'ServiceAccount', 'TaskPath', 'WorkingDirectory', 'worker scheduled task principal', '--workspace-root', '--repair', 'configExistedBeforePair', 'expectedKitNames', 'actualKitNames', 'exactly five normal files')) {
         if ($windowsSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "Windows worker installer is missing rollback/integrity guard: $requiredPattern"
         }
