@@ -7,6 +7,16 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.43] - 2026-08-31
+
+### Fixed
+
+- Bound Linux and macOS worker lifecycle cleanup to the install manifest's
+  authoritative install, data, workspace, log, and LaunchAgent roots; requests
+  with mismatched roots now fail closed before service or file mutation.
+- Added sentinel and zero-call regression coverage for path-binding failures so
+  unrelated same-named files and services remain untouched.
+
 ## [0.1.0-preview.42] - 2026-08-31
 
 ### Fixed
@@ -523,7 +533,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.42...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.43...HEAD
+[0.1.0-preview.43]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.42...v0.1.0-preview.43
 [0.1.0-preview.42]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.41...v0.1.0-preview.42
 [0.1.0-preview.41]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.40...v0.1.0-preview.41
 [0.1.0-preview.40]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.39...v0.1.0-preview.40
