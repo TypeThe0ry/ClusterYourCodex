@@ -362,12 +362,13 @@ require_user_systemd_ready() {
 }
 
 service_path_for_scope() {
-  local requested_scope="$1"
+  local requested_scope="$1" path
   if [[ "$requested_scope" == system ]]; then
-    printf '/etc/systemd/system/%s' "$SERVICE_NAME"
+    path="/etc/systemd/system/${SERVICE_NAME}"
   else
-    printf '%s/systemd/user/%s' "${XDG_CONFIG_HOME:-${HOME}/.config}" "$SERVICE_NAME"
+    path="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user/${SERVICE_NAME}"
   fi
+  normalize_path "$path"
 }
 
 service_path() {
@@ -454,7 +455,7 @@ manifest_scope_or_current() {
 }
 
 validate_owned_manifest() {
-  local raw byte_count expected
+  local raw byte_count expected recorded_scope
   if [[ ! -f "$install_manifest" || -L "$install_manifest" ]]; then
     printf 'Owned worker install manifest is missing or unsafe.\n' >&2
     return 1
@@ -486,6 +487,12 @@ validate_owned_manifest() {
   expected="$(json_escape "$workspace_root")"
   [[ "$raw" == *"\"workspaceRoot\":\"${expected}\""* ]] || {
     printf 'Installer paths do not match the existing owned installation.\n' >&2
+    return 1
+  }
+  recorded_scope="$(manifest_scope_or_current)"
+  expected="$(json_escape "$(service_path_for_scope "$recorded_scope")")"
+  [[ "$raw" == *"\"servicePath\":\"${expected}\""* ]] || {
+    printf 'Installer service path does not match the existing owned installation.\n' >&2
     return 1
   }
 }
@@ -823,7 +830,7 @@ fi
 worker_hash="$(sha256sum -- "$worker_path" | awk '{print $1}')"
 inject_failure before-manifest-write
 cat >"${install_manifest}.new.$$" <<EOF
-{"schemaVersion":"${SCHEMA}","installedAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","installRoot":"$(json_escape "$install_root")","dataRoot":"$(json_escape "$data_root")","workspaceRoot":"$(json_escape "$workspace_root")","workerSha256":"${worker_hash}","paired":${paired},"serviceEnabled":${service_enabled},"service":"${service_state}","scope":"${scope}","allowOnBattery":$([[ "$allow_on_battery" -eq 1 ]] && printf true || printf false),"pairOnly":$([[ "$pair_only" -eq 1 ]] && printf true || printf false)}
+{"schemaVersion":"${SCHEMA}","installedAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","installRoot":"$(json_escape "$install_root")","dataRoot":"$(json_escape "$data_root")","workspaceRoot":"$(json_escape "$workspace_root")","servicePath":"$(json_escape "$(service_path_for_scope "$scope")")","workerSha256":"${worker_hash}","paired":${paired},"serviceEnabled":${service_enabled},"service":"${service_state}","scope":"${scope}","allowOnBattery":$([[ "$allow_on_battery" -eq 1 ]] && printf true || printf false),"pairOnly":$([[ "$pair_only" -eq 1 ]] && printf true || printf false)}
 EOF
 chmod 0600 -- "${install_manifest}.new.$$"
 mv -f -- "${install_manifest}.new.$$" "$install_manifest"

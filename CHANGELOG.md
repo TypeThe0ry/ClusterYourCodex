@@ -16,6 +16,9 @@ are versioned independently from the product.
   with mismatched roots now fail closed before service or file mutation.
 - Added sentinel and zero-call regression coverage for path-binding failures so
   unrelated same-named files and services remain untouched.
+- Recorded the Linux systemd unit path in the install manifest and reject
+  lifecycle calls whose XDG_CONFIG_HOME would redirect cleanup to a foreign
+  same-named unit.
 - Bound Windows Scheduled Task lifecycle operations to the current user SID,
   owned install root, executable, and working directory; foreign-principal and
   foreign-root fixtures now fail closed before mutation.

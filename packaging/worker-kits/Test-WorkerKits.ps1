@@ -977,6 +977,33 @@ assert_linux_manifest_binding_failure \
   "$wrong_workspace_root" \
   "$wrong_workspace_root/worker-sentinel"
 
+# A changed XDG_CONFIG_HOME must not redirect cleanup to a same-named foreign
+# user unit. The service path is recorded in the owned manifest and checked
+# before any systemd command or file mutation.
+wrong_xdg_config="$root/xdg-config-foreign"
+wrong_xdg_unit="$wrong_xdg_config/systemd/user/clusteryourcodex-worker.service"
+mkdir -p "$(dirname "$wrong_xdg_unit")"
+printf '%s\n' 'LINUX_XDG_PATH_BINDING_SENTINEL' >"$wrong_xdg_unit"
+xdg_systemctl_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')"
+xdg_worker_hash_before="$(sha256sum "$worker" | awk '{print $1}')"
+xdg_manifest_hash_before="$(sha256sum "$data/install-manifest.json" | awk '{print $1}')"
+set +e
+XDG_CONFIG_HOME="$wrong_xdg_config" "$good/install-worker.sh" uninstall --bundle-root "$good" \
+  --install-root "$bound_install_root" \
+  --data-root "$data" \
+  --workspace-root "$bound_workspace_root" \
+  --scope user \
+  >"$root/xdg-path-binding.stdout" 2>"$root/xdg-path-binding.stderr"
+xdg_binding_exit=$?
+set -e
+test "$xdg_binding_exit" -ne 0
+grep -q 'Installer service path does not match the existing owned installation.' "$root/xdg-path-binding.stderr"
+test "$(sha256sum "$worker" | awk '{print $1}')" = "$xdg_worker_hash_before"
+test "$(sha256sum "$data/install-manifest.json" | awk '{print $1}')" = "$xdg_manifest_hash_before"
+test "$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')" = "$xdg_systemctl_lines_before"
+test -f "$wrong_xdg_unit"
+test "$(cat "$wrong_xdg_unit")" = 'LINUX_XDG_PATH_BINDING_SENTINEL'
+
 before="$(sha256sum "$worker" | awk '{print $1}')"
 
 # Routine Ready -> Repair keeps the existing identity and credential while it
@@ -1273,7 +1300,7 @@ test ! -e "$default_logs"
         }
     }
     $linuxSource = Get-Content -LiteralPath $linuxInstaller -Raw
-    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'after-pair', 'after-service-registration', 'before-manifest-write', 'remove_service', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot')) {
+    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'after-pair', 'after-service-registration', 'before-manifest-write', 'remove_service', 'service_path_for_scope', 'servicePath', 'Installer service path does not match the existing owned installation.', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot')) {
         if ($linuxSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "Linux worker installer is missing rollback/integrity guard: $requiredPattern"
         }
