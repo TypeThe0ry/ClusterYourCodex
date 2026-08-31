@@ -10,6 +10,7 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "linux")]
@@ -21,12 +22,13 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use cyc_protocol::{HostileIsolationBackend, HostileIsolationInventory};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::config::WorkerConfig;
 use crate::security::{
-    ensure_protected_directory, ensure_protected_input, prepare_private_directory,
-    replace_protected_file, write_protected_file,
+    ensure_no_windows_reparse_points, ensure_protected_directory, ensure_protected_input,
+    prepare_private_directory, replace_protected_file, write_protected_file,
 };
 
 pub const HOSTILE_ISOLATION_CONFIG_ENV: &str = "CYC_HOSTILE_ISOLATION_CONFIG";
@@ -42,6 +44,7 @@ const RECONCILIATION_RECEIPT_VERSION: &str = "cyc.dev/hostile-reconciliation/v1"
 const MAX_CONFIG_BYTES: usize = 128 * 1024;
 const MAX_RECEIPT_BYTES: usize = 64 * 1024;
 const MAX_RECEIPT_AGE_MINUTES: i64 = 15;
+const SHA256_HEX_LENGTH: usize = 64;
 #[cfg(any(target_os = "linux", test))]
 const LINUX_CGROUP_ROOT: &str = "/sys/fs/cgroup";
 #[cfg(target_os = "linux")]
@@ -83,6 +86,8 @@ enum IsolationDocument {
         execution_sid: String,
         #[serde(rename = "guardExecutable")]
         guard_executable: PathBuf,
+        #[serde(rename = "guardExecutableSha256")]
+        guard_executable_sha256: String,
         #[serde(rename = "guardStateDirectory")]
         guard_state_directory: PathBuf,
         #[serde(rename = "guardStateFile")]
@@ -99,6 +104,8 @@ enum IsolationDocument {
         execution_gid: u32,
         #[serde(rename = "guardExecutable")]
         guard_executable: PathBuf,
+        #[serde(rename = "guardExecutableSha256")]
+        guard_executable_sha256: String,
         #[serde(rename = "guardStateDirectory")]
         guard_state_directory: PathBuf,
         #[serde(rename = "guardStateFile")]
@@ -139,6 +146,7 @@ struct WindowsIsolation {
     node_id: Uuid,
     execution_sid: String,
     guard_executable: PathBuf,
+    guard_executable_sha256: String,
     guard_state_directory: PathBuf,
     guard_state_file: PathBuf,
 }
@@ -149,6 +157,7 @@ struct MacosIsolation {
     execution_uid: u32,
     execution_gid: u32,
     guard_executable: PathBuf,
+    guard_executable_sha256: String,
     guard_state_directory: PathBuf,
     guard_state_file: PathBuf,
 }
@@ -224,6 +233,7 @@ struct ExternalGuardRequest {
     execution_identity: String,
     containment_name: String,
     guard_executable: PathBuf,
+    guard_executable_sha256: String,
     guard_state_directory: PathBuf,
     guard_state_file: PathBuf,
 }
@@ -239,6 +249,10 @@ impl ExternalGuardRequest {
         if self.worker_pid == 0 {
             bail!("external guard worker PID must be non-zero");
         }
+        validate_sha256_digest(
+            &self.guard_executable_sha256,
+            "external guard executable SHA-256",
+        )?;
         let guard_executable =
             absolute_clean_path(&self.guard_executable, "external guard executable")?;
         let guard_state_directory = absolute_clean_path(
@@ -320,6 +334,7 @@ struct NativeGuardAttestation {
     guard_start_time: u64,
     execution_identity: String,
     containment_name: String,
+    guard_executable_sha256: String,
 }
 
 impl NativeGuardAttestation {
@@ -329,6 +344,7 @@ impl NativeGuardAttestation {
         backend: HostileIsolationBackend,
         expected_identity: &str,
         expected_containment_name: &str,
+        expected_guard_executable_sha256: &str,
     ) -> Result<()> {
         if self.protocol != EXTERNAL_GUARD_PROTOCOL_VERSION {
             bail!("external guard attestation protocol version is invalid");
@@ -341,6 +357,13 @@ impl NativeGuardAttestation {
         }
         if self.containment_name != expected_containment_name {
             bail!("external guard attestation containment does not match node {node_id}");
+        }
+        validate_sha256_digest(
+            &self.guard_executable_sha256,
+            "external guard attestation executable SHA-256",
+        )?;
+        if self.guard_executable_sha256 != expected_guard_executable_sha256 {
+            bail!("external guard attestation executable does not match the pinned SHA-256");
         }
         if !matches!(
             backend,
@@ -429,6 +452,7 @@ impl HostileIsolation {
                 node_id,
                 execution_sid,
                 guard_executable,
+                guard_executable_sha256,
                 guard_state_directory,
                 guard_state_file,
                 ..
@@ -448,6 +472,7 @@ impl HostileIsolation {
                     node_id,
                     execution_sid,
                     guard_executable,
+                    guard_executable_sha256,
                     guard_state_directory,
                     guard_state_file,
                 })
@@ -457,6 +482,7 @@ impl HostileIsolation {
                 execution_uid,
                 execution_gid,
                 guard_executable,
+                guard_executable_sha256,
                 guard_state_directory,
                 guard_state_file,
                 ..
@@ -479,6 +505,7 @@ impl HostileIsolation {
                     execution_uid,
                     execution_gid,
                     guard_executable,
+                    guard_executable_sha256,
                     guard_state_directory,
                     guard_state_file,
                 })
@@ -517,6 +544,7 @@ impl HostileIsolation {
                 execution_identity: config.execution_sid.clone(),
                 containment_name: windows_job_object_name(config.node_id),
                 guard_executable: config.guard_executable.clone(),
+                guard_executable_sha256: config.guard_executable_sha256.clone(),
                 guard_state_directory: config.guard_state_directory.clone(),
                 guard_state_file: config.guard_state_file.clone(),
             },
@@ -529,6 +557,7 @@ impl HostileIsolation {
                 execution_identity: format!("{}:{}", config.execution_uid, config.execution_gid),
                 containment_name: macos_process_group_name(config.node_id),
                 guard_executable: config.guard_executable.clone(),
+                guard_executable_sha256: config.guard_executable_sha256.clone(),
                 guard_state_directory: config.guard_state_directory.clone(),
                 guard_state_file: config.guard_state_file.clone(),
             },
@@ -540,6 +569,10 @@ impl HostileIsolation {
             }
         };
         request.validate()?;
+        validate_external_guard_executable(
+            &request.guard_executable,
+            &request.guard_executable_sha256,
+        )?;
         let request_json =
             serde_json::to_string(&request).context("serialize external hostile guard request")?;
         Ok(ExternalGuardInvocation {
@@ -561,22 +594,34 @@ impl HostileIsolation {
     /// this preview.
     pub fn validate_external_guard_receipt(&self) -> Result<()> {
         match &self.backend {
-            Some(IsolationBackend::Windows(config)) => validate_external_receipt_file(
-                &config.guard_state_file,
-                config.node_id,
-                HostileIsolationBackend::WindowsJobObjectExternalGuard,
-                &config.execution_sid,
-                &windows_job_object_name(config.node_id),
-            ),
+            Some(IsolationBackend::Windows(config)) => {
+                validate_external_guard_executable(
+                    &config.guard_executable,
+                    &config.guard_executable_sha256,
+                )?;
+                validate_external_receipt_file(
+                    &config.guard_state_file,
+                    config.node_id,
+                    HostileIsolationBackend::WindowsJobObjectExternalGuard,
+                    &config.execution_sid,
+                    &windows_job_object_name(config.node_id),
+                    &config.guard_executable_sha256,
+                )
+            }
             Some(IsolationBackend::Macos(config)) => {
                 let execution_identity =
                     format!("{}:{}", config.execution_uid, config.execution_gid);
+                validate_external_guard_executable(
+                    &config.guard_executable,
+                    &config.guard_executable_sha256,
+                )?;
                 validate_external_receipt_file(
                     &config.guard_state_file,
                     config.node_id,
                     HostileIsolationBackend::MacosExternalReconciliation,
                     &execution_identity,
                     &macos_process_group_name(config.node_id),
+                    &config.guard_executable_sha256,
                 )
             }
             None => bail!("external guard receipt requested while hostile isolation is disabled"),
@@ -893,6 +938,7 @@ impl ReconciliationReceipt {
         backend: HostileIsolationBackend,
         expected_identity: &str,
         expected_containment_name: &str,
+        expected_guard_executable_sha256: &str,
     ) -> Result<()> {
         self.validate(node_id, backend)?;
         self.native_guard
@@ -903,6 +949,7 @@ impl ReconciliationReceipt {
                 backend,
                 expected_identity,
                 expected_containment_name,
+                expected_guard_executable_sha256,
             )
     }
 }
@@ -970,6 +1017,7 @@ fn validate_external_receipt_file(
     backend: HostileIsolationBackend,
     expected_identity: &str,
     expected_containment_name: &str,
+    expected_guard_executable_sha256: &str,
 ) -> Result<()> {
     ensure_protected_input(path)
         .with_context(|| format!("refuse unprotected hostile guard state {}", path.display()))?;
@@ -985,6 +1033,7 @@ fn validate_external_receipt_file(
         backend,
         expected_identity,
         expected_containment_name,
+        expected_guard_executable_sha256,
     )
 }
 
@@ -1002,6 +1051,87 @@ fn path_exists(path: &Path) -> Result<bool> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error).with_context(|| format!("inspect path {}", path.display())),
     }
+}
+
+fn validate_sha256_digest(value: &str, label: &str) -> Result<()> {
+    if value.len() != SHA256_HEX_LENGTH
+        || !value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        bail!("{label} must be exactly 64 lowercase hexadecimal characters");
+    }
+    Ok(())
+}
+
+/// Validate the executable that owns the external guard contract.
+///
+/// A protected receipt is not useful when an attacker can replace the guard
+/// executable that produced it.  The config therefore carries a pinned
+/// SHA-256, and every invocation/receipt validation re-checks the regular file
+/// and its digest.  This remains an integrity precondition only; it does not
+/// claim that the executable implements native containment correctly.
+fn validate_external_guard_executable(path: &Path, expected_sha256: &str) -> Result<()> {
+    validate_sha256_digest(expected_sha256, "external guard executable SHA-256")?;
+    let path = absolute_clean_path(path, "external guard executable")?;
+    ensure_no_windows_reparse_points(&path)
+        .context("external guard executable path contains a reparse point")?;
+    let metadata = fs::symlink_metadata(&path)
+        .with_context(|| format!("inspect external guard executable {}", path.display()))?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        bail!(
+            "external guard executable must be a regular non-link file: {}",
+            path.display()
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let effective_uid = unsafe { libc::geteuid() };
+        if metadata.uid() != 0 && metadata.uid() != effective_uid {
+            bail!(
+                "external guard executable must be root-owned or worker-owned: {}",
+                path.display()
+            );
+        }
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o022 != 0 {
+            bail!(
+                "external guard executable is writable by group or other: {}",
+                path.display()
+            );
+        }
+        if mode & 0o111 == 0 {
+            bail!(
+                "external guard executable has no execute permission: {}",
+                path.display()
+            );
+        }
+    }
+
+    let mut file = fs::File::open(&path)
+        .with_context(|| format!("open external guard executable {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("hash external guard executable {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual_sha256 = hex::encode(hasher.finalize());
+    if actual_sha256 != expected_sha256 {
+        bail!(
+            "external guard executable SHA-256 mismatch (expected pinned digest, observed {})",
+            actual_sha256
+        );
+    }
+    Ok(())
 }
 
 fn absolute_clean_path(path: &Path, label: &str) -> Result<PathBuf> {
@@ -1634,6 +1764,10 @@ fn validate_windows_schema(config: &WindowsIsolation) -> Result<()> {
         bail!("Windows hostile isolation node id must not be nil");
     }
     validate_windows_sid(&config.execution_sid)?;
+    validate_sha256_digest(
+        &config.guard_executable_sha256,
+        "Windows hostile guard executable SHA-256",
+    )?;
     if !config.guard_executable.is_absolute()
         || !config.guard_state_directory.is_absolute()
         || !config.guard_state_file.is_absolute()
@@ -1653,6 +1787,10 @@ fn validate_macos_schema(config: &MacosIsolation) -> Result<()> {
         bail!("macOS hostile isolation node id must not be nil");
     }
     validate_numeric_identity(config.execution_uid, config.execution_gid)?;
+    validate_sha256_digest(
+        &config.guard_executable_sha256,
+        "macOS hostile guard executable SHA-256",
+    )?;
     if config.execution_uid == unsafe { libc_geteuid_portable() } {
         bail!("macOS hostile execution uid must differ from the worker uid");
     }
@@ -1679,6 +1817,16 @@ unsafe fn libc_geteuid_portable() -> u32 {
 mod tests {
     use super::*;
 
+    fn test_guard(path: &Path) -> String {
+        fs::write(path, b"test external guard").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        hex::encode(Sha256::digest(b"test external guard"))
+    }
+
     #[test]
     fn disabled_inventory_is_conservative() {
         let inventory = HostileIsolation::disabled().inventory();
@@ -1704,13 +1852,15 @@ mod tests {
         let node_id = Uuid::new_v4();
         let guard_directory = directory.path().join("guard-state");
         let guard_executable = directory.path().join("bin").join("cyc-guard.exe");
-        fs::create_dir_all(guard_directory.parent().unwrap()).unwrap();
+        fs::create_dir_all(guard_executable.parent().unwrap()).unwrap();
+        let guard_executable_sha256 = test_guard(&guard_executable);
         let isolation = HostileIsolation {
             config_path: None,
             backend: Some(IsolationBackend::Windows(WindowsIsolation {
                 node_id,
                 execution_sid: "S-1-5-21-1-2-3-1001".to_owned(),
                 guard_executable: guard_executable.clone(),
+                guard_executable_sha256: guard_executable_sha256.clone(),
                 guard_state_directory: guard_directory.clone(),
                 guard_state_file: guard_directory.join("receipt.json"),
             })),
@@ -1736,6 +1886,7 @@ mod tests {
             "executionIdentity",
             "containmentName",
             "guardExecutable",
+            "guardExecutableSha256",
             "guardStateDirectory",
             "guardStateFile",
         ] {
@@ -1756,6 +1907,7 @@ mod tests {
         assert_eq!(request.execution_identity, "S-1-5-21-1-2-3-1001");
         assert_eq!(request.containment_name, windows_job_object_name(node_id));
         assert!(request.guard_executable.is_absolute());
+        assert_eq!(request.guard_executable_sha256, guard_executable_sha256);
         assert!(request.guard_state_directory.is_absolute());
         assert!(request.guard_state_file.is_absolute());
 
@@ -1774,6 +1926,15 @@ mod tests {
         );
         assert!(command.get_envs().next().is_none());
         assert!(!isolation.inventory().ready);
+
+        fs::write(&guard_executable, b"tampered external guard").unwrap();
+        let error = isolation
+            .external_guard_invocation(ExternalGuardOperation::Reconcile)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("SHA-256 mismatch"),
+            "guard replacement must fail the pinned digest check: {error:#}"
+        );
     }
 
     #[test]
@@ -1782,6 +1943,8 @@ mod tests {
         let node_id = Uuid::new_v4();
         let guard_directory = directory.path().join("guard-state");
         let guard_executable = directory.path().join("bin").join("cyc-guard");
+        fs::create_dir_all(guard_executable.parent().unwrap()).unwrap();
+        let guard_executable_sha256 = test_guard(&guard_executable);
         let isolation = HostileIsolation {
             config_path: None,
             backend: Some(IsolationBackend::Macos(MacosIsolation {
@@ -1789,6 +1952,7 @@ mod tests {
                 execution_uid: 501,
                 execution_gid: 20,
                 guard_executable: guard_executable.clone(),
+                guard_executable_sha256: guard_executable_sha256.clone(),
                 guard_state_directory: guard_directory.clone(),
                 guard_state_file: guard_directory.join("receipt.json"),
             })),
@@ -1810,6 +1974,7 @@ mod tests {
             "executionIdentity",
             "containmentName",
             "guardExecutable",
+            "guardExecutableSha256",
             "guardStateDirectory",
             "guardStateFile",
         ] {
@@ -1828,6 +1993,7 @@ mod tests {
         assert_eq!(request.node_id, node_id);
         assert_eq!(request.execution_identity, "501:20");
         assert_eq!(request.containment_name, macos_process_group_name(node_id));
+        assert_eq!(request.guard_executable_sha256, guard_executable_sha256);
         assert_eq!(invocation.program, guard_executable);
         assert_eq!(invocation.arguments[0], OsStr::new("--request-json"));
         assert!(!isolation.inventory().ready);
@@ -1843,6 +2009,7 @@ mod tests {
             node_id,
             execution_sid: "S-1-5".to_owned(),
             guard_executable: directory.path().join("guard.exe"),
+            guard_executable_sha256: "0".repeat(SHA256_HEX_LENGTH),
             guard_state_directory: state_directory.clone(),
             guard_state_file: state_directory.join("receipt.json"),
         };
@@ -1885,6 +2052,7 @@ mod tests {
             execution_uid: 0,
             execution_gid: 20,
             guard_executable: directory.path().join("guard"),
+            guard_executable_sha256: "0".repeat(SHA256_HEX_LENGTH),
             guard_state_directory: state_directory.clone(),
             guard_state_file: state_directory.join("receipt.json"),
         };
@@ -1903,6 +2071,7 @@ mod tests {
     fn external_receipts_require_native_attestation_metadata() {
         let node_id = Uuid::new_v4();
         let backend = HostileIsolationBackend::WindowsJobObjectExternalGuard;
+        let guard_executable_sha256 = "a".repeat(SHA256_HEX_LENGTH);
         let mut receipt = ReconciliationReceipt::clean(node_id, backend, 0);
         assert!(receipt.validate(node_id, backend).is_err());
 
@@ -1912,6 +2081,7 @@ mod tests {
             guard_start_time: 7,
             execution_identity: "S-1-5-21-1-2-3-1001".to_owned(),
             containment_name: windows_job_object_name(node_id),
+            guard_executable_sha256: guard_executable_sha256.clone(),
         });
         receipt
             .validate_external_attestation(
@@ -1919,8 +2089,35 @@ mod tests {
                 backend,
                 "S-1-5-21-1-2-3-1001",
                 &windows_job_object_name(node_id),
+                &guard_executable_sha256,
             )
             .unwrap();
+
+        receipt
+            .native_guard
+            .as_mut()
+            .unwrap()
+            .guard_executable_sha256 = "b".repeat(SHA256_HEX_LENGTH);
+        let error = receipt
+            .validate_external_attestation(
+                node_id,
+                backend,
+                "S-1-5-21-1-2-3-1001",
+                &windows_job_object_name(node_id),
+                &guard_executable_sha256,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not match the pinned SHA-256"),
+            "receipt must be bound to the configured guard digest: {error:#}"
+        );
+        receipt
+            .native_guard
+            .as_mut()
+            .unwrap()
+            .guard_executable_sha256 = guard_executable_sha256.clone();
 
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("state");
@@ -1935,6 +2132,7 @@ mod tests {
             backend,
             "S-1-5-21-1-2-3-1001",
             &windows_job_object_name(node_id),
+            &guard_executable_sha256,
         )
         .unwrap();
 
@@ -1945,6 +2143,7 @@ mod tests {
                 backend,
                 "S-1-5-21-1-2-3-1001",
                 &windows_job_object_name(node_id),
+                &guard_executable_sha256,
             )
             .is_err());
     }
@@ -2063,6 +2262,7 @@ mod tests {
                 node_id,
                 execution_sid: "S-1-5-21-1-2-3-1001".to_owned(),
                 guard_executable: directory.path().join("fake-guard.exe"),
+                guard_executable_sha256: "0".repeat(SHA256_HEX_LENGTH),
                 guard_state_directory: directory.path().to_path_buf(),
                 guard_state_file,
             })),
@@ -2089,6 +2289,7 @@ mod tests {
                 node_id,
                 execution_sid: "S-1-5-21-1-2-3-1001".to_owned(),
                 guard_executable: directory.path().join("fake-guard.exe"),
+                guard_executable_sha256: "0".repeat(SHA256_HEX_LENGTH),
                 guard_state_directory: directory.path().to_path_buf(),
                 guard_state_file: directory.path().join("fake-receipt.json"),
             })),
@@ -2158,6 +2359,7 @@ mod tests {
                 execution_uid,
                 execution_gid: 20,
                 guard_executable: directory.path().join("fake-guard"),
+                guard_executable_sha256: "0".repeat(SHA256_HEX_LENGTH),
                 guard_state_directory: directory.path().to_path_buf(),
                 guard_state_file: directory.path().join("fake-receipt.json"),
             })),
@@ -2282,6 +2484,7 @@ mod tests {
                 execution_uid: 501,
                 execution_gid: 20,
                 guard_executable: PathBuf::from("/Library/PrivilegedHelperTools/cyc-guard"),
+                guard_executable_sha256: "0".repeat(SHA256_HEX_LENGTH),
                 guard_state_directory: PathBuf::from("/var/db/cyc-guard"),
                 guard_state_file: PathBuf::from("/var/db/cyc-guard/reconcile.json"),
             })),
