@@ -7,6 +7,16 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.45] - 2026-09-01
+
+### Fixed
+
+- Closed a Windows silent-Setup cleanup race by stopping only tasks proven to
+  belong to the disposable install root, then re-enumerating owned processes
+  after the Scheduled Task restart policy has been quiesced.
+- Added static regression coverage for the task-restart cleanup and exit-code
+  reconciliation paths so future packaging changes fail closed before release.
+
 ## [0.1.0-preview.44] - 2026-08-31
 
 ### Fixed
@@ -559,7 +569,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.44...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.45...HEAD
+[0.1.0-preview.45]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.44...v0.1.0-preview.45
 [0.1.0-preview.44]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.43...v0.1.0-preview.44
 [0.1.0-preview.43]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.42...v0.1.0-preview.43
 [0.1.0-preview.42]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.41...v0.1.0-preview.42
