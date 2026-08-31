@@ -4282,6 +4282,10 @@ exit 0
     Assert-True ($profileMatrixSource -match 'Stop-Process\s+-Id\s+\$process\.Id' -and
         $profileMatrixSource -match '\$process\.WaitForExit\(10000\)' -and
         $profileMatrixSource -match 'did not exit after cleanup') 'profile matrix reaps a child after helper/IPC failure before profile cleanup'
+    Assert-True ($profileMatrixSource -match '\$process\.Refresh\(\)' -and
+        $profileMatrixSource -match 'child receipt' -and
+        $profileMatrixSource -match '\$rawExitCode' -and
+        $profileMatrixSource -match 'candidateExitCode') 'profile matrix handles null Start-Process exit-code projections with a receipt-backed fallback'
     Assert-True ($profileMatrixSource -match 'Assert-ProfileMatrixTaskOwnership' -and
         ([regex]::Matches($profileMatrixSource, '-TaskPath ''\\''').Count -ge 4)) 'profile matrix binds task ownership checks and task operations to the root task path'
     Assert-True ($profileMatrixSource -match 'observedPrincipalSid' -and

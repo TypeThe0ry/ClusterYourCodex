@@ -1120,7 +1120,32 @@ try {
                     Start-Sleep -Milliseconds 100
                 }
                 $process.WaitForExit()
-                $exitCode = $process.ExitCode
+                # Start-Process -Credential on ARM64 Windows can return a
+                # Process wrapper whose ExitCode projection is temporarily
+                # null even after WaitForExit() (the child has already
+                # published its receipt). Refresh and use the child receipt
+                # as an independently written exit-status fallback; a missing
+                # or malformed receipt remains a hard failure below.
+                try { $process.Refresh() } catch { }
+                $rawExitCode = $process.ExitCode
+                if ($null -ne $rawExitCode) {
+                    $exitCode = [int]$rawExitCode
+                } else {
+                    $exitCode = $null
+                    if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
+                        try {
+                            $childReceipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+                            $candidateExitCode = $childReceipt.exitCode
+                            $parsedExitCode = 0
+                            if ($null -ne $candidateExitCode -and [int]::TryParse([string]$candidateExitCode, [ref]$parsedExitCode)) {
+                                $exitCode = [int]$parsedExitCode
+                            }
+                        } catch {
+                            $exitCode = $null
+                        }
+                    }
+                    if ($null -eq $exitCode) { $exitCode = 1 }
+                }
             }
             if ($exitCode -ne 0) {
                 $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
