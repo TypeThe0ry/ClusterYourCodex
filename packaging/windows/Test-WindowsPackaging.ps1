@@ -387,6 +387,202 @@ try {
     $source = Get-Content -LiteralPath $bootstrap -Raw
     Assert-True ($source -notmatch '(?i)CYC_CONTROLLER_TOKEN=') 'no token environment injection'
     Assert-True ($source -notmatch '(?i)--token\s') 'no raw token command argument'
+    Assert-True ($source -match 'Assert-CycTaskSnapshotOwnership') 'Scheduled Task lifecycle has an explicit ownership preflight'
+    Assert-True ($source -match 'Get-CycTaskExpectedExecutable') 'Scheduled Task ownership binds the task name to its install-root executable'
+    Assert-True ($source -match 'action working directory does not match the requested install root') 'Scheduled Task ownership binds the working directory to the install root'
+    Assert-True ($source -match 'principal SID does not match the initiating SID') 'Scheduled Task ownership binds the principal to the initiating SID'
+    Assert-True ($source -match 'Register-CycTask[\s\S]+ExpectedInstallRoot') 'task replacement receives an explicit expected install root'
+    Assert-True ($source -match 'Unregister-CycTask[\s\S]+ExpectedInstallRoot') 'task removal receives an explicit expected install root'
+    Assert-True ($source -match 'Restore-CycTaskSnapshots[\s\S]+ExpectedInstallRoot') 'task rollback receives an explicit expected install root'
+
+    # Task ownership fixture: the lifecycle helpers must accept an exact
+    # current-user/root binding, while rejecting a foreign SID, executable, or
+    # working directory before Stop/Register/Unregister can be reached.
+    $taskProbeRoot = Join-Path $testRoot 'task-probe-owned'
+    $taskProbeForeignRoot = Join-Path $testRoot 'task-probe-foreign'
+    $taskProbeSid = Get-CurrentUserSid
+    $taskProbeForeignSid = [regex]::Replace($taskProbeSid, '-\d+$', '-1002')
+    if ($taskProbeForeignSid -ceq $taskProbeSid) { $taskProbeForeignSid = 'S-1-5-18' }
+    $taskProbeAction = [PSCustomObject]@{
+        executable = Join-Path $taskProbeRoot 'cyc-controller.exe'
+        arguments = '--fixture'
+        workingDirectory = $taskProbeRoot
+    }
+    $taskProbeSnapshot = [PSCustomObject]@{
+        name = $script:ControllerTaskName
+        xml = '<Task />'
+        taskPath = '\'
+        principalSid = $taskProbeSid
+        triggerSids = @($taskProbeSid)
+        action = $taskProbeAction
+        wasRunning = $false
+    }
+    [void](Assert-CycTaskActionBinding `
+        -Name $script:ControllerTaskName `
+        -InstallRoot $taskProbeRoot `
+        -Action $taskProbeAction)
+    [void](Assert-CycTaskSnapshotOwnership `
+        -Snapshot $taskProbeSnapshot `
+        -InstallRoot $taskProbeRoot `
+        -ExpectedSid $taskProbeSid)
+    Assert-ThrowsLike `
+        -Action {
+            [void](Assert-CycTaskSnapshotOwnership `
+                -Snapshot $taskProbeSnapshot `
+                -InstallRoot $taskProbeRoot `
+                -ExpectedSid $taskProbeForeignSid)
+        } `
+        -Pattern 'initiating SID' `
+        -Message 'task ownership rejects a different principal SID'
+    $wrongRootSnapshot = [PSCustomObject]@{
+        name = $taskProbeSnapshot.name
+        xml = $taskProbeSnapshot.xml
+        taskPath = $taskProbeSnapshot.taskPath
+        principalSid = $taskProbeSnapshot.principalSid
+        triggerSids = @($taskProbeSnapshot.triggerSids)
+        action = $taskProbeSnapshot.action
+        wasRunning = $taskProbeSnapshot.wasRunning
+    }
+    Assert-ThrowsLike `
+        -Action {
+            [void](Assert-CycTaskSnapshotOwnership `
+                -Snapshot $wrongRootSnapshot `
+                -InstallRoot $taskProbeForeignRoot `
+                -ExpectedSid $taskProbeSid)
+        } `
+        -Pattern 'install root' `
+        -Message 'task ownership rejects an executable outside the requested install root'
+    $wrongWorkingDirectoryAction = [PSCustomObject]@{
+        executable = $taskProbeAction.executable
+        arguments = $taskProbeAction.arguments
+        workingDirectory = $taskProbeForeignRoot
+    }
+    $wrongWorkingDirectorySnapshot = [PSCustomObject]@{
+        name = $taskProbeSnapshot.name
+        xml = $taskProbeSnapshot.xml
+        taskPath = $taskProbeSnapshot.taskPath
+        principalSid = $taskProbeSnapshot.principalSid
+        triggerSids = @($taskProbeSnapshot.triggerSids)
+        action = $wrongWorkingDirectoryAction
+        wasRunning = $taskProbeSnapshot.wasRunning
+    }
+    Assert-ThrowsLike `
+        -Action {
+            [void](Assert-CycTaskSnapshotOwnership `
+                -Snapshot $wrongWorkingDirectorySnapshot `
+                -InstallRoot $taskProbeRoot `
+                -ExpectedSid $taskProbeSid)
+        } `
+        -Pattern 'working directory' `
+        -Message 'task ownership rejects a working directory outside the requested install root'
+
+    # Stub only the Scheduled Task cmdlets for a no-side-effect positive and
+    # foreign-task negative lifecycle check.  The foreign task must be left
+    # untouched when Unregister or Register is asked to act on its name.
+    function New-CycTaskProbeLiveTask {
+        param(
+            [Parameter(Mandatory = $true)][string]$Sid,
+            [Parameter(Mandatory = $true)][string]$Root,
+            [string]$Arguments = '--fixture'
+        )
+        return [PSCustomObject]@{
+            TaskPath = '\'
+            Principal = [PSCustomObject]@{ UserId = $Sid }
+            Triggers = @([PSCustomObject]@{ UserId = $Sid })
+            Actions = @([PSCustomObject]@{
+                Execute = Join-Path $Root 'cyc-controller.exe'
+                Arguments = $Arguments
+                WorkingDirectory = $Root
+            })
+            State = 'Running'
+        }
+    }
+    $script:CycTaskProbeTask = New-CycTaskProbeLiveTask `
+        -Sid $taskProbeSid `
+        -Root $taskProbeRoot
+    $script:CycTaskProbeStopCount = 0
+    $script:CycTaskProbeUnregisterCount = 0
+    $script:CycTaskProbeRegisterCount = 0
+    function Get-ScheduledTask {
+        param([string]$TaskName, [string]$TaskPath, [string]$ErrorAction)
+        return $script:CycTaskProbeTask
+    }
+    function Export-ScheduledTask {
+        param([string]$TaskName, [string]$TaskPath)
+        return '<Task />'
+    }
+    function Stop-ScheduledTask {
+        param([string]$TaskName, [string]$TaskPath, [string]$ErrorAction)
+        $script:CycTaskProbeStopCount++
+    }
+    function Unregister-ScheduledTask {
+        param([string]$TaskName, [string]$TaskPath, [switch]$Confirm)
+        $script:CycTaskProbeUnregisterCount++
+    }
+    function Register-ScheduledTask {
+        param(
+            [string]$TaskName,
+            [string]$TaskPath,
+            $Action,
+            $Trigger,
+            $Principal,
+            $Settings,
+            [string]$Description,
+            [switch]$Force
+        )
+        $script:CycTaskProbeRegisterCount++
+    }
+    try {
+        # Positive path: the exact SID/root binding reaches both lifecycle
+        # operations.
+        Unregister-CycTask `
+            -Name $script:ControllerTaskName `
+            -ExpectedInstallRoot $taskProbeRoot `
+            -ExpectedSid $taskProbeSid
+        Assert-True ($script:CycTaskProbeStopCount -eq 1 -and
+            $script:CycTaskProbeUnregisterCount -eq 1) 'owned task can be stopped and unregistered after preflight'
+
+        # Foreign principal: no stop/unregister side effect and no forceful
+        # replacement attempt.
+        $script:CycTaskProbeTask = New-CycTaskProbeLiveTask `
+            -Sid $taskProbeForeignSid `
+            -Root $taskProbeForeignRoot `
+            -Arguments '--foreign'
+        $stopBeforeForeign = $script:CycTaskProbeStopCount
+        $unregisterBeforeForeign = $script:CycTaskProbeUnregisterCount
+        Assert-ThrowsLike `
+            -Action {
+                Unregister-CycTask `
+                    -Name $script:ControllerTaskName `
+                    -ExpectedInstallRoot $taskProbeRoot `
+                    -ExpectedSid $taskProbeSid
+            } `
+            -Pattern 'principal SID|ownership validation failed' `
+            -Message 'foreign task is rejected before Unregister stop/remove'
+        Assert-True ($script:CycTaskProbeStopCount -eq $stopBeforeForeign -and
+            $script:CycTaskProbeUnregisterCount -eq $unregisterBeforeForeign) 'foreign task remains untouched by Unregister'
+        $registerBeforeForeign = $script:CycTaskProbeRegisterCount
+        Assert-ThrowsLike `
+            -Action {
+                Register-CycTask `
+                    -Name $script:ControllerTaskName `
+                    -Action $taskProbeAction `
+                    -ExpectedInstallRoot $taskProbeRoot `
+                    -ExpectedSid $taskProbeSid
+            } `
+            -Pattern 'principal SID|ownership validation failed' `
+            -Message 'foreign task is rejected before forceful Register replacement'
+        Assert-True ($script:CycTaskProbeRegisterCount -eq $registerBeforeForeign) 'foreign task is not overwritten by Register'
+    } finally {
+        Remove-Item Function:\Get-ScheduledTask -Force -ErrorAction SilentlyContinue
+        Remove-Item Function:\Export-ScheduledTask -Force -ErrorAction SilentlyContinue
+        Remove-Item Function:\Stop-ScheduledTask -Force -ErrorAction SilentlyContinue
+        Remove-Item Function:\Unregister-ScheduledTask -Force -ErrorAction SilentlyContinue
+        Remove-Item Function:\Register-ScheduledTask -Force -ErrorAction SilentlyContinue
+        Remove-Item Function:\New-CycTaskProbeLiveTask -Force -ErrorAction SilentlyContinue
+        Remove-Variable CycTaskProbeTask, CycTaskProbeStopCount, CycTaskProbeUnregisterCount, CycTaskProbeRegisterCount `
+            -Scope Script -ErrorAction SilentlyContinue
+    }
     Assert-True ($source -match 'AreAccessRulesProtected') 'ACL inheritance is verified'
     Assert-True ($source -match "S-1-5-32-544[\s\S]+ReadAndExecute") 'install ACL grants BUILTIN Administrators only the read/execute access needed by over-the-shoulder elevation'
     Assert-True ($source -match 'Set-PrivateDirectoryAcl -Path \$Plan\.installRoot -AllowAdministratorsReadAndExecute[\s\S]+Set-PrivateDirectoryAcl -Path \$Plan\.dataRoot') 'only the install tree, never private data/TLS state, receives the administrator read contract'

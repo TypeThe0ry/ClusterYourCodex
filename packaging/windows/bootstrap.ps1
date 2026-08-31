@@ -3808,10 +3808,206 @@ function Invoke-CycProfileMatrixTaskGate {
     throw "Profile-matrix parent task helper timed out for $Operation $Name. request=$($script:ProfileMatrixTaskRequestPath) response=$($script:ProfileMatrixTaskResponsePath)"
 }
 
+function ConvertTo-CycTaskSnapshotSid {
+    param([Parameter(Mandatory = $true)][string]$Identity)
+    $value = $Identity.Trim()
+    if ($value -match '^S-\d-\d+(?:-\d+)+$') { return $value }
+    try {
+        return ([System.Security.Principal.NTAccount]::new($value)).Translate(
+            [System.Security.Principal.SecurityIdentifier]
+        ).Value
+    } catch {
+        throw "Unable to resolve Scheduled Task identity '$Identity' to a SID."
+    }
+}
+
+function Get-CycTaskExpectedExecutable {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$InstallRoot
+    )
+    $root = Resolve-NormalizedPath $InstallRoot
+    if ([string]::Equals($Name, $script:ControllerTaskName, [System.StringComparison]::Ordinal)) {
+        return Join-Path $root 'cyc-controller.exe'
+    }
+    if ([string]::Equals($Name, $script:WorkerTaskName, [System.StringComparison]::Ordinal)) {
+        return Join-Path $root 'cyc-worker.exe'
+    }
+    throw "Scheduled Task $Name is not a ClusterYourCodex-owned task name."
+}
+
+function Assert-CycTaskActionBinding {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)]$Action
+    )
+    $prefix = "Scheduled Task $Name ownership validation failed"
+    if ($null -eq $Action -or $Action -is [System.Array]) {
+        throw ($prefix + ': action is not a single object.')
+    }
+    $executable = [string]$Action.executable
+    $workingDirectory = [string]$Action.workingDirectory
+    if ([string]::IsNullOrWhiteSpace($executable) -or
+        [string]::IsNullOrWhiteSpace($workingDirectory)) {
+        throw ($prefix + ': action executable and working directory are required.')
+    }
+    try {
+        $root = Resolve-NormalizedPath $InstallRoot
+        $expectedExecutable = Resolve-NormalizedPath (Get-CycTaskExpectedExecutable -Name $Name -InstallRoot $root)
+        $actualExecutable = Resolve-NormalizedPath $executable
+        $actualWorkingDirectory = Resolve-NormalizedPath $workingDirectory
+    } catch {
+        throw ($prefix + ': action paths could not be normalized.')
+    }
+    if (-not [string]::Equals(
+            $actualExecutable,
+            $expectedExecutable,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw ($prefix + ': action executable does not match the requested install root.')
+    }
+    if (-not [string]::Equals(
+            $actualWorkingDirectory,
+            $root,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw ($prefix + ': action working directory does not match the requested install root.')
+    }
+    return [PSCustomObject]@{
+        executable = $actualExecutable
+        arguments = [string]$Action.arguments
+        workingDirectory = $actualWorkingDirectory
+    }
+}
+
+function Assert-CycTaskSnapshotOwnership {
+    param(
+        [Parameter(Mandatory = $true)]$Snapshot,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [string]$ExpectedSid
+    )
+    $prefix = 'Scheduled Task ownership validation failed'
+    $currentSid = Get-CurrentUserSid
+    if ([string]::IsNullOrWhiteSpace($ExpectedSid)) { $ExpectedSid = $currentSid }
+    try {
+        $ExpectedSid = ConvertTo-CycTaskSnapshotSid -Identity $ExpectedSid
+    } catch {
+        throw ($prefix + ': initiating SID could not be resolved.')
+    }
+    if (-not [string]::Equals(
+            $ExpectedSid,
+            $currentSid,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw ($prefix + ': expected SID does not match the current Windows account.')
+    }
+    if ($null -eq $Snapshot -or $Snapshot -is [System.Array]) {
+        throw ($prefix + ': task snapshot is not a single object.')
+    }
+    $name = [string]$Snapshot.name
+    if (-not [string]::Equals($name, $script:ControllerTaskName, [System.StringComparison]::Ordinal) -and
+        -not [string]::Equals($name, $script:WorkerTaskName, [System.StringComparison]::Ordinal)) {
+        throw ($prefix + ': task name is not owned by ClusterYourCodex.')
+    }
+    if ([string]$Snapshot.taskPath -cne '\') {
+        throw ($prefix + ': task is outside the root Task Scheduler path.')
+    }
+    $principalSid = [string]$Snapshot.principalSid
+    if ([string]::IsNullOrWhiteSpace($principalSid) -or
+        -not [string]::Equals($principalSid, $ExpectedSid, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw ($prefix + ': task principal SID does not match the initiating SID.')
+    }
+    $triggerSids = $Snapshot.triggerSids
+    if ($triggerSids -isnot [System.Array] -or @($triggerSids).Count -ne 1 -or
+        [string]::IsNullOrWhiteSpace([string]$triggerSids[0]) -or
+        -not [string]::Equals([string]$triggerSids[0], $ExpectedSid, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw ($prefix + ': task logon trigger SID does not match the initiating SID.')
+    }
+    [void](Assert-CycTaskActionBinding -Name $name -InstallRoot $InstallRoot -Action $Snapshot.action)
+    return $Snapshot
+}
+
+function Get-CycTaskSnapshotByName {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $tasks = @(Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction SilentlyContinue)
+    if ($tasks.Count -gt 1) {
+        throw "Multiple root Scheduled Tasks found for $Name."
+    }
+    $task = $tasks | Select-Object -First 1
+    if ($null -eq $task) { return $null }
+
+    $taskActionsProperty = $task.PSObject.Properties['Actions']
+    $taskActions = @(
+        if ($null -ne $taskActionsProperty -and $null -ne $taskActionsProperty.Value) {
+            $taskActionsProperty.Value | Select-Object -First 1
+        }
+    )
+    if ($taskActions.Count -ne 1) { throw "Scheduled Task $Name has no single action to snapshot." }
+    $workingDirectoryProperty = $taskActions[0].PSObject.Properties['WorkingDirectory']
+
+    $taskTriggersProperty = $task.PSObject.Properties['Triggers']
+    $taskTriggers = @(
+        if ($null -ne $taskTriggersProperty -and $null -ne $taskTriggersProperty.Value) {
+            $taskTriggersProperty.Value
+        }
+    )
+    $triggerSids = @($taskTriggers | ForEach-Object {
+            $userProperty = $_.PSObject.Properties['UserId']
+            if ($null -ne $userProperty -and -not [string]::IsNullOrWhiteSpace([string]$userProperty.Value)) {
+                ConvertTo-CycTaskSnapshotSid ([string]$userProperty.Value)
+            }
+        })
+    if ($triggerSids.Count -ne 1) {
+        throw "Scheduled Task $Name must have exactly one logon trigger identity to snapshot."
+    }
+
+    $principalProperty = $task.PSObject.Properties['Principal']
+    $principal = if ($null -ne $principalProperty) { $principalProperty.Value } else { $null }
+    $principalUserProperty = if ($null -ne $principal) { $principal.PSObject.Properties['UserId'] } else { $null }
+    if ($null -eq $principalUserProperty -or
+        [string]::IsNullOrWhiteSpace([string]$principalUserProperty.Value)) {
+        throw "Scheduled Task $Name has no principal identity to snapshot."
+    }
+    $stateProperty = $task.PSObject.Properties['State']
+    $xml = Export-ScheduledTask -TaskName $Name -TaskPath '\'
+    return [PSCustomObject]@{
+        name = $Name
+        xml = $xml
+        taskPath = [string]$task.TaskPath
+        principalSid = ConvertTo-CycTaskSnapshotSid ([string]$principalUserProperty.Value)
+        triggerSids = $triggerSids
+        action = [PSCustomObject]@{
+            executable = [string]$taskActions[0].Execute
+            arguments = [string]$taskActions[0].Arguments
+            workingDirectory = if ($null -ne $workingDirectoryProperty) {
+                [string]$workingDirectoryProperty.Value
+            } else { '' }
+        }
+        wasRunning = ($null -ne $stateProperty -and [string]$stateProperty.Value -eq 'Running')
+    }
+}
+
+function Assert-CycLiveTaskOwnership {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [string]$ExpectedSid
+    )
+    $snapshot = Get-CycTaskSnapshotByName -Name $Name
+    if ($null -eq $snapshot) { return $null }
+    return Assert-CycTaskSnapshotOwnership `
+        -Snapshot $snapshot `
+        -InstallRoot $InstallRoot `
+        -ExpectedSid $ExpectedSid
+}
+
 function Register-CycTask {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)]$Action,
+        [Parameter(Mandatory = $true)][string]$ExpectedInstallRoot,
+        [string]$ExpectedSid,
         [ValidateSet('Interactive', 'S4U')]
         [string]$LogonType = $script:ScheduledTaskLogonType
     )
@@ -3821,6 +4017,8 @@ function Register-CycTask {
     if (-not $ProfileMatrixTestMode -and $LogonType -cne 'Interactive') {
         throw 'Production task registration requires the Interactive principal.'
     }
+    [void](Assert-CycTaskActionBinding -Name $Name -InstallRoot $ExpectedInstallRoot -Action $Action)
+    [void](Assert-CycLiveTaskOwnership -Name $Name -InstallRoot $ExpectedInstallRoot -ExpectedSid $ExpectedSid)
     if ($script:ProfileMatrixTaskGate -ne 'none') {
         [void](Invoke-CycProfileMatrixTaskGate -Operation Register -Name $Name -Action $Action)
         return
@@ -3840,6 +4038,9 @@ function Register-CycTask {
         -RestartCount 3 `
         -RestartInterval (New-TimeSpan -Minutes 1) `
         -ExecutionTimeLimit ([TimeSpan]::Zero)
+    # Re-check directly before the forceful replacement.  A task with the
+    # product name but another owner/install root must never be overwritten.
+    [void](Assert-CycLiveTaskOwnership -Name $Name -InstallRoot $ExpectedInstallRoot -ExpectedSid $ExpectedSid)
     Register-ScheduledTask `
         -TaskName $Name `
         -TaskPath '\' `
@@ -3852,73 +4053,55 @@ function Register-CycTask {
 }
 
 function Unregister-CycTask {
-    param([Parameter(Mandatory = $true)][string]$Name)
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$ExpectedInstallRoot,
+        [string]$ExpectedSid
+    )
+    $snapshot = Assert-CycLiveTaskOwnership `
+        -Name $Name `
+        -InstallRoot $ExpectedInstallRoot `
+        -ExpectedSid $ExpectedSid
     if ($script:ProfileMatrixTaskGate -ne 'none') {
         [void](Invoke-CycProfileMatrixTaskGate -Operation Unregister -Name $Name)
         return
     }
-    if (Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction SilentlyContinue) {
+    if ($null -ne $snapshot) {
         Stop-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName $Name -TaskPath '\' -Confirm:$false
     }
 }
 
-function ConvertTo-CycTaskSnapshotSid {
-    param([Parameter(Mandatory = $true)][string]$Identity)
-    $value = $Identity.Trim()
-    if ($value -match '^S-\d-\d+(?:-\d+)+$') { return $value }
-    try {
-        return ([System.Security.Principal.NTAccount]::new($value)).Translate(
-            [System.Security.Principal.SecurityIdentifier]
-        ).Value
-    } catch {
-        throw "Unable to resolve Scheduled Task identity '$Identity' to a SID."
-    }
-}
-
 function Get-CycTaskSnapshots {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedInstallRoot,
+        [string]$ExpectedSid
+    )
     $snapshots = @()
     foreach ($name in @($script:ControllerTaskName, $script:WorkerTaskName)) {
-        $tasks = @(Get-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction SilentlyContinue)
-        if ($tasks.Count -gt 1) {
-            throw "Multiple root Scheduled Tasks found for $name."
-        }
-        $task = $tasks | Select-Object -First 1
-        if ($task) {
-            $taskAction = @($task.Actions | Select-Object -First 1)
-            if ($taskAction.Count -ne 1) { throw "Scheduled Task $name has no single action to snapshot." }
-            $workingDirectoryProperty = $taskAction[0].PSObject.Properties['WorkingDirectory']
-            $triggerSids = @($task.Triggers | ForEach-Object {
-                    $userProperty = $_.PSObject.Properties['UserId']
-                    if ($null -ne $userProperty -and -not [string]::IsNullOrWhiteSpace([string]$userProperty.Value)) {
-                        ConvertTo-CycTaskSnapshotSid ([string]$userProperty.Value)
-                    }
-                })
-            if ($triggerSids.Count -ne 1) {
-                throw "Scheduled Task $name must have exactly one logon trigger identity to snapshot."
-            }
-            $snapshots += [PSCustomObject]@{
-                name = $name
-                xml = Export-ScheduledTask -TaskName $name -TaskPath '\'
-                taskPath = [string]$task.TaskPath
-                principalSid = ConvertTo-CycTaskSnapshotSid ([string]$task.Principal.UserId)
-                triggerSids = $triggerSids
-                action = [PSCustomObject]@{
-                    executable = [string]$taskAction[0].Execute
-                    arguments = [string]$taskAction[0].Arguments
-                    workingDirectory = if ($null -ne $workingDirectoryProperty) { [string]$workingDirectoryProperty.Value } else { '' }
-                }
-                wasRunning = ([string]$task.State -eq 'Running')
-            }
+        $snapshot = Get-CycTaskSnapshotByName -Name $name
+        if ($null -ne $snapshot) {
+            [void](Assert-CycTaskSnapshotOwnership `
+                -Snapshot $snapshot `
+                -InstallRoot $ExpectedInstallRoot `
+                -ExpectedSid $ExpectedSid)
+            $snapshots += $snapshot
         }
     }
     return $snapshots
 }
 
 function Stop-CycRuntime {
-    param([Parameter(Mandatory = $true)][string]$InstallRoot)
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [string]$ExpectedSid
+    )
     foreach ($name in @($script:WorkerTaskName, $script:ControllerTaskName)) {
-        if (Get-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction SilentlyContinue) {
+        $snapshot = Assert-CycLiveTaskOwnership `
+            -Name $name `
+            -InstallRoot $InstallRoot `
+            -ExpectedSid $ExpectedSid
+        if ($null -ne $snapshot) {
             Stop-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction SilentlyContinue
         }
     }
@@ -3962,7 +4145,24 @@ function Assert-CycListenPortsAvailable {
 }
 
 function Restore-CycTaskSnapshots {
-    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Snapshots)
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Snapshots,
+        [Parameter(Mandatory = $true)][string]$ExpectedInstallRoot,
+        [string]$ExpectedSid
+    )
+
+    # Validate every captured task before unregistering either name.  This is
+    # the rollback boundary: a same-name task introduced by another user or
+    # installation must remain untouched rather than being used as a restore
+    # target.
+    $validatedSnapshots = @()
+    foreach ($snapshot in @($Snapshots)) {
+        [void](Assert-CycTaskSnapshotOwnership `
+            -Snapshot $snapshot `
+            -InstallRoot $ExpectedInstallRoot `
+            -ExpectedSid $ExpectedSid)
+        $validatedSnapshots += $snapshot
+    }
 
     if ($script:ProfileMatrixTaskGate -ne 'none') {
         $validated = @()
@@ -4008,7 +4208,10 @@ function Restore-CycTaskSnapshots {
         # Validate the complete snapshot set before unregistering anything so
         # malformed rollback data cannot destroy the pre-existing task state.
         foreach ($name in @($script:WorkerTaskName, $script:ControllerTaskName)) {
-            Unregister-CycTask -Name $name
+            Unregister-CycTask `
+                -Name $name `
+                -ExpectedInstallRoot $ExpectedInstallRoot `
+                -ExpectedSid $ExpectedSid
         }
         foreach ($snapshot in @($validated)) {
             [void](Invoke-CycProfileMatrixTaskGate -Operation Restore -Name $snapshot.name -Snapshot $snapshot)
@@ -4016,10 +4219,20 @@ function Restore-CycTaskSnapshots {
         return
     }
     foreach ($name in @($script:WorkerTaskName, $script:ControllerTaskName)) {
-        Unregister-CycTask -Name $name
+        Unregister-CycTask `
+            -Name $name `
+            -ExpectedInstallRoot $ExpectedInstallRoot `
+            -ExpectedSid $ExpectedSid
     }
-    foreach ($snapshot in $Snapshots) {
-        Register-ScheduledTask -TaskName $snapshot.name -TaskPath '\' -Xml $snapshot.xml -Force | Out-Null
+    foreach ($snapshot in $validatedSnapshots) {
+        # Registration-only rollback expects the task to be absent after the
+        # ownership-checked unregister above.  Omitting -Force makes a race
+        # with a foreign task fail closed instead of overwriting it.
+        [void](Assert-CycLiveTaskOwnership `
+            -Name ([string]$snapshot.name) `
+            -InstallRoot $ExpectedInstallRoot `
+            -ExpectedSid $ExpectedSid)
+        Register-ScheduledTask -TaskName $snapshot.name -TaskPath '\' -Xml $snapshot.xml | Out-Null
         if ($snapshot.wasRunning) {
             Start-ScheduledTask -TaskName $snapshot.name -TaskPath '\'
         }
@@ -5788,13 +6001,20 @@ function Invoke-InstallOrRepairCore {
     if (-not $PSCmdlet.ShouldProcess($Plan.installRoot, "$Action ClusterYourCodex")) { return }
 
     $oldManifest = Read-InstallManifest -ManifestPath $Plan.manifestPath
+    # Snapshot and validate existing product tasks before touching ACLs or any
+    # other lifecycle resource.  A same-name task from another SID/root is a
+    # hard stop for Install/Repair.
+    $taskSnapshots = @(Get-CycTaskSnapshots `
+        -ExpectedInstallRoot $Plan.installRoot `
+        -ExpectedSid $Plan.initiator.sid)
     # The elevated firewall-only helper may run as a different administrator
     # during over-the-shoulder UAC. It needs read/execute access to hash the
     # request-bound controller, but receives no write/delete/control rights.
     Set-PrivateDirectoryAcl -Path $Plan.installRoot -AllowAdministratorsReadAndExecute
     Set-PrivateDirectoryAcl -Path $Plan.dataRoot
-    $taskSnapshots = @(Get-CycTaskSnapshots)
-    Stop-CycRuntime -InstallRoot $Plan.installRoot
+    Stop-CycRuntime `
+        -InstallRoot $Plan.installRoot `
+        -ExpectedSid $Plan.initiator.sid
     $requiredPorts = @(47831)
     if ($Plan.managedWorker.enabled) { $requiredPorts += [int]$Plan.managedWorker.listenPort }
     Assert-CycListenPortsAvailable -Ports $requiredPorts
@@ -5827,11 +6047,22 @@ function Invoke-InstallOrRepairCore {
                 -KeepRelativePaths @($Plan.files.relativePath)
         }
 
-        Register-CycTask -Name $script:ControllerTaskName -Action $Plan.tasks[0].action
+        Register-CycTask `
+            -Name $script:ControllerTaskName `
+            -Action $Plan.tasks[0].action `
+            -ExpectedInstallRoot $Plan.installRoot `
+            -ExpectedSid $Plan.initiator.sid
         if ($Plan.tasks[1].enabled) {
-            Register-CycTask -Name $script:WorkerTaskName -Action $Plan.tasks[1].action
+            Register-CycTask `
+                -Name $script:WorkerTaskName `
+                -Action $Plan.tasks[1].action `
+                -ExpectedInstallRoot $Plan.installRoot `
+                -ExpectedSid $Plan.initiator.sid
         } else {
-            Unregister-CycTask -Name $script:WorkerTaskName
+            Unregister-CycTask `
+                -Name $script:WorkerTaskName `
+                -ExpectedInstallRoot $Plan.installRoot `
+                -ExpectedSid $Plan.initiator.sid
         }
 
         $codexResult = Invoke-CodexIntegration -Plan $Plan -Operation Install
@@ -5882,7 +6113,9 @@ function Invoke-InstallOrRepairCore {
         $coreCommitPublished = $true
     } catch {
         $failure = $_
-        Stop-CycRuntime -InstallRoot $Plan.installRoot
+        Stop-CycRuntime `
+            -InstallRoot $Plan.installRoot `
+            -ExpectedSid $Plan.initiator.sid
         $rollbackFailures = New-Object System.Collections.Generic.List[string]
         $oldCodexSucceeded = $false
         if ($oldManifest -and $oldManifest.PSObject.Properties['codexIntegration'] -and
@@ -5943,7 +6176,12 @@ function Invoke-InstallOrRepairCore {
                 [void]$rollbackFailures.Add('installed files')
             }
         }
-        try { Restore-CycTaskSnapshots -Snapshots $taskSnapshots } catch {
+        try {
+            Restore-CycTaskSnapshots `
+                -Snapshots $taskSnapshots `
+                -ExpectedInstallRoot $Plan.installRoot `
+                -ExpectedSid $Plan.initiator.sid
+        } catch {
             [void]$rollbackFailures.Add('Scheduled Tasks')
         }
         if ($rollbackFailures.Count -gt 0) {
@@ -6012,6 +6250,12 @@ function Invoke-UninstallCore {
         -RequestedProfile $InitiatingProfile `
         -RequestedLocalAppData $InitiatingLocalAppData
     Assert-CycManifestInitiatorBinding -Manifest $manifest -CurrentBinding $currentBinding
+    # Perform the task ownership preflight before Codex/AGENTS cleanup.  This
+    # keeps Uninstall fail-closed without mutating shared integration state when
+    # a same-name task belongs to another SID or install root.
+    $taskSnapshots = @(Get-CycTaskSnapshots `
+        -ExpectedInstallRoot $install `
+        -ExpectedSid $currentBinding.sid)
     $agentsRecord = if ($manifest.PSObject.Properties['agentsIntegration']) {
         $manifest.agentsIntegration
     } else { $null }
@@ -6077,6 +6321,11 @@ function Invoke-UninstallCore {
         marketplaceExitCode = $null
     }
     if ($codexCleanupRequired) {
+        # Re-check immediately before the first external mutation to narrow the
+        # task replacement race after the initial preflight.
+        [void](Get-CycTaskSnapshots `
+            -ExpectedInstallRoot $install `
+            -ExpectedSid $currentBinding.sid)
         $checkpoint = {
             param($result)
             Write-CodexCleanupState -Manifest $manifest -ManifestPath $manifestPath -Result $result
@@ -6102,7 +6351,6 @@ function Invoke-UninstallCore {
     } else {
         [PSCustomObject]@{ required = $false; alreadyApplied = $true }
     }
-    $taskSnapshots = @(Get-CycTaskSnapshots)
     $uninstallRollbackPlan = [PSCustomObject]@{
         installRoot = $install
         dataRoot = $data
@@ -6138,9 +6386,17 @@ function Invoke-UninstallCore {
                 -RegistryPath $plan.uninstallRegistration.registryPath
         }
 
-        Unregister-CycTask -Name $script:WorkerTaskName
-        Unregister-CycTask -Name $script:ControllerTaskName
-        Stop-CycRuntime -InstallRoot $install
+        Unregister-CycTask `
+            -Name $script:WorkerTaskName `
+            -ExpectedInstallRoot $install `
+            -ExpectedSid $currentBinding.sid
+        Unregister-CycTask `
+            -Name $script:ControllerTaskName `
+            -ExpectedInstallRoot $install `
+            -ExpectedSid $currentBinding.sid
+        Stop-CycRuntime `
+            -InstallRoot $install `
+            -ExpectedSid $currentBinding.sid
         Remove-OwnedFiles -Manifest $manifest -ExpectedInstallRoot $install
 
         if ($plan.uninstallRegistration -and $plan.uninstallRegistration.enabled) {
@@ -6173,7 +6429,12 @@ function Invoke-UninstallCore {
         try { Restore-FileRollbackSnapshot -Snapshot $fileSnapshot } catch {
             [void]$rollbackFailures.Add('installed files')
         }
-        try { Restore-CycTaskSnapshots -Snapshots $taskSnapshots } catch {
+        try {
+            Restore-CycTaskSnapshots `
+                -Snapshots $taskSnapshots `
+                -ExpectedInstallRoot $install `
+                -ExpectedSid $currentBinding.sid
+        } catch {
             [void]$rollbackFailures.Add('Scheduled Tasks')
         }
         if ($rollbackFailures.Count -eq 0) {
