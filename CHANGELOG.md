@@ -7,6 +7,16 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.44] - 2026-08-31
+
+### Fixed
+
+- Made the Windows self-contained preview resolve the NSIS compiler through
+  PATH/Chocolatey shims and all supported package layouts, so Setup.exe
+  staging no longer assumes a single Program Files location.
+- Added release-contract regression coverage for the NSIS PATH, `NSIS\\Bin`,
+  and `nsis.install` tool layouts while retaining fail-closed discovery.
+
 ## [0.1.0-preview.43] - 2026-08-31
 
 ### Fixed
@@ -549,7 +559,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.43...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.44...HEAD
+[0.1.0-preview.44]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.43...v0.1.0-preview.44
 [0.1.0-preview.43]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.42...v0.1.0-preview.43
 [0.1.0-preview.42]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.41...v0.1.0-preview.42
 [0.1.0-preview.41]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.40...v0.1.0-preview.41

@@ -4382,7 +4382,11 @@ exit 0
     Assert-True ($setupSilentSource -match 'restores the pre-test firewall state') 'silent Setup smoke verifies firewall restoration'
     $releaseWorkflow = Get-Content -LiteralPath (Join-Path $repoRoot '.github\workflows\release.yml') -Raw
     Assert-True (([regex]::Matches($releaseWorkflow, 'name:\s*Test full Rust workspace')).Count -eq 2) 'release runs the native workspace suite in the platform matrix and self-contained Windows job without a redundant integration-bundle copy'
-    Assert-True ($releaseWorkflow -match 'NSIS installation completed but makensis\.exe was not found') 'release workflow validates its explicit NSIS compiler path'
+    Assert-True ($releaseWorkflow -match 'Get-Command\s+-Name [\x27\x22]makensis\.exe[\x27\x22].+CommandType Application') 'release workflow resolves the NSIS compiler through the runner command table'
+    Assert-True ($releaseWorkflow -match 'NSIS\\Bin\\makensis\.exe') 'release workflow accepts the NSIS Bin compiler layout'
+    Assert-True ($releaseWorkflow -match 'lib\\nsis\\tools\\makensis\.exe') 'release workflow accepts the Chocolatey NSIS tools layout'
+    Assert-True ($releaseWorkflow -match 'lib\\nsis\.install\\tools\\makensis\.exe') 'release workflow accepts the Chocolatey nsis.install tools layout'
+    Assert-True ($releaseWorkflow -match 'NSIS installation completed but makensis\.exe was not found') 'release workflow validates its resolved NSIS compiler path'
     Assert-True ($releaseWorkflow -match 'New-SetupExecutable\.ps1[\s\S]+-MakeNsisPath \$makeNsis') 'release workflow passes the resolved NSIS compiler into Setup.exe staging'
     Assert-True ($releaseWorkflow -match 'ZipFileExtensions\]::CreateEntryFromFile') 'release ZIP creation explicitly includes forced and hidden files instead of Compress-Archive omission semantics'
     Assert-True ($releaseWorkflow -match 'Expand-Archive[\s\S]+Get-CycArchiveInventory[\s\S]+exact forced/hidden package tree') 'release expands the final ZIP and compares its exact tree and bytes with staging'

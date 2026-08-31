@@ -1135,21 +1135,48 @@ jobs:
           New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
           $setup = Join-Path $archiveRoot 'ClusterYourCodex-Setup.exe'
           $makeNsis = $null
+          # Chocolatey may expose makensis.exe through a shim on PATH, while
+          # the package itself has used both NSIS\makensis.exe and
+          # NSIS\Bin\makensis.exe layouts on different runner images. Resolve
+          # the executable through the command table first, then fall back to
+          # the known installation roots without assuming one layout.
+          $nsisCommands = @(Get-Command -Name 'makensis.exe' -CommandType Application -All -ErrorAction SilentlyContinue)
+          foreach ($command in $nsisCommands) {
+            foreach ($propertyName in @('Path', 'Source', 'Definition')) {
+              $property = $command.PSObject.Properties[$propertyName]
+              if ($null -eq $property) { continue }
+              $commandPath = [string]$property.Value
+              if ([string]::IsNullOrWhiteSpace($commandPath)) { continue }
+              $commandPath = $commandPath.Trim()
+              if ((Test-Path -LiteralPath $commandPath -PathType Leaf) -and
+                  ([System.IO.Path]::GetFileName($commandPath) -ieq 'makensis.exe')) {
+                $makeNsis = [string](Resolve-Path -LiteralPath $commandPath -ErrorAction Stop).ProviderPath
+                break
+              }
+            }
+            if (-not [string]::IsNullOrWhiteSpace($makeNsis)) { break }
+          }
           $nsisRoots = @(
             [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86),
             [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles),
             [string]${env:ProgramFiles(x86)},
-            [string]$env:ProgramFiles
+            [string]$env:ProgramFiles,
+            [string]$env:ChocolateyInstall
           ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-          foreach ($nsisRoot in $nsisRoots) {
-            $candidate = Join-Path -Path $nsisRoot.Trim() -ChildPath 'NSIS\makensis.exe'
-            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-              $makeNsis = [string](Resolve-Path -LiteralPath $candidate -ErrorAction Stop).ProviderPath
-              break
+          if ([string]::IsNullOrWhiteSpace($makeNsis)) {
+            foreach ($nsisRoot in $nsisRoots) {
+              foreach ($relativePath in @('NSIS\makensis.exe', 'NSIS\Bin\makensis.exe', 'lib\nsis\tools\makensis.exe', 'lib\nsis.install\tools\makensis.exe')) {
+                $candidate = Join-Path -Path $nsisRoot.Trim() -ChildPath $relativePath
+                if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                  $makeNsis = [string](Resolve-Path -LiteralPath $candidate -ErrorAction Stop).ProviderPath
+                  break
+                }
+              }
+              if (-not [string]::IsNullOrWhiteSpace($makeNsis)) { break }
             }
           }
           if ([string]::IsNullOrWhiteSpace($makeNsis)) {
-            throw 'NSIS installation completed but makensis.exe was not found in a standard Program Files location.'
+            throw 'NSIS installation completed but makensis.exe was not found on PATH, in Chocolatey, or in a standard NSIS installation root.'
           }
           & .\packaging\windows\New-SetupExecutable.ps1 `
             -PackageRoot $preview `
