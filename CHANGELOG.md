@@ -7,6 +7,13 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.42] - 2026-08-31
+
+### Fixed
+
+- Hardened Windows profile-matrix exit-code handling so a null parent Process.ExitCode is reconciled from the validated child receipt and fails closed when the receipt is missing or malformed.
+- Kept all public preview artifacts prerelease while GA readiness remains gated by independently verifiable Issue #2, #3, and #5 evidence.
+
 ## [0.1.0-preview.41] - 2026-08-31
 
 ### Fixed
@@ -516,7 +523,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.41...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.42...HEAD
+[0.1.0-preview.42]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.41...v0.1.0-preview.42
 [0.1.0-preview.41]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.40...v0.1.0-preview.41
 [0.1.0-preview.40]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.39...v0.1.0-preview.40
 [0.1.0-preview.39]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.38...v0.1.0-preview.39
