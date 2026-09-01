@@ -322,6 +322,18 @@ jobs:
                 & chmod 'u+x' $path
                 if ($LASTEXITCODE -ne 0) { throw "chmod failed for $path" }
               }
+              # Run the native Unix package verifier while the exact kit is
+              # still in the release staging tree. This checks the signed
+              # five-file contract on the actual Linux/macOS runner without
+              # mutating systemd or LaunchAgent state; live managed-worker
+              # acceptance remains an external GA gate.
+              $nativePlatform = [string]'${{ matrix.platform }}'
+              & bash ./scripts/Test-WorkerKitsNative.sh `
+                --platform $nativePlatform `
+                --kit-root $workerKit `
+                --expected-version ([string]$env:CYC_PRODUCT_VERSION) `
+                --skip-live
+              if ($LASTEXITCODE -ne 0) { throw "Native Worker Kit validation failed for $nativePlatform." }
             }
           }
           Copy-Item -LiteralPath README.md, LICENSE -Destination $stage

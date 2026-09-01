@@ -38,7 +38,10 @@ agree exactly.
 1. Review a clean exact source SHA.
 2. Run deterministic local checks.
 3. Run native Windows and Linux worker checks on independent exact-SHA
-   workspaces.
+   workspaces. The repository CI and tagged Unix artifact jobs also run
+   `scripts/Test-WorkerKitsNative.sh` on Linux, macOS Intel, and macOS arm64
+   to verify each signed Worker Kit's five-file, manifest, checksum, and
+   Ed25519 contract without mutating a service manager.
 4. Run CI on the exact SHA.
 5. Confirm the Worker Kit publisher key exists only in the protected
    `production-signing` environment, repository-level signing secrets are

@@ -194,6 +194,18 @@ powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   remain the cross-platform contract; an archive does not claim that a future
   service lifecycle is already implemented.
 
+The repository's `native-worker-kits` CI matrix runs on native Linux, Intel
+macOS, and Apple Silicon macOS runners. It builds `cyc-worker`, creates an
+ephemeral test-signed five-file kit, and runs
+`scripts/Test-WorkerKitsNative.sh`. The verifier checks strict UTF-8/JSON,
+target and native architecture identity, regular-file and executable-bit
+boundaries, exact `SHA256SUMS` membership and digests, and the Ed25519 detached
+signature over the canonical manifest. The tagged preview artifact job runs
+the same verifier against the production-signed staged kit. These checks do
+not start systemd or LaunchAgent and therefore remain package-contract checks;
+live service and controller round-trip evidence is still collected on the
+external acceptance hosts described by the GA readiness contract.
+
 ## Codex integration
 
 The installer owns a dedicated local marketplace and installs the plugin from

@@ -76,6 +76,97 @@ jobs:
       # state, so run native tests on one test thread for deterministic CI.
       - run: cargo test --workspace --locked -- --test-threads=1
 
+  native-worker-kits:
+    name: Native Worker Kit (${{ matrix.label }})
+    needs: [version-identity]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x64
+            os: ubuntu-latest
+            platform: linux
+            target: linux-x86_64
+          - label: macos-x64
+            os: macos-15-intel
+            platform: macos
+            target: macos-x86_64
+          - label: macos-arm64
+            os: macos-15
+            platform: macos
+            target: macos-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - name: Provision OpenSSL 3 on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! brew list --versions openssl@3 >/dev/null 2>&1; then
+            brew install openssl@3
+          fi
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+      - name: Build native worker
+        shell: bash
+        run: cargo build --locked --release -p cyc-worker
+      - name: Create ephemeral native-kit publisher key
+        shell: bash
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/cyc-native-kit-${{ matrix.label }}.pem"
+          der="$RUNNER_TEMP/cyc-native-kit-${{ matrix.label }}.der"
+          raw="$RUNNER_TEMP/cyc-native-kit-${{ matrix.label }}.pub"
+          openssl genpkey -algorithm ED25519 -out "$key"
+          openssl pkey -in "$key" -pubout -outform DER -out "$der"
+          python3 - "$der" "$raw" <<'PY'
+          import base64
+          import pathlib
+          import sys
+          data = pathlib.Path(sys.argv[1]).read_bytes()
+          prefix = bytes.fromhex('302a300506032b6570032100')
+          if len(data) != 44 or data[:12] != prefix:
+              raise SystemExit('unexpected Ed25519 SPKI fixture')
+          pathlib.Path(sys.argv[2]).write_text(base64.b64encode(data[12:]).decode('ascii') + '\n', encoding='ascii')
+          PY
+          chmod 600 "$key" "$raw"
+          {
+            echo "CYC_NATIVE_SIGNING_KEY=$key"
+            echo "CYC_NATIVE_PUBLIC_KEY=$raw"
+          } >> "$GITHUB_ENV"
+      - name: Build signed native Worker Kit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content -LiteralPath VERSION -Raw).Trim()
+          if ([string]::IsNullOrWhiteSpace($version)) { throw 'VERSION is empty.' }
+          $kit = Join-Path $env:RUNNER_TEMP 'cyc-native-worker-kit-${{ matrix.label }}'
+          New-Item -ItemType Directory -Path $kit -Force | Out-Null
+          & ./packaging/worker-kits/New-WorkerKit.ps1 `
+            -Target '${{ matrix.target }}' `
+            -WorkerExecutable (Join-Path $PWD 'target/release/cyc-worker') `
+            -OutputDirectory $kit `
+            -Version $version `
+            -SigningKeyPath $env:CYC_NATIVE_SIGNING_KEY `
+            -SigningKeyId 'cyc-ci-native-${{ matrix.label }}' `
+            -TrustedPublicKeyPath $env:CYC_NATIVE_PUBLIC_KEY | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw 'Native worker-kit generation failed.' }
+          & chmod u+x (Join-Path $kit 'cyc-worker') (Join-Path $kit 'install-worker.sh')
+          if ($LASTEXITCODE -ne 0) { throw 'Worker-kit executable-bit setup failed.' }
+          "CYC_NATIVE_KIT_ROOT=$kit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Validate native Worker Kit without mutating services
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n' < VERSION)"
+          bash scripts/Test-WorkerKitsNative.sh \
+            --platform '${{ matrix.platform }}' \
+            --kit-root "$CYC_NATIVE_KIT_ROOT" \
+            --public-key "$CYC_NATIVE_PUBLIC_KEY" \
+            --expected-version "$version" \
+            --skip-live
+
   web:
     name: Desktop, Windows host, and Codex bridge
     needs: [version-identity]

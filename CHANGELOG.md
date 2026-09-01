@@ -7,6 +7,17 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.53] - 2026-09-01
+
+### Added
+
+- Added a native Linux/macOS Worker Kit contract verifier that checks the
+  exact five-file package, strict manifest/checksum bindings, executable bits,
+  native target identity, and Ed25519 publisher signature without mutating
+  systemd or LaunchAgent state.
+- Added native Linux, Intel macOS, and Apple Silicon macOS Worker Kit CI
+  coverage and invoked the same verifier from tagged Unix preview staging.
+
 ## [0.1.0-preview.52] - 2026-09-01
 
 ### Fixed
@@ -645,7 +656,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.52...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.53...HEAD
+[0.1.0-preview.53]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.52...v0.1.0-preview.53
 [0.1.0-preview.52]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.51...v0.1.0-preview.52
 [0.1.0-preview.51]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.50...v0.1.0-preview.51
 [0.1.0-preview.50]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.49...v0.1.0-preview.50
