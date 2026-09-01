@@ -3559,7 +3559,7 @@ mod tests {
             return;
         };
         #[cfg(target_os = "windows")]
-        let arguments = vec![
+        let arguments = [
             OsString::from("-NoLogo"),
             OsString::from("-NoProfile"),
             OsString::from("-NonInteractive"),
@@ -3572,7 +3572,7 @@ mod tests {
             return;
         };
         #[cfg(not(target_os = "windows"))]
-        let arguments = vec![OsString::from("10")];
+        let arguments = [OsString::from("10")];
 
         let references: Vec<&OsStr> = arguments.iter().map(OsString::as_os_str).collect();
         let started = Instant::now();
