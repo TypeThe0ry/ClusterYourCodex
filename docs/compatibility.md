@@ -116,6 +116,9 @@ gate/run evidence object also binds a bounded `runId` and `node`, external
 chronological ISO-8601 `startedAt`/`endedAt` instants. Each nested run binds
 an external execution row to its exact test selector and locked command; the
 raw-log verifier cross-binds the provenance fields as well as the markers.
+The compatibility aliases `selector` and `markers` are accepted only when
+they exactly match canonical `testSelector` and `rawLogMarkers` values; any
+conflicting duplicate field fails closed.
 The Linux row uses
 `isolation::tests::linux_live_dedicated_identity_credential_and_residual_reconciliation`
 with `--ignored --exact --nocapture`; the Windows row uses

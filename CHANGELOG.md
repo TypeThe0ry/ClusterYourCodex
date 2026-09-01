@@ -7,6 +7,19 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.57] - 2026-09-01
+
+### Fixed
+
+- Fixed Issue #5 raw-log verification for matrix gates by applying provenance
+  matching only to single-platform gate records and retaining array shape for
+  single-marker evidence.
+- Rejected conflicting `testSelector`/`selector` and
+  `rawLogMarkers`/`markers` compatibility aliases instead of silently choosing
+  one spelling, and aligned the stable jq contract with the same rule.
+- Added chronological ISO-8601 timestamp ordering to the stable jq evidence
+  contract and regression coverage for the corrected downloaded-evidence path.
+
 ## [0.1.0-preview.56] - 2026-09-01
 
 ### Fixed
@@ -694,7 +707,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.56...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.57...HEAD
+[0.1.0-preview.57]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.56...v0.1.0-preview.57
 [0.1.0-preview.56]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.55...v0.1.0-preview.56
 [0.1.0-preview.55]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.54...v0.1.0-preview.55
 [0.1.0-preview.54]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.53...v0.1.0-preview.54

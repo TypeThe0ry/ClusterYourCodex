@@ -248,6 +248,10 @@ Describe 'GA evidence issue acceptance contract' {
         $workflowSource | Should Match 'issue5_single_gate_valid'
         $workflowSource | Should Match 'issue5_matrix_gate_valid'
         $workflowSource | Should Match 'issue5-evidence-matrix'
+        $workflowSource | Should Match 'issue5_selector_value'
+        $workflowSource | Should Match 'valid_iso_order'
+        $readinessSource | Should Match 'rawLogMarkers and markers aliases must match exactly'
+        $rawLogSource | Should Match 'rawLogMarkers and markers aliases must match exactly'
         $workflowSource | Should Not Match 'valid_issue_evidence\(\.issue5'
         $workflowSource | Should Match 'valid_https_url'
         ($workflowSource.IndexOf('test("^https://[^@/?#[:space:]]+([/?#]|$)")') -ge 0) | Should Be $true
@@ -405,6 +409,36 @@ Describe 'GA evidence issue acceptance contract' {
             -Path 'issue5' -Description 'Issue #5 test evidence' -ExpectedCommit $expectedCommitForTest `
             -RequiredGates $issue5GateNamesForTest
         $result.status | Should Be 'passed'
+    }
+
+    It 'accepts downloaded Issue #5 verification for single and matrix gates' {
+        $manifest = New-TestIssue5Evidence
+        $contract = Assert-GaIssue5Evidence -Node $manifest -Description 'Issue #5 raw verification fixture' -RequiredGates $issue5GateNamesForTest
+        $rawRecord = [pscustomobject]@{
+            markersVerified = $true
+            platforms = @('linux', 'windows', 'macos')
+            markers = @($contract.markers)
+            gateEvidence = @($contract.gates)
+        }
+        { Assert-GaIssue5RawVerification -ManifestIssue $manifest -RawRecord $rawRecord -Description 'Issue #5 raw verification fixture' } | Should Not Throw
+    }
+
+    It 'rejects conflicting Issue #5 selector and marker aliases' {
+        $record = New-TestIssue5Evidence
+        $record.gates.windowsJobObject | Add-Member -MemberType NoteProperty -Name selector -Value 'isolation::tests::wrong_selector'
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 selector alias conflict' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+
+        $record = New-TestIssue5Evidence
+        $record.gates.windowsJobObject | Add-Member -MemberType NoteProperty -Name markers -Value @('conflicting-marker')
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 marker alias conflict' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
     }
 
     It 'requires source-bound provenance on every Issue #5 run' {

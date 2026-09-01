@@ -262,10 +262,15 @@ function Get-RawLogIssue5RunSelector {
         [Parameter(Mandatory = $true)][string]$Description
     )
 
-    $selector = Get-RawLogOptionalProperty -Object $Run -Name 'testSelector'
-    if ($null -eq $selector) {
-        $selector = Get-RawLogOptionalProperty -Object $Run -Name 'selector'
+    $canonicalProperty = $Run.PSObject.Properties['testSelector']
+    $aliasProperty = $Run.PSObject.Properties['selector']
+    $hasCanonical = $null -ne $canonicalProperty
+    $hasAlias = $null -ne $aliasProperty
+    if ($hasCanonical -and $hasAlias) {
+        Assert-RawLogCondition ($canonicalProperty.Value -is [string] -and $aliasProperty.Value -is [string]) "$Description.testSelector and selector must both be strings when both are present"
+        Assert-RawLogCondition ([string]$canonicalProperty.Value -ceq [string]$aliasProperty.Value) "$Description.testSelector and selector aliases must match exactly"
     }
+    $selector = if ($hasCanonical) { $canonicalProperty.Value } else { Get-RawLogOptionalProperty -Object $Run -Name 'selector' }
     Assert-RawLogCondition ($selector -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$selector)) "$Description.testSelector is a non-empty string"
     return [string]$selector
 }
@@ -328,9 +333,20 @@ function Get-RawLogIssue5GateMarkers {
         [Parameter(Mandatory = $true)][string]$Description
     )
 
-    $markerProperty = $GateEvidence.PSObject.Properties['rawLogMarkers']
+    $canonicalProperty = $GateEvidence.PSObject.Properties['rawLogMarkers']
+    $aliasProperty = $GateEvidence.PSObject.Properties['markers']
+    if ($null -ne $canonicalProperty -and $null -ne $aliasProperty) {
+        Assert-RawLogCondition (($canonicalProperty.Value -is [System.Array]) -and ($aliasProperty.Value -is [System.Array])) "$Description.rawLogMarkers and markers must both be arrays when both are present"
+        $canonicalMarkers = @($canonicalProperty.Value | ForEach-Object { [string]$_ })
+        $aliasMarkers = @($aliasProperty.Value | ForEach-Object { [string]$_ })
+        Assert-RawLogCondition ($canonicalMarkers.Count -eq $aliasMarkers.Count) "$Description.rawLogMarkers and markers aliases must have the same length"
+        for ($index = 0; $index -lt $canonicalMarkers.Count; $index++) {
+            Assert-RawLogCondition ($canonicalMarkers[$index] -ceq $aliasMarkers[$index]) "$Description.rawLogMarkers and markers aliases must match exactly"
+        }
+    }
+    $markerProperty = $canonicalProperty
     if ($null -eq $markerProperty) {
-        $markerProperty = $GateEvidence.PSObject.Properties['markers']
+        $markerProperty = $aliasProperty
     }
     if ($null -eq $markerProperty) {
         $markers = $null

@@ -621,6 +621,20 @@ jobs:
                 (string_value($value) | test("^https://[^@/?#[:space:]]+([/?#]|$)"));
               def valid_iso_instant($value):
                 (string_value($value) | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^[:space:]]+(Z|[+-][0-9]{2}:[0-9]{2})$"));
+              def iso_epoch:
+                capture("^(?<date>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<fraction>\\.[0-9]+)?(?<zone>Z|[+-][0-9]{2}:[0-9]{2})$") as $parts
+                | (($parts.date + "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime) as $base
+                | (($parts.fraction // ".0") | tonumber) as $fraction
+                | (if $parts.zone == "Z" then 0
+                   else ($parts.zone | capture("^(?<sign>[+-])(?<hours>[0-9]{2}):(?<minutes>[0-9]{2})$")) as $offset
+                     | (($offset.hours | tonumber) * 3600 + ($offset.minutes | tonumber) * 60)
+                       * (if $offset.sign == "+" then 1 else -1 end)
+                   end) as $offsetSeconds
+                | $base + $fraction - $offsetSeconds;
+              def valid_iso_order($started; $ended):
+                (try ($started | iso_epoch) catch null) as $startedEpoch
+                | (try ($ended | iso_epoch) catch null) as $endedEpoch
+                | ($startedEpoch != null and $endedEpoch != null and $endedEpoch >= $startedEpoch);
               def valid_raw_log($record):
                 (($record.rawLog | type) == "object")
                 and nonempty_string($record.rawLog.url)
@@ -631,6 +645,7 @@ jobs:
                 and ((string_value($record.rawLog.node) | test("github|actions|hosted|runner"; "i")) | not)
                 and valid_iso_instant($record.rawLog.startedAt)
                 and valid_iso_instant($record.rawLog.endedAt)
+                and valid_iso_order($record.rawLog.startedAt; $record.rawLog.endedAt)
                 and (($record.rawLog.exitCode | type) == "number")
                 and ($record.rawLog.exitCode == 0)
                 and (($record.rawLog.tests | type) == "object")
@@ -678,9 +693,27 @@ jobs:
                 (issue5_single_gates + issue5_matrix_gates);
               def normalized_command:
                 gsub("[[:space:]]+"; " ") | sub("^ +"; "") | sub(" +$"; "");
+              def issue5_selector_value($entry):
+                if (($entry | has("testSelector")) and ($entry | has("selector"))) then
+                  if (($entry.testSelector | type) == "string"
+                      and ($entry.selector | type) == "string"
+                      and $entry.testSelector == $entry.selector) then $entry.testSelector
+                  else "" end
+                elif (($entry | has("testSelector")) and (($entry.testSelector | type) == "string")) then
+                  $entry.testSelector
+                elif (($entry | has("selector")) and (($entry.selector | type) == "string")) then
+                  $entry.selector
+                else "" end;
               def issue5_marker_array($entry):
-                if (($entry.rawLogMarkers | type) == "array") then $entry.rawLogMarkers
-                elif (($entry.markers | type) == "array") then $entry.markers
+                if (($entry | has("rawLogMarkers")) and ($entry | has("markers"))) then
+                  if (($entry.rawLogMarkers | type) == "array"
+                      and ($entry.markers | type) == "array"
+                      and $entry.rawLogMarkers == $entry.markers) then $entry.rawLogMarkers
+                  else [] end
+                elif (($entry | has("rawLogMarkers")) and (($entry.rawLogMarkers | type) == "array")) then
+                  $entry.rawLogMarkers
+                elif (($entry | has("markers")) and (($entry.markers | type) == "array")) then
+                  $entry.markers
                 else [] end;
               def issue5_run_identifier_valid($value):
                 (string_value($value) | test("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"));
@@ -708,7 +741,8 @@ jobs:
                 and ($run.tests.ignored >= 0)
                 and ($run.tests.ignored == ($run.tests.ignored | floor))
                 and valid_iso_instant($run.startedAt)
-                and valid_iso_instant($run.endedAt);
+                and valid_iso_instant($run.endedAt)
+                and valid_iso_order($run.startedAt; $run.endedAt);
               def issue5_markers_valid($markers):
                 (($markers | type) == "array")
                 and (($markers | length) > 0)
@@ -743,9 +777,10 @@ jobs:
                     or (issue5_run_provenance_valid($run) | not)) then false
                 else
                   ($run.platform | ascii_downcase) as $platform
-                  | ($run.testSelector // $run.selector) as $selector
+                  | (issue5_selector_value($run)) as $selector
                   | (issue5_marker_array($run)) as $markers
                   | ($platform == "linux" or $platform == "windows" or $platform == "macos")
+                    and (($selector | length) > 0)
                     and ($selector == issue5_selector($platform))
                     and issue5_command_valid($platform; $run.command)
                     and issue5_markers_valid($markers)
@@ -763,9 +798,10 @@ jobs:
                     or (issue5_run_provenance_valid($record.gates[$gate]) | not)) then false
                 else
                   ($record.gates[$gate].platform | ascii_downcase) as $platform
-                  | ($record.gates[$gate].testSelector // $record.gates[$gate].selector) as $selector
+                  | (issue5_selector_value($record.gates[$gate])) as $selector
                   | (issue5_marker_array($record.gates[$gate])) as $markers
                   | ($platform == issue5_single_platform($gate))
+                    and (($selector | length) > 0)
                     and ($selector == issue5_selector($platform))
                     and issue5_command_valid($platform; $record.gates[$gate].command)
                     and issue5_markers_valid($markers)

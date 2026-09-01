@@ -139,6 +139,9 @@ also carries source-bound provenance: a bounded `runId` and `node`, external
 `tests.passed`, zero `tests.failed`, non-negative `tests.ignored`, and explicit
 ISO-8601 `startedAt`/`endedAt` instants in chronological order. The downloader
 cross-binds these fields instead of accepting a marker-only or relabelled run.
+The legacy `selector` and `markers` aliases may be supplied for compatibility,
+but if they appear alongside canonical `testSelector` or `rawLogMarkers` they
+must be the same values byte-for-byte; conflicting spellings fail closed.
 Every nested run carries its exact selector, command, and raw-log markers. The required selectors are the Linux ignored native probe
 `isolation::tests::linux_live_dedicated_identity_credential_and_residual_reconciliation`,
 the Windows guard contract

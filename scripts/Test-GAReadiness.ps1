@@ -393,12 +393,18 @@ function Get-GaIssue5RunSelector {
     )
 
     # ``testSelector`` is canonical.  ``selector`` is accepted as a read-only
-    # compatibility alias for early manifests, but the command must still end
-    # in the same exact selector.
-    $selector = Get-GaIssue5OptionalProperty -Object $Run -Name 'testSelector'
-    if ($null -eq $selector) {
-        $selector = Get-GaIssue5OptionalProperty -Object $Run -Name 'selector'
+    # compatibility alias for early manifests, but when both spellings are
+    # present they must be identical.  Silently preferring one spelling would
+    # allow a manifest and a retained raw record to describe different tests.
+    $canonicalProperty = $Run.PSObject.Properties['testSelector']
+    $aliasProperty = $Run.PSObject.Properties['selector']
+    $hasCanonical = $null -ne $canonicalProperty
+    $hasAlias = $null -ne $aliasProperty
+    if ($hasCanonical -and $hasAlias) {
+        Assert-GaCondition ($canonicalProperty.Value -is [string] -and $aliasProperty.Value -is [string]) "$Description.testSelector and selector must both be strings when both are present"
+        Assert-GaCondition ([string]$canonicalProperty.Value -ceq [string]$aliasProperty.Value) "$Description.testSelector and selector aliases must match exactly"
     }
+    $selector = if ($hasCanonical) { $canonicalProperty.Value } else { Get-GaIssue5OptionalProperty -Object $Run -Name 'selector' }
     Assert-GaCondition ($selector -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$selector)) "$Description.testSelector must be a non-empty string"
     return [string]$selector
 }
@@ -409,11 +415,22 @@ function Get-GaIssue5GateMarkers {
         [Parameter(Mandatory = $true)][string]$Description
     )
 
-    $markerProperty = $GateEvidence.PSObject.Properties['rawLogMarkers']
+    $canonicalProperty = $GateEvidence.PSObject.Properties['rawLogMarkers']
+    $aliasProperty = $GateEvidence.PSObject.Properties['markers']
+    if ($null -ne $canonicalProperty -and $null -ne $aliasProperty) {
+        Assert-GaCondition (($canonicalProperty.Value -is [System.Array]) -and ($aliasProperty.Value -is [System.Array])) "$Description.rawLogMarkers and markers must both be arrays when both are present"
+        $canonicalMarkers = @($canonicalProperty.Value | ForEach-Object { [string]$_ })
+        $aliasMarkers = @($aliasProperty.Value | ForEach-Object { [string]$_ })
+        Assert-GaCondition ($canonicalMarkers.Count -eq $aliasMarkers.Count) "$Description.rawLogMarkers and markers aliases must have the same length"
+        for ($index = 0; $index -lt $canonicalMarkers.Count; $index++) {
+            Assert-GaCondition ($canonicalMarkers[$index] -ceq $aliasMarkers[$index]) "$Description.rawLogMarkers and markers aliases must match exactly"
+        }
+    }
+    $markerProperty = $canonicalProperty
     if ($null -eq $markerProperty) {
         # ``markers`` is accepted as a compatibility alias; new manifests
         # should use the unambiguous rawLogMarkers name.
-        $markerProperty = $GateEvidence.PSObject.Properties['markers']
+        $markerProperty = $aliasProperty
     }
     if ($null -eq $markerProperty) {
         $markers = $null
@@ -482,7 +499,7 @@ function Assert-GaIssue5SingleGateEvidence {
     Assert-GaCondition ($commandValue -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$commandValue)) "$Description.gates.$Gate.command must be a non-empty string"
     $command = [string]$commandValue
     Assert-GaIssue5RunCommand -Platform $platform -Selector $selector -Command $command -Description "$Description.gates.$Gate"
-    $markers = Get-GaIssue5GateMarkers -GateEvidence $GateEvidence -Description "$Description.gates.$Gate"
+    $markers = @(Get-GaIssue5GateMarkers -GateEvidence $GateEvidence -Description "$Description.gates.$Gate")
     $canonicalMarker = Get-GaIssue5Marker -Platform $platform -Selector $selector -Command $command -Gate $Gate
     Assert-GaCondition (@($markers | Where-Object { $_ -ceq $canonicalMarker }).Count -eq 1) "$Description.gates.$Gate.rawLogMarkers must contain the source-bound platform/selector/command marker"
     Assert-GaIssue5RequiredMarkers -Markers $markers -Gate $Gate -Platform $platform -Description "$Description.gates.$Gate"
@@ -539,7 +556,7 @@ function Assert-GaIssue5MatrixGateEvidence {
         Assert-GaCondition ($commandValue -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$commandValue)) "$Description.gates.$Gate.runs.$platform.command must be a non-empty string"
         $command = [string]$commandValue
         Assert-GaIssue5RunCommand -Platform $platform -Selector $selector -Command $command -Description "$Description.gates.$Gate.runs.$platform"
-        $markers = Get-GaIssue5GateMarkers -GateEvidence $run -Description "$Description.gates.$Gate.runs.$platform"
+        $markers = @(Get-GaIssue5GateMarkers -GateEvidence $run -Description "$Description.gates.$Gate.runs.$platform")
         $canonicalMarker = Get-GaIssue5Marker -Platform $platform -Selector $selector -Command $command -Gate $Gate
         Assert-GaCondition (@($markers | Where-Object { $_ -ceq $canonicalMarker }).Count -eq 1) "$Description.gates.$Gate.runs.$platform.rawLogMarkers must contain the source-bound marker"
         Assert-GaIssue5RequiredMarkers -Markers $markers -Gate $Gate -Platform $platform -Description "$Description.gates.$Gate.runs.$platform"
@@ -565,7 +582,7 @@ function Assert-GaIssue5MatrixGateEvidence {
             })
     }
     Assert-GaCondition ($seenPlatforms.Count -eq $GaIssue5Platforms.Count) "$Description.gates.$Gate.runs must cover all required platforms"
-    $gateMarkers = Get-GaIssue5GateMarkers -GateEvidence $GateEvidence -Description "$Description.gates.$Gate"
+    $gateMarkers = @(Get-GaIssue5GateMarkers -GateEvidence $GateEvidence -Description "$Description.gates.$Gate")
     foreach ($marker in $allMarkers) {
         Assert-GaCondition (@($gateMarkers | Where-Object { $_ -ceq $marker }).Count -eq 1) "$Description.gates.$Gate.rawLogMarkers must retain each platform marker"
     }
@@ -729,10 +746,9 @@ function Assert-GaIssue5RawVerification {
         $gateMatches = @($verifiedGates | Where-Object { [string](Get-GaProperty -Object $_ -Path 'gate' -Description $Description) -ceq $gateName })
         Assert-GaCondition ($gateMatches.Count -eq 1) "$Description.gateEvidence must retain exactly one '$gateName' record"
         $verifiedGate = $gateMatches[0]
-        [void](Assert-GaIssue5RunProvenanceMatch -ManifestRun $manifestGate -VerifiedRun $verifiedGate -Description "$Description.gateEvidence.$gateName")
         $verifiedGateStatus = Get-GaProperty -Object $verifiedGate -Path 'status' -Description $Description
         Assert-GaCondition (($verifiedGateStatus -is [bool]) -and $verifiedGateStatus) "$Description.gateEvidence.$gateName.status must be boolean true"
-        $verifiedMarkersForGate = Get-GaProperty -Object $verifiedGate -Path 'markers' -Description $Description
+        $verifiedMarkersForGate = @(Get-GaProperty -Object $verifiedGate -Path 'markers' -Description $Description)
         Assert-GaCondition (($verifiedMarkersForGate -is [System.Array]) -and $verifiedMarkersForGate.Count -gt 0) "$Description.gateEvidence.$gateName.markers must be retained"
         foreach ($marker in @($manifestGate.markers)) {
             Assert-GaCondition (@($verifiedMarkersForGate | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.gateEvidence.$gateName.markers must match the manifest"
@@ -759,13 +775,14 @@ function Assert-GaIssue5RawVerification {
                 $manifestCommand = Normalize-GaIssue5Command -Command ([string](Get-GaProperty -Object $manifestRun -Path 'command' -Description $Description))
                 $verifiedCommand = Normalize-GaIssue5Command -Command ([string](Get-GaProperty -Object $verifiedRun -Path 'command' -Description $Description))
                 Assert-GaCondition ($verifiedCommand.Equals($manifestCommand, [System.StringComparison]::Ordinal)) "$Description.gateEvidence.$gateName.runs.$manifestPlatform.command must match the manifest"
-                $verifiedRunMarkers = Get-GaProperty -Object $verifiedRun -Path 'markers' -Description $Description
+                $verifiedRunMarkers = @(Get-GaProperty -Object $verifiedRun -Path 'markers' -Description $Description)
                 Assert-GaCondition (($verifiedRunMarkers -is [System.Array]) -and $verifiedRunMarkers.Count -gt 0) "$Description.gateEvidence.$gateName.runs.$manifestPlatform.markers must be retained"
                 foreach ($marker in @($manifestRun.markers)) {
                     Assert-GaCondition (@($verifiedRunMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.gateEvidence.$gateName.runs.$manifestPlatform.markers must match the manifest"
                 }
             }
         } else {
+            [void](Assert-GaIssue5RunProvenanceMatch -ManifestRun $manifestGate -VerifiedRun $verifiedGate -Description "$Description.gateEvidence.$gateName")
             $manifestPlatform = ([string](Get-GaProperty -Object $manifestGate -Path 'platform' -Description $Description)).ToLowerInvariant()
             $verifiedPlatform = ([string](Get-GaProperty -Object $verifiedGate -Path 'platform' -Description $Description)).ToLowerInvariant()
             Assert-GaCondition ($verifiedPlatform.Equals($manifestPlatform, [System.StringComparison]::Ordinal)) "$Description.gateEvidence.$gateName.platform must match the manifest"
