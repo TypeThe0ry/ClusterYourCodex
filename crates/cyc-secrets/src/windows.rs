@@ -1,4 +1,8 @@
-use std::{ffi::c_void, io, ptr};
+use std::{
+    ffi::c_void,
+    io,
+    ptr::{self, NonNull},
+};
 
 use windows_sys::Win32::Foundation::FILETIME;
 use windows_sys::Win32::Security::Credentials::{
@@ -109,17 +113,15 @@ impl CredentialVault for WindowsCredentialVault {
                 source,
             });
         }
-        // CredReadW reports success through its return value, but a defensive
-        // null check keeps the native boundary fail-closed if a malformed API
-        // shim ever returns success without an allocation.
-        if raw.is_null() {
-            return Err(VaultError::InvalidNativeRecord);
-        }
-        let guard = CredBuffer(raw.cast());
+        // CredReadW reports success through its return value, but the native
+        // pointer is still converted to NonNull before it crosses the unsafe
+        // boundary. A malformed API shim therefore fails closed.
+        let raw = NonNull::new(raw).ok_or(VaultError::InvalidNativeRecord)?;
+        let guard = CredBuffer(raw.as_ptr().cast());
 
         // SAFETY: CredReadW succeeded and owns a complete CREDENTIALW allocation
-        // until `guard` calls CredFree.
-        let credential = unsafe { &*raw };
+        // until `guard` calls CredFree; NonNull proves the allocation is not null.
+        let credential = unsafe { raw.as_ref() };
         let blob_size = credential.CredentialBlobSize as usize;
         if blob_size > CRED_MAX_CREDENTIAL_BLOB_SIZE as usize
             || (blob_size > 0 && credential.CredentialBlob.is_null())

@@ -11,8 +11,8 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Added a fail-closed null guard at the Windows Credential Manager boundary
-  before dereferencing a `CredReadW` result.
+- Converted the Windows Credential Manager `CredReadW` result to `NonNull`
+  before dereferencing so malformed native output fails closed.
 - Removed the MCP runtime-receipt test's filesystem check-then-use pattern so
   receipt assertions do not introduce a TOCTOU race.
 
