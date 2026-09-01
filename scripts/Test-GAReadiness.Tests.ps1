@@ -286,8 +286,14 @@ Describe 'GA evidence issue acceptance contract' {
         $workflowSource | Should Match 'expected_marker'
         $workflowSource | Should Match 'len\(matches\) != 1'
         $workflowSource | Should Match 'binding_count != 15'
-        $workflowSource | Should Match 'jq -e --arg commit "\$CYC_GA_SOURCE_COMMIT" --slurpfile manifest "\$evidence_path" -f - "\$raw_verification" <<''JQ'''
-        $workflowSource | Should Match '(?s)<<''JQ''.*\r?\n\s*\(\$manifest\[0\]\).*\r?\n\s*JQ'
+        $workflowSource | Should Match 'raw_verification_contract="\$RUNNER_TEMP/cyc-ga-raw-log-contract\.jq"'
+        $workflowSource | Should Match 'cat > "\$raw_verification_contract" <<''JQ'''
+        $workflowSource | Should Match 'jq -e --arg commit "\$CYC_GA_SOURCE_COMMIT" --slurpfile manifest "\$evidence_path" \\\r?\n\s*-f "\$raw_verification_contract" "\$raw_verification"'
+        $workflowSource | Should Match '(?s)cat > "\$raw_verification_contract" <<''JQ''.*\r?\n\s*\(\$manifest\[0\]\).*\r?\n\s*JQ'
+        $workflowSource | Should Match 'stable_ga_contract="\$RUNNER_TEMP/cyc-ga-stable-contract\.jq"'
+        $workflowSource | Should Match 'cat > "\$stable_ga_contract" <<''JQ'''
+        $workflowSource | Should Match 'jq -e --arg tag "\$CYC_GA_SOURCE_TAG" --arg commit "\$CYC_GA_SOURCE_COMMIT" \\\r?\n\s*-f "\$stable_ga_contract" "\$evidence_path"'
+        $workflowSource | Should Not Match '-f -'
     }
 
     It 'keeps the workflow contract semantic and checks helper exit codes' {

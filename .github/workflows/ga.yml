@@ -566,7 +566,8 @@ jobs:
               raise SystemExit("Issue #5 marker command bindings are incomplete")
           print(f"Issue #5 marker commandSha256 bindings verified: {binding_count}")
           PY
-          jq -e --arg commit "$CYC_GA_SOURCE_COMMIT" --slurpfile manifest "$evidence_path" -f - "$raw_verification" <<'JQ'
+          raw_verification_contract="$RUNNER_TEMP/cyc-ga-raw-log-contract.jq"
+          cat > "$raw_verification_contract" <<'JQ'
             ($manifest[0]) as $m
             | .schemaVersion == "cyc.dev/ga-raw-log-verification/v1"
             and .status == "passed"
@@ -588,7 +589,9 @@ jobs:
                 and .url == $m.issue5.rawLog.url
                 and ((.expectedSha256 | ascii_downcase) == ($m.issue5.rawLog.sha256 | ascii_downcase))
                 and ((.actualSha256 | ascii_downcase) == ($m.issue5.rawLog.sha256 | ascii_downcase)))] | length == 1)
-          ' "$raw_verification" >/dev/null
+          JQ
+          jq -e --arg commit "$CYC_GA_SOURCE_COMMIT" --slurpfile manifest "$evidence_path" \
+            -f "$raw_verification_contract" "$raw_verification" >/dev/null
           raw_root="$(cd "$raw_log_dir" && pwd -P)"
           while IFS=$'\t' read -r raw_path raw_hash raw_bytes; do
             test -n "$raw_path"
@@ -606,8 +609,8 @@ jobs:
           evidence_index_hash="$(jq -r '.artifactVerification.indexSha256 // empty' "$evidence_path" | tr '[:upper:]' '[:lower:]')"
           [[ "$evidence_index_hash" =~ ^[0-9a-f]{64}$ ]]
           test "$evidence_index_hash" = "$bundle_index_hash"
-          jq -e --arg tag "$CYC_GA_SOURCE_TAG" --arg commit "$CYC_GA_SOURCE_COMMIT" \
-            '
+          stable_ga_contract="$RUNNER_TEMP/cyc-ga-stable-contract.jq"
+          cat > "$stable_ga_contract" <<'JQ'
               def string_value($value):
                 if (($value | type) == "string") then $value else "" end;
               def nonempty_string($value):
@@ -853,6 +856,8 @@ jobs:
                and ([.issue2.evidenceId, .issue3.evidenceId, .issue5.evidenceId] | unique | length == 3)
                and ([.issue2.rawLog.url, .issue3.rawLog.url, .issue5.rawLog.url] | unique | length == 3)
           JQ
+          jq -e --arg tag "$CYC_GA_SOURCE_TAG" --arg commit "$CYC_GA_SOURCE_COMMIT" \
+            -f "$stable_ga_contract" "$evidence_path" >/dev/null
           echo "GA evidence, issue3/issue5 acceptance gates, and stable release-index are source-bound to $bundle_index_hash" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify every stable payload attestation cryptographically
