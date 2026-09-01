@@ -282,13 +282,23 @@ function Assert-GaIssue5RunProvenance {
         Assert-GaCondition ($null -ne $Run.PSObject.Properties[$required]) "$Description.$required is required for source-bound run provenance"
     }
 
-    $runId = [string](Get-GaProperty -Object $Run -Path 'runId' -Description $Description)
+    $runIdValue = Get-GaProperty -Object $Run -Path 'runId' -Description $Description
+    Assert-GaCondition ($runIdValue -is [string]) "$Description.runId must be a JSON string"
+    $runId = [string]$runIdValue
     Assert-GaCondition ($runId -match $GaIssue5RunIdentifierPattern) "$Description.runId must be a bounded portable run identifier"
-    $node = [string](Get-GaProperty -Object $Run -Path 'node' -Description $Description)
+    $nodeValue = Get-GaProperty -Object $Run -Path 'node' -Description $Description
+    Assert-GaCondition ($nodeValue -is [string]) "$Description.node must be a JSON string"
+    $node = [string]$nodeValue
     Assert-GaCondition ($node -match $GaIssue5RunIdentifierPattern) "$Description.node must be a bounded portable node identifier"
     Assert-GaCondition ($node -notmatch '(?i)github|actions|hosted|runner') "$Description.node must not identify a GitHub-hosted execution surface"
+    $providerValue = Get-GaProperty -Object $Run -Path 'provider' -Description $Description
+    $hostTypeValue = Get-GaProperty -Object $Run -Path 'hostType' -Description $Description
+    Assert-GaCondition ($providerValue -is [string]) "$Description.provider must be a JSON string"
+    Assert-GaCondition ($hostTypeValue -is [string]) "$Description.hostType must be a JSON string"
+    $provider = [string]$providerValue
+    $hostType = [string]$hostTypeValue
     foreach ($field in @('provider', 'hostType')) {
-        $value = [string](Get-GaProperty -Object $Run -Path $field -Description $Description)
+        $value = if ($field -ceq 'provider') { $provider } else { $hostType }
         Assert-GaCondition (-not [string]::IsNullOrWhiteSpace($value)) "$Description.$field must be a non-empty external identifier"
         Assert-GaCondition ($value -notmatch '(?i)github|actions|hosted|runner') "$Description.$field must not identify a GitHub-hosted execution surface"
     }
@@ -345,13 +355,28 @@ function Assert-GaIssue5RunProvenance {
     return [pscustomobject]@{
         runId = $runId
         node = $node
-        provider = [string](Get-GaProperty -Object $Run -Path 'provider' -Description $Description)
-        hostType = [string](Get-GaProperty -Object $Run -Path 'hostType' -Description $Description)
+        provider = $provider
+        hostType = $hostType
         status = 'passed'
         exitCode = [int64]$exitCode
         tests = $tests
         startedAt = $startedAt.ToUniversalTime().ToString('yyyy-MM-dd''T''HH:mm:ss.fffffffzzz', [Globalization.CultureInfo]::InvariantCulture)
         endedAt = $endedAt.ToUniversalTime().ToString('yyyy-MM-dd''T''HH:mm:ss.fffffffzzz', [Globalization.CultureInfo]::InvariantCulture)
+    }
+}
+
+function Assert-GaIssue5RunPlatformBinding {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$RunPlatformMap,
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)][string]$Platform,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    if ($RunPlatformMap.ContainsKey($RunId)) {
+        Assert-GaCondition ([string]$RunPlatformMap[$RunId] -ceq $Platform) "$Description.runId '$RunId' must remain bound to platform '$($RunPlatformMap[$RunId])', not '$Platform'"
+    } else {
+        $RunPlatformMap[$RunId] = $Platform
     }
 }
 
@@ -481,7 +506,8 @@ function Assert-GaIssue5SingleGateEvidence {
     param(
         [Parameter(Mandatory = $true)][string]$Gate,
         [Parameter(Mandatory = $true)][object]$GateEvidence,
-        [Parameter(Mandatory = $true)][string]$Description
+        [Parameter(Mandatory = $true)][string]$Description,
+        [Parameter(Mandatory = $false)][hashtable]$RunPlatformMap = $null
     )
 
     Assert-GaCondition (($GateEvidence -is [pscustomobject]) -and -not ($GateEvidence -is [System.Array])) "$Description.gates.$Gate must be a structured evidence object, not a bare boolean"
@@ -493,6 +519,9 @@ function Assert-GaIssue5SingleGateEvidence {
     $platform = ([string]$platformValue).ToLowerInvariant()
     Assert-GaCondition ($GaIssue5GateExpectedPlatforms[$Gate].Count -eq 1) "$Description.gates.$Gate has an invalid single-platform contract"
     Assert-GaCondition ($platform.Equals([string]$GaIssue5GateExpectedPlatforms[$Gate][0], [System.StringComparison]::Ordinal)) "$Description.gates.$Gate.platform must be '$($GaIssue5GateExpectedPlatforms[$Gate][0])'"
+    if ($null -ne $RunPlatformMap) {
+        Assert-GaIssue5RunPlatformBinding -RunPlatformMap $RunPlatformMap -RunId $provenance.runId -Platform $platform -Description "$Description.gates.$Gate"
+    }
     $selector = Get-GaIssue5RunSelector -Run $GateEvidence -Description "$Description.gates.$Gate"
     Assert-GaCondition ($selector.Equals([string]$GaIssue5ExpectedSelectors[$platform], [System.StringComparison]::Ordinal)) "$Description.gates.$Gate.testSelector must be the exact '$platform' selector"
     $commandValue = Get-GaProperty -Object $GateEvidence -Path 'command' -Description "$Description.gates.$Gate"
@@ -525,7 +554,8 @@ function Assert-GaIssue5MatrixGateEvidence {
     param(
         [Parameter(Mandatory = $true)][string]$Gate,
         [Parameter(Mandatory = $true)][object]$GateEvidence,
-        [Parameter(Mandatory = $true)][string]$Description
+        [Parameter(Mandatory = $true)][string]$Description,
+        [Parameter(Mandatory = $false)][hashtable]$RunPlatformMap = $null
     )
 
     Assert-GaCondition (($GateEvidence -is [pscustomobject]) -and -not ($GateEvidence -is [System.Array])) "$Description.gates.$Gate must be a structured evidence object, not a bare boolean"
@@ -539,6 +569,7 @@ function Assert-GaIssue5MatrixGateEvidence {
     $runs = Get-GaProperty -Object $GateEvidence -Path 'runs' -Description "$Description.gates.$Gate"
     Assert-GaCondition (($runs -is [System.Array]) -and $runs.Count -eq $GaIssue5Platforms.Count) "$Description.gates.$Gate.runs must contain one run for each platform"
     $seenPlatforms = @{}
+    $seenRunIds = @{}
     $allMarkers = New-Object System.Collections.Generic.List[string]
     $runRecords = New-Object System.Collections.Generic.List[object]
     foreach ($run in @($runs)) {
@@ -550,6 +581,11 @@ function Assert-GaIssue5MatrixGateEvidence {
         Assert-GaCondition ($GaIssue5Platforms -contains $platform) "$Description.gates.$Gate.runs.platform must be linux, windows, or macos"
         Assert-GaCondition (-not $seenPlatforms.ContainsKey($platform)) "$Description.gates.$Gate.runs.platform entries must be unique"
         $seenPlatforms[$platform] = $true
+        Assert-GaCondition (-not $seenRunIds.ContainsKey($provenance.runId)) "$Description.gates.$Gate.runs.runId entries must be unique within the matrix gate"
+        $seenRunIds[$provenance.runId] = $true
+        if ($null -ne $RunPlatformMap) {
+            Assert-GaIssue5RunPlatformBinding -RunPlatformMap $RunPlatformMap -RunId $provenance.runId -Platform $platform -Description "$Description.gates.$Gate.runs.$platform"
+        }
         $selector = Get-GaIssue5RunSelector -Run $run -Description "$Description.gates.$Gate.runs.$platform"
         Assert-GaCondition ($selector.Equals([string]$GaIssue5ExpectedSelectors[$platform], [System.StringComparison]::Ordinal)) "$Description.gates.$Gate.runs.$platform.testSelector must be the exact '$platform' selector"
         $commandValue = Get-GaProperty -Object $run -Path 'command' -Description "$Description.gates.$Gate.runs.$platform"
@@ -676,14 +712,15 @@ function Assert-GaIssue5Evidence {
         Assert-GaCondition ($GaIssue5GateNames -contains [string]$gateProperty.Name) "$Description.gates contains only the reviewed Issue #5 gate names"
     }
     $gateRecords = New-Object System.Collections.Generic.List[object]
+    $runPlatformMap = @{}
     foreach ($gate in $GaIssue5GateNames) {
         $gateEvidence = Get-GaProperty -Object $gates -Path $gate -Description "$Description.gates"
         Assert-GaCondition (($gateEvidence -is [pscustomobject]) -and -not ($gateEvidence -is [System.Array])) "$Description.gates.$gate must be a structured evidence object, not a bare boolean"
         $expectedPlatforms = @($GaIssue5GateExpectedPlatforms[$gate])
         if ($expectedPlatforms.Count -eq 1) {
-            [void]$gateRecords.Add((Assert-GaIssue5SingleGateEvidence -Gate $gate -GateEvidence $gateEvidence -Description $Description))
+            [void]$gateRecords.Add((Assert-GaIssue5SingleGateEvidence -Gate $gate -GateEvidence $gateEvidence -Description $Description -RunPlatformMap $runPlatformMap))
         } else {
-            [void]$gateRecords.Add((Assert-GaIssue5MatrixGateEvidence -Gate $gate -GateEvidence $gateEvidence -Description $Description))
+            [void]$gateRecords.Add((Assert-GaIssue5MatrixGateEvidence -Gate $gate -GateEvidence $gateEvidence -Description $Description -RunPlatformMap $runPlatformMap))
         }
     }
 
@@ -701,6 +738,13 @@ function Assert-GaIssue5Evidence {
 
     $rawMarkers = Get-GaProperty -Object $rawLog -Path 'markers' -Description $Description
     Assert-GaCondition (($rawMarkers -is [System.Array]) -and $rawMarkers.Count -gt 0) "$Description.rawLog.markers must be a non-empty array"
+    $seenRawMarkers = @{}
+    foreach ($rawMarker in @($rawMarkers)) {
+        Assert-GaCondition ($rawMarker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$rawMarker)) "$Description.rawLog.markers entries must be non-empty strings"
+        $rawMarkerText = [string]$rawMarker
+        Assert-GaCondition (-not $seenRawMarkers.ContainsKey($rawMarkerText)) "$Description.rawLog.markers entries must be unique"
+        $seenRawMarkers[$rawMarkerText] = $true
+    }
     foreach ($gateRecord in $gateRecords.ToArray()) {
         foreach ($marker in @($gateRecord.markers)) {
             Assert-GaCondition (@($rawMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.rawLog.markers must retain the source-bound marker for '$($gateRecord.gate)'"
@@ -735,6 +779,13 @@ function Assert-GaIssue5RawVerification {
 
     $verifiedMarkers = Get-GaProperty -Object $RawRecord -Path 'markers' -Description $Description
     Assert-GaCondition (($verifiedMarkers -is [System.Array]) -and $verifiedMarkers.Count -gt 0) "$Description.markers must be a non-empty array"
+    $seenVerifiedMarkers = @{}
+    foreach ($verifiedMarker in @($verifiedMarkers)) {
+        Assert-GaCondition ($verifiedMarker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$verifiedMarker)) "$Description.markers entries must be non-empty strings"
+        $verifiedMarkerText = [string]$verifiedMarker
+        Assert-GaCondition (-not $seenVerifiedMarkers.ContainsKey($verifiedMarkerText)) "$Description.markers entries must be unique"
+        $seenVerifiedMarkers[$verifiedMarkerText] = $true
+    }
     foreach ($marker in @($manifestContract.markers)) {
         Assert-GaCondition (@($verifiedMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.markers must contain the source-bound marker '$marker'"
     }
@@ -750,6 +801,13 @@ function Assert-GaIssue5RawVerification {
         Assert-GaCondition (($verifiedGateStatus -is [bool]) -and $verifiedGateStatus) "$Description.gateEvidence.$gateName.status must be boolean true"
         $verifiedMarkersForGate = @(Get-GaProperty -Object $verifiedGate -Path 'markers' -Description $Description)
         Assert-GaCondition (($verifiedMarkersForGate -is [System.Array]) -and $verifiedMarkersForGate.Count -gt 0) "$Description.gateEvidence.$gateName.markers must be retained"
+        $seenVerifiedGateMarkers = @{}
+        foreach ($verifiedGateMarker in @($verifiedMarkersForGate)) {
+            Assert-GaCondition ($verifiedGateMarker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$verifiedGateMarker)) "$Description.gateEvidence.$gateName.markers entries must be non-empty strings"
+            $verifiedGateMarkerText = [string]$verifiedGateMarker
+            Assert-GaCondition (-not $seenVerifiedGateMarkers.ContainsKey($verifiedGateMarkerText)) "$Description.gateEvidence.$gateName.markers entries must be unique"
+            $seenVerifiedGateMarkers[$verifiedGateMarkerText] = $true
+        }
         foreach ($marker in @($manifestGate.markers)) {
             Assert-GaCondition (@($verifiedMarkersForGate | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.gateEvidence.$gateName.markers must match the manifest"
         }

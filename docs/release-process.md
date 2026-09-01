@@ -156,6 +156,13 @@ row. Linux, Windows, and macOS each have to carry their platform-specific
 gates plus the guard-state, worker-credential, and restart residual-process
 gates.
 
+Within each three-platform matrix, `runId` values are unique. Across gates a
+run may be reused only for the same platform; a single execution identifier
+cannot be relabelled from Linux to Windows or macOS. Provenance identifiers
+are required to remain JSON strings (numeric, boolean, and null values are
+rejected before normalization), and aggregate or retained marker arrays must
+contain unique, non-empty strings.
+
 Every run/gate pair has a marker in the corresponding `rawLogMarkers` array
 and in the raw-log descriptor's `markers` array, of the form
 `CYC-GA-ISSUE5|platform=<platform>|selector=<selector>|commandSha256=<digest>|gate=<gate>|status=passed`.

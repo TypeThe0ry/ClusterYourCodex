@@ -183,13 +183,23 @@ function Assert-RawLogIssue5RunProvenance {
         Assert-RawLogCondition ($null -ne $Run.PSObject.Properties[$required]) "$Description.$required is required for source-bound run provenance"
     }
 
-    $runId = [string](Get-RawLogProperty -Object $Run -Path 'runId' -Description $Description)
+    $runIdValue = Get-RawLogProperty -Object $Run -Path 'runId' -Description $Description
+    Assert-RawLogCondition ($runIdValue -is [string]) "$Description.runId is a JSON string"
+    $runId = [string]$runIdValue
     Assert-RawLogCondition ($runId -match $GaIssue5RunIdentifierPattern) "$Description.runId is a bounded portable run identifier"
-    $node = [string](Get-RawLogProperty -Object $Run -Path 'node' -Description $Description)
+    $nodeValue = Get-RawLogProperty -Object $Run -Path 'node' -Description $Description
+    Assert-RawLogCondition ($nodeValue -is [string]) "$Description.node is a JSON string"
+    $node = [string]$nodeValue
     Assert-RawLogCondition ($node -match $GaIssue5RunIdentifierPattern) "$Description.node is a bounded portable node identifier"
     Assert-RawLogCondition ($node -notmatch '(?i)github|actions|hosted|runner') "$Description.node does not identify a GitHub-hosted execution surface"
+    $providerValue = Get-RawLogProperty -Object $Run -Path 'provider' -Description $Description
+    $hostTypeValue = Get-RawLogProperty -Object $Run -Path 'hostType' -Description $Description
+    Assert-RawLogCondition ($providerValue -is [string]) "$Description.provider is a JSON string"
+    Assert-RawLogCondition ($hostTypeValue -is [string]) "$Description.hostType is a JSON string"
+    $provider = [string]$providerValue
+    $hostType = [string]$hostTypeValue
     foreach ($field in @('provider', 'hostType')) {
-        $value = [string](Get-RawLogProperty -Object $Run -Path $field -Description $Description)
+        $value = if ($field -ceq 'provider') { $provider } else { $hostType }
         Assert-RawLogCondition (-not [string]::IsNullOrWhiteSpace($value)) "$Description.$field is a non-empty external identifier"
         Assert-RawLogCondition ($value -notmatch '(?i)github|actions|hosted|runner') "$Description.$field does not identify a GitHub-hosted execution surface"
     }
@@ -246,13 +256,28 @@ function Assert-RawLogIssue5RunProvenance {
     return [pscustomobject]@{
         runId = $runId
         node = $node
-        provider = [string](Get-RawLogProperty -Object $Run -Path 'provider' -Description $Description)
-        hostType = [string](Get-RawLogProperty -Object $Run -Path 'hostType' -Description $Description)
+        provider = $provider
+        hostType = $hostType
         status = 'passed'
         exitCode = [int64]$exitCode
         tests = $tests
         startedAt = $startedAt.ToUniversalTime().ToString('yyyy-MM-dd''T''HH:mm:ss.fffffffzzz', [Globalization.CultureInfo]::InvariantCulture)
         endedAt = $endedAt.ToUniversalTime().ToString('yyyy-MM-dd''T''HH:mm:ss.fffffffzzz', [Globalization.CultureInfo]::InvariantCulture)
+    }
+}
+
+function Assert-RawLogIssue5RunPlatformBinding {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$RunPlatformMap,
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)][string]$Platform,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    if ($RunPlatformMap.ContainsKey($RunId)) {
+        Assert-RawLogCondition ([string]$RunPlatformMap[$RunId] -ceq $Platform) "$Description.runId '$RunId' remains bound to platform '$($RunPlatformMap[$RunId])', not '$Platform'"
+    } else {
+        $RunPlatformMap[$RunId] = $Platform
     }
 }
 
@@ -397,7 +422,8 @@ function Assert-RawLogIssue5SingleGateEvidence {
     param(
         [Parameter(Mandatory = $true)][string]$Gate,
         [Parameter(Mandatory = $true)][object]$GateEvidence,
-        [Parameter(Mandatory = $true)][string]$Description
+        [Parameter(Mandatory = $true)][string]$Description,
+        [Parameter(Mandatory = $false)][hashtable]$RunPlatformMap = $null
     )
 
     Assert-RawLogCondition (($GateEvidence -is [pscustomobject]) -and -not ($GateEvidence -is [System.Array])) "$Description.gates.$Gate is a structured evidence object, not a bare boolean"
@@ -409,6 +435,9 @@ function Assert-RawLogIssue5SingleGateEvidence {
     $platform = ([string]$platformValue).ToLowerInvariant()
     Assert-RawLogCondition ($GaIssue5GateExpectedPlatforms[$Gate].Count -eq 1) "$Description.gates.$Gate has a single-platform contract"
     Assert-RawLogCondition ($platform.Equals([string]$GaIssue5GateExpectedPlatforms[$Gate][0], [StringComparison]::Ordinal)) "$Description.gates.$Gate.platform is '$($GaIssue5GateExpectedPlatforms[$Gate][0])'"
+    if ($null -ne $RunPlatformMap) {
+        Assert-RawLogIssue5RunPlatformBinding -RunPlatformMap $RunPlatformMap -RunId $provenance.runId -Platform $platform -Description "$Description.gates.$Gate"
+    }
     $selector = Get-RawLogIssue5RunSelector -Run $GateEvidence -Description "$Description.gates.$Gate"
     Assert-RawLogCondition ($selector.Equals([string]$GaIssue5ExpectedSelectors[$platform], [StringComparison]::Ordinal)) "$Description.gates.$Gate.testSelector is the exact '$platform' selector"
     $commandValue = Get-RawLogProperty -Object $GateEvidence -Path 'command' -Description "$Description.gates.$Gate"
@@ -441,7 +470,8 @@ function Assert-RawLogIssue5MatrixGateEvidence {
     param(
         [Parameter(Mandatory = $true)][string]$Gate,
         [Parameter(Mandatory = $true)][object]$GateEvidence,
-        [Parameter(Mandatory = $true)][string]$Description
+        [Parameter(Mandatory = $true)][string]$Description,
+        [Parameter(Mandatory = $false)][hashtable]$RunPlatformMap = $null
     )
 
     Assert-RawLogCondition (($GateEvidence -is [pscustomobject]) -and -not ($GateEvidence -is [System.Array])) "$Description.gates.$Gate is a structured evidence object, not a bare boolean"
@@ -456,6 +486,7 @@ function Assert-RawLogIssue5MatrixGateEvidence {
     $runs = Get-RawLogProperty -Object $GateEvidence -Path 'runs' -Description "$Description.gates.$Gate"
     Assert-RawLogCondition (($runs -is [System.Array]) -and $runs.Count -eq $GaIssue5Platforms.Count) "$Description.gates.$Gate.runs contains one run per required platform"
     $seenPlatforms = @{}
+    $seenRunIds = @{}
     $allMarkers = New-Object System.Collections.Generic.List[string]
     $runRecords = New-Object System.Collections.Generic.List[object]
     foreach ($run in @($runs)) {
@@ -467,6 +498,11 @@ function Assert-RawLogIssue5MatrixGateEvidence {
         Assert-RawLogCondition ($GaIssue5Platforms -contains $platform) "$Description.gates.$Gate.runs.platform is linux, windows, or macos"
         Assert-RawLogCondition (-not $seenPlatforms.ContainsKey($platform)) "$Description.gates.$Gate.runs.platform entries are unique"
         $seenPlatforms[$platform] = $true
+        Assert-RawLogCondition (-not $seenRunIds.ContainsKey($provenance.runId)) "$Description.gates.$Gate.runs.runId entries are unique within the matrix gate"
+        $seenRunIds[$provenance.runId] = $true
+        if ($null -ne $RunPlatformMap) {
+            Assert-RawLogIssue5RunPlatformBinding -RunPlatformMap $RunPlatformMap -RunId $provenance.runId -Platform $platform -Description "$Description.gates.$Gate.runs.$platform"
+        }
 
         $selector = Get-RawLogIssue5RunSelector -Run $run -Description "$Description.gates.$Gate.runs.$platform"
         Assert-RawLogCondition ($selector.Equals([string]$GaIssue5ExpectedSelectors[$platform], [StringComparison]::Ordinal)) "$Description.gates.$Gate.runs.$platform.testSelector is the exact '$platform' selector"
@@ -545,20 +581,28 @@ function Assert-RawLogIssue5Evidence {
         Assert-RawLogCondition ($GaIssue5AllGateNames -contains [string]$gateProperty.Name) "$Description.gates contains only the reviewed Issue #5 gate names"
     }
     $gateRecords = New-Object System.Collections.Generic.List[object]
+    $runPlatformMap = @{}
     foreach ($gate in $GaIssue5AllGateNames) {
         $gateProperty = $gates.PSObject.Properties[$gate]
         Assert-RawLogCondition ($null -ne $gateProperty) "$Description.gates.$gate is present"
         $gateEvidence = $gateProperty.Value
         $expectedPlatforms = @($GaIssue5GateExpectedPlatforms[$gate])
         if ($expectedPlatforms.Count -eq 1) {
-            [void]$gateRecords.Add((Assert-RawLogIssue5SingleGateEvidence -Gate $gate -GateEvidence $gateEvidence -Description $Description))
+            [void]$gateRecords.Add((Assert-RawLogIssue5SingleGateEvidence -Gate $gate -GateEvidence $gateEvidence -Description $Description -RunPlatformMap $runPlatformMap))
         } else {
-            [void]$gateRecords.Add((Assert-RawLogIssue5MatrixGateEvidence -Gate $gate -GateEvidence $gateEvidence -Description $Description))
+            [void]$gateRecords.Add((Assert-RawLogIssue5MatrixGateEvidence -Gate $gate -GateEvidence $gateEvidence -Description $Description -RunPlatformMap $runPlatformMap))
         }
     }
 
     $rawMarkers = Get-RawLogProperty -Object $rawLog -Path 'markers' -Description $Description
     Assert-RawLogCondition (($rawMarkers -is [System.Array]) -and $rawMarkers.Count -gt 0) "$Description.markers is a non-empty array"
+    $seenRawMarkers = @{}
+    foreach ($rawMarker in @($rawMarkers)) {
+        Assert-RawLogCondition ($rawMarker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$rawMarker)) "$Description.markers entries are non-empty strings"
+        $rawMarkerText = [string]$rawMarker
+        Assert-RawLogCondition (-not $seenRawMarkers.ContainsKey($rawMarkerText)) "$Description.markers entries are unique"
+        $seenRawMarkers[$rawMarkerText] = $true
+    }
     $expectedMarkers = New-Object System.Collections.Generic.List[string]
     foreach ($gateRecord in $gateRecords.ToArray()) {
         foreach ($marker in @($gateRecord.markers)) {

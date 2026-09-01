@@ -492,6 +492,7 @@ jobs:
           import json
           import re
           import sys
+          from datetime import datetime, timezone
 
           verification_path = sys.argv[1]
           with open(verification_path, encoding="utf-8") as handle:
@@ -511,13 +512,65 @@ jobs:
               raise SystemExit("Issue #5 raw-log verification must retain all nine gate records")
 
           whitespace = re.compile(r"\s+")
+          run_id_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+          iso_instant_pattern = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\s]+(Z|[+-][0-9]{2}:[0-9]{2})$")
           seen_gates = set()
+          seen_run_platform = {}
           binding_count = 0
 
           def normalized_command(value, description):
               if not isinstance(value, str) or not value.strip():
                   raise SystemExit(f"{description}.command is not a non-empty string")
               return whitespace.sub(" ", value.strip())
+
+          def parse_iso_instant(value, description):
+              if not isinstance(value, str) or not iso_instant_pattern.fullmatch(value):
+                  raise SystemExit(f"{description} is not an ISO-8601 instant")
+              try:
+                  instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+              except ValueError as exc:
+                  raise SystemExit(f"{description} is not parseable ISO-8601") from exc
+              if instant.tzinfo is None or instant.utcoffset() is None:
+                  raise SystemExit(f"{description} does not carry an explicit timezone")
+              return instant.astimezone(timezone.utc)
+
+          def validate_run_provenance(run, description):
+              if not isinstance(run, dict):
+                  raise SystemExit(f"{description} is not an object")
+              required = ("runId", "node", "provider", "hostType", "status", "exitCode", "tests", "startedAt", "endedAt")
+              missing = [field for field in required if field not in run]
+              if missing:
+                  raise SystemExit(f"{description} is missing provenance fields: {', '.join(missing)}")
+              for field in ("runId", "node"):
+                  value = run[field]
+                  if type(value) is not str or not run_id_pattern.fullmatch(value):
+                      raise SystemExit(f"{description}.{field} is not a bounded string identifier")
+              if re.search(r"github|actions|hosted|runner", run["node"], re.IGNORECASE):
+                  raise SystemExit(f"{description}.node identifies a hosted execution surface")
+              for field in ("provider", "hostType"):
+                  value = run[field]
+                  if type(value) is not str or not value.strip():
+                      raise SystemExit(f"{description}.{field} is not a non-empty string")
+                  if re.search(r"github|actions|hosted|runner", value, re.IGNORECASE):
+                      raise SystemExit(f"{description}.{field} identifies a hosted execution surface")
+              if not (run["status"] == "passed" or run["status"] is True):
+                  raise SystemExit(f"{description}.status is not passed")
+              if type(run["exitCode"]) is not int or run["exitCode"] != 0:
+                  raise SystemExit(f"{description}.exitCode is not integer zero")
+              tests = run["tests"]
+              if not isinstance(tests, dict):
+                  raise SystemExit(f"{description}.tests is not an object")
+              for field in ("passed", "failed", "ignored"):
+                  value = tests.get(field)
+                  if type(value) is not int or value < 0:
+                      raise SystemExit(f"{description}.tests.{field} is not a non-negative integer")
+              if tests["passed"] <= 0 or tests["failed"] != 0:
+                  raise SystemExit(f"{description}.tests does not describe a successful run")
+              started_at = parse_iso_instant(run["startedAt"], f"{description}.startedAt")
+              ended_at = parse_iso_instant(run["endedAt"], f"{description}.endedAt")
+              if ended_at < started_at:
+                  raise SystemExit(f"{description}.endedAt precedes startedAt")
+              return run["runId"]
 
           for gate in gate_evidence:
               if not isinstance(gate, dict):
@@ -529,15 +582,21 @@ jobs:
                   raise SystemExit(f"Issue #5 gateEvidence repeats gate {gate_name}")
               seen_gates.add(gate_name)
 
-              runs = gate.get("runs")
-              if runs is None:
+              raw_runs = gate.get("runs")
+              is_matrix = raw_runs is not None
+              if raw_runs is None:
                   runs = [gate]
-              elif not isinstance(runs, list) or len(runs) != 3:
+              elif not isinstance(raw_runs, list) or len(raw_runs) != 3:
                   raise SystemExit(f"Issue #5 matrix gate {gate_name} does not retain three runs")
+              else:
+                  runs = raw_runs
+              matrix_run_ids = set()
+              matrix_platforms = set()
 
               for run in runs:
                   if not isinstance(run, dict):
                       raise SystemExit(f"Issue #5 gate {gate_name} run is not an object")
+                  run_id = validate_run_provenance(run, f"Issue #5 gate {gate_name} run")
                   platform = run.get("platform")
                   selector = run.get("selector")
                   command = run.get("command")
@@ -545,9 +604,27 @@ jobs:
                   description = f"Issue #5 gate {gate_name}"
                   if not isinstance(platform, str) or not platform:
                       raise SystemExit(f"{description}.platform is not a non-empty string")
+                  platform = platform.lower()
+                  if platform not in {"linux", "windows", "macos"}:
+                      raise SystemExit(f"{description}.platform is not linux, windows, or macos")
+                  if is_matrix:
+                      if platform in matrix_platforms:
+                          raise SystemExit(f"{description}.platform is repeated within the matrix")
+                      matrix_platforms.add(platform)
+                      if run_id in matrix_run_ids:
+                          raise SystemExit(f"{description}.runId is repeated within the matrix")
+                      matrix_run_ids.add(run_id)
+                  previous_platform = seen_run_platform.get(run_id)
+                  if previous_platform is not None and previous_platform != platform:
+                      raise SystemExit(
+                          f"{description}.runId {run_id!r} is bound to both {previous_platform} and {platform}"
+                      )
+                  seen_run_platform[run_id] = platform
                   if not isinstance(selector, str) or not selector:
                       raise SystemExit(f"{description}.selector is not a non-empty string")
-                  if not isinstance(markers, list) or any(not isinstance(marker, str) for marker in markers):
+                  if (not isinstance(markers, list)
+                          or any(type(marker) is not str or not marker.strip() for marker in markers)
+                          or len(set(markers)) != len(markers)):
                       raise SystemExit(f"{description}.markers is not an array of strings")
                   normalized = normalized_command(command, description)
                   digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
@@ -561,6 +638,12 @@ jobs:
                           f"{description} marker commandSha256 does not match the normalized command"
                       )
                   binding_count += 1
+
+          raw_markers = issue5_records[0].get("markers")
+          if (not isinstance(raw_markers, list)
+                  or any(type(marker) is not str or not marker.strip() for marker in raw_markers)
+                  or len(set(raw_markers)) != len(raw_markers)):
+              raise SystemExit("Issue #5 aggregate markers are not a unique non-empty string array")
 
           if len(seen_gates) != 9 or binding_count != 15:
               raise SystemExit("Issue #5 marker command bindings are incomplete")
@@ -747,7 +830,8 @@ jobs:
                 (($markers | type) == "array")
                 and (($markers | length) > 0)
                 and ([ $markers[] | select(type != "string") ] | length == 0)
-                and ([ $markers[] | strings | select(length == 0) ] | length == 0);
+                and ([ $markers[] | strings | select(test("^[[:space:]]*$")) ] | length == 0)
+                and (($markers | unique | length) == ($markers | length));
               def issue5_has_prefix($markers; $prefix):
                 ([ $markers[] | strings | select(startswith($prefix)) ] | length) > 0;
               def issue5_marker_valid($marker; $platform; $gate):
@@ -827,12 +911,29 @@ jobs:
                   | ([ $runs[] | select(issue5_run_valid(.; $gate)) ] | length) as $valid_runs
                   | ([ $runs[] | issue5_marker_array(.)[] ] | unique) as $expected_markers
                   | ($run_platforms == (issue5_platforms | sort))
+                    and (([$runs[].runId] | unique | length) == ($runs | length))
                     and ($valid_runs == 3)
                     and issue5_markers_valid($gate_markers)
                     and ([ $expected_markers[] as $marker |
                            select([ $gate_markers[] | select(. == $marker) ] | length == 1)
                          ] | length == ($expected_markers | length))
                 end;
+              def issue5_run_bindings($record):
+                [
+                  issue5_gates[] as $gate
+                  | (if (issue5_single_gates | index($gate)) != null
+                     then [ $record.gates[$gate] ]
+                     else ($record.gates[$gate].runs // [])
+                     end)[]
+                  | select((type == "object")
+                      and ((.runId | type) == "string")
+                      and ((.platform | type) == "string"))
+                  | { runId: .runId, platform: (.platform | ascii_downcase) }
+                ];
+              def issue5_run_platform_bindings_valid($record):
+                (issue5_run_bindings($record) | group_by(.runId)
+                 | map([.[].platform] | unique | length)
+                 | all(. == 1));
               def issue5_gate_valid($record; $gate):
                 if (issue5_single_gates | index($gate)) != null then
                   issue5_single_gate_valid($record; $gate)
@@ -842,6 +943,7 @@ jobs:
               def issue5_all_gates_valid($record):
                 (($record.gates | type) == "object")
                 and (($record.gates | keys_unsorted | sort) == (issue5_gates | sort))
+                and issue5_run_platform_bindings_valid($record)
                 and ([ issue5_gates[] as $gate |
                        select(issue5_gate_valid($record; $gate))
                      ] | length == (issue5_gates | length));

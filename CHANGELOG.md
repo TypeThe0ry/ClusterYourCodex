@@ -7,6 +7,18 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.58] - 2026-09-01
+
+### Fixed
+
+- Hardened Issue #5 provenance schema parity by rejecting non-string run
+  identifiers, nodes, providers, and host types before normalization.
+- Bound every Issue #5 execution `runId` to one platform, rejected duplicate
+  IDs inside a matrix, and made aggregate and retained marker arrays unique,
+  non-empty string collections.
+- Synchronized the raw-log publisher, stable jq contract, and PowerShell
+  readiness verifier with the stricter run and marker binding rules.
+
 ## [0.1.0-preview.57] - 2026-09-01
 
 ### Fixed
@@ -707,7 +719,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.57...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.58...HEAD
+[0.1.0-preview.58]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.57...v0.1.0-preview.58
 [0.1.0-preview.57]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.56...v0.1.0-preview.57
 [0.1.0-preview.56]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.55...v0.1.0-preview.56
 [0.1.0-preview.55]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.54...v0.1.0-preview.55

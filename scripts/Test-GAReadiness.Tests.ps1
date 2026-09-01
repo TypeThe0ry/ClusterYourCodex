@@ -250,6 +250,8 @@ Describe 'GA evidence issue acceptance contract' {
         $workflowSource | Should Match 'issue5-evidence-matrix'
         $workflowSource | Should Match 'issue5_selector_value'
         $workflowSource | Should Match 'valid_iso_order'
+        $workflowSource | Should Match 'parse_iso_instant'
+        $workflowSource | Should Match 'ended_at < started_at'
         $readinessSource | Should Match 'rawLogMarkers and markers aliases must match exactly'
         $rawLogSource | Should Match 'rawLogMarkers and markers aliases must match exactly'
         $workflowSource | Should Not Match 'valid_issue_evidence\(\.issue5'
@@ -463,6 +465,62 @@ Describe 'GA evidence issue acceptance contract' {
         Assert-TestThrows {
             Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
                 -Path 'issue5' -Description 'Issue #5 failed run provenance' -ExpectedCommit $expectedCommitForTest `
+            -RequiredGates $issue5GateNamesForTest
+        }
+    }
+
+    It 'rejects non-string Issue #5 provenance identifiers before normalization' {
+        foreach ($field in @('runId', 'node', 'provider', 'hostType')) {
+            $record = New-TestIssue5Evidence
+            if ($field -ceq 'runId') {
+                $record.gates.windowsJobObject.runId = 123
+            } elseif ($field -ceq 'node') {
+                $record.gates.windowsJobObject.node = $false
+            } elseif ($field -ceq 'provider') {
+                $record.gates.windowsJobObject.provider = 456
+            } else {
+                $record.gates.windowsJobObject.hostType = $null
+            }
+            Assert-TestThrows {
+                Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                    -Path 'issue5' -Description "Issue #5 non-string $field" -ExpectedCommit $expectedCommitForTest `
+                    -RequiredGates $issue5GateNamesForTest
+            }
+        }
+    }
+
+    It 'rejects duplicate matrix run IDs and cross-platform run ID reuse' {
+        $record = New-TestIssue5Evidence
+        $record.gates.jobsCannotAlterGuardState.runs[1].runId = $record.gates.jobsCannotAlterGuardState.runs[0].runId
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 duplicate matrix run ID' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+
+        $record = New-TestIssue5Evidence
+        $record.gates.windowsJobObject.runId = $record.gates.linuxDedicatedExecutionIdentity.runId
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 cross-platform run ID reuse' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+    }
+
+    It 'rejects non-string and duplicate aggregate Issue #5 markers' {
+        $record = New-TestIssue5Evidence
+        $record.rawLog.markers = @($record.rawLog.markers) + @(99)
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 numeric aggregate marker' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+
+        $record = New-TestIssue5Evidence
+        $record.rawLog.markers = @($record.rawLog.markers) + @([string]$record.rawLog.markers[0])
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 duplicate aggregate marker' -ExpectedCommit $expectedCommitForTest `
                 -RequiredGates $issue5GateNamesForTest
         }
     }

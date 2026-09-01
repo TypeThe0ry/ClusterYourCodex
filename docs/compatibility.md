@@ -119,6 +119,10 @@ raw-log verifier cross-binds the provenance fields as well as the markers.
 The compatibility aliases `selector` and `markers` are accepted only when
 they exactly match canonical `testSelector` and `rawLogMarkers` values; any
 conflicting duplicate field fails closed.
+Each matrix gate also requires unique `runId` values and keeps every run ID
+bound to one platform across the complete Issue #5 record. Provenance
+identifiers and retained marker entries remain JSON strings; duplicates,
+blank markers, and numeric/boolean/null substitutions fail closed.
 The Linux row uses
 `isolation::tests::linux_live_dedicated_identity_credential_and_residual_reconciliation`
 with `--ignored --exact --nocapture`; the Windows row uses
