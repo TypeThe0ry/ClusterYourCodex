@@ -7,6 +7,15 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.55] - 2026-09-01
+
+### Fixed
+
+- Added a fail-closed null guard at the Windows Credential Manager boundary
+  before dereferencing a `CredReadW` result.
+- Removed the MCP runtime-receipt test's filesystem check-then-use pattern so
+  receipt assertions do not introduce a TOCTOU race.
+
 ## [0.1.0-preview.54] - 2026-09-01
 
 ### Fixed
@@ -676,7 +685,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.54...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.55...HEAD
+[0.1.0-preview.55]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.54...v0.1.0-preview.55
 [0.1.0-preview.54]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.53...v0.1.0-preview.54
 [0.1.0-preview.53]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.52...v0.1.0-preview.53
 [0.1.0-preview.52]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.51...v0.1.0-preview.52

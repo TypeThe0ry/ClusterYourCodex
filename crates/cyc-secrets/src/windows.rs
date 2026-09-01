@@ -109,6 +109,12 @@ impl CredentialVault for WindowsCredentialVault {
                 source,
             });
         }
+        // CredReadW reports success through its return value, but a defensive
+        // null check keeps the native boundary fail-closed if a malformed API
+        // shim ever returns success without an allocation.
+        if raw.is_null() {
+            return Err(VaultError::InvalidNativeRecord);
+        }
         let guard = CredBuffer(raw.cast());
 
         // SAFETY: CredReadW succeeded and owns a complete CREDENTIALW allocation

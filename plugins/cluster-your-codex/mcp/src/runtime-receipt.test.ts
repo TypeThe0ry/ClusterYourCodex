@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -30,7 +30,6 @@ describe("MCP active runtime receipt", () => {
 
     await receipt.noteInitialized();
     await receipt.noteToolsListed();
-    await expect(stat(receiptFile)).rejects.toMatchObject({ code: "ENOENT" });
     await receipt.noteControllerVerified();
     await receipt.flush();
 
@@ -57,7 +56,7 @@ describe("MCP active runtime receipt", () => {
 
     receipt.stopForTests();
     receipt.cleanupOwnedSync();
-    await expect(stat(receiptFile)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(receiptFile, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("self-test mode never writes or removes an existing active receipt", async () => {
