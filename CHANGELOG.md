@@ -7,6 +7,16 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.51] - 2026-09-01
+
+### Fixed
+
+- Resolved production Scheduled Task identities from immutable account SIDs
+  with SID round-trip validation and a fail-closed CIM fallback, so non-ASCII
+  account display-name mojibake cannot reach Task Scheduler.
+- Added packaging regression coverage for the production resolver and the
+  direct `WindowsIdentity.Name` bypass.
+
 ## [0.1.0-preview.50] - 2026-09-01
 
 ### Fixed
@@ -620,7 +630,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.50...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.51...HEAD
+[0.1.0-preview.51]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.50...v0.1.0-preview.51
 [0.1.0-preview.50]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.49...v0.1.0-preview.50
 [0.1.0-preview.49]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.48...v0.1.0-preview.49
 [0.1.0-preview.48]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.47...v0.1.0-preview.48

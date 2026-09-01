@@ -104,7 +104,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
-$script:ProductVersion = '0.1.0-preview.50'
+$script:ProductVersion = '0.1.0-preview.51'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
@@ -2090,6 +2090,97 @@ function Get-CurrentUserSid {
     return [string]$identity.User.Value
 }
 
+function Test-CycScheduledTaskAccountNameSidBinding {
+    param(
+        [string]$AccountName,
+        [Parameter(Mandatory = $true)][string]$ExpectedSid
+    )
+    if ([string]::IsNullOrWhiteSpace($AccountName)) { return $false }
+    try {
+        $observedSid = ([System.Security.Principal.NTAccount]::new($AccountName)).Translate(
+            [System.Security.Principal.SecurityIdentifier]
+        ).Value
+        return [string]::Equals(
+            [string]$observedSid,
+            [string]$ExpectedSid,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    } catch {
+        return $false
+    }
+}
+
+function Resolve-CycScheduledTaskAccountName {
+    param(
+        [Parameter(Mandatory = $true)][string]$Sid,
+        [string]$FallbackUserName
+    )
+
+    try {
+        $normalizedSid = ([System.Security.Principal.SecurityIdentifier]::new($Sid)).Value
+    } catch {
+        throw "Unable to resolve Scheduled Task identity '$Sid' to a canonical SID."
+    }
+
+    # WindowsIdentity.Name is a display projection and can be mojibaked for
+    # non-ASCII local accounts under the ARM64/x64 PowerShell combination.
+    # Resolve the scheduler credential from the immutable SID first, then
+    # verify the returned account name maps back to that exact SID.
+    try {
+        $translated = ([System.Security.Principal.SecurityIdentifier]::new($normalizedSid)).Translate(
+            [System.Security.Principal.NTAccount]
+        ).Value
+        if (Test-CycScheduledTaskAccountNameSidBinding `
+                -AccountName ([string]$translated) `
+                -ExpectedSid $normalizedSid) {
+            return [string]$translated
+        }
+    } catch { }
+
+    # The short-lived profile-matrix account can be visible through the local
+    # SAM before SecurityIdentifier.Translate observes it.  CIM provides a
+    # second SID-bound lookup without trusting the lossy display projection.
+    try {
+        $account = Get-CimInstance `
+            -ClassName Win32_UserAccount `
+            -Filter ("SID='{0}'" -f $normalizedSid) `
+            -ErrorAction Stop |
+            Select-Object -First 1
+        if ($null -ne $account -and
+            -not [string]::IsNullOrWhiteSpace([string]$account.Domain) -and
+            -not [string]::IsNullOrWhiteSpace([string]$account.Name)) {
+            $cimAccount = '{0}\{1}' -f [string]$account.Domain, [string]$account.Name
+            if (Test-CycScheduledTaskAccountNameSidBinding `
+                    -AccountName $cimAccount `
+                    -ExpectedSid $normalizedSid) {
+                return $cimAccount
+            }
+        }
+    } catch { }
+
+    # A fallback is accepted only after the same SID round-trip check.  This
+    # keeps a mojibaked or foreign display name from reaching Task Scheduler.
+    if (-not [string]::IsNullOrWhiteSpace($FallbackUserName)) {
+        $fallback = [string]$FallbackUserName
+        $candidates = if ($fallback.Contains('\')) {
+            @($fallback)
+        } elseif (-not [string]::IsNullOrWhiteSpace($env:COMPUTERNAME)) {
+            @('{0}\{1}' -f [string]$env:COMPUTERNAME, $fallback)
+        } else {
+            @($fallback)
+        }
+        foreach ($candidate in $candidates) {
+            if (Test-CycScheduledTaskAccountNameSidBinding `
+                    -AccountName $candidate `
+                    -ExpectedSid $normalizedSid) {
+                return [string]$candidate
+            }
+        }
+    }
+
+    throw "Unable to resolve a SID-bound Scheduled Task account name for '$normalizedSid'."
+}
+
 function Get-CycInitiatorBinding {
     param(
         [string]$RequestedSid,
@@ -4028,7 +4119,23 @@ function Register-CycTask {
         [void](Invoke-CycProfileMatrixTaskGate -Operation Register -Name $Name -Action $Action)
         return
     }
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $taskSid = if ([string]::IsNullOrWhiteSpace($ExpectedSid)) {
+        Get-CurrentUserSid
+    } else {
+        ConvertTo-CycTaskSnapshotSid -Identity $ExpectedSid
+    }
+    $currentSid = Get-CurrentUserSid
+    if (-not [string]::Equals(
+            [string]$taskSid,
+            [string]$currentSid,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'Scheduled Task registration identity does not match the current Windows account.'
+    }
+    $identity = Resolve-CycScheduledTaskAccountName `
+        -Sid $taskSid `
+        -FallbackUserName ([string]$currentIdentity.Name)
     $taskAction = New-ScheduledTaskAction `
         -Execute $Action.executable `
         -Argument $Action.arguments `

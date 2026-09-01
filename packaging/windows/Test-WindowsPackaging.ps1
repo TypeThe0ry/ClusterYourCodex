@@ -394,6 +394,14 @@ try {
     Assert-True ($source -match 'Register-CycTask[\s\S]+ExpectedInstallRoot') 'task replacement receives an explicit expected install root'
     Assert-True ($source -match 'Unregister-CycTask[\s\S]+ExpectedInstallRoot') 'task removal receives an explicit expected install root'
     Assert-True ($source -match 'Restore-CycTaskSnapshots[\s\S]+ExpectedInstallRoot') 'task rollback receives an explicit expected install root'
+    Assert-True ($source -match 'function Resolve-CycScheduledTaskAccountName' -and
+        $source -match 'Test-CycScheduledTaskAccountNameSidBinding' -and
+        $source -match 'Unable to resolve a SID-bound Scheduled Task account name') 'production Scheduled Task identities resolve from immutable SIDs with fail-closed name binding'
+    $registerTaskFunction = [regex]::Match($source, 'function Register-CycTask[\s\S]+?function Unregister-CycTask')
+    Assert-True ($registerTaskFunction.Success -and
+        $registerTaskFunction.Value -match 'Resolve-CycScheduledTaskAccountName' -and
+        $registerTaskFunction.Value -match 'ConvertTo-CycTaskSnapshotSid' -and
+        $registerTaskFunction.Value -notmatch 'WindowsIdentity\]::GetCurrent\(\)\.Name') 'production task registration never trusts WindowsIdentity.Name directly'
 
     # Task ownership fixture: the lifecycle helpers must accept an exact
     # current-user/root binding, while rejecting a foreign SID, executable, or
@@ -401,6 +409,14 @@ try {
     $taskProbeRoot = Join-Path $testRoot 'task-probe-owned'
     $taskProbeForeignRoot = Join-Path $testRoot 'task-probe-foreign'
     $taskProbeSid = Get-CurrentUserSid
+    $taskProbeDisplayName = [string]([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name
+    $taskProbeAccountName = Resolve-CycScheduledTaskAccountName `
+        -Sid $taskProbeSid `
+        -FallbackUserName $taskProbeDisplayName
+    Assert-True (-not [string]::IsNullOrWhiteSpace($taskProbeAccountName)) 'current-user Scheduled Task account resolver returns a canonical account name'
+    Assert-True (Test-CycScheduledTaskAccountNameSidBinding `
+        -AccountName $taskProbeAccountName `
+        -ExpectedSid $taskProbeSid) 'current-user Scheduled Task account resolver round-trips to the immutable SID'
     $taskProbeForeignSid = [regex]::Replace($taskProbeSid, '-\d+$', '-1002')
     if ($taskProbeForeignSid -ceq $taskProbeSid) { $taskProbeForeignSid = 'S-1-5-18' }
     $taskProbeAction = [PSCustomObject]@{
@@ -512,6 +528,9 @@ try {
     $script:CycTaskProbeStopCount = 0
     $script:CycTaskProbeUnregisterCount = 0
     $script:CycTaskProbeRegisterCount = 0
+    $script:CycTaskProbeRegisteredAction = $null
+    $script:CycTaskProbeRegisteredTrigger = $null
+    $script:CycTaskProbeRegisteredPrincipal = $null
     function Get-ScheduledTask {
         param([string]$TaskName, [string]$TaskPath, [string]$ErrorAction)
         return $script:CycTaskProbeTask
@@ -540,6 +559,60 @@ try {
             [switch]$Force
         )
         $script:CycTaskProbeRegisterCount++
+        $script:CycTaskProbeRegisteredAction = $Action
+        $script:CycTaskProbeRegisteredTrigger = $Trigger
+        $script:CycTaskProbeRegisteredPrincipal = $Principal
+    }
+    function New-ScheduledTaskAction {
+        param(
+            [string]$Execute,
+            [string]$Argument,
+            [string]$WorkingDirectory
+        )
+        return [PSCustomObject]@{
+            Execute = $Execute
+            Arguments = $Argument
+            WorkingDirectory = $WorkingDirectory
+        }
+    }
+    function New-ScheduledTaskTrigger {
+        param(
+            [switch]$AtLogOn,
+            [string]$User
+        )
+        return [PSCustomObject]@{
+            UserId = $User
+            AtLogOn = [bool]$AtLogOn
+        }
+    }
+    function New-ScheduledTaskPrincipal {
+        param(
+            [string]$UserId,
+            [string]$LogonType,
+            [string]$RunLevel
+        )
+        return [PSCustomObject]@{
+            UserId = $UserId
+            LogonType = $LogonType
+            RunLevel = $RunLevel
+        }
+    }
+    function New-ScheduledTaskSettingsSet {
+        param(
+            [string]$MultipleInstances,
+            [switch]$AllowStartIfOnBatteries,
+            [switch]$DontStopIfGoingOnBatteries,
+            [switch]$StartWhenAvailable,
+            [int]$RestartCount,
+            [TimeSpan]$RestartInterval,
+            [TimeSpan]$ExecutionTimeLimit
+        )
+        return [PSCustomObject]@{
+            MultipleInstances = $MultipleInstances
+            RestartCount = $RestartCount
+            RestartInterval = $RestartInterval
+            ExecutionTimeLimit = $ExecutionTimeLimit
+        }
     }
     try {
         # Positive path: the exact SID/root binding reaches both lifecycle
@@ -582,14 +655,42 @@ try {
             -Pattern 'principal SID|ownership validation failed' `
             -Message 'foreign task is rejected before forceful Register replacement'
         Assert-True ($script:CycTaskProbeRegisterCount -eq $registerBeforeForeign) 'foreign task is not overwritten by Register'
+
+        # Production path: exercise Register-CycTask with the profile-matrix
+        # bridge disabled.  The Scheduled Task cmdlets are stubbed above so
+        # this proves the resolver, trigger, and principal receive one
+        # canonical SID-bound account without mutating the host scheduler.
+        $script:CycTaskProbeTask = New-CycTaskProbeLiveTask `
+            -Sid $taskProbeSid `
+            -Root $taskProbeRoot
+        Register-CycTask `
+            -Name $script:ControllerTaskName `
+            -Action $taskProbeAction `
+            -ExpectedInstallRoot $taskProbeRoot `
+            -ExpectedSid $taskProbeSid
+        Assert-True ($script:CycTaskProbeRegisterCount -eq ($registerBeforeForeign + 1)) 'production task registration reaches Register-ScheduledTask after SID preflight'
+        Assert-True ($null -ne $script:CycTaskProbeRegisteredTrigger -and
+            (Test-CycScheduledTaskAccountNameSidBinding `
+                -AccountName ([string]$script:CycTaskProbeRegisteredTrigger.UserId) `
+                -ExpectedSid $taskProbeSid)) 'production task trigger account round-trips to the initiating SID'
+        Assert-True ($null -ne $script:CycTaskProbeRegisteredPrincipal -and
+            (Test-CycScheduledTaskAccountNameSidBinding `
+                -AccountName ([string]$script:CycTaskProbeRegisteredPrincipal.UserId) `
+                -ExpectedSid $taskProbeSid) -and
+            [string]$script:CycTaskProbeRegisteredPrincipal.LogonType -ceq 'Interactive') 'production task principal is canonical SID-bound Interactive identity'
     } finally {
         Remove-Item Function:\Get-ScheduledTask -Force -ErrorAction SilentlyContinue
         Remove-Item Function:\Export-ScheduledTask -Force -ErrorAction SilentlyContinue
         Remove-Item Function:\Stop-ScheduledTask -Force -ErrorAction SilentlyContinue
         Remove-Item Function:\Unregister-ScheduledTask -Force -ErrorAction SilentlyContinue
         Remove-Item Function:\Register-ScheduledTask -Force -ErrorAction SilentlyContinue
+        Remove-Item Function:\New-ScheduledTaskAction -Force -ErrorAction SilentlyContinue
+        Remove-Item Function:\New-ScheduledTaskTrigger -Force -ErrorAction SilentlyContinue
+        Remove-Item Function:\New-ScheduledTaskPrincipal -Force -ErrorAction SilentlyContinue
+        Remove-Item Function:\New-ScheduledTaskSettingsSet -Force -ErrorAction SilentlyContinue
         Remove-Item Function:\New-CycTaskProbeLiveTask -Force -ErrorAction SilentlyContinue
-        Remove-Variable CycTaskProbeTask, CycTaskProbeStopCount, CycTaskProbeUnregisterCount, CycTaskProbeRegisterCount `
+        Remove-Variable CycTaskProbeTask, CycTaskProbeStopCount, CycTaskProbeUnregisterCount, CycTaskProbeRegisterCount, `
+            CycTaskProbeRegisteredAction, CycTaskProbeRegisteredTrigger, CycTaskProbeRegisteredPrincipal `
             -Scope Script -ErrorAction SilentlyContinue
     }
     Assert-True ($source -match 'AreAccessRulesProtected') 'ACL inheritance is verified'
