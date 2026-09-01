@@ -696,6 +696,16 @@ impl HostileIsolation {
 
         match backend {
             IsolationBackend::Linux(config) => {
+                // Identity handoff below recursively changes ownership of the
+                // exact jobs/<runId> tree.  Keep the durable guard receipt
+                // outside that worker-owned workspace so a hostile process
+                // can never take ownership of the guard state as part of the
+                // normal job preparation step.
+                ensure_path_outside_directory(
+                    &config.guard_state_file,
+                    &worker_config.workspace_root,
+                    "hostile guard state",
+                )?;
                 // The cgroup control files do not exist until the node-owned
                 // child is prepared. Create and validate that boundary first,
                 // then run the broader worker/credential checks against the
@@ -1090,6 +1100,47 @@ fn prepare_guard_parent(path: &Path) -> Result<()> {
         .context("hostile guard state must have a parent")?;
     prepare_private_directory(parent).context("prepare protected external guard directory")?;
     ensure_protected_directory(parent).context("verify protected external guard directory")
+}
+
+/// Resolve the nearest existing path component and reject a protected path
+/// that aliases a directory the hostile identity is allowed to own.  The
+/// guard receipt is normally absent on first startup, so resolving only the
+/// complete path would miss a path nested below an existing workspace.  Walking
+/// back to the nearest existing ancestor also catches symlink aliases before a
+/// missing receipt is created.
+fn ensure_path_outside_directory(path: &Path, directory: &Path, label: &str) -> Result<()> {
+    let directory = fs::canonicalize(directory)
+        .with_context(|| format!("canonicalize protected directory {}", directory.display()))?;
+    let resolved = canonicalize_existing_ancestor(path)?;
+    if resolved == directory || resolved.starts_with(&directory) {
+        bail!(
+            "{label} must remain outside protected directory {}",
+            directory.display()
+        );
+    }
+    Ok(())
+}
+
+fn canonicalize_existing_ancestor(path: &Path) -> Result<PathBuf> {
+    let mut candidate = path;
+    loop {
+        match fs::canonicalize(candidate) {
+            Ok(resolved) => return Ok(resolved),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                candidate = candidate.parent().with_context(|| {
+                    format!("path has no existing ancestor: {}", path.display())
+                })?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "canonicalize protected path component {}",
+                        candidate.display()
+                    )
+                });
+            }
+        }
+    }
 }
 
 fn path_exists(path: &Path) -> Result<bool> {
@@ -1745,6 +1796,7 @@ fn prepare_linux_execution_scope(
     ensure_linux_cgroup_empty(&config.cgroup_path)?;
     ensure_linux_identity_idle(config.execution_uid)?;
     let scope = hostile_job_scope(cwd, stdout_path)?;
+    ensure_path_outside_directory(&config.guard_state_file, &scope, "hostile guard state")?;
     for entry in walkdir::WalkDir::new(&scope).follow_links(false) {
         let entry = entry.context("enumerate hostile job scope for identity handoff")?;
         let path = entry.path();
@@ -2594,6 +2646,33 @@ mod tests {
         let unrelated = directory.path().join("other-logs");
         fs::create_dir(&unrelated).unwrap();
         assert!(hostile_job_scope(&repo, &unrelated.join("out.log")).is_err());
+    }
+
+    #[test]
+    fn hostile_guard_state_cannot_overlap_worker_or_job_scope() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+
+        let outside = directory.path().join("state").join("receipt.json");
+        assert!(ensure_path_outside_directory(&outside, &workspace, "guard state").is_ok());
+
+        let nested = workspace.join("state").join("receipt.json");
+        assert!(ensure_path_outside_directory(&nested, &workspace, "guard state").is_err());
+
+        let run_id = Uuid::new_v4();
+        let scope = workspace.join("jobs").join(run_id.to_string());
+        fs::create_dir_all(&scope).unwrap();
+        let scoped = scope.join("receipt.json");
+        assert!(ensure_path_outside_directory(&scoped, &scope, "guard state").is_err());
+
+        #[cfg(unix)]
+        {
+            let alias = directory.path().join("workspace-alias");
+            std::os::unix::fs::symlink(&workspace, &alias).unwrap();
+            let aliased = alias.join("receipt.json");
+            assert!(ensure_path_outside_directory(&aliased, &workspace, "guard state").is_err());
+        }
     }
 
     #[test]

@@ -82,7 +82,8 @@ fi
 
 normalize_path() {
   local value="$1"
-  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || {
+  local control_pattern=$'[\001-\037\177]'
+  [[ ! "$value" =~ $control_pattern ]] || {
     printf 'Control characters are not allowed in paths.\n' >&2
     return 1
   }
@@ -415,6 +416,7 @@ WorkingDirectory=$(systemd_quote "$workspace_root")
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true
+KillMode=control-group
 
 [Install]
 WantedBy=${wanted_by}
@@ -513,7 +515,8 @@ begin_transaction() {
     printf '%s\n' "$TRANSACTION_SCHEMA" >"$staging/schema"
     printf '%s\n' "$old_scope" >"$staging/old-scope"
     printf '%s\n' "$(id -u)" >"$staging/installer-uid"
-    chmod 0600 -- "$staging/schema" "$staging/old-scope" "$staging/installer-uid"
+    printf '%s\n' "$installation_owned_before" >"$staging/marker-existed"
+    chmod 0600 -- "$staging/schema" "$staging/old-scope" "$staging/installer-uid" "$staging/marker-existed"
 
     if [[ -f "$worker_path" && ! -L "$worker_path" ]]; then
       install -m 0700 -- "$worker_path" "$staging/cyc-worker"
@@ -561,7 +564,7 @@ begin_transaction() {
 }
 
 restore_transaction() {
-  local transaction_root="$1" old_scope old_unit candidate
+  local transaction_root="$1" old_scope old_unit candidate marker_existed
   assert_transaction_tree_safe "$transaction_root"
   [[ -f "$transaction_root/schema" && ! -L "$transaction_root/schema" &&
      "$(cat "$transaction_root/schema")" == "$TRANSACTION_SCHEMA" ]] || {
@@ -572,6 +575,20 @@ restore_transaction() {
   [[ "$old_scope" == user || "$old_scope" == system ]] || { printf 'Worker repair transaction scope is invalid.\n' >&2; return 1; }
   [[ -f "$transaction_root/installer-uid" && "$(cat "$transaction_root/installer-uid")" == "$(id -u)" ]] || {
     printf 'Worker repair transaction belongs to a different installer identity.\n' >&2
+    return 1
+  }
+  # marker-existed was added after the original journal format. Infer the
+  # legacy value from manifest-existed so an interrupted first install does
+  # not leave an ownership marker that can authorize destructive cleanup.
+  if [[ -f "$transaction_root/marker-existed" && ! -L "$transaction_root/marker-existed" ]]; then
+    marker_existed="$(cat "$transaction_root/marker-existed")"
+  elif [[ -f "$transaction_root/manifest-existed" && ! -L "$transaction_root/manifest-existed" ]]; then
+    marker_existed=1
+  else
+    marker_existed=0
+  fi
+  [[ "$marker_existed" == 0 || "$marker_existed" == 1 ]] || {
+    printf 'Worker repair transaction ownership state is invalid.\n' >&2
     return 1
   }
 
@@ -616,6 +633,9 @@ restore_transaction() {
       service_ctl_for_scope "$old_scope" is-active --quiet "$SERVICE_NAME"
     fi
   fi
+  if [[ "$marker_existed" == 0 ]]; then
+    rm -f -- "$marker_path"
+  fi
   remove_transaction "$transaction_root"
 }
 
@@ -650,8 +670,18 @@ elif [[ -f "$marker_path" ]]; then
   fi
 fi
 
-if [[ "$installation_owned_before" -eq 1 && ( -e "$install_manifest" || -L "$install_manifest" ) ]]; then
-  validate_owned_manifest
+if [[ "$installation_owned_before" -eq 1 ]]; then
+  if [[ -e "$install_manifest" || -L "$install_manifest" ]]; then
+    validate_owned_manifest
+  elif [[ ! -e "$transaction_root" && ! -L "$transaction_root" ]]; then
+    printf 'Owned worker install manifest is missing or unsafe.\n' >&2
+    exit 1
+  elif [[ -f "$transaction_root/committed" && ! -L "$transaction_root/committed" ]]; then
+    # A committed journal has no rollback work left to perform. It must not
+    # be used to authorize cleanup after the authoritative manifest vanished.
+    printf 'Owned worker install manifest is missing or unsafe.\n' >&2
+    exit 1
+  fi
 fi
 
 if [[ -e "$transaction_root" || -L "$transaction_root" ]]; then
@@ -747,9 +777,6 @@ fi
 private_dir "$install_root"
 private_dir "$data_root"
 private_dir "$workspace_root"
-printf '%s\n' "$SCHEMA" >"${data_root}/${MARKER_NAME}"
-chmod 0600 -- "${data_root}/${MARKER_NAME}"
-
 config_existed_before_pair=0
 if [[ -e "$config_path" || -L "$config_path" ]]; then
   [[ -f "$config_path" && ! -L "$config_path" ]] || { printf 'Worker config path is not a regular file.\n' >&2; exit 1; }
@@ -765,14 +792,22 @@ cleanup() {
   rm -f -- "${install_manifest}.new.$$"
   if [[ -n "$protected_enrollment" ]]; then rm -f -- "$protected_enrollment"; fi
   if [[ -n "$enrollment_file" ]]; then rm -f -- "$enrollment_file"; fi
-  if [[ "$exit_code" -ne 0 && "$committed" -eq 0 && "$transaction_active" -eq 1 ]]; then
-    if ! restore_transaction "$transaction_root"; then
-      printf 'Worker repair failed and the protected rollback transaction could not be restored.\n' >&2
+  if [[ "$exit_code" -ne 0 && "$committed" -eq 0 ]]; then
+    if [[ "$transaction_active" -eq 1 ]]; then
+      if ! restore_transaction "$transaction_root"; then
+        printf 'Worker repair failed and the protected rollback transaction could not be restored.\n' >&2
+      fi
+    elif [[ "$installation_owned_before" -eq 0 ]]; then
+      # The marker is an ownership capability. Do not leave a new marker
+      # behind when journal creation failed before rollback became active.
+      rm -f -- "$marker_path"
     fi
   fi
   return "$exit_code"
 }
 trap cleanup EXIT
+printf '%s\n' "$SCHEMA" >"${data_root}/${MARKER_NAME}"
+chmod 0600 -- "${data_root}/${MARKER_NAME}"
 install -m 0700 -- "${bundle_root}/cyc-worker" "$temporary_worker"
 begin_transaction "$transaction_root"
 transaction_active=1

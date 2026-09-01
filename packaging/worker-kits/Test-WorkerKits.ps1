@@ -850,6 +850,49 @@ test ! -e "$root/invalid-install"
 test ! -e "$root/invalid-data"
 test ! -e "$root/invalid-workspace"
 
+# Linux paths must reject every C0/DEL control character before realpath,
+# systemd quoting, or JSON manifest generation. A TAB is a valid shell byte
+# but is not a safe lifecycle path component.
+control_path="${root}/linux-control"$'\t'"root"
+set +e
+"$good/install-worker.sh" install \
+  --bundle-root "$good" \
+  --install-root "$control_path" \
+  --data-root "$root/linux-control-data" \
+  --workspace-root "$root/linux-control-workspace" \
+  --scope user \
+  >"$root/linux-control.stdout" 2>"$root/linux-control.stderr"
+control_path_exit=$?
+set -e
+test "$control_path_exit" -ne 0
+grep -q 'Control characters are not allowed in paths.' "$root/linux-control.stderr"
+test ! -e "$control_path"
+test ! -e "$root/linux-control-data"
+test ! -e "$root/linux-control-workspace"
+
+# A failed first install must remove the newly-created ownership marker along
+# with the restored transaction, otherwise a later call could treat the empty
+# state as an owned installation.
+first_failure_install="$root/linux-first-failure-install"
+first_failure_data="$root/linux-first-failure-data"
+first_failure_workspace="$root/linux-first-failure-workspace"
+set +e
+"$good/install-worker.sh" install \
+  --bundle-root "$good" \
+  --install-root "$first_failure_install" \
+  --data-root "$first_failure_data" \
+  --workspace-root "$first_failure_workspace" \
+  --scope user \
+  --failure-injection before-manifest-write \
+  >"$root/linux-first-failure.stdout" 2>"$root/linux-first-failure.stderr"
+first_failure_exit=$?
+set -e
+test "$first_failure_exit" -ne 0
+test ! -e "$first_failure_data/.clusteryourcodex-worker-owned"
+test ! -e "$first_failure_data/.repair-transaction"
+test ! -e "$first_failure_install/cyc-worker"
+test ! -e "$first_failure_data/install-manifest.json"
+
 # Root + auto resolves to system scope without probing or modifying a user
 # manager. This is an unpaired preinstall, so it must not touch systemd.
 root_login_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log")"
@@ -915,6 +958,35 @@ test -f "$CYC_FAKE_SYSTEMD_ROOT/linger-enabled"
 test -f "$CYC_FAKE_SYSTEMD_ROOT/service-enabled"
 test -f "$CYC_FAKE_SYSTEMD_ROOT/service-active"
 grep -q -- '--user show-environment' "$CYC_FAKE_SYSTEMD_ROOT/systemctl.log"
+grep -q '^KillMode=control-group$' "$unit"
+
+# An ownership marker without its manifest is not sufficient authority to
+# remove a computed same-named systemd unit. The lifecycle must fail closed
+# before invoking systemd or changing the worker, config, or unit.
+missing_manifest_backup="$root/linux-missing-manifest.backup"
+cp -- "$data/install-manifest.json" "$missing_manifest_backup"
+missing_manifest_worker_hash="$(sha256sum "$worker" | awk '{print $1}')"
+missing_manifest_config_hash="$(sha256sum "$data/config.json" | awk '{print $1}')"
+missing_manifest_unit_hash="$(sha256sum "$unit" | awk '{print $1}')"
+missing_manifest_systemctl_lines="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')"
+rm -f -- "$data/install-manifest.json"
+set +e
+"$good/install-worker.sh" uninstall --bundle-root "$good" --scope user \
+  >"$root/linux-missing-manifest.stdout" 2>"$root/linux-missing-manifest.stderr"
+missing_manifest_exit=$?
+set -e
+test "$missing_manifest_exit" -ne 0
+test ! -s "$root/linux-missing-manifest.stdout"
+grep -q 'Owned worker install manifest is missing or unsafe.' "$root/linux-missing-manifest.stderr"
+test -f "$data/.clusteryourcodex-worker-owned"
+test -f "$worker"
+test -f "$unit"
+test "$(sha256sum "$worker" | awk '{print $1}')" = "$missing_manifest_worker_hash"
+test "$(sha256sum "$data/config.json" | awk '{print $1}')" = "$missing_manifest_config_hash"
+test "$(sha256sum "$unit" | awk '{print $1}')" = "$missing_manifest_unit_hash"
+test "$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')" = "$missing_manifest_systemctl_lines"
+cp -- "$missing_manifest_backup" "$data/install-manifest.json"
+rm -f -- "$missing_manifest_backup"
 
 # Ready-node repair is one transaction. A normal repair does not rotate the
 # credential; injected failures after pair, service registration, and before
@@ -1139,6 +1211,30 @@ workspace_root="$root/macos-workspace"
 logs_root="$root/macos-logs"
 common=(--install-root "$install_root" --data-root "$data_root" --workspace-root "$workspace_root" --logs-root "$logs_root")
 
+# A failed first macOS install must remove both newly-created ownership
+# markers along with the restored transaction, even while LaunchAgent
+# activation remains gated.
+first_failure_install="$root/macos-first-failure-install"
+first_failure_data="$root/macos-first-failure-data"
+first_failure_workspace="$root/macos-first-failure-workspace"
+first_failure_logs="$root/macos-first-failure-logs"
+set +e
+$good/install-worker.sh install --bundle-root "$good" \
+  --install-root "$first_failure_install" \
+  --data-root "$first_failure_data" \
+  --workspace-root "$first_failure_workspace" \
+  --logs-root "$first_failure_logs" \
+  --failure-injection before-manifest-write \
+  >"$root/macos-first-failure.stdout" 2>"$root/macos-first-failure.stderr"
+first_failure_exit=$?
+set -e
+test "$first_failure_exit" -ne 0
+test ! -e "$first_failure_data/.clusteryourcodex-worker-owned"
+test ! -e "$first_failure_logs/.clusteryourcodex-worker-logs-owned"
+test ! -e "$first_failure_data/.repair-transaction"
+test ! -e "$first_failure_install/cyc-worker"
+test ! -e "$first_failure_data/install-manifest.json"
+
 # Safe, enrollment-free preinstall is idempotent and remains dormant.
 preinstall="$($good/install-worker.sh install --bundle-root "$good" "${common[@]}")"
 grep -q '"succeeded":true' <<<"$preinstall"
@@ -1216,6 +1312,36 @@ grep -q '"serviceEnabled":false' <<<"$routine"
 test "$credential_before" = "$(find "$data_root" -maxdepth 1 -name '*.credential' -type f | head -n 1)"
 test "$(shasum -a 256 "$install_root/cyc-worker" | awk '{print $1}')" != "$baseline_worker"
 test ! -e "$HOME/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
+
+# A macOS ownership marker without its manifest is not sufficient authority
+# to boot out or delete a computed same-named LaunchAgent. Keep a sentinel at
+# that path and assert that no launchctl operation occurs.
+mac_missing_manifest_backup="$root/macos-missing-manifest.backup"
+cp "$data_root/install-manifest.json" "$mac_missing_manifest_backup"
+mac_missing_launch_agent="$HOME/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
+mkdir -p "$(dirname "$mac_missing_launch_agent")"
+printf '%s\n' 'MACOS_MISSING_MANIFEST_SENTINEL' >"$mac_missing_launch_agent"
+mac_missing_manifest_worker_hash="$(shasum -a 256 "$install_root/cyc-worker" | awk '{print $1}')"
+mac_missing_manifest_config_hash="$(shasum -a 256 "$data_root/config.json" | awk '{print $1}')"
+mac_missing_manifest_launchctl_lines="$(wc -l <"$CYC_FAKE_LAUNCHCTL_LOG" | tr -d '[:space:]')"
+rm -f "$data_root/install-manifest.json"
+set +e
+$upgrade/install-worker.sh uninstall --bundle-root "$upgrade" "${common[@]}" \
+  >"$root/macos-missing-manifest.stdout" 2>"$root/macos-missing-manifest.stderr"
+mac_missing_manifest_exit=$?
+set -e
+test "$mac_missing_manifest_exit" -ne 0
+test ! -s "$root/macos-missing-manifest.stdout"
+grep -q 'Owned worker install manifest is missing or unsafe.' "$root/macos-missing-manifest.stderr"
+test -f "$data_root/.clusteryourcodex-worker-owned"
+test -f "$install_root/cyc-worker"
+test "$(shasum -a 256 "$install_root/cyc-worker" | awk '{print $1}')" = "$mac_missing_manifest_worker_hash"
+test "$(shasum -a 256 "$data_root/config.json" | awk '{print $1}')" = "$mac_missing_manifest_config_hash"
+test "$(wc -l <"$CYC_FAKE_LAUNCHCTL_LOG" | tr -d '[:space:]')" = "$mac_missing_manifest_launchctl_lines"
+test -f "$mac_missing_launch_agent"
+test "$(cat "$mac_missing_launch_agent")" = 'MACOS_MISSING_MANIFEST_SENTINEL'
+cp "$mac_missing_manifest_backup" "$data_root/install-manifest.json"
+rm -f "$mac_missing_manifest_backup" "$mac_missing_launch_agent"
 
 # Existing ownership is bound to every macOS lifecycle root. Changing the
 # install, logs, or HOME-derived LaunchAgent root must fail before any
@@ -1336,7 +1462,7 @@ test ! -e "$default_logs"
         }
     }
     $linuxSource = Get-Content -LiteralPath $linuxInstaller -Raw
-    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'after-pair', 'after-service-registration', 'before-manifest-write', 'remove_service', 'service_path_for_scope', 'servicePath', 'Installer service path does not match the existing owned installation.', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot')) {
+    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'after-pair', 'after-service-registration', 'before-manifest-write', 'remove_service', 'service_path_for_scope', 'servicePath', 'Installer service path does not match the existing owned installation.', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot', 'KillMode=control-group', 'marker-existed', 'Owned worker install manifest is missing or unsafe.')) {
         if ($linuxSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "Linux worker installer is missing rollback/integrity guard: $requiredPattern"
         }
@@ -1364,6 +1490,7 @@ test ! -e "$default_logs"
         'StandardOutPath',
         'StandardErrorPath',
         'KeepAlive',
+        'AbandonProcessGroup',
         'ProcessType',
         'verify_worker_kit_signature',
         'SHA256SUMS must contain exactly four signed-kit files',
@@ -1385,7 +1512,9 @@ test ! -e "$default_logs"
         'dataRoot',
         'workspaceRoot',
         'logsRoot',
-        'launchAgent'
+        'launchAgent',
+        'marker-existed',
+        'Owned worker install manifest is missing or unsafe.'
     )) {
         if ($macosSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "macOS worker installer is missing lifecycle/gating guard: $requiredPattern"

@@ -7,6 +7,24 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.60] - 2026-09-02
+
+### Fixed
+
+- Terminated Codex and MCP child processes on pipe extraction, reader-thread,
+  wait, and timeout failures so native desktop integration cannot strand a
+  background process after an error.
+- Kept Windows runtime teardown failures inside the Install/Repair rollback
+  transaction so file, task, and integration compensations continue and report
+  incomplete rollback explicitly.
+- Prevented Linux and macOS worker-kit first-install failures from leaving
+  ownership markers that could authorize later cleanup, and made marker-only
+  installs fail closed when the authoritative manifest is missing.
+- Added explicit Linux systemd process-group teardown and macOS LaunchAgent
+  process-group policy to the worker-kit contracts.
+- Rejected control-character paths and prevented hostile Linux identity handoff
+  from taking ownership of guard receipts inside worker or job scopes.
+
 ## [0.1.0-preview.59] - 2026-09-02
 
 ### Documentation
@@ -737,7 +755,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.59...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.60...HEAD
+[0.1.0-preview.60]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.59...v0.1.0-preview.60
 [0.1.0-preview.59]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.58...v0.1.0-preview.59
 [0.1.0-preview.58]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.57...v0.1.0-preview.58
 [0.1.0-preview.57]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.56...v0.1.0-preview.57

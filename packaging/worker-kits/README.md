@@ -234,6 +234,18 @@ path. A mismatch fails before any service/LaunchAgent operation or worker,
 config, manifest, log, or workspace mutation, so a same-named path elsewhere
 cannot be mistaken for the owned installation.
 
+The ownership marker is not sufficient authority by itself: if it remains but
+the manifest is missing or unsafe, lifecycle operations fail closed before
+touching the worker or service layer unless an uncommitted crash-recovery
+journal is present to restore the authoritative state. The journal records
+whether the marker predated the transaction, so a failed first install does
+not leave a new marker that can authorize later cleanup. Linux systemd units
+also set `KillMode=control-group` explicitly so stopping or removing the unit
+terminates every process still in that unit's cgroup. The gated macOS
+LaunchAgent plist carries the corresponding explicit
+`AbandonProcessGroup=false` contract; live LaunchAgent teardown remains an
+external acceptance gate.
+
 Treat a root change as an explicit migration or new installation, not as a
 repair/uninstall override. Existing paired data and workspaces are preserved by
 default; explicit data purge remains separately constrained to the installer

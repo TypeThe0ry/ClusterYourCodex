@@ -2120,16 +2120,36 @@ fn run_process(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|_| IntegrationError::CodexInvocationFailed)?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or(IntegrationError::CodexInvocationFailed)?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or(IntegrationError::CodexInvocationFailed)?;
-    let stdout_reader = thread::spawn(move || read_bounded(stdout, MAX_PROCESS_OUTPUT));
-    let stderr_reader = thread::spawn(move || read_bounded(stderr, MAX_PROCESS_OUTPUT));
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            terminate_child(&mut child);
+            return Err(IntegrationError::CodexInvocationFailed);
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            terminate_child(&mut child);
+            return Err(IntegrationError::CodexInvocationFailed);
+        }
+    };
+    let stdout_reader =
+        match thread::Builder::new().spawn(move || read_bounded(stdout, MAX_PROCESS_OUTPUT)) {
+            Ok(reader) => reader,
+            Err(_) => {
+                terminate_child(&mut child);
+                return Err(IntegrationError::CodexInvocationFailed);
+            }
+        };
+    let stderr_reader =
+        match thread::Builder::new().spawn(move || read_bounded(stderr, MAX_PROCESS_OUTPUT)) {
+            Ok(reader) => reader,
+            Err(_) => {
+                terminate_child(&mut child);
+                return Err(IntegrationError::CodexInvocationFailed);
+            }
+        };
 
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -2137,11 +2157,15 @@ fn run_process(
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(40)),
             Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_child(&mut child);
                 return Err(IntegrationError::CodexInvocationFailed);
             }
-            Err(_) => return Err(IntegrationError::CodexInvocationFailed),
+            Err(_) => {
+                // `Child` does not normally kill its process when dropped;
+                // terminate explicitly on the wait-error path as well.
+                terminate_child(&mut child);
+                return Err(IntegrationError::CodexInvocationFailed);
+            }
         }
     };
     let stdout = stdout_reader
@@ -3084,20 +3108,35 @@ impl McpSession {
             terminate_child(&mut child);
             return Err(IntegrationError::McpStartFailed);
         }
-        let stdin = child.stdin.take().ok_or(IntegrationError::McpStartFailed)?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(IntegrationError::McpStartFailed)?;
+        let stdin = match child.stdin.take() {
+            Some(stdin) => stdin,
+            None => {
+                terminate_child(&mut child);
+                return Err(IntegrationError::McpStartFailed);
+            }
+        };
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                terminate_child(&mut child);
+                return Err(IntegrationError::McpStartFailed);
+            }
+        };
         let (sender, receiver) = mpsc::sync_channel::<String>(32);
-        let reader = thread::spawn(move || {
+        let reader = match thread::Builder::new().spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
                 if sender.send(line).is_err() {
                     break;
                 }
             }
-        });
+        }) {
+            Ok(reader) => reader,
+            Err(_) => {
+                terminate_child(&mut child);
+                return Err(IntegrationError::McpStartFailed);
+            }
+        };
         let mut session = Self {
             child,
             stdin: Some(stdin),
@@ -3511,6 +3550,38 @@ mod tests {
         )
         .unwrap();
         plugin
+    }
+
+    #[test]
+    fn timed_out_process_is_terminated_before_return() {
+        #[cfg(target_os = "windows")]
+        let Some(executable) = discover_windows_powershell() else {
+            return;
+        };
+        #[cfg(target_os = "windows")]
+        let arguments = vec![
+            OsString::from("-NoLogo"),
+            OsString::from("-NoProfile"),
+            OsString::from("-NonInteractive"),
+            OsString::from("-Command"),
+            OsString::from("Start-Sleep -Seconds 10"),
+        ];
+
+        #[cfg(not(target_os = "windows"))]
+        let Some(executable) = discover_path_executable("sleep") else {
+            return;
+        };
+        #[cfg(not(target_os = "windows"))]
+        let arguments = vec![OsString::from("10")];
+
+        let references: Vec<&OsStr> = arguments.iter().map(OsString::as_os_str).collect();
+        let started = Instant::now();
+        let result = run_process(&executable, &references, Duration::from_millis(100));
+        assert!(result.is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timeout cleanup should not wait for the command's full sleep"
+        );
     }
 
     #[test]

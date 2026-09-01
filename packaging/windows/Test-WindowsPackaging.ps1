@@ -703,6 +703,10 @@ try {
     Assert-True ($source -match 'Get-Process -Id \$process\.Id -ErrorAction SilentlyContinue') 'runtime stop tolerates a process exiting between snapshot and stop'
     Assert-True ($source -match 'Restore-FileRollbackSnapshot') 'failed replacement has file rollback'
     Assert-True ($source -match 'Restore-CycTaskSnapshots') 'failed replacement has task rollback'
+    $installCoreSource = [regex]::Match($source, 'function Invoke-InstallOrRepairCore[\s\S]+?function Invoke-InstallOrRepair')
+    Assert-True ($installCoreSource.Success -and
+        $installCoreSource.Value -match '\$rollbackFailures[\s\S]+try \{\s*Stop-CycRuntime' -and
+        $installCoreSource.Value -match "rollbackFailures\.Add\('runtime'\)") 'install rollback continues after runtime teardown failure'
     Assert-True ($source -match 'Wait-CycTaskStable') 'Scheduled Tasks require a stable running window'
     Assert-True ($source -match 'LastTaskResult') 'Scheduled Task health checks LastTaskResult'
     Assert-True ($source -match 'Test-CycControllerLoopbackHealth') 'controller readiness uses the direct loopback health probe'

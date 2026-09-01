@@ -104,7 +104,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
-$script:ProductVersion = '0.1.0-preview.59'
+$script:ProductVersion = '0.1.0-preview.60'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
@@ -6264,10 +6264,18 @@ function Invoke-InstallOrRepairCore {
         $coreCommitPublished = $true
     } catch {
         $failure = $_
-        Stop-CycRuntime `
-            -InstallRoot $Plan.installRoot `
-            -ExpectedSid $Plan.initiator.sid
         $rollbackFailures = New-Object System.Collections.Generic.List[string]
+        try {
+            Stop-CycRuntime `
+                -InstallRoot $Plan.installRoot `
+                -ExpectedSid $Plan.initiator.sid
+        } catch {
+            # Runtime teardown is part of rollback, not a prerequisite for
+            # the remaining compensating actions.  Continue restoring files,
+            # tasks, and integrations so a stop/access error cannot strand a
+            # partially replaced install without its rollback attempt.
+            [void]$rollbackFailures.Add('runtime')
+        }
         $oldCodexSucceeded = $false
         if ($oldManifest -and $oldManifest.PSObject.Properties['codexIntegration'] -and
             $oldManifest.codexIntegration.PSObject.Properties['succeeded']) {
