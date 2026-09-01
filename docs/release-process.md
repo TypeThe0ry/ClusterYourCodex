@@ -126,9 +126,43 @@ targets, reparse points, and directories, writes to a fresh same-directory
 temporary file, and atomically publishes the result without overwriting an
 existing evidence file.
 
-The `gates` object is fail-closed: every required gate is a JSON boolean with
-value `true`; a missing, non-boolean, or false gate fails the manifest. Issue
-#2 requires `tauriDesktopHostTray`, `rendererNativeControllerProxy`,
+Issue #5 has an additional, fail-closed evidence contract because its nine
+gates are a cross-platform hostile-workload matrix. Its `rawLog` descriptor
+must contain `platforms: ["linux", "windows", "macos"]` and a non-empty
+`markers` array. The issue's `gates` map is structured evidence: each
+platform-specific gate records `status: true`, its exact `platform`, exact
+`testSelector`, exact locked `command`, and `rawLogMarkers`; each matrix gate
+records `status: true`, all three `platforms`, one nested `runs` object per
+platform, and the marker set for those runs. Every nested run carries its
+exact selector, command, and raw-log markers. The required selectors are the Linux ignored native probe
+`isolation::tests::linux_live_dedicated_identity_credential_and_residual_reconciliation`,
+the Windows guard contract
+`isolation::tests::windows_external_json_contract_is_fail_closed_at_every_runtime_gate`,
+and the macOS reconciliation contract
+`isolation::tests::macos_external_reconciliation_is_fail_closed_at_every_runtime_gate`.
+Commands must select `cyc-worker`'s library target with `--locked` and
+`--exact --nocapture`; the Linux row additionally requires `--ignored` and
+all rows must end in their exact selector. A workspace-wide
+`cargo test --workspace --locked` command is not evidence for any Issue #5
+row. Linux, Windows, and macOS each have to carry their platform-specific
+gates plus the guard-state, worker-credential, and restart residual-process
+gates.
+
+Every run/gate pair has a marker in the corresponding `rawLogMarkers` array
+and in the raw-log descriptor's `markers` array, of the form
+`CYC-GA-ISSUE5|platform=<platform>|selector=<selector>|commandSha256=<digest>|gate=<gate>|status=passed`.
+The marker digest is over the normalized exact command. `Test-GARawLogs.ps1`
+requires every source-bound marker in the manifest, searches for every marker
+in the downloaded bytes, and emits `markersVerified: true` plus the verified
+`gateEvidence` records. `Test-GAReadiness.ps1` cross-binds those records back
+to the manifest, so setting all nine gates to `true`, relabelling a single
+Linux log, or omitting a semantic native marker cannot satisfy the Windows,
+macOS, or restart gates.
+
+The Issue #2 and Issue #3 `gates` objects remain fail-closed legacy maps: every
+required gate is a JSON boolean with value `true`; a missing, non-boolean, or
+false gate fails the manifest. Issue #5 uses the structured gate matrix above.
+Issue #2 requires `tauriDesktopHostTray`, `rendererNativeControllerProxy`,
 `perUserScheduledTasks`, `sidScopedDataDirAcl`,
 `bundledMcpInstallerMarketplace`, `installRepairUpgradeRollbackUninstall`,
 `cleanWindows11Vm`, `liveWindowsControllerWorkerRoundTrip`, and
@@ -140,8 +174,8 @@ value `true`; a missing, non-boolean, or false gate fails the manifest. Issue
 `macosArm64ReleaseArtifact`, `platformNativeShells`,
 `platformNativeProcessGroups`, `crossPlatformPathAclTests`, and `liveMacosRun`.
 It also requires `liveLinuxControllerWorkerRoundTrip` and
-`macosDeveloperIdSigningNotarization`.
-Issue #5 requires `linuxDedicatedExecutionIdentity`,
+`macosDeveloperIdSigningNotarization`. Issue #5 requires structured entries
+for `linuxDedicatedExecutionIdentity`,
 `linuxCgroupV2Reconciliation`, `windowsIsolatedExecutionIdentity`,
 `windowsJobObject`, `windowsProtectedExternalGuard`,
 `macosExternalReconciliation`, `jobsCannotAlterGuardState`,

@@ -92,6 +92,95 @@ function New-TestIssueEvidence {
     return (($record | ConvertTo-Json -Depth 10) | ConvertFrom-Json)
 }
 
+function New-TestIssue5Evidence {
+    $record = New-TestIssueEvidence -Provider 'issue5-matrix-lab' -HostType 'external-native-matrix'
+    $record.evidenceId = 'ga-issue5-matrix-20260830'
+    $record.rawLog.command = 'issue5-evidence-matrix'
+    $record.rawLog.node = 'issue5-matrix-coordinator'
+    $record.rawLog | Add-Member -MemberType NoteProperty -Name platforms -Value @('linux', 'windows', 'macos')
+
+    $runs = New-Object System.Collections.Generic.List[object]
+    foreach ($platform in @('linux', 'windows', 'macos')) {
+        $selector = [string]$GaIssue5ExpectedSelectors[$platform]
+        $manifestPath = if ($platform -ceq 'windows') { 'C:\src\ClusterYourCodex\Cargo.toml' } else { '/srv/ClusterYourCodex/Cargo.toml' }
+        $flags = if ($platform -ceq 'linux') { '--ignored --exact --nocapture' } else { '--exact --nocapture' }
+        $command = "cargo test --manifest-path $manifestPath -p cyc-worker --lib --locked -- $flags $selector"
+        $gates = @($GaIssue5PlatformGateNames[$platform] + $GaIssue5MatrixGateNames)
+        $markers = @($gates | ForEach-Object {
+                Get-GaIssue5Marker -Platform $platform -Selector $selector -Command $command -Gate ([string]$_)
+            })
+        if ($platform -ceq 'linux') {
+            $markers += @('uid=1007', 'gid=1007', 'cgroup_escape=blocked', 'cgroup.threads_escape=blocked', 'residual_empty')
+        }
+        [void]$runs.Add([ordered]@{
+                platform = $platform
+                node = "$platform-native-lab"
+                testSelector = $selector
+                command = $command
+                gates = $gates
+                markers = $markers
+            })
+    }
+    $runByPlatform = @{}
+    foreach ($run in $runs) {
+        $runByPlatform[[string]$run.platform] = $run
+    }
+    $structuredGates = [ordered]@{}
+    foreach ($platform in @('linux', 'windows', 'macos')) {
+        $run = $runByPlatform[$platform]
+        foreach ($gate in @($GaIssue5PlatformGateNames[$platform])) {
+            $gateMarkers = @($run.markers | Where-Object { [string]$_ -ceq (Get-GaIssue5Marker -Platform $platform -Selector ([string]$run.testSelector) -Command ([string]$run.command) -Gate $gate) })
+            if ($platform -ceq 'linux' -and $gate -ceq 'linuxDedicatedExecutionIdentity') {
+                $gateMarkers += @('uid=1007', 'gid=1007')
+            }
+            if ($platform -ceq 'linux' -and $gate -ceq 'linuxCgroupV2Reconciliation') {
+                $gateMarkers += @('cgroup_escape=blocked', 'cgroup.threads_escape=blocked')
+            }
+            $structuredGates[$gate] = [ordered]@{
+                status = $true
+                platform = $platform
+                testSelector = [string]$run.testSelector
+                command = [string]$run.command
+                rawLogMarkers = $gateMarkers
+            }
+        }
+    }
+    foreach ($gate in $GaIssue5MatrixGateNames) {
+        $matrixRuns = New-Object System.Collections.Generic.List[object]
+        $matrixMarkers = New-Object System.Collections.Generic.List[string]
+        foreach ($platform in @('linux', 'windows', 'macos')) {
+            $run = $runByPlatform[$platform]
+            $marker = Get-GaIssue5Marker -Platform $platform -Selector ([string]$run.testSelector) -Command ([string]$run.command) -Gate $gate
+            $runMarkers = @($marker)
+            if ($gate -ceq 'restartResidualProcessReconciliation' -and $platform -ceq 'linux') {
+                $runMarkers += 'residual_empty'
+            }
+            [void]$matrixMarkers.Add($marker)
+            foreach ($markerValue in $runMarkers) {
+                if (-not (@($matrixMarkers | Where-Object { $_ -ceq $markerValue }).Count -gt 0)) {
+                    [void]$matrixMarkers.Add($markerValue)
+                }
+            }
+            [void]$matrixRuns.Add([ordered]@{
+                    platform = $platform
+                    testSelector = [string]$run.testSelector
+                    command = [string]$run.command
+                    rawLogMarkers = $runMarkers
+                })
+        }
+        $structuredGates[$gate] = [ordered]@{
+            status = $true
+            platforms = @('linux', 'windows', 'macos')
+            runs = $matrixRuns.ToArray()
+            rawLogMarkers = $matrixMarkers.ToArray()
+        }
+    }
+    $record.gates = (($structuredGates | ConvertTo-Json -Depth 20) | ConvertFrom-Json)
+    $record.rawLog | Add-Member -MemberType NoteProperty -Name runs -Value $runs.ToArray()
+    $record.rawLog | Add-Member -MemberType NoteProperty -Name markers -Value @($structuredGates.Values | ForEach-Object { $_.rawLogMarkers } | Select-Object -Unique)
+    return (($record | ConvertTo-Json -Depth 20) | ConvertFrom-Json)
+}
+
 function Assert-TestThrows {
     param([Parameter(Mandatory = $true)][scriptblock]$ScriptBlock)
 
@@ -124,6 +213,11 @@ Describe 'GA evidence issue acceptance contract' {
         $workflowSource | Should Match 'valid_issue_evidence'
         $workflowSource | Should Match '\.issue3'
         $workflowSource | Should Match '\.issue5'
+        $workflowSource | Should Match 'def valid_issue5'
+        $workflowSource | Should Match 'issue5_single_gate_valid'
+        $workflowSource | Should Match 'issue5_matrix_gate_valid'
+        $workflowSource | Should Match 'issue5-evidence-matrix'
+        $workflowSource | Should Not Match 'valid_issue_evidence\(\.issue5'
         $workflowSource | Should Match 'valid_https_url'
         ($workflowSource.IndexOf('test("^https://[^@/?#[:space:]]+([/?#]|$)")') -ge 0) | Should Be $true
         foreach ($field in @('attestation_signer_repo:', 'attestation_signer_workflow:', 'attestation_cert_identity:', 'attestation_signer_digest:', 'CYC_GA_ATTESTATION_SIGNER_REPO: ${{ inputs.attestation_signer_repo }}', 'CYC_GA_ATTESTATION_SIGNER_WORKFLOW: ${{ inputs.attestation_signer_workflow }}', 'CYC_GA_ATTESTATION_CERT_IDENTITY: ${{ inputs.attestation_cert_identity }}', 'CYC_GA_ATTESTATION_SIGNER_DIGEST: ${{ inputs.attestation_signer_digest }}')) {
@@ -161,6 +255,20 @@ Describe 'GA evidence issue acceptance contract' {
         $rawLogSource | Should Match 'issue2'
         $rawLogSource | Should Match 'issue3'
         $rawLogSource | Should Match 'issue5'
+        $rawLogSource | Should Match 'markersVerified'
+        $rawLogSource | Should Match 'Assert-RawLogIssue5Evidence'
+        $rawLogSource | Should Match 'Assert-RawLogIssue5Markers'
+        $rawLogSource | Should Match 'rawLogMarkers'
+        $rawLogSource | Should Match 'gateEvidence'
+        $rawLogSource | Should Match '--workspace'
+        foreach ($markerPrefix in @('uid=', 'gid=', 'cgroup_escape=blocked', 'cgroup.threads_escape=blocked', 'residual_empty')) {
+            $rawLogSource | Should Match ([regex]::Escape($markerPrefix))
+        }
+        $readinessSource | Should Match 'Assert-GaIssue5Evidence'
+        $readinessSource | Should Match 'Assert-GaIssue5RawVerification'
+        $readinessSource | Should Match 'rawLogMarkers'
+        $readinessSource | Should Match 'testSelector'
+        $readinessSource | Should Match 'platforms'
         $readinessSource | Should Match 'rawVerificationRootPrefix'
         $readinessSource | Should Match 'downloaded raw-log URL matches'
         $readinessSource | Should Match 'downloaded GA raw-log file hash matches'
@@ -239,11 +347,79 @@ Describe 'GA evidence issue acceptance contract' {
     }
 
     It 'accepts a complete source-bound issue 5 evidence record' {
-        $record = New-TestIssueEvidence -Provider 'linux-lab' -HostType 'linux-native'
+        $record = New-TestIssue5Evidence
         $result = Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
             -Path 'issue5' -Description 'Issue #5 test evidence' -ExpectedCommit $expectedCommitForTest `
             -RequiredGates $issue5GateNamesForTest
         $result.status | Should Be 'passed'
+    }
+
+    It 'rejects a generic Linux cargo test with every Issue #5 gate set true' {
+        $record = New-TestIssueEvidence -Provider 'linux-lab' -HostType 'linux-native'
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 generic Linux evidence' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+    }
+
+    It 'rejects an Issue #5 platform row relabelled to another platform' {
+        $record = New-TestIssue5Evidence
+        $record.gates.windowsIsolatedExecutionIdentity.platform = 'linux'
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 platform mismatch' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+    }
+
+    It 'rejects an Issue #5 row with a generic command or wrong exact selector' {
+        $record = New-TestIssue5Evidence
+        $record.gates.linuxDedicatedExecutionIdentity.command = 'cargo test --workspace --locked'
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 generic command' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+
+        $record = New-TestIssue5Evidence
+        $record.rawLog.command = 'cargo test --manifest-path /srv/ClusterYourCodex/Cargo.toml -p cyc-worker --lib --locked'
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 aggregate command mismatch' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+
+        $record = New-TestIssue5Evidence
+        $record.gates.macosExternalReconciliation.testSelector = 'isolation::tests::wrong_selector'
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 selector mismatch' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+    }
+
+    It 'rejects Issue #5 matrix evidence with a missing native Linux marker' {
+        $record = New-TestIssue5Evidence
+        $record.gates.linuxCgroupV2Reconciliation.rawLogMarkers = @(
+            $record.gates.linuxCgroupV2Reconciliation.rawLogMarkers |
+                Where-Object { ([string]$_) -notlike 'cgroup_escape=blocked*' }
+        )
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 missing native marker' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+    }
+
+    It 'rejects an Issue #5 manifest with a missing retained raw-log marker' {
+        $record = New-TestIssue5Evidence
+        $record.rawLog.markers = @($record.rawLog.markers | Select-Object -Skip 1)
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 marker mismatch' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
     }
 
     It 'rejects a record with no raw log even when all gates are true' {

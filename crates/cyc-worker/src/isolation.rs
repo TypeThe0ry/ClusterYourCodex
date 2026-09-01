@@ -47,6 +47,11 @@ const MAX_RECEIPT_AGE_MINUTES: i64 = 15;
 const SHA256_HEX_LENGTH: usize = 64;
 #[cfg(any(target_os = "linux", test))]
 const LINUX_CGROUP_ROOT: &str = "/sys/fs/cgroup";
+#[cfg(any(target_os = "linux", test))]
+const LINUX_CGROUP_ANCESTOR_CONTROL_FILES: &[&str] = &["cgroup.procs", "cgroup.threads"];
+#[cfg(any(target_os = "linux", test))]
+const LINUX_CGROUP_LEAF_CONTROL_FILES: &[&str] =
+    &["cgroup.procs", "cgroup.threads", "cgroup.kill", "pids.max"];
 #[cfg(target_os = "linux")]
 const RECONCILE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -742,15 +747,18 @@ impl HostileIsolation {
         }
     }
 
-    /// Re-check the durable external proof and current backend immediately
-    /// before each claim.  This detects malicious guard replacement or newly
-    /// appeared residual processes without silently repairing either condition.
+    /// Re-check the durable proof and current backend immediately before each
+    /// claim.  Linux validates the receipt structure and uses the live cgroup,
+    /// identity, control-boundary, and resource checks below as its freshness
+    /// authority; external backends retain their receipt TTL.  This detects
+    /// malicious guard replacement or newly appeared residual processes without
+    /// silently repairing either condition.
     pub fn verify_before_claim(&self) -> Result<()> {
         self.ensure_runtime_backend_available()?;
         match &self.backend {
             None => Ok(()),
             Some(IsolationBackend::Linux(config)) => {
-                validate_receipt_file(
+                validate_receipt_structure_file(
                     &config.guard_state_file,
                     config.node_id,
                     HostileIsolationBackend::LinuxCgroupV2DedicatedIdentity,
@@ -906,8 +914,13 @@ impl ReconciliationReceipt {
         }
     }
 
-    fn validate(&self, node_id: Uuid, backend: HostileIsolationBackend) -> Result<()> {
-        let now = Utc::now();
+    /// Validate the durable, identity-bound receipt fields.
+    ///
+    /// Linux performs this structural check on every claim and pairs it with
+    /// fresh live cgroup/identity/control-plane checks.  A Linux worker is
+    /// long-lived, so the timestamp of the startup reconciliation receipt must
+    /// not become a second, independent worker lifetime limit.
+    fn validate_structure(&self, node_id: Uuid, backend: HostileIsolationBackend) -> Result<()> {
         if self.api_version != RECONCILIATION_RECEIPT_VERSION
             || self.node_id != node_id
             || self.backend != backend
@@ -916,8 +929,6 @@ impl ReconciliationReceipt {
             || !self.dedicated_identity
             || !self.protected_guard_state
             || !self.worker_state_isolated
-            || self.reconciled_at > now + chrono::Duration::minutes(5)
-            || self.reconciled_at < now - chrono::Duration::minutes(MAX_RECEIPT_AGE_MINUTES)
         {
             bail!("hostile reconciliation receipt is invalid or incomplete");
         }
@@ -930,6 +941,26 @@ impl ReconciliationReceipt {
             bail!("external hostile reconciliation receipt omitted native guard attestation");
         }
         Ok(())
+    }
+
+    /// Validate the timestamp freshness required when no native live probe is
+    /// available to corroborate the durable receipt.
+    fn validate_freshness(&self) -> Result<()> {
+        self.validate_freshness_at(Utc::now())
+    }
+
+    fn validate_freshness_at(&self, now: DateTime<Utc>) -> Result<()> {
+        if self.reconciled_at > now + chrono::Duration::minutes(5)
+            || self.reconciled_at < now - chrono::Duration::minutes(MAX_RECEIPT_AGE_MINUTES)
+        {
+            bail!("hostile reconciliation receipt is stale or from the future");
+        }
+        Ok(())
+    }
+
+    fn validate(&self, node_id: Uuid, backend: HostileIsolationBackend) -> Result<()> {
+        self.validate_structure(node_id, backend)?;
+        self.validate_freshness()
     }
 
     fn validate_external_attestation(
@@ -993,6 +1024,24 @@ fn validate_receipt_file(
     node_id: Uuid,
     backend: HostileIsolationBackend,
 ) -> Result<()> {
+    let receipt = read_receipt_file(path)?;
+    receipt.validate(node_id, backend)
+}
+
+/// Read and validate only the identity/protocol portion of a reconciliation
+/// receipt.  Linux uses this on each claim because its real-time cgroup,
+/// identity, control-boundary, and resource-limit checks are the freshness
+/// authority; the startup receipt's timestamp is not.
+fn validate_receipt_structure_file(
+    path: &Path,
+    node_id: Uuid,
+    backend: HostileIsolationBackend,
+) -> Result<()> {
+    let receipt = read_receipt_file(path)?;
+    receipt.validate_structure(node_id, backend)
+}
+
+fn read_receipt_file(path: &Path) -> Result<ReconciliationReceipt> {
     ensure_protected_input(path)
         .with_context(|| format!("refuse unprotected hostile guard state {}", path.display()))?;
     let raw =
@@ -1000,9 +1049,7 @@ fn validate_receipt_file(
     if raw.len() > MAX_RECEIPT_BYTES {
         bail!("hostile guard state is unexpectedly large");
     }
-    let receipt: ReconciliationReceipt =
-        serde_json::from_slice(&raw).context("parse hostile reconciliation receipt")?;
-    receipt.validate(node_id, backend)
+    serde_json::from_slice(&raw).context("parse hostile reconciliation receipt")
 }
 
 /// Validate an external guard receipt against the request contract.
@@ -1451,7 +1498,13 @@ fn prepare_linux_cgroup(config: &LinuxIsolation) -> Result<()> {
     if canonical != config.cgroup_path {
         bail!("hostile cgroupPath changed through aliasing or symlink resolution");
     }
-    for required in ["cgroup.procs", "cgroup.events", "cgroup.kill", "pids.max"] {
+    for required in [
+        "cgroup.procs",
+        "cgroup.threads",
+        "cgroup.events",
+        "cgroup.kill",
+        "pids.max",
+    ] {
         if !config.cgroup_path.join(required).is_file() {
             bail!("hostile cgroup v2 control `{required}` is unavailable");
         }
@@ -1511,13 +1564,14 @@ fn validate_linux_cgroup_control_boundary(config: &LinuxIsolation) -> Result<()>
                 cgroup_path.display()
             );
         }
-        let controls: &[&str] = if cgroup_path == config.cgroup_path {
-            &["cgroup.procs", "cgroup.kill", "pids.max"]
+        let controls = if cgroup_path == config.cgroup_path {
+            LINUX_CGROUP_LEAF_CONTROL_FILES
         } else {
-            // Migration only requires a writable cgroup.procs. The cgroup
-            // v2 root intentionally omits leaf-only controls such as
+            // Migration can target either a process or an individual thread,
+            // so every ancestor must protect both membership interfaces. The
+            // cgroup v2 root intentionally omits leaf-only controls such as
             // cgroup.kill and pids.max, so do not require them on ancestors.
-            &["cgroup.procs"]
+            LINUX_CGROUP_ANCESTOR_CONTROL_FILES
         };
         for name in controls {
             let path = cgroup_path.join(name);
@@ -1595,6 +1649,20 @@ fn linux_cgroup_pids(path: &Path) -> Result<Vec<u32>> {
 }
 
 #[cfg(target_os = "linux")]
+fn linux_cgroup_threads(path: &Path) -> Result<Vec<u32>> {
+    let text = fs::read_to_string(path.join("cgroup.threads"))
+        .with_context(|| format!("read hostile cgroup threads at {}", path.display()))?;
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            line.trim()
+                .parse::<u32>()
+                .context("hostile cgroup.threads contained a malformed TID")
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
 fn linux_cgroup_populated(path: &Path) -> Result<bool> {
     let text = fs::read_to_string(path.join("cgroup.events"))
         .with_context(|| format!("read hostile cgroup events at {}", path.display()))?;
@@ -1614,8 +1682,11 @@ fn linux_cgroup_populated(path: &Path) -> Result<bool> {
 
 #[cfg(target_os = "linux")]
 fn ensure_linux_cgroup_empty(path: &Path) -> Result<()> {
-    if !linux_cgroup_pids(path)?.is_empty() || linux_cgroup_populated(path)? {
-        bail!("hostile cgroup contains residual processes");
+    if !linux_cgroup_pids(path)?.is_empty()
+        || !linux_cgroup_threads(path)?.is_empty()
+        || linux_cgroup_populated(path)?
+    {
+        bail!("hostile cgroup contains residual processes or threads");
     }
     Ok(())
 }
@@ -1629,8 +1700,9 @@ fn ensure_linux_cgroup_empty(_path: &Path) -> Result<()> {
 fn reconcile_linux_cgroup(config: &LinuxIsolation) -> Result<u32> {
     prepare_linux_cgroup(config)?;
     let initial = linux_cgroup_pids(&config.cgroup_path)?;
+    let initial_threads = linux_cgroup_threads(&config.cgroup_path)?;
     let populated = linux_cgroup_populated(&config.cgroup_path)?;
-    if populated || !initial.is_empty() {
+    if populated || !initial.is_empty() || !initial_threads.is_empty() {
         fs::write(config.cgroup_path.join("cgroup.kill"), b"1\n")
             .context("kill residual hostile cgroup processes")?;
     }
@@ -2196,6 +2268,43 @@ mod tests {
     }
 
     #[test]
+    fn stale_linux_receipt_is_not_a_claim_lifetime_limit() {
+        let node_id = Uuid::new_v4();
+        let backend = HostileIsolationBackend::LinuxCgroupV2DedicatedIdentity;
+        let now = Utc::now();
+        let mut receipt = ReconciliationReceipt::clean(node_id, backend, 0);
+        receipt.reconciled_at = now - chrono::Duration::minutes(MAX_RECEIPT_AGE_MINUTES + 1);
+
+        // The durable receipt still has to be bound to the expected node and
+        // backend, but Linux freshness comes from the live boundary checks in
+        // verify_before_claim rather than this startup timestamp.
+        receipt.validate_structure(node_id, backend).unwrap();
+        assert!(receipt.validate_freshness_at(now).is_err());
+
+        // External-guard paths do not have the same in-process live proof and
+        // therefore continue to reject an old receipt through validate().
+        assert!(receipt.validate(node_id, backend).is_err());
+    }
+
+    #[test]
+    fn linux_receipt_file_structure_validation_accepts_an_old_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state");
+        prepare_private_directory(&state).unwrap();
+        let path = state.join("receipt.json");
+        let node_id = Uuid::new_v4();
+        let backend = HostileIsolationBackend::LinuxCgroupV2DedicatedIdentity;
+        let mut receipt = ReconciliationReceipt::clean(node_id, backend, 0);
+        receipt.reconciled_at = Utc::now() - chrono::Duration::minutes(MAX_RECEIPT_AGE_MINUTES + 1);
+        let mut bytes = serde_json::to_vec(&receipt).unwrap();
+        bytes.push(b'\n');
+        write_protected_file(&path, &bytes).unwrap();
+
+        validate_receipt_structure_file(&path, node_id, backend).unwrap();
+        assert!(validate_receipt_file(&path, node_id, backend).is_err());
+    }
+
+    #[test]
     fn linux_clean_receipt_cannot_enable_public_readiness() {
         let directory = tempfile::tempdir().unwrap();
         let node_id = Uuid::new_v4();
@@ -2458,6 +2567,18 @@ mod tests {
     }
 
     #[test]
+    fn cgroup_boundary_inventory_protects_process_and_thread_membership() {
+        assert_eq!(
+            LINUX_CGROUP_ANCESTOR_CONTROL_FILES,
+            &["cgroup.procs", "cgroup.threads"]
+        );
+        assert_eq!(
+            LINUX_CGROUP_LEAF_CONTROL_FILES,
+            &["cgroup.procs", "cgroup.threads", "cgroup.kill", "pids.max"]
+        );
+    }
+
+    #[test]
     fn process_scope_cannot_expand_beyond_exact_run_root() {
         let directory = tempfile::tempdir().unwrap();
         let jobs = directory.path().join("jobs");
@@ -2534,21 +2655,30 @@ mod tests {
     fn cgroup_parsers_reject_residual_and_malformed_state() {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("cgroup.procs"), b"123\n456\n").unwrap();
+        fs::write(directory.path().join("cgroup.threads"), b"123\n456\n").unwrap();
         fs::write(
             directory.path().join("cgroup.events"),
             b"populated 1\nfrozen 0\n",
         )
         .unwrap();
         assert_eq!(linux_cgroup_pids(directory.path()).unwrap(), vec![123, 456]);
+        assert_eq!(
+            linux_cgroup_threads(directory.path()).unwrap(),
+            vec![123, 456]
+        );
         assert!(ensure_linux_cgroup_empty(directory.path()).is_err());
 
         fs::write(directory.path().join("cgroup.procs"), b"").unwrap();
+        fs::write(directory.path().join("cgroup.threads"), b"").unwrap();
         fs::write(directory.path().join("cgroup.events"), b"populated 0\n").unwrap();
         ensure_linux_cgroup_empty(directory.path()).unwrap();
 
         fs::write(directory.path().join("cgroup.procs"), b"not-a-pid\n").unwrap();
         assert!(linux_cgroup_pids(directory.path()).is_err());
         fs::write(directory.path().join("cgroup.procs"), b"").unwrap();
+        fs::write(directory.path().join("cgroup.threads"), b"not-a-tid\n").unwrap();
+        assert!(linux_cgroup_threads(directory.path()).is_err());
+        fs::write(directory.path().join("cgroup.threads"), b"").unwrap();
         fs::write(directory.path().join("cgroup.events"), b"populated maybe\n").unwrap();
         assert!(linux_cgroup_populated(directory.path()).is_err());
     }
@@ -2638,6 +2768,11 @@ mod tests {
         isolation.reconcile_before_claim().unwrap();
         isolation.verify_before_claim().unwrap();
 
+        assert!(
+            linux_cgroup_threads(&cgroup).unwrap().is_empty(),
+            "freshly reconciled hostile cgroup must have no residual threads"
+        );
+
         // A dedicated identity is only a boundary while it is exclusive to
         // this worker. A process with the execution UID outside the cgroup must
         // block the next claim instead of being silently ignored.
@@ -2681,7 +2816,9 @@ mod tests {
                          if cat \"$1\" >/dev/null 2>&1; then exit 91; fi; \
                          if cat \"$2\" >/dev/null 2>&1; then exit 92; fi; \
                          if printf '%s\\n' \"$$\" > \"$3\" 2>/dev/null; then exit 93; fi; \
-                         printf 'cgroup_escape=blocked\\n'",
+                         if printf '%s\\n' \"$$\" > \"$4\" 2>/dev/null; then exit 94; fi; \
+                         printf 'cgroup_escape=blocked\\n'; \
+                         printf 'cgroup.threads_escape=blocked\\n'",
                     ),
                     OsString::from("hostile-live"),
                     credential.as_os_str().to_owned(),
@@ -2690,6 +2827,12 @@ mod tests {
                         .parent()
                         .unwrap()
                         .join("cgroup.procs")
+                        .as_os_str()
+                        .to_owned(),
+                    cgroup
+                        .parent()
+                        .unwrap()
+                        .join("cgroup.threads")
                         .as_os_str()
                         .to_owned(),
                 ],
@@ -2709,9 +2852,13 @@ mod tests {
         assert!(result.succeeded(), "{result:?}");
         assert_eq!(
             fs::read_to_string(&stdout).unwrap(),
-            format!("uid={uid} gid={gid}\ncgroup_escape=blocked\n")
+            format!("uid={uid} gid={gid}\ncgroup_escape=blocked\ncgroup.threads_escape=blocked\n")
         );
         isolation.verify_after_process().unwrap();
+        assert!(
+            linux_cgroup_threads(&cgroup).unwrap().is_empty(),
+            "completed hostile process must leave no cgroup.threads entries"
+        );
 
         let mut residual = Command::new("sh")
             .args([
@@ -2729,6 +2876,7 @@ mod tests {
         }
         isolation.reconcile_before_claim().unwrap();
         isolation.verify_before_claim().unwrap();
+        assert!(linux_cgroup_threads(&cgroup).unwrap().is_empty());
         let status = residual.wait().unwrap();
         assert!(!status.success(), "residual survived cgroup.kill");
         let receipt: ReconciliationReceipt =

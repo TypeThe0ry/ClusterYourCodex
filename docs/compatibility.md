@@ -103,8 +103,33 @@ each URL with `scripts/Test-GARawLogs.ps1`, rejects redirects and oversized
 responses, recomputes the SHA-256 over the retained bytes, and cross-binds the
 result back to the corresponding issue record.
 
-The records contain a boolean `gates` map, and every required entry must be
-`true`. Issue #2 covers the Tauri desktop host/tray, native renderer proxy,
+Issue #5 is validated as a platform matrix rather than as nine independent
+booleans. Its `rawLog` must enumerate Linux, Windows, and macOS exactly once
+under `platforms`, and its `markers` array must retain every source-bound
+gate marker. The issue's `gates` map contains structured evidence objects:
+platform-specific gates bind one platform, exact test selector, exact locked
+`cyc-worker` command, and `rawLogMarkers`; matrix gates bind all three
+platforms, one nested run per platform, and each run's `rawLogMarkers`. Each
+nested run binds an external execution row to its exact test selector and
+locked command. The Linux row uses
+`isolation::tests::linux_live_dedicated_identity_credential_and_residual_reconciliation`
+with `--ignored --exact --nocapture`; the Windows row uses
+`isolation::tests::windows_external_json_contract_is_fail_closed_at_every_runtime_gate`;
+and the macOS row uses
+`isolation::tests::macos_external_reconciliation_is_fail_closed_at_every_runtime_gate`.
+All rows use `--manifest-path`, `-p cyc-worker`, `--lib`, and `--locked`, and
+must end in their exact selector. The marker format is
+`CYC-GA-ISSUE5|platform=<platform>|selector=<selector>|commandSha256=<digest>|gate=<gate>|status=passed`;
+the digest covers the normalized command. The downloader searches for every
+marker in the downloaded log and records `markersVerified: true` plus
+`gateEvidence`; the readiness gate cross-binds the verified platform, selector,
+command, and marker sets. A generic Linux `cargo test --workspace --locked`
+run therefore cannot satisfy the Windows, macOS, or restart rows even when an
+older manifest supplies every Issue #5 gate as `true`.
+
+Issue #2 and Issue #3 retain their boolean `gates` maps, and every required
+entry must be `true`. Issue #5 uses the structured gate matrix described above.
+Issue #2 covers the Tauri desktop host/tray, native renderer proxy,
 per-user tasks, SID-scoped data ACL, bundled MCP/marketplace payload,
 transactional install/repair/upgrade/rollback/uninstall, clean Windows 11 VM,
 live Windows controller/worker round trip, and production Authenticode setup

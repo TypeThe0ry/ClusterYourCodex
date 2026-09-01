@@ -11,6 +11,65 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $MaximumRawLogBytes = 64MB
 
+# Issue #5 evidence is a three-host matrix.  These constants intentionally
+# mirror Test-GAReadiness.ps1: the downloader validates the manifest before it
+# makes a request, then validates the retained bytes against the exact marker
+# set.  A generic Linux ``cargo test --workspace --locked`` log consequently
+# cannot be relabelled as Windows, macOS, or restart evidence.
+$GaIssue5Platforms = @('linux', 'windows', 'macos')
+$GaIssue5MatrixGateNames = @(
+    'jobsCannotAlterGuardState',
+    'jobsCannotReadWorkerCredentials',
+    'restartResidualProcessReconciliation'
+)
+$GaIssue5PlatformGateNames = [ordered]@{
+    linux = @(
+        'linuxDedicatedExecutionIdentity',
+        'linuxCgroupV2Reconciliation'
+    )
+    windows = @(
+        'windowsIsolatedExecutionIdentity',
+        'windowsJobObject',
+        'windowsProtectedExternalGuard'
+    )
+    macos = @('macosExternalReconciliation')
+}
+$GaIssue5AllGateNames = @(
+    'linuxDedicatedExecutionIdentity',
+    'linuxCgroupV2Reconciliation',
+    'windowsIsolatedExecutionIdentity',
+    'windowsJobObject',
+    'windowsProtectedExternalGuard',
+    'macosExternalReconciliation',
+    'jobsCannotAlterGuardState',
+    'jobsCannotReadWorkerCredentials',
+    'restartResidualProcessReconciliation'
+)
+$GaIssue5ExpectedSelectors = [ordered]@{
+    linux = 'isolation::tests::linux_live_dedicated_identity_credential_and_residual_reconciliation'
+    windows = 'isolation::tests::windows_external_json_contract_is_fail_closed_at_every_runtime_gate'
+    macos = 'isolation::tests::macos_external_reconciliation_is_fail_closed_at_every_runtime_gate'
+}
+$GaIssue5AggregateCommand = 'issue5-evidence-matrix'
+$GaIssue5GateExpectedPlatforms = [ordered]@{
+    linuxDedicatedExecutionIdentity = @('linux')
+    linuxCgroupV2Reconciliation = @('linux')
+    windowsIsolatedExecutionIdentity = @('windows')
+    windowsJobObject = @('windows')
+    windowsProtectedExternalGuard = @('windows')
+    macosExternalReconciliation = @('macos')
+    jobsCannotAlterGuardState = @('linux', 'windows', 'macos')
+    jobsCannotReadWorkerCredentials = @('linux', 'windows', 'macos')
+    restartResidualProcessReconciliation = @('linux', 'windows', 'macos')
+}
+$GaIssue5RequiredMarkerPrefixes = [ordered]@{
+    linuxDedicatedExecutionIdentity = @('uid=', 'gid=')
+    linuxCgroupV2Reconciliation = @('cgroup_escape=blocked', 'cgroup.threads_escape=blocked')
+}
+$GaIssue5AnyMarkerPrefixes = [ordered]@{
+    restartResidualProcessReconciliation = @('residual_empty', 'residualCgroupVerified=1', 'residualIdentityProcessesVerified=1')
+}
+
 function Assert-RawLogCondition {
     param(
         [Parameter(Mandatory = $true)][bool]$Condition,
@@ -97,6 +156,316 @@ function Get-RawLogProperty {
         $current = $property.Value
     }
     return $current
+}
+
+function Get-RawLogOptionalProperty {
+    param(
+        [Parameter(Mandatory = $true)][object]$Object,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    if ($null -eq $Object) { return $null }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Get-RawLogIssue5RunSelector {
+    param(
+        [Parameter(Mandatory = $true)][object]$Run,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $selector = Get-RawLogOptionalProperty -Object $Run -Name 'testSelector'
+    if ($null -eq $selector) {
+        $selector = Get-RawLogOptionalProperty -Object $Run -Name 'selector'
+    }
+    Assert-RawLogCondition ($selector -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$selector)) "$Description.testSelector is a non-empty string"
+    return [string]$selector
+}
+
+function Normalize-RawLogIssue5Command {
+    param([Parameter(Mandatory = $true)][string]$Command)
+
+    return [regex]::Replace($Command.Trim(), '\s+', ' ')
+}
+
+function Get-RawLogIssue5CommandSha256 {
+    param([Parameter(Mandatory = $true)][string]$Command)
+
+    $sha = New-Object System.Security.Cryptography.SHA256Managed
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes((Normalize-RawLogIssue5Command -Command $Command))
+        return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+    }
+}
+
+function Get-RawLogIssue5Marker {
+    param(
+        [Parameter(Mandatory = $true)][string]$Platform,
+        [Parameter(Mandatory = $true)][string]$Selector,
+        [Parameter(Mandatory = $true)][string]$Command,
+        [Parameter(Mandatory = $true)][string]$Gate
+    )
+
+    $commandDigest = Get-RawLogIssue5CommandSha256 -Command $Command
+    return "CYC-GA-ISSUE5|platform=$($Platform.ToLowerInvariant())|selector=$Selector|commandSha256=$commandDigest|gate=$Gate|status=passed"
+}
+
+function Assert-RawLogIssue5RunCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$Platform,
+        [Parameter(Mandatory = $true)][string]$Selector,
+        [Parameter(Mandatory = $true)][string]$Command,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $normalized = Normalize-RawLogIssue5Command -Command $Command
+    $manifestToken = '(?:"[^"]*Cargo\.toml"|''[^'']*Cargo\.toml''|\S*Cargo\.toml)'
+    $tail = if ($Platform -ceq 'linux') {
+        '--ignored\s+--exact\s+--nocapture'
+    } else {
+        '--exact\s+--nocapture'
+    }
+    $pattern = '^cargo(?:\.exe)?\s+test\s+--manifest-path\s+' + $manifestToken +
+        '\s+-p\s+cyc-worker\s+--lib\s+--locked\s+--\s+' + $tail +
+        '\s+' + [regex]::Escape($Selector) + '$'
+    Assert-RawLogCondition ($normalized -match $pattern) "$Description.command is the exact locked cyc-worker selector for platform '$Platform'"
+    Assert-RawLogCondition ($normalized -notmatch '(?i)(?:^|\s)--workspace(?:\s|$)') "$Description.command is not a workspace-wide generic test command"
+}
+
+function Get-RawLogIssue5GateMarkers {
+    param(
+        [Parameter(Mandatory = $true)][object]$GateEvidence,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $markerProperty = $GateEvidence.PSObject.Properties['rawLogMarkers']
+    if ($null -eq $markerProperty) {
+        $markerProperty = $GateEvidence.PSObject.Properties['markers']
+    }
+    if ($null -eq $markerProperty) {
+        $markers = $null
+    } elseif ($markerProperty.Value -is [System.Array]) {
+        $markers = $markerProperty.Value
+    } else {
+        $markers = @($markerProperty.Value)
+    }
+    Assert-RawLogCondition (($markers -is [System.Array]) -and $markers.Count -gt 0) "$Description.rawLogMarkers is a non-empty array"
+    foreach ($marker in @($markers)) {
+        Assert-RawLogCondition ($marker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$marker)) "$Description.rawLogMarkers entries are non-empty strings"
+    }
+    return @($markers | ForEach-Object { [string]$_ })
+}
+
+function Assert-RawLogIssue5RequiredMarkers {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Markers,
+        [Parameter(Mandatory = $true)][string]$Gate,
+        [Parameter(Mandatory = $true)][string]$Platform,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    if ($GaIssue5RequiredMarkerPrefixes.Contains($Gate)) {
+        foreach ($prefix in @($GaIssue5RequiredMarkerPrefixes[$Gate])) {
+            $matched = @($Markers | Where-Object {
+                    $candidate = [string]$_
+                    $candidate.Equals($prefix, [StringComparison]::Ordinal) -or
+                    $candidate.StartsWith($prefix, [StringComparison]::Ordinal)
+                })
+            Assert-RawLogCondition ($matched.Count -gt 0) "$Description.rawLogMarkers contains a native marker beginning with '$prefix'"
+        }
+    }
+    if ($Platform -ceq 'linux' -and $GaIssue5AnyMarkerPrefixes.Contains($Gate)) {
+        $anyMatched = @()
+        foreach ($prefix in @($GaIssue5AnyMarkerPrefixes[$Gate])) {
+            $anyMatched += @($Markers | Where-Object {
+                    $candidate = [string]$_
+                    $candidate.Equals($prefix, [StringComparison]::Ordinal) -or
+                    $candidate.StartsWith($prefix, [StringComparison]::Ordinal)
+                })
+        }
+        Assert-RawLogCondition ($anyMatched.Count -gt 0) "$Description.rawLogMarkers contains a residual-process reconciliation marker"
+    }
+}
+
+function Assert-RawLogIssue5SingleGateEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$Gate,
+        [Parameter(Mandatory = $true)][object]$GateEvidence,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-RawLogCondition (($GateEvidence -is [pscustomobject]) -and -not ($GateEvidence -is [System.Array])) "$Description.gates.$Gate is a structured evidence object, not a bare boolean"
+    $status = Get-RawLogProperty -Object $GateEvidence -Path 'status' -Description "$Description.gates.$Gate"
+    Assert-RawLogCondition (($status -is [bool]) -and $status) "$Description.gates.$Gate.status is boolean true"
+    $platformValue = Get-RawLogProperty -Object $GateEvidence -Path 'platform' -Description "$Description.gates.$Gate"
+    Assert-RawLogCondition ($platformValue -is [string]) "$Description.gates.$Gate.platform is a string"
+    $platform = ([string]$platformValue).ToLowerInvariant()
+    Assert-RawLogCondition ($GaIssue5GateExpectedPlatforms[$Gate].Count -eq 1) "$Description.gates.$Gate has a single-platform contract"
+    Assert-RawLogCondition ($platform.Equals([string]$GaIssue5GateExpectedPlatforms[$Gate][0], [StringComparison]::Ordinal)) "$Description.gates.$Gate.platform is '$($GaIssue5GateExpectedPlatforms[$Gate][0])'"
+    $selector = Get-RawLogIssue5RunSelector -Run $GateEvidence -Description "$Description.gates.$Gate"
+    Assert-RawLogCondition ($selector.Equals([string]$GaIssue5ExpectedSelectors[$platform], [StringComparison]::Ordinal)) "$Description.gates.$Gate.testSelector is the exact '$platform' selector"
+    $commandValue = Get-RawLogProperty -Object $GateEvidence -Path 'command' -Description "$Description.gates.$Gate"
+    Assert-RawLogCondition ($commandValue -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$commandValue)) "$Description.gates.$Gate.command is a non-empty string"
+    $command = [string]$commandValue
+    Assert-RawLogIssue5RunCommand -Platform $platform -Selector $selector -Command $command -Description "$Description.gates.$Gate"
+    $markers = @(Get-RawLogIssue5GateMarkers -GateEvidence $GateEvidence -Description "$Description.gates.$Gate")
+    $canonicalMarker = Get-RawLogIssue5Marker -Platform $platform -Selector $selector -Command $command -Gate $Gate
+    Assert-RawLogCondition (@($markers | Where-Object { $_ -ceq $canonicalMarker }).Count -eq 1) "$Description.gates.$Gate.rawLogMarkers retains the source-bound platform/selector/command marker"
+    Assert-RawLogIssue5RequiredMarkers -Markers $markers -Gate $Gate -Platform $platform -Description "$Description.gates.$Gate"
+    return [pscustomobject]@{
+        gate = $Gate
+        status = $true
+        platform = $platform
+        selector = $selector
+        command = (Normalize-RawLogIssue5Command -Command $command)
+        markers = $markers
+    }
+}
+
+function Assert-RawLogIssue5MatrixGateEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$Gate,
+        [Parameter(Mandatory = $true)][object]$GateEvidence,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-RawLogCondition (($GateEvidence -is [pscustomobject]) -and -not ($GateEvidence -is [System.Array])) "$Description.gates.$Gate is a structured evidence object, not a bare boolean"
+    $status = Get-RawLogProperty -Object $GateEvidence -Path 'status' -Description "$Description.gates.$Gate"
+    Assert-RawLogCondition (($status -is [bool]) -and $status) "$Description.gates.$Gate.status is boolean true"
+    $platformValues = Get-RawLogProperty -Object $GateEvidence -Path 'platforms' -Description "$Description.gates.$Gate"
+    Assert-RawLogCondition (($platformValues -is [System.Array]) -and $platformValues.Count -eq $GaIssue5Platforms.Count) "$Description.gates.$Gate.platforms lists Linux, Windows, and macOS"
+    foreach ($platform in $GaIssue5Platforms) {
+        Assert-RawLogCondition (@($platformValues | Where-Object { ([string]$_).ToLowerInvariant() -ceq $platform }).Count -eq 1) "$Description.gates.$Gate.platforms contains '$platform' exactly once"
+    }
+
+    $runs = Get-RawLogProperty -Object $GateEvidence -Path 'runs' -Description "$Description.gates.$Gate"
+    Assert-RawLogCondition (($runs -is [System.Array]) -and $runs.Count -eq $GaIssue5Platforms.Count) "$Description.gates.$Gate.runs contains one run per required platform"
+    $seenPlatforms = @{}
+    $allMarkers = New-Object System.Collections.Generic.List[string]
+    $runRecords = New-Object System.Collections.Generic.List[object]
+    foreach ($run in @($runs)) {
+        Assert-RawLogCondition (($run -is [pscustomobject]) -and -not ($run -is [System.Array])) "$Description.gates.$Gate.runs entries are JSON objects"
+        $platformValue = Get-RawLogProperty -Object $run -Path 'platform' -Description "$Description.gates.$Gate.runs"
+        Assert-RawLogCondition ($platformValue -is [string]) "$Description.gates.$Gate.runs.platform is a string"
+        $platform = ([string]$platformValue).ToLowerInvariant()
+        Assert-RawLogCondition ($GaIssue5Platforms -contains $platform) "$Description.gates.$Gate.runs.platform is linux, windows, or macos"
+        Assert-RawLogCondition (-not $seenPlatforms.ContainsKey($platform)) "$Description.gates.$Gate.runs.platform entries are unique"
+        $seenPlatforms[$platform] = $true
+
+        $selector = Get-RawLogIssue5RunSelector -Run $run -Description "$Description.gates.$Gate.runs.$platform"
+        Assert-RawLogCondition ($selector.Equals([string]$GaIssue5ExpectedSelectors[$platform], [StringComparison]::Ordinal)) "$Description.gates.$Gate.runs.$platform.testSelector is the exact '$platform' selector"
+        $commandValue = Get-RawLogProperty -Object $run -Path 'command' -Description "$Description.gates.$Gate.runs.$platform"
+        Assert-RawLogCondition ($commandValue -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$commandValue)) "$Description.gates.$Gate.runs.$platform.command is a non-empty string"
+        $command = [string]$commandValue
+        Assert-RawLogIssue5RunCommand -Platform $platform -Selector $selector -Command $command -Description "$Description.gates.$Gate.runs.$platform"
+
+        $markers = @(Get-RawLogIssue5GateMarkers -GateEvidence $run -Description "$Description.gates.$Gate.runs.$platform")
+        $canonicalMarker = Get-RawLogIssue5Marker -Platform $platform -Selector $selector -Command $command -Gate $Gate
+        Assert-RawLogCondition (@($markers | Where-Object { $_ -ceq $canonicalMarker }).Count -eq 1) "$Description.gates.$Gate.runs.$platform.rawLogMarkers retains the source-bound marker"
+        Assert-RawLogIssue5RequiredMarkers -Markers $markers -Gate $Gate -Platform $platform -Description "$Description.gates.$Gate.runs.$platform"
+        foreach ($marker in $markers) {
+            if (-not (@($allMarkers | Where-Object { $_ -ceq $marker }).Count -gt 0)) {
+                [void]$allMarkers.Add([string]$marker)
+            }
+        }
+        [void]$runRecords.Add([pscustomobject]@{
+                platform = $platform
+                selector = $selector
+                command = (Normalize-RawLogIssue5Command -Command $command)
+                markers = $markers
+            })
+    }
+    Assert-RawLogCondition ($seenPlatforms.Count -eq $GaIssue5Platforms.Count) "$Description.gates.$Gate.runs covers all required platforms"
+
+    $gateMarkers = @(Get-RawLogIssue5GateMarkers -GateEvidence $GateEvidence -Description "$Description.gates.$Gate")
+    foreach ($marker in $allMarkers) {
+        Assert-RawLogCondition (@($gateMarkers | Where-Object { $_ -ceq $marker }).Count -eq 1) "$Description.gates.$Gate.rawLogMarkers retains each platform marker"
+    }
+    Assert-RawLogIssue5RequiredMarkers -Markers $gateMarkers -Gate $Gate -Platform 'multi-platform' -Description "$Description.gates.$Gate"
+    return [pscustomobject]@{
+        gate = $Gate
+        status = $true
+        platforms = @($GaIssue5Platforms)
+        markers = $gateMarkers
+        runs = $runRecords.ToArray()
+    }
+}
+
+function Assert-RawLogIssue5Evidence {
+    param(
+        [Parameter(Mandatory = $true)][object]$Issue,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    # The gate matrix lives on the Issue #5 record.  Keep the ordinary rawLog
+    # descriptor as the source-bound download metadata so issue2/issue3 retain
+    # their existing shape while this validator can cross-bind all nine gates.
+    $rawLog = Get-RawLogProperty -Object $Issue -Path 'rawLog' -Description $Description
+    $aggregateCommand = [string](Get-RawLogProperty -Object $rawLog -Path 'command' -Description $Description)
+    Assert-RawLogCondition ($aggregateCommand.Equals($GaIssue5AggregateCommand, [StringComparison]::Ordinal)) "$Description.command equals '$GaIssue5AggregateCommand'"
+    Assert-RawLogCondition ($aggregateCommand -notmatch '(?i)(?:^|\s)--workspace(?:\s|$)') "$Description.command is not a workspace-wide generic test command"
+
+    $rawPlatforms = Get-RawLogProperty -Object $rawLog -Path 'platforms' -Description $Description
+    Assert-RawLogCondition (($rawPlatforms -is [System.Array]) -and $rawPlatforms.Count -eq $GaIssue5Platforms.Count) "$Description.platforms enumerates Linux, Windows, and macOS exactly once"
+    $normalizedRawPlatforms = @($rawPlatforms | ForEach-Object { ([string]$_).ToLowerInvariant() })
+    foreach ($platform in $GaIssue5Platforms) {
+        Assert-RawLogCondition (@($normalizedRawPlatforms | Where-Object { $_ -ceq $platform }).Count -eq 1) "$Description.platforms contains '$platform' exactly once"
+    }
+
+    $gates = Get-RawLogProperty -Object $Issue -Path 'gates' -Description $Description
+    Assert-RawLogCondition (($gates -is [pscustomobject]) -and -not ($gates -is [System.Array])) "$Description.gates is a JSON object"
+    $gateProperties = @($gates.PSObject.Properties)
+    Assert-RawLogCondition ($gateProperties.Count -eq $GaIssue5AllGateNames.Count) "$Description.gates contains exactly the nine Issue #5 gate entries"
+    foreach ($gateProperty in $gateProperties) {
+        Assert-RawLogCondition ($GaIssue5AllGateNames -contains [string]$gateProperty.Name) "$Description.gates contains only the reviewed Issue #5 gate names"
+    }
+    $gateRecords = New-Object System.Collections.Generic.List[object]
+    foreach ($gate in $GaIssue5AllGateNames) {
+        $gateProperty = $gates.PSObject.Properties[$gate]
+        Assert-RawLogCondition ($null -ne $gateProperty) "$Description.gates.$gate is present"
+        $gateEvidence = $gateProperty.Value
+        $expectedPlatforms = @($GaIssue5GateExpectedPlatforms[$gate])
+        if ($expectedPlatforms.Count -eq 1) {
+            [void]$gateRecords.Add((Assert-RawLogIssue5SingleGateEvidence -Gate $gate -GateEvidence $gateEvidence -Description $Description))
+        } else {
+            [void]$gateRecords.Add((Assert-RawLogIssue5MatrixGateEvidence -Gate $gate -GateEvidence $gateEvidence -Description $Description))
+        }
+    }
+
+    $rawMarkers = Get-RawLogProperty -Object $rawLog -Path 'markers' -Description $Description
+    Assert-RawLogCondition (($rawMarkers -is [System.Array]) -and $rawMarkers.Count -gt 0) "$Description.markers is a non-empty array"
+    $expectedMarkers = New-Object System.Collections.Generic.List[string]
+    foreach ($gateRecord in $gateRecords.ToArray()) {
+        foreach ($marker in @($gateRecord.markers)) {
+            if (-not (@($expectedMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -gt 0)) {
+                [void]$expectedMarkers.Add([string]$marker)
+            }
+            Assert-RawLogCondition (@($rawMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.markers retains the exact expected marker for '$($gateRecord.gate)'"
+        }
+    }
+    return [pscustomobject]@{
+        platforms = @($GaIssue5Platforms)
+        markers = $expectedMarkers.ToArray()
+        gates = $gateRecords.ToArray()
+    }
+}
+
+function Assert-RawLogIssue5Markers {
+    param(
+        [Parameter(Mandatory = $true)][object]$RawLog,
+        [Parameter(Mandatory = $true)][string]$LogPath,
+        [Parameter(Mandatory = $true)][object]$Contract
+    )
+
+    Assert-RawLogCondition (Test-Path -LiteralPath $LogPath -PathType Leaf) "Issue #5 raw log exists for marker validation: $LogPath"
+    $logText = [IO.File]::ReadAllText($LogPath)
+    foreach ($marker in @($Contract.markers)) {
+        Assert-RawLogCondition ($logText.IndexOf([string]$marker, [StringComparison]::Ordinal) -ge 0) "Issue #5 raw log contains retained marker '$marker'"
+    }
 }
 
 function Get-RawLogJson {
@@ -282,10 +651,18 @@ foreach ($issueName in @('issue2', 'issue3', 'issue5')) {
     $expectedHash = [string](Get-RawLogProperty -Object $rawLog -Path 'sha256' -Description $issueName)
     Assert-RawLogCondition ($expectedHash -match '^[0-9a-fA-F]{64}$') "$issueName.rawLog.sha256 is a SHA-256 digest"
 
+    $issue5Contract = $null
+    if ($issueName -ceq 'issue5') {
+        $issue5Contract = Assert-RawLogIssue5Evidence -Issue $issue -Description 'issue5'
+    }
+
     $logPath = Join-Path $outputRoot "$evidenceId.log"
     [long]$bytes = Save-RawLogFromHttps -Uri $uri -Destination $logPath
     $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $logPath).Hash.ToLowerInvariant()
     Assert-RawLogCondition ($actualHash -ceq $expectedHash.ToLowerInvariant()) "$issueName raw log bytes match rawLog.sha256"
+    if ($issueName -ceq 'issue5') {
+        Assert-RawLogIssue5Markers -RawLog $rawLog -LogPath $logPath -Contract $issue5Contract
+    }
     $record = [ordered]@{
         issue = $issueName
         evidenceId = $evidenceId
@@ -296,9 +673,15 @@ foreach ($issueName in @('issue2', 'issue3', 'issue5')) {
         path = $logPath
         status = 'passed'
     }
+    if ($issueName -ceq 'issue5') {
+        $record.markersVerified = $true
+        $record.platforms = $issue5Contract.platforms
+        $record.markers = $issue5Contract.markers
+        $record.gateEvidence = $issue5Contract.gates
+    }
     Write-RawLogAtomicText `
         -Path (Join-Path $outputRoot "$evidenceId.verification.json") `
-        -Text ($record | ConvertTo-Json -Depth 8) `
+        -Text ($record | ConvertTo-Json -Depth 20) `
         -Encoding (New-Object System.Text.UTF8Encoding($false))
     [void]$records.Add($record)
 }
@@ -309,7 +692,7 @@ $result = [ordered]@{
     sourceCommit = $ExpectedCommit.ToLowerInvariant()
     records = $records.ToArray()
 }
-$resultJson = $result | ConvertTo-Json -Depth 10 -Compress
+$resultJson = $result | ConvertTo-Json -Depth 20 -Compress
 Write-RawLogAtomicText `
     -Path (Join-Path $outputRoot 'raw-log-verification.json') `
     -Text $resultJson `

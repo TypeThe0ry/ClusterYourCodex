@@ -46,6 +46,7 @@ HOSTILE_GID=""
 SOURCE_SHA=""
 CGROUP_CONTROLLERS=""
 CGROUP_SUBTREE_CONTROLLERS=""
+CGROUP_THREADS_VERIFIED=0
 TEST_STARTED_AT=""
 TEST_FINISHED_AT=""
 TEST_START_EPOCH=""
@@ -169,7 +170,7 @@ current_owned_cgroups() {
 
 cleanup_one_cgroup() {
   local path="$1"
-  local deadline now pids populated
+  local deadline now pids threads populated
 
   [[ -e "$path" ]] || return 0
   if [[ ! -d "$path" || -L "$path" ]]; then
@@ -178,6 +179,10 @@ cleanup_one_cgroup() {
   fi
   if [[ ! -w "$path/cgroup.kill" ]]; then
     log_cleanup "cgroup.kill is not writable: $path"
+    return 1
+  fi
+  if [[ ! -f "$path/cgroup.threads" ]]; then
+    log_cleanup "cgroup.threads is missing: $path"
     return 1
   fi
 
@@ -189,14 +194,15 @@ cleanup_one_cgroup() {
   deadline=$(( $(now_epoch) + 15 ))
   while :; do
     pids="$(cat "$path/cgroup.procs" 2>/dev/null || true)"
+    threads="$(cat "$path/cgroup.threads" 2>/dev/null || true)"
     populated="$(awk '$1 == "populated" { print $2; found = 1 } END { if (!found) exit 1 }' \
       "$path/cgroup.events" 2>/dev/null || true)"
-    if [[ -z "$pids" && "$populated" == "0" ]]; then
+    if [[ -z "$pids" && -z "$threads" && "$populated" == "0" ]]; then
       break
     fi
     now=$(now_epoch)
     if (( now >= deadline )); then
-      log_cleanup "cgroup still populated after kill timeout: $path (pids=${pids:-none})"
+      log_cleanup "cgroup still populated after kill timeout: $path (pids=${pids:-none}; threads=${threads:-none})"
       return 1
     fi
     sleep 0.05
@@ -269,6 +275,11 @@ write_manifest() {
   "cgroupRoot": "$CGROUP_ROOT",
   "cgroupControllers": "$controllers",
   "cgroupSubtreeControllers": "$(json_escape "$CGROUP_SUBTREE_CONTROLLERS")",
+  "cgroupControls": ["cgroup.procs", "cgroup.threads", "cgroup.events", "cgroup.kill", "pids.max"],
+  "nativeProbeMarkers": {
+    "cgroupThreadsControl": "cgroup.threads",
+    "cgroupThreadsBoundaryVerified": $CGROUP_THREADS_VERIFIED
+  },
   "temporaryUser": "$(json_escape "$HOSTILE_USER")",
   "temporaryGroup": "$(json_escape "$HOSTILE_GROUP")",
   "executionUid": ${HOSTILE_UID:-null},
@@ -297,7 +308,7 @@ write_result() {
   local cleanup_status="$2"
   local test_code="null" uid_json="null" gid_json="null"
   local source_sha repo work test_log cleanup_log preflight_log tmp
-  local residual_cgroup=0 residual_uid=0 elapsed=0
+  local residual_cgroup=0 residual_uid=0 elapsed=0 cgroup_threads_marker=0
 
   [[ -n "$TEST_EXIT_CODE" ]] && test_code="$TEST_EXIT_CODE"
   is_uint "${HOSTILE_UID:-}" && uid_json="$HOSTILE_UID"
@@ -317,6 +328,9 @@ write_result() {
   if [[ -n "$TEST_START_EPOCH" && -n "$TEST_END_EPOCH" ]] &&
      is_uint "$TEST_START_EPOCH" && is_uint "$TEST_END_EPOCH"; then
     elapsed=$(( TEST_END_EPOCH - TEST_START_EPOCH ))
+  fi
+  if [[ "$CGROUP_THREADS_VERIFIED" == 1 && "${TEST_EXIT_CODE:-}" == 0 ]]; then
+    cgroup_threads_marker=1
   fi
   tmp="$RESULT_PATH.tmp.$$"
   cat >"$tmp" <<EOF
@@ -339,6 +353,10 @@ write_result() {
   "temporaryGroup": "$(json_escape "$HOSTILE_GROUP")",
   "executionUid": $uid_json,
   "executionGid": $gid_json,
+  "nativeProbeMarkers": {
+    "cgroupThreadsControlVerified": $CGROUP_THREADS_VERIFIED,
+    "cgroupThreadsBoundaryVerified": $cgroup_threads_marker
+  },
   "residualCgroupVerified": $residual_cgroup,
   "residualIdentityProcessesVerified": $residual_uid,
   "logs": {
@@ -543,6 +561,7 @@ preflight() {
   [[ -f "$CGROUP_ROOT/cgroup.subtree_control" ]] || die "cgroup.subtree_control is missing"
   [[ -w "$CGROUP_ROOT" ]] || die "cgroup-v2 root is not writable"
   [[ -f "$CGROUP_ROOT/cgroup.procs" ]] || die "cgroup.procs is missing from cgroup-v2 root"
+  [[ -f "$CGROUP_ROOT/cgroup.threads" ]] || die "cgroup.threads is missing from cgroup-v2 root"
   CGROUP_CONTROLLERS="$(tr '\n' ' ' <"$CGROUP_ROOT/cgroup.controllers" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')"
   case " $CGROUP_CONTROLLERS " in
     *' pids '*) ;;
@@ -571,13 +590,16 @@ preflight() {
   [[ ! -e "$PREFLIGHT_CGROUP" ]] || die "preflight cgroup name collision: $PREFLIGHT_CGROUP"
   mkdir -- "$PREFLIGHT_CGROUP" || die "cannot create a writable cgroup-v2 child: $PREFLIGHT_CGROUP"
   PREFLIGHT_CGROUP_CREATED=1
-  for required in cgroup.procs cgroup.events cgroup.kill pids.max; do
+  for required in cgroup.procs cgroup.threads cgroup.events cgroup.kill pids.max; do
     [[ -f "$PREFLIGHT_CGROUP/$required" ]] || die "new cgroup lacks required controller file: $required"
   done
+  [[ -z "$(cat "$PREFLIGHT_CGROUP/cgroup.threads" 2>/dev/null || true)" ]] ||
+    die "new cgroup unexpectedly contains cgroup.threads entries"
+  CGROUP_THREADS_VERIFIED=1
   printf '64\n' >"$PREFLIGHT_CGROUP/pids.max" || die "cannot write pids.max in cgroup-v2 child"
   cleanup_one_cgroup "$PREFLIGHT_CGROUP" || die "preflight cgroup cleanup failed"
   PREFLIGHT_CGROUP_CREATED=0
-  log_preflight "created, configured, killed, and removed disposable cgroup"
+  log_preflight "created, configured, checked cgroup.threads, killed, and removed disposable cgroup"
 
 }
 
