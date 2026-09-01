@@ -90,7 +90,15 @@ function Read-CycFirewallJson {
         throw "$Label must be a bounded regular file."
     }
     try {
-        $raw = Get-Content -LiteralPath $resolved -Raw -ErrorAction Stop
+        [byte[]]$bytes = [System.IO.File]::ReadAllBytes($resolved)
+        $utf8Strict = New-Object System.Text.UTF8Encoding($false, $true)
+        $hasUtf8Bom = $bytes.Length -ge 3 -and
+            $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+        $raw = if ($hasUtf8Bom) {
+            $utf8Strict.GetString($bytes, 3, $bytes.Length - 3)
+        } else {
+            $utf8Strict.GetString($bytes)
+        }
         $converter = Get-Command ConvertFrom-Json -CommandType Cmdlet -ErrorAction Stop
         if ($converter.Parameters.ContainsKey('DateKind')) {
             return ConvertFrom-Json -InputObject $raw -DateKind String

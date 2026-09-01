@@ -5,6 +5,41 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Convert-CycWorkerKitsJsonText {
+    param([Parameter(Mandatory = $true)][string]$Raw)
+
+    $converter = Get-Command ConvertFrom-Json -CommandType Cmdlet -ErrorAction Stop
+    if ($converter.Parameters.ContainsKey('DateKind')) {
+        return ConvertFrom-Json -InputObject $Raw -DateKind String
+    }
+    return ConvertFrom-Json -InputObject $Raw
+}
+
+function Read-CycWorkerKitsUtf8Json {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [int64]$MaximumBytes = 4MB
+    )
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or
+        ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $item.Length -le 0 -or $item.Length -gt $MaximumBytes) {
+        throw "JSON fixture is not a bounded regular file: $Path"
+    }
+    try {
+        [byte[]]$bytes = [System.IO.File]::ReadAllBytes($item.FullName)
+        $utf8Strict = New-Object System.Text.UTF8Encoding($false, $true)
+        $offset = if ($bytes.Length -ge 3 -and
+            $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { 3 } else { 0 }
+        return Convert-CycWorkerKitsJsonText -Raw (
+            $utf8Strict.GetString($bytes, $offset, $bytes.Length - $offset)
+        )
+    } catch {
+        throw "JSON fixture contains invalid UTF-8: $Path"
+    }
+}
+
 $windowsInstaller = Join-Path $PSScriptRoot 'windows\Install-Worker.ps1'
 $linuxInstaller = Join-Path $PSScriptRoot 'linux\install-worker.sh'
 $macosInstaller = Join-Path $PSScriptRoot 'macos\install-worker.sh'
@@ -67,11 +102,11 @@ try {
     $windowsOutput = Join-Path $temporary 'windows'
     $result = & $builder -Target windows-x86_64 -WorkerExecutable $fakeWorker -OutputDirectory $windowsOutput -Version '0.1.0-test.1' | ConvertFrom-Json
     if ($result.schemaVersion -ne 'cyc.dev/worker-kit-build/v1') { throw 'Unexpected builder result schema.' }
-    $manifest = Get-Content -LiteralPath (Join-Path $windowsOutput 'worker-kit.json') -Raw | ConvertFrom-Json
+    $manifest = Read-CycWorkerKitsUtf8Json -Path (Join-Path $windowsOutput 'worker-kit.json')
     if ($manifest.schemaVersion -ne 'cyc.dev/worker-kit/v1' -or $manifest.os -ne 'windows') { throw 'Windows manifest is invalid.' }
     $actual = (Get-FileHash -LiteralPath (Join-Path $windowsOutput 'cyc-worker.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($manifest.files[0].sha256 -ne $actual) { throw 'Windows worker digest mismatch.' }
-    $signatureEnvelope = Get-Content -LiteralPath (Join-Path $windowsOutput 'worker-kit.sig') -Raw | ConvertFrom-Json
+    $signatureEnvelope = Read-CycWorkerKitsUtf8Json -Path (Join-Path $windowsOutput 'worker-kit.sig') -MaximumBytes 64KB
     if ($signatureEnvelope.schemaVersion -ne 'cyc.dev/worker-kit-signature/v1' -or
         $signatureEnvelope.algorithm -ne 'Ed25519' -or
         $signatureEnvelope.keyId -ne 'cyc-release-2026-02' -or
@@ -95,7 +130,7 @@ try {
         -Target linux-x86_64 `
         -WorkerExecutable $fakeWorker `
         -OutputDirectory $defaultVersionOutput | ConvertFrom-Json
-    $defaultVersionManifest = Get-Content -LiteralPath (Join-Path $defaultVersionOutput 'worker-kit.json') -Raw | ConvertFrom-Json
+    $defaultVersionManifest = Read-CycWorkerKitsUtf8Json -Path (Join-Path $defaultVersionOutput 'worker-kit.json')
     if ($defaultVersionResult.version -cne $repositoryVersion -or
         $defaultVersionManifest.version -cne $repositoryVersion) {
         throw 'Worker-kit omitted -Version does not derive its identity from repository VERSION.'
@@ -191,7 +226,7 @@ try {
             (Test-Path -LiteralPath (Join-Path $windowsSmokeData 'config.json'))) {
             throw 'Windows preinstall file state is invalid.'
         }
-        $preinstallManifest = Get-Content -LiteralPath (Join-Path $windowsSmokeData 'install-manifest.json') -Raw | ConvertFrom-Json
+        $preinstallManifest = Read-CycWorkerKitsUtf8Json -Path (Join-Path $windowsSmokeData 'install-manifest.json')
         if ($preinstallManifest.paired -or $preinstallManifest.serviceEnabled) {
             throw 'Windows preinstall manifest incorrectly reports a paired service.'
         }
@@ -384,7 +419,7 @@ internal static class Program
         $installedWorker = Join-Path $windowsTransactionInstall 'cyc-worker.exe'
         $installedConfig = Join-Path $windowsTransactionData 'config.json'
         $installedManifest = Join-Path $windowsTransactionData 'install-manifest.json'
-        $baselineCredentialPath = (Get-Content -LiteralPath $installedConfig -Raw | ConvertFrom-Json).credentialFile
+        $baselineCredentialPath = (Read-CycWorkerKitsUtf8Json -Path $installedConfig).credentialFile
         $baseline = [ordered]@{
             worker = (Get-FileHash -LiteralPath $installedWorker -Algorithm SHA256).Hash
             config = (Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash
@@ -515,7 +550,7 @@ internal static class Program
 
     $linuxOutput = Join-Path $temporary 'linux'
     $null = & $builder -Target linux-aarch64 -WorkerExecutable $fakeWorker -OutputDirectory $linuxOutput -Version '0.1.0-test.1'
-    $linuxManifest = Get-Content -LiteralPath (Join-Path $linuxOutput 'worker-kit.json') -Raw | ConvertFrom-Json
+    $linuxManifest = Read-CycWorkerKitsUtf8Json -Path (Join-Path $linuxOutput 'worker-kit.json')
     if ($linuxManifest.os -ne 'linux' -or $linuxManifest.architecture -ne 'aarch64') { throw 'Linux manifest is invalid.' }
 
     foreach ($macosTarget in @('macos-x86_64', 'macos-aarch64')) {
@@ -529,7 +564,7 @@ internal static class Program
             throw "macOS worker-kit build receipt is invalid for $macosTarget."
         }
         $macosManifestPath = Join-Path $macosOutput 'worker-kit.json'
-        $macosManifest = Get-Content -LiteralPath $macosManifestPath -Raw | ConvertFrom-Json
+        $macosManifest = Read-CycWorkerKitsUtf8Json -Path $macosManifestPath
         $expectedArchitecture = if ($macosTarget.EndsWith('aarch64', [StringComparison]::Ordinal)) { 'aarch64' } else { 'x86_64' }
         if ($macosManifest.schemaVersion -cne 'cyc.dev/worker-kit/v1' -or
             $macosManifest.target -cne $macosTarget -or
@@ -568,7 +603,8 @@ internal static class Program
                 throw "macOS checksum mismatch for $macosTarget/$($parts[1])."
             }
         }
-        $macosSignature = Get-Content -LiteralPath (Join-Path $macosOutput 'worker-kit.sig') -Raw | ConvertFrom-Json
+        $macosSignature = Read-CycWorkerKitsUtf8Json `
+            -Path (Join-Path $macosOutput 'worker-kit.sig') -MaximumBytes 64KB
         if ($macosSignature.manifestSha256 -cne (Get-FileHash -LiteralPath $macosManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()) {
             throw "macOS signature envelope does not bind the manifest for $macosTarget."
         }

@@ -644,6 +644,37 @@ function Write-JsonAtomic {
     }
 }
 
+function Read-WorkerUtf8Json {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [int64]$MaximumBytes = 1MB
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "$Label is missing."
+    }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $item.Length -le 0 -or $item.Length -gt $MaximumBytes) {
+        throw "$Label is not a bounded regular file."
+    }
+    try {
+        [byte[]]$bytes = [System.IO.File]::ReadAllBytes($item.FullName)
+        $utf8Strict = New-Object System.Text.UTF8Encoding($false, $true)
+        $offset = if ($bytes.Length -ge 3 -and
+            $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { 3 } else { 0 }
+        $raw = $utf8Strict.GetString($bytes, $offset, $bytes.Length - $offset)
+        $converter = Get-Command ConvertFrom-Json -CommandType Cmdlet -ErrorAction Stop
+        if ($converter.Parameters.ContainsKey('DateKind')) {
+            return ConvertFrom-Json -InputObject $raw -DateKind String
+        }
+        return ConvertFrom-Json -InputObject $raw
+    } catch {
+        throw "$Label contains invalid UTF-8 JSON."
+    }
+}
+
 function Get-WorkerIdentityFiles {
     param([Parameter(Mandatory = $true)][string]$DataRoot)
     if (-not (Test-Path -LiteralPath $DataRoot -PathType Container)) { return @() }
@@ -790,7 +821,7 @@ function Restore-WorkerTransaction {
     if ((Test-ReparsePoint $stateItem) -or $stateItem.Length -le 0 -or $stateItem.Length -gt 64KB) {
         throw 'Worker repair transaction state is unsafe.'
     }
-    $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+    $state = Read-WorkerUtf8Json -Path $statePath -Label 'Worker repair transaction state' -MaximumBytes 64KB
     if ($state.schemaVersion -ne $script:TransactionSchema) { throw 'Unsupported worker repair transaction state.' }
 
     Stop-AndRemoveTask `
@@ -934,7 +965,7 @@ if ($ownedInstallation -and (Test-Path -LiteralPath $manifestPath -PathType Leaf
     if ((Test-ReparsePoint $recordedManifestItem) -or $recordedManifestItem.Length -gt 1MB) {
         throw 'Existing install manifest is unsafe.'
     }
-    $recordedManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $recordedManifest = Read-WorkerUtf8Json -Path $manifestPath -Label 'Existing worker install manifest'
     if ($recordedManifest.schemaVersion -ne $script:Schema -or
         -not [string]::Equals((Resolve-NormalizedPath $recordedManifest.installRoot), $install, [System.StringComparison]::OrdinalIgnoreCase) -or
         -not [string]::Equals((Resolve-NormalizedPath $recordedManifest.dataRoot), $data, [System.StringComparison]::OrdinalIgnoreCase) -or

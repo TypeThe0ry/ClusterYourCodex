@@ -20,6 +20,57 @@ function Resolve-FullPath {
     return [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
 }
 
+function Convert-CycPreviewJsonText {
+    param([Parameter(Mandatory = $true)][string]$Raw)
+
+    $converter = Get-Command ConvertFrom-Json -CommandType Cmdlet -ErrorAction Stop
+    if ($converter.Parameters.ContainsKey('DateKind')) {
+        return ConvertFrom-Json -InputObject $Raw -DateKind String
+    }
+    return ConvertFrom-Json -InputObject $Raw
+}
+
+function Read-CycPreviewUtf8Json {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [int64]$MaximumBytes = 4MB
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "JSON file is missing: $Path"
+    }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $item.Length -le 0 -or $item.Length -gt $MaximumBytes) {
+        throw "JSON file is not a bounded regular file: $Path"
+    }
+    try {
+        [byte[]]$bytes = [System.IO.File]::ReadAllBytes($item.FullName)
+        $utf8Strict = New-Object System.Text.UTF8Encoding($false, $true)
+        $offset = if ($bytes.Length -ge 3 -and
+            $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { 3 } else { 0 }
+        $raw = $utf8Strict.GetString($bytes, $offset, $bytes.Length - $offset)
+        return Convert-CycPreviewJsonText -Raw $raw
+    } catch {
+        throw "JSON file contains invalid UTF-8 JSON: $Path"
+    }
+}
+
+function Write-CycPreviewUtf8Json {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Value,
+        [int]$Depth = 12
+    )
+
+    $json = ($Value | ConvertTo-Json -Depth $Depth) + "`n"
+    [System.IO.File]::WriteAllText(
+        $Path,
+        $json,
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+}
+
 function Test-CycPreviewPrivateLanAddress {
     param([Parameter(Mandatory = $true)][string]$Address)
     $parsed = $null
@@ -60,7 +111,7 @@ function Assert-ValidMcpDeploy {
     if (-not (Test-Path -LiteralPath $SourcePackageManifest -PathType Leaf)) {
         throw "MCP source package manifest is missing: $SourcePackageManifest"
     }
-    $package = Get-Content -LiteralPath $SourcePackageManifest -Raw | ConvertFrom-Json
+    $package = Read-CycPreviewUtf8Json -Path $SourcePackageManifest -MaximumBytes 1MB
     $dependenciesProperty = $package.PSObject.Properties['dependencies']
     if ($null -eq $dependenciesProperty -or $null -eq $dependenciesProperty.Value) {
         throw 'MCP source package manifest must declare production dependencies.'
@@ -161,7 +212,7 @@ function Copy-ValidatedWorkerKits {
     $manifests = @(Get-ChildItem -LiteralPath $sourceRootPath -File -Recurse -Filter 'worker-kit.json' -Force)
     foreach ($manifestFile in $manifests) {
         $kitRoot = $manifestFile.Directory.FullName
-        $manifest = Get-Content -LiteralPath $manifestFile.FullName -Raw | ConvertFrom-Json
+        $manifest = Read-CycPreviewUtf8Json -Path $manifestFile.FullName -MaximumBytes 1MB
         if ([string]$manifest.schemaVersion -cne 'cyc.dev/worker-kit/v1') {
             throw "Unsupported worker-kit manifest schema: $($manifestFile.FullName)"
         }
@@ -221,7 +272,7 @@ function Copy-ValidatedWorkerKits {
         }
 
         $signaturePath = Join-Path $kitRoot 'worker-kit.sig'
-        $signature = Get-Content -LiteralPath $signaturePath -Raw | ConvertFrom-Json
+        $signature = Read-CycPreviewUtf8Json -Path $signaturePath -MaximumBytes 64KB
         if (@($signature.PSObject.Properties).Count -ne 6 -or
             [string]$signature.schemaVersion -cne 'cyc.dev/worker-kit-signature/v1' -or
             [string]$signature.algorithm -cne 'Ed25519' -or
@@ -376,12 +427,12 @@ if (-not (Test-Path -LiteralPath $sourceMcpManifest -PathType Leaf)) {
 }
 $sourceMcpHash = (Get-FileHash -LiteralPath $sourceMcpManifest -Algorithm SHA256).Hash
 $stagedMcpManifest = Join-Path $pluginTarget '.mcp.json'
-$mcpConfiguration = Get-Content -LiteralPath $sourceMcpManifest -Raw | ConvertFrom-Json
+$mcpConfiguration = Read-CycPreviewUtf8Json -Path $sourceMcpManifest -MaximumBytes 1MB
 if (-not $mcpConfiguration.mcpServers.cluster_your_codex) {
     throw 'Plugin .mcp.json is missing mcpServers.cluster_your_codex.'
 }
 $mcpConfiguration.mcpServers.cluster_your_codex.command = './mcp/runtime/node.exe'
-$mcpConfiguration | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $stagedMcpManifest -Encoding UTF8
+Write-CycPreviewUtf8Json -Path $stagedMcpManifest -Value $mcpConfiguration -Depth 12
 if ((Get-FileHash -LiteralPath $sourceMcpManifest -Algorithm SHA256).Hash -ne $sourceMcpHash) {
     throw 'Source plugin .mcp.json changed during preview staging.'
 }
@@ -421,7 +472,7 @@ $manifest = [ordered]@{
     workerKits = $workerKitRecords
     files = $records
 }
-$manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $output 'preview-manifest.json') -Encoding UTF8
+Write-CycPreviewUtf8Json -Path (Join-Path $output 'preview-manifest.json') -Value $manifest -Depth 6
 $checksumRecords = @(Get-ChildItem -LiteralPath $output -File -Recurse -Force | Sort-Object FullName | ForEach-Object {
     $relative = $_.FullName.Substring($output.Length + 1).Replace('\', '/')
     $digest = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()

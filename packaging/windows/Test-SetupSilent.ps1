@@ -358,7 +358,9 @@ function Read-SetupSilentJson {
     try {
         $bytes = [System.IO.File]::ReadAllBytes($item.FullName)
         $utf8Strict = New-Object System.Text.UTF8Encoding($false, $true)
-        $raw = $utf8Strict.GetString($bytes)
+        $offset = if ($bytes.Length -ge 3 -and
+            $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { 3 } else { 0 }
+        $raw = $utf8Strict.GetString($bytes, $offset, $bytes.Length - $offset)
         $converter = Get-Command ConvertFrom-Json -CommandType Cmdlet -ErrorAction Stop
         if ($converter.Parameters.ContainsKey('DateKind')) {
             return ConvertFrom-Json -InputObject $raw -DateKind String

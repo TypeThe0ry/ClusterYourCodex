@@ -4173,6 +4173,9 @@ try {
     $lifecycleSource = Get-Content -LiteralPath $lifecycleScript -Raw
     $firewallSource = Get-Content -LiteralPath $firewallScript -Raw
     $bootstrapSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'bootstrap.ps1') -Raw
+    $previewPayloadSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'New-PreviewPayload.ps1') -Raw
+    $workerInstallerSource = Get-Content -LiteralPath (Join-Path $repoRoot 'packaging\worker-kits\windows\Install-Worker.ps1') -Raw
+    $workerKitsHarnessSource = Get-Content -LiteralPath (Join-Path $repoRoot 'packaging\worker-kits\Test-WorkerKits.ps1') -Raw
     $uninstallerSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Uninstall-ClusterYourCodex.ps1') -Raw
     $desktopIntegrationSource = Get-Content -LiteralPath (Join-Path $repoRoot 'apps\desktop\src-tauri\src\integration.rs') -Raw
     Assert-True (([regex]::Matches($lifecycleSource, '(?i)-Verb\s+RunAs')).Count -eq 1) 'coordinator contains exactly one firewall-only elevation site'
@@ -4184,6 +4187,18 @@ try {
     Assert-True ($lifecycleSource -match 'Get-AuthenticodeSignature\s+-Content\s+`?\$helperBytes') 'GA elevation verifies Authenticode over the same captured helper bytes it executes'
     Assert-True ($lifecycleSource -match '\[ScriptBlock\]::Create\(`?\$helperText\)') 'only digest-verified captured helper text becomes executable'
     Assert-True ($firewallSource -match "ValidateSet\('Rollback', 'Finalize'\).*RecoveryAction") 'elevated recovery exposes only rollback or finalize actions'
+    Assert-True ($lifecycleSource -match 'function Read-CycLifecycleJson' -and
+        $lifecycleSource -match '\[System\.IO\.File\]::ReadAllBytes\(\$resolved\)' -and
+        $lifecycleSource -match 'New-Object System\.Text\.UTF8Encoding\(\$false,\s*\$true\)' -and
+        $lifecycleSource -match '\$hasUtf8Bom' -and
+        $lifecycleSource -match '0xEF' -and $lifecycleSource -match '0xBB' -and $lifecycleSource -match '0xBF' -and
+        $lifecycleSource -notmatch 'Get-Content[^\r\n]+ConvertFrom-Json') 'lifecycle coordinator reads file-backed JSON as strict UTF-8 bytes with BOM support'
+    Assert-True ($firewallSource -match 'function Read-CycFirewallJson' -and
+        $firewallSource -match '\[System\.IO\.File\]::ReadAllBytes\(\$resolved\)' -and
+        $firewallSource -match 'New-Object System\.Text\.UTF8Encoding\(\$false,\s*\$true\)' -and
+        $firewallSource -match '\$hasUtf8Bom' -and
+        $firewallSource -match '0xEF' -and $firewallSource -match '0xBB' -and $firewallSource -match '0xBF' -and
+        $firewallSource -notmatch 'Get-Content[^\r\n]+ConvertFrom-Json') 'firewall helper reads file-backed JSON as strict UTF-8 bytes with BOM support'
     $helperProbeStdout = Join-Path $testRoot 'helper-normal-entry.stdout.log'
     $helperProbeStderr = Join-Path $testRoot 'helper-normal-entry.stderr.log'
     $helperProbePath64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($firewallScript))
@@ -4224,6 +4239,21 @@ exit 91
     Assert-True ($firewallSource -match 'Read-CycFirewallDigestBoundJson') 'elevated helper hashes and parses request and journal from one captured byte sequence'
     Assert-True ($firewallSource -match 'ExpectedRecoveryJournalSha256') 'recovery is bound to the coordinator-approved lifecycle journal digest'
     Assert-True ($firewallSource -match 'ReapplyThenFinalize') 'core-applied recovery explicitly re-establishes a timed-out or interrupted desired firewall state'
+    Assert-True ($previewPayloadSource -match 'function Read-CycPreviewUtf8Json' -and
+        $previewPayloadSource -match '\[System\.IO\.File\]::ReadAllBytes' -and
+        $previewPayloadSource -match 'New-Object System\.Text\.UTF8Encoding\(\$false,\s*\$true\)' -and
+        $previewPayloadSource -match '0xEF' -and $previewPayloadSource -match '0xBB' -and $previewPayloadSource -match '0xBF' -and
+        $previewPayloadSource -notmatch 'Get-Content[^\r\n]+ConvertFrom-Json') 'preview payload staging reads metadata as strict UTF-8 with BOM support'
+    Assert-True ($workerInstallerSource -match 'function Read-WorkerUtf8Json' -and
+        $workerInstallerSource -match '\[System\.IO\.File\]::ReadAllBytes' -and
+        $workerInstallerSource -match 'New-Object System\.Text\.UTF8Encoding\(\$false,\s*\$true\)' -and
+        $workerInstallerSource -match '0xEF' -and $workerInstallerSource -match '0xBB' -and $workerInstallerSource -match '0xBF' -and
+        $workerInstallerSource -notmatch 'Get-Content[^\r\n]+ConvertFrom-Json') 'Windows worker repair reads state and manifests as strict UTF-8 with BOM support'
+    Assert-True ($workerKitsHarnessSource -match 'function Read-CycWorkerKitsUtf8Json' -and
+        $workerKitsHarnessSource -match '\[System\.IO\.File\]::ReadAllBytes' -and
+        $workerKitsHarnessSource -match 'New-Object System\.Text\.UTF8Encoding\(\$false,\s*\$true\)' -and
+        $workerKitsHarnessSource -match '0xEF' -and $workerKitsHarnessSource -match '0xBB' -and $workerKitsHarnessSource -match '0xBF' -and
+        $workerKitsHarnessSource -notmatch 'Get-Content[^\r\n]+ConvertFrom-Json') 'worker-kit validation reads metadata as strict UTF-8 with BOM support'
     Assert-True ($firewallSource -match '\[System\.IO\.File\]::Replace\(') 'firewall state and receipts use native same-volume atomic replacement'
     Assert-True ($firewallSource -notmatch '(?m)^\s*Move-Item\s+-LiteralPath\s+\$temporary') 'firewall atomic writer does not emulate replacement with non-atomic Move-Item -Force'
     Assert-True ($lifecycleSource -match 'CycMaxInstallManifestBytes\s*=\s*16MB') 'lifecycle coordinator accepts the bounded self-contained install manifest size'
@@ -4477,6 +4507,7 @@ exit 0
     Assert-True ($setupSilentSource -match 'Re-enumerate after every termination[\s\S]+deadline[\s\S]+AddSeconds\(20\)') 'silent Setup smoke closes the Scheduled Task restart race with bounded process re-enumeration'
     Assert-True ($setupSilentSource -match 'EnvironmentVariables[\s\S]+CYC_SETUP_DIAGNOSTIC_LOG') 'silent Setup smoke injects the structured lifecycle diagnostic path into Setup.exe'
     Assert-True ($setupSilentSource -match 'Read-SetupSilentJson[\s\S]+ReadAllBytes[\s\S]+UTF8Encoding\(\$false,\s*\$true\)') 'silent Setup reads lifecycle diagnostics as strict UTF-8 independently of the Windows ANSI code page'
+    Assert-True ($setupSilentSource -match 'Read-SetupSilentJson[\s\S]+\$offset[\s\S]+0xEF[\s\S]+0xBB[\s\S]+0xBF') 'silent Setup accepts both BOM-bearing and BOM-less strict UTF-8 JSON'
     Assert-True ($setupSilentSource -match 'primaryFailure\s*=\s*if\s*\(\$primaryFailure\)') 'silent Setup cleanup receipt preserves the primary failure independently of cleanup'
     Assert-True ($setupSilentSource.IndexOf('if ($primaryFailure) { throw $primaryFailure }', [StringComparison]::Ordinal) -lt $setupSilentSource.IndexOf('if ($cleanupFailures.Count -gt 0)', [StringComparison]::Ordinal)) 'silent Setup preserves the primary lifecycle exception ahead of secondary cleanup failures'
     Assert-True ($setupSilentSource -match 'CYC_DISPOSABLE_WINDOWS') 'silent Setup smoke requires an explicit disposable-environment sentinel'

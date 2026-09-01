@@ -16,6 +16,9 @@ are versioned independently from the product.
   Windows 11 ARM64 x64-emulation acceptance path.
 - Added regression coverage for explicit UTF-8 JSON decoding in the profile
   matrix, bootstrap, and fresh-deployment lifecycle harnesses.
+- Extended strict UTF-8 file decoding with BOM support to the lifecycle
+  coordinator, elevated firewall helper, silent Setup smoke, preview payload
+  staging, and Windows worker repair/kit validation paths.
 - Retained SID-bound scheduled-task identity resolution and round-trip
   validation from preview.51.
 
