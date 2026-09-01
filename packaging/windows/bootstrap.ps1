@@ -104,7 +104,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
-$script:ProductVersion = '0.1.0-preview.48'
+$script:ProductVersion = '0.1.0-preview.49'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
@@ -3726,6 +3726,11 @@ function Invoke-CycProfileMatrixTaskGate {
         taskName = $Name
         sid = [string]$identity.User.Value
         account = [string]$identity.Name
+        # WindowsIdentity.Name is only a display projection and may be
+        # mojibaked for non-ASCII local accounts under ARM64/x64 emulation.
+        # Carry the immutable SID explicitly so the elevated parent helper can
+        # bind the request without relying on that lossy account string.
+        accountSid = [string]$identity.User.Value
         logonType = 'Interactive'
         action = if ($null -ne $Action) {
             [ordered]@{

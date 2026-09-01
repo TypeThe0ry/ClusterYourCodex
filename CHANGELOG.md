@@ -7,6 +7,19 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.49] - 2026-09-01
+
+### Fixed
+
+- Bound Windows profile-matrix task registration and disposable-user
+  credentials to the immutable account SID, with a translation fallback for
+  short-lived local SAM propagation windows.
+- Preserved the account display value as diagnostic evidence so ARM64/x64
+  PowerShell Unicode projection differences cannot reject an otherwise
+  SID-bound non-ASCII profile case.
+- Added static regression coverage for the explicit account-SID request field,
+  SID-derived scheduler credential, and display-mismatch evidence binding.
+
 ## [0.1.0-preview.48] - 2026-09-01
 
 ### Fixed
@@ -599,7 +612,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.48...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.49...HEAD
+[0.1.0-preview.49]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.48...v0.1.0-preview.49
 [0.1.0-preview.48]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.47...v0.1.0-preview.48
 [0.1.0-preview.47]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.46...v0.1.0-preview.47
 [0.1.0-preview.46]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.45...v0.1.0-preview.46

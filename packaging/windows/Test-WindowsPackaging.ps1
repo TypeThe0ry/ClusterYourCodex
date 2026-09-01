@@ -4163,6 +4163,7 @@ exit 91
     Assert-True ($bootstrapSource -match 'parent-elevated-registration-v1[\s\S]+not-started') 'bootstrap has an explicit parent-elevated registration-only gate'
     Assert-True ($bootstrapSource -match 'ProfileMatrixTaskHelperMode[\s\S]+requires its explicit test switch') 'bootstrap requires an explicit helper-mode switch in addition to the IPC declaration'
     Assert-True ($bootstrapSource -match 'Invoke-CycProfileMatrixTaskGate[\s\S]+requestId') 'bootstrap binds gated task registration to a request/response exchange'
+    Assert-True ($bootstrapSource -match 'accountSid\s*=\s*\[string\]\$identity\.User\.Value') 'bootstrap carries the immutable profile-matrix account SID beside the display name'
     Assert-True ($bootstrapSource -match "ValidateSet\('Register', 'Unregister', 'Restore'\)") 'bootstrap task gate includes a dedicated restore operation'
     Assert-True ($bootstrapSource -match 'cyc\.dev/windows-profile-matrix-task-request/v2') 'bootstrap restore requests use the versioned structured task IPC contract'
     Assert-True ($bootstrapSource -match 'windows-profile-matrix-task-helper/v1' -and
@@ -4472,6 +4473,11 @@ exit 0
     Assert-True ($profileMatrixSource -match 'cyc\.dev/windows-profile-matrix-task-request/v2' -and
         $profileMatrixSource -match 'cyc\.dev/windows-profile-matrix-task-snapshot/v1' -and
         $profileMatrixSource -match "operation -notin @\('Register', 'Unregister', 'Restore'\)") 'profile matrix parent helper validates the structured restore operation contract'
+    Assert-True ($profileMatrixSource -match 'function Resolve-ProfileMatrixAccountName' -and
+        $profileMatrixSource -match 'function Test-AccountNameSidBinding' -and
+        $profileMatrixSource -match 'accountBinding\s*=\s*''sid-bound-display-mismatch''' -and
+        $profileMatrixSource -match 'credentialAccount\s*=\s*Resolve-ProfileMatrixAccountName' -and
+        $profileMatrixSource -match 'accountSid') 'profile matrix resolves scheduler credentials from immutable SIDs and records Unicode display mismatches'
     Assert-True ($profileMatrixSource -match '\$actionProperty' -and
         $profileMatrixSource -match 'action binding for \$operation' -and
         $profileMatrixSource -match 'snapshotProperty') 'profile matrix parent helper binds action and snapshot fields to their operation'

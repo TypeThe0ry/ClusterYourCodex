@@ -370,6 +370,59 @@ function Get-ProfileMatrixAdminGroupName {
     ).Value.Split('\')[-1]
 }
 
+function Resolve-ProfileMatrixAccountName {
+    param(
+        [Parameter(Mandatory = $true)][string]$Sid,
+        [string]$FallbackUserName
+    )
+
+    function Test-AccountNameSidBinding {
+        param(
+            [string]$AccountName,
+            [string]$ExpectedSid
+        )
+        if ([string]::IsNullOrWhiteSpace($AccountName)) { return $false }
+        try {
+            $observedSid = ([System.Security.Principal.NTAccount]::new($AccountName)).Translate(
+                [System.Security.Principal.SecurityIdentifier]
+            ).Value
+            return [string]$observedSid -ceq $ExpectedSid
+        } catch {
+            return $false
+        }
+    }
+
+    # WindowsIdentity.Name is a display projection and can be mojibaked for
+    # non-ASCII local accounts under the ARM64/x64 PowerShell combination.
+    # Resolve the scheduler credential from the immutable SID instead. The
+    # WMI fallback covers LocalAccounts projections that cannot translate a
+    # freshly-created SID during the short SAM propagation window.
+    try {
+        $translated = ([System.Security.Principal.SecurityIdentifier]::new($Sid)).Translate(
+            [System.Security.Principal.NTAccount]
+        ).Value
+        if (Test-AccountNameSidBinding -AccountName ([string]$translated) -ExpectedSid $Sid) {
+            return [string]$translated
+        }
+    } catch { }
+    try {
+        $account = Get-CimInstance -ClassName Win32_UserAccount -Filter ("SID='{0}'" -f $Sid) -ErrorAction Stop |
+            Select-Object -First 1
+        if ($null -ne $account -and
+            -not [string]::IsNullOrWhiteSpace([string]$account.Domain) -and
+            -not [string]::IsNullOrWhiteSpace([string]$account.Name)) {
+            $cimAccount = '{0}\{1}' -f [string]$account.Domain, [string]$account.Name
+            if (Test-AccountNameSidBinding -AccountName $cimAccount -ExpectedSid $Sid) {
+                return $cimAccount
+            }
+        }
+    } catch { }
+    if (-not [string]::IsNullOrWhiteSpace($FallbackUserName)) {
+        return ('{0}\{1}' -f $env:COMPUTERNAME, $FallbackUserName)
+    }
+    throw "profile matrix could not resolve account name for SID $Sid."
+}
+
 function ConvertTo-ProfileMatrixSecureString {
     $plain = 'Cyc-' + [Guid]::NewGuid().ToString('N') + '-Aa9!'
     return ConvertTo-SecureString -String $plain -AsPlainText -Force
@@ -809,6 +862,9 @@ function Invoke-ProfileMatrixTaskHelperRequest {
     $operation = 'unknown'
     $observedLogonType = $null
     $ownership = $null
+    $expectedAccount = $null
+    $requestAccount = $null
+    $accountBinding = 'unresolved'
     try {
         $request = Get-Content -LiteralPath $RequestPath -Raw -ErrorAction Stop | ConvertFrom-Json
         if ([string]$request.schemaVersion -cne 'cyc.dev/windows-profile-matrix-task-request/v2' -or
@@ -818,10 +874,41 @@ function Invoke-ProfileMatrixTaskHelperRequest {
             [string]$request.taskName -notin @('ClusterYourCodex Controller', 'ClusterYourCodex Worker')) {
             throw 'profile-matrix task helper rejected an unbound task request.'
         }
-        $account = "$env:COMPUTERNAME\$UserName"
-        if ([string]$request.account -cne $account) {
-            throw "profile-matrix task helper rejected account identity $([string]$request.account)."
+        $requestAccount = [string]$request.account
+        if ([string]::IsNullOrWhiteSpace($requestAccount)) {
+            throw 'profile-matrix task helper rejected an empty account identity.'
         }
+        $expectedAccount = Resolve-ProfileMatrixAccountName -Sid $Sid -FallbackUserName $UserName
+        $accountSidProperty = $request.PSObject.Properties['accountSid']
+        if ($null -ne $accountSidProperty) {
+            $declaredAccountSid = [string]$accountSidProperty.Value
+            if ($declaredAccountSid -cne $Sid) {
+                throw "profile-matrix task helper rejected account SID binding $declaredAccountSid."
+            }
+            $accountBinding = 'request-account-sid'
+        } else {
+            $requestAccountSid = $null
+            try {
+                $requestAccountSid = ConvertTo-ProfileMatrixSid -Identity $requestAccount
+            } catch { }
+            if ($null -ne $requestAccountSid) {
+                if ($requestAccountSid -cne $Sid) {
+                    throw "profile-matrix task helper rejected account identity $requestAccount (SID $requestAccountSid)."
+                }
+                $accountBinding = 'legacy-request-account-sid'
+            } elseif ([string]::Equals($requestAccount, $expectedAccount, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $accountBinding = 'canonical-account'
+            } else {
+                # Keep the SID from the request and the SID-derived account
+                # used below as the security boundary. WindowsIdentity.Name
+                # can be a lossy display string for Unicode local accounts on
+                # ARM64/x64 emulation, so a name-only mismatch is diagnostic
+                # rather than a reason to reject a request already bound to
+                # the expected SID.
+                $accountBinding = 'sid-bound-display-mismatch'
+            }
+        }
+        $account = $expectedAccount
         $operation = [string]$request.operation
         if ($operation -notin @('Register', 'Unregister', 'Restore')) {
             throw "profile-matrix task helper rejected operation $operation."
@@ -886,7 +973,11 @@ function Invoke-ProfileMatrixTaskHelperRequest {
                 -Execute $action.executable `
                 -Argument $action.arguments `
                 -WorkingDirectory $action.workingDirectory
-            $account = "$env:COMPUTERNAME\$UserName"
+            $account = if (-not [string]::IsNullOrWhiteSpace($expectedAccount)) {
+                $expectedAccount
+            } else {
+                Resolve-ProfileMatrixAccountName -Sid $Sid -FallbackUserName $UserName
+            }
             $trigger = New-ScheduledTaskTrigger -AtLogOn -User $account
             $principal = New-ScheduledTaskPrincipal -UserId $account -LogonType Interactive -RunLevel Limited
             $settings = New-ScheduledTaskSettingsSet `
@@ -940,6 +1031,10 @@ function Invoke-ProfileMatrixTaskHelperRequest {
                 workingDirectory = [string]$ownership.workingDirectory
             }
         } else { $null }
+        expectedAccount = $expectedAccount
+        requestAccount = $requestAccount
+        accountSid = if ($null -ne $request) { [string]$request.accountSid } else { $null }
+        accountBinding = $accountBinding
         runtime = 'not-started'
         restoredRunning = if ($operation -ceq 'Restore' -and $status -ceq 'passed') { $false } else { $null }
         error = $errorMessage
@@ -1207,7 +1302,8 @@ try {
                         -MemberName "$env:COMPUTERNAME\$userName" `
                         -EvidencePath $membershipEvidencePath)
                 }
-                $credential = [System.Management.Automation.PSCredential]::new("$env:COMPUTERNAME\$userName", $password)
+                $credentialAccount = Resolve-ProfileMatrixAccountName -Sid $sid -FallbackUserName $userName
+                $credential = [System.Management.Automation.PSCredential]::new($credentialAccount, $password)
             }
             $childArguments = @(
                 '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
