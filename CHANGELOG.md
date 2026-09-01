@@ -7,6 +7,15 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.56] - 2026-09-01
+
+### Fixed
+
+- Hardened Issue #5 GA evidence so every platform gate/run carries a
+  source-bound run identifier, external node/provider metadata, successful
+  exit status, test counts, and chronological timestamps; raw-log verification
+  now cross-binds that provenance instead of accepting marker-only rows.
+
 ## [0.1.0-preview.55] - 2026-09-01
 
 ### Fixed
@@ -685,7 +694,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.55...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.56...HEAD
+[0.1.0-preview.56]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.55...v0.1.0-preview.56
 [0.1.0-preview.55]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.54...v0.1.0-preview.55
 [0.1.0-preview.54]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.53...v0.1.0-preview.54
 [0.1.0-preview.53]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.52...v0.1.0-preview.53

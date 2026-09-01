@@ -109,9 +109,14 @@ under `platforms`, and its `markers` array must retain every source-bound
 gate marker. The issue's `gates` map contains structured evidence objects:
 platform-specific gates bind one platform, exact test selector, exact locked
 `cyc-worker` command, and `rawLogMarkers`; matrix gates bind all three
-platforms, one nested run per platform, and each run's `rawLogMarkers`. Each
-nested run binds an external execution row to its exact test selector and
-locked command. The Linux row uses
+platforms, one nested run per platform, and each run's `rawLogMarkers`. Every
+gate/run evidence object also binds a bounded `runId` and `node`, external
+`provider` and `hostType`, `status: "passed"`, integer `exitCode: 0`, positive
+`tests.passed`, zero `tests.failed`, non-negative `tests.ignored`, and
+chronological ISO-8601 `startedAt`/`endedAt` instants. Each nested run binds
+an external execution row to its exact test selector and locked command; the
+raw-log verifier cross-binds the provenance fields as well as the markers.
+The Linux row uses
 `isolation::tests::linux_live_dedicated_identity_credential_and_residual_reconciliation`
 with `--ignored --exact --nocapture`; the Windows row uses
 `isolation::tests::windows_external_json_contract_is_fail_closed_at_every_runtime_gate`;

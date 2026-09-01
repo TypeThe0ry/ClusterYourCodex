@@ -682,6 +682,33 @@ jobs:
                 if (($entry.rawLogMarkers | type) == "array") then $entry.rawLogMarkers
                 elif (($entry.markers | type) == "array") then $entry.markers
                 else [] end;
+              def issue5_run_identifier_valid($value):
+                (string_value($value) | test("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"));
+              def issue5_run_provenance_valid($run):
+                (($run | type) == "object")
+                and issue5_run_identifier_valid($run.runId)
+                and issue5_run_identifier_valid($run.node)
+                and ((string_value($run.node) | test("github|actions|hosted|runner"; "i")) | not)
+                and nonempty_string($run.provider)
+                and ((string_value($run.provider) | test("github|actions|hosted|runner"; "i")) | not)
+                and nonempty_string($run.hostType)
+                and ((string_value($run.hostType) | test("github|actions|hosted|runner"; "i")) | not)
+                and (($run.status == "passed") or ($run.status == true))
+                and (($run.exitCode | type) == "number")
+                and ($run.exitCode == 0)
+                and ($run.exitCode == ($run.exitCode | floor))
+                and (($run.tests | type) == "object")
+                and (($run.tests.passed | type) == "number")
+                and (($run.tests.failed | type) == "number")
+                and (($run.tests.ignored | type) == "number")
+                and ($run.tests.passed > 0)
+                and ($run.tests.passed == ($run.tests.passed | floor))
+                and ($run.tests.failed == 0)
+                and ($run.tests.failed == ($run.tests.failed | floor))
+                and ($run.tests.ignored >= 0)
+                and ($run.tests.ignored == ($run.tests.ignored | floor))
+                and valid_iso_instant($run.startedAt)
+                and valid_iso_instant($run.endedAt);
               def issue5_markers_valid($markers):
                 (($markers | type) == "array")
                 and (($markers | length) > 0)
@@ -712,7 +739,8 @@ jobs:
                 if (($run | type) != "object"
                     or ($run.platform | type) != "string"
                     or (($run.testSelector | type) != "string" and ($run.selector | type) != "string")
-                    or ($run.command | type) != "string") then false
+                    or ($run.command | type) != "string"
+                    or (issue5_run_provenance_valid($run) | not)) then false
                 else
                   ($run.platform | ascii_downcase) as $platform
                   | ($run.testSelector // $run.selector) as $selector
@@ -731,7 +759,8 @@ jobs:
               def issue5_single_gate_valid($record; $gate):
                 if (($record.gates[$gate] | type) != "object"
                     or $record.gates[$gate].status != true
-                    or ($record.gates[$gate].platform | type) != "string") then false
+                    or ($record.gates[$gate].platform | type) != "string"
+                    or (issue5_run_provenance_valid($record.gates[$gate]) | not)) then false
                 else
                   ($record.gates[$gate].platform | ascii_downcase) as $platform
                   | ($record.gates[$gate].testSelector // $record.gates[$gate].selector) as $selector

@@ -268,6 +268,111 @@ $GaIssue5RequiredMarkerPrefixes = [ordered]@{
 $GaIssue5AnyMarkerPrefixes = [ordered]@{
     restartResidualProcessReconciliation = @('residual_empty', 'residualCgroupVerified=1', 'residualIdentityProcessesVerified=1')
 }
+$GaIssue5RunIdentifierPattern = '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+$GaIssue5IsoInstantPattern = '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\s]+(Z|[+-][0-9]{2}:[0-9]{2})$'
+
+function Assert-GaIssue5RunProvenance {
+    param(
+        [Parameter(Mandatory = $true)][object]$Run,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-GaCondition (($Run -is [pscustomobject]) -and -not ($Run -is [System.Array])) "$Description must be a JSON object"
+    foreach ($required in @('runId', 'node', 'provider', 'hostType', 'status', 'exitCode', 'tests', 'startedAt', 'endedAt')) {
+        Assert-GaCondition ($null -ne $Run.PSObject.Properties[$required]) "$Description.$required is required for source-bound run provenance"
+    }
+
+    $runId = [string](Get-GaProperty -Object $Run -Path 'runId' -Description $Description)
+    Assert-GaCondition ($runId -match $GaIssue5RunIdentifierPattern) "$Description.runId must be a bounded portable run identifier"
+    $node = [string](Get-GaProperty -Object $Run -Path 'node' -Description $Description)
+    Assert-GaCondition ($node -match $GaIssue5RunIdentifierPattern) "$Description.node must be a bounded portable node identifier"
+    Assert-GaCondition ($node -notmatch '(?i)github|actions|hosted|runner') "$Description.node must not identify a GitHub-hosted execution surface"
+    foreach ($field in @('provider', 'hostType')) {
+        $value = [string](Get-GaProperty -Object $Run -Path $field -Description $Description)
+        Assert-GaCondition (-not [string]::IsNullOrWhiteSpace($value)) "$Description.$field must be a non-empty external identifier"
+        Assert-GaCondition ($value -notmatch '(?i)github|actions|hosted|runner') "$Description.$field must not identify a GitHub-hosted execution surface"
+    }
+
+    $status = Get-GaProperty -Object $Run -Path 'status' -Description $Description
+    $statusPassed = (($status -is [string]) -and ([string]$status).Equals('passed', [System.StringComparison]::Ordinal)) -or (($status -is [bool]) -and $status)
+    Assert-GaCondition $statusPassed "$Description.status must be 'passed' (or boolean true for a single-gate record)"
+
+    $exitCode = Get-GaProperty -Object $Run -Path 'exitCode' -Description $Description
+    $isInteger = ($exitCode -is [byte]) -or ($exitCode -is [sbyte]) -or ($exitCode -is [int16]) -or ($exitCode -is [uint16]) -or ($exitCode -is [int32]) -or ($exitCode -is [uint32]) -or ($exitCode -is [int64]) -or ($exitCode -is [uint64])
+    Assert-GaCondition ($isInteger -and ([int64]$exitCode -eq 0)) "$Description.exitCode must be integer zero"
+
+    $tests = Get-GaProperty -Object $Run -Path 'tests' -Description $Description
+    Assert-GaCondition (($tests -is [pscustomobject]) -and -not ($tests -is [System.Array])) "$Description.tests must be a JSON object"
+    foreach ($countName in @('passed', 'failed', 'ignored')) {
+        Assert-GaCondition ($null -ne $tests.PSObject.Properties[$countName]) "$Description.tests.$countName is required"
+        $count = $tests.PSObject.Properties[$countName].Value
+        $countIsInteger = ($count -is [byte]) -or ($count -is [sbyte]) -or ($count -is [int16]) -or ($count -is [uint16]) -or ($count -is [int32]) -or ($count -is [uint32]) -or ($count -is [int64]) -or ($count -is [uint64])
+        Assert-GaCondition ($countIsInteger -and ([int64]$count -ge 0)) "$Description.tests.$countName must be a non-negative integer"
+    }
+    Assert-GaCondition ([int64]$tests.PSObject.Properties['passed'].Value -gt 0) "$Description.tests.passed must be greater than zero"
+    Assert-GaCondition ([int64]$tests.PSObject.Properties['failed'].Value -eq 0) "$Description.tests.failed must be zero"
+
+    $startedValue = Get-GaProperty -Object $Run -Path 'startedAt' -Description $Description
+    $endedValue = Get-GaProperty -Object $Run -Path 'endedAt' -Description $Description
+    Assert-GaCondition ($startedValue -is [string] -or $startedValue -is [DateTime] -or $startedValue -is [DateTimeOffset]) "$Description.startedAt must be an ISO-8601 instant with an explicit timezone"
+    Assert-GaCondition ($endedValue -is [string] -or $endedValue -is [DateTime] -or $endedValue -is [DateTimeOffset]) "$Description.endedAt must be an ISO-8601 instant with an explicit timezone"
+    try {
+        if ($startedValue -is [DateTimeOffset]) {
+            $startedAt = [DateTimeOffset]$startedValue
+        } elseif ($startedValue -is [DateTime]) {
+            Assert-GaCondition ($startedValue.Kind -ne [DateTimeKind]::Unspecified) "$Description.startedAt must carry an explicit UTC offset"
+            $startedAt = [DateTimeOffset]$startedValue
+        } else {
+            $startedText = [string]$startedValue
+            Assert-GaCondition ($startedText -match $GaIssue5IsoInstantPattern) "$Description.startedAt must include a UTC designator or numeric offset"
+            $startedAt = [DateTimeOffset]::Parse($startedText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        }
+        if ($endedValue -is [DateTimeOffset]) {
+            $endedAt = [DateTimeOffset]$endedValue
+        } elseif ($endedValue -is [DateTime]) {
+            Assert-GaCondition ($endedValue.Kind -ne [DateTimeKind]::Unspecified) "$Description.endedAt must carry an explicit UTC offset"
+            $endedAt = [DateTimeOffset]$endedValue
+        } else {
+            $endedText = [string]$endedValue
+            Assert-GaCondition ($endedText -match $GaIssue5IsoInstantPattern) "$Description.endedAt must include a UTC designator or numeric offset"
+            $endedAt = [DateTimeOffset]::Parse($endedText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        }
+    } catch {
+        throw "GA readiness assertion failed: $Description timestamps are not parseable ISO-8601 instants."
+    }
+    Assert-GaCondition ($endedAt -ge $startedAt) "$Description.endedAt must not precede startedAt"
+
+    return [pscustomobject]@{
+        runId = $runId
+        node = $node
+        provider = [string](Get-GaProperty -Object $Run -Path 'provider' -Description $Description)
+        hostType = [string](Get-GaProperty -Object $Run -Path 'hostType' -Description $Description)
+        status = 'passed'
+        exitCode = [int64]$exitCode
+        tests = $tests
+        startedAt = $startedAt.ToUniversalTime().ToString('yyyy-MM-dd''T''HH:mm:ss.fffffffzzz', [Globalization.CultureInfo]::InvariantCulture)
+        endedAt = $endedAt.ToUniversalTime().ToString('yyyy-MM-dd''T''HH:mm:ss.fffffffzzz', [Globalization.CultureInfo]::InvariantCulture)
+    }
+}
+
+function Assert-GaIssue5RunProvenanceMatch {
+    param(
+        [Parameter(Mandatory = $true)][object]$ManifestRun,
+        [Parameter(Mandatory = $true)][object]$VerifiedRun,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $manifest = Assert-GaIssue5RunProvenance -Run $ManifestRun -Description "$Description.manifest"
+    $verified = Assert-GaIssue5RunProvenance -Run $VerifiedRun -Description "$Description.verified"
+    foreach ($field in @('runId', 'node', 'provider', 'hostType', 'status', 'startedAt', 'endedAt')) {
+        Assert-GaCondition ([string]$verified.$field -ceq [string]$manifest.$field) "$Description.$field must match the source-bound manifest"
+    }
+    Assert-GaCondition ([int64]$verified.exitCode -eq [int64]$manifest.exitCode) "$Description.exitCode must match the source-bound manifest"
+    foreach ($countName in @('passed', 'failed', 'ignored')) {
+        Assert-GaCondition ([int64]$verified.tests.PSObject.Properties[$countName].Value -eq [int64]$manifest.tests.PSObject.Properties[$countName].Value) "$Description.tests.$countName must match the source-bound manifest"
+    }
+    return $verified
+}
 
 function Get-GaIssue5OptionalProperty {
     param(
@@ -363,6 +468,7 @@ function Assert-GaIssue5SingleGateEvidence {
     )
 
     Assert-GaCondition (($GateEvidence -is [pscustomobject]) -and -not ($GateEvidence -is [System.Array])) "$Description.gates.$Gate must be a structured evidence object, not a bare boolean"
+    $provenance = Assert-GaIssue5RunProvenance -Run $GateEvidence -Description "$Description.gates.$Gate"
     $status = Get-GaProperty -Object $GateEvidence -Path 'status' -Description "$Description.gates.$Gate"
     Assert-GaCondition (($status -is [bool]) -and $status) "$Description.gates.$Gate.status must be boolean true"
     $platformValue = Get-GaProperty -Object $GateEvidence -Path 'platform' -Description "$Description.gates.$Gate"
@@ -382,7 +488,15 @@ function Assert-GaIssue5SingleGateEvidence {
     Assert-GaIssue5RequiredMarkers -Markers $markers -Gate $Gate -Platform $platform -Description "$Description.gates.$Gate"
     return [pscustomobject]@{
         gate = $Gate
+        runId = $provenance.runId
+        node = $provenance.node
+        provider = $provenance.provider
+        hostType = $provenance.hostType
         status = $true
+        exitCode = $provenance.exitCode
+        tests = $provenance.tests
+        startedAt = $provenance.startedAt
+        endedAt = $provenance.endedAt
         platform = $platform
         selector = $selector
         command = (Normalize-GaIssue5Command -Command $command)
@@ -412,6 +526,7 @@ function Assert-GaIssue5MatrixGateEvidence {
     $runRecords = New-Object System.Collections.Generic.List[object]
     foreach ($run in @($runs)) {
         Assert-GaCondition (($run -is [pscustomobject]) -and -not ($run -is [System.Array])) "$Description.gates.$Gate.runs entries must be JSON objects"
+        $provenance = Assert-GaIssue5RunProvenance -Run $run -Description "$Description.gates.$Gate.runs"
         $platformValue = Get-GaProperty -Object $run -Path 'platform' -Description "$Description.gates.$Gate.runs"
         Assert-GaCondition ($platformValue -is [string]) "$Description.gates.$Gate.runs.platform must be a string"
         $platform = ([string]$platformValue).ToLowerInvariant()
@@ -434,6 +549,15 @@ function Assert-GaIssue5MatrixGateEvidence {
             }
         }
         [void]$runRecords.Add([pscustomobject]@{
+                runId = $provenance.runId
+                node = $provenance.node
+                provider = $provenance.provider
+                hostType = $provenance.hostType
+                status = $provenance.status
+                exitCode = $provenance.exitCode
+                tests = $provenance.tests
+                startedAt = $provenance.startedAt
+                endedAt = $provenance.endedAt
                 platform = $platform
                 selector = $selector
                 command = (Normalize-GaIssue5Command -Command $command)
@@ -605,6 +729,7 @@ function Assert-GaIssue5RawVerification {
         $gateMatches = @($verifiedGates | Where-Object { [string](Get-GaProperty -Object $_ -Path 'gate' -Description $Description) -ceq $gateName })
         Assert-GaCondition ($gateMatches.Count -eq 1) "$Description.gateEvidence must retain exactly one '$gateName' record"
         $verifiedGate = $gateMatches[0]
+        [void](Assert-GaIssue5RunProvenanceMatch -ManifestRun $manifestGate -VerifiedRun $verifiedGate -Description "$Description.gateEvidence.$gateName")
         $verifiedGateStatus = Get-GaProperty -Object $verifiedGate -Path 'status' -Description $Description
         Assert-GaCondition (($verifiedGateStatus -is [bool]) -and $verifiedGateStatus) "$Description.gateEvidence.$gateName.status must be boolean true"
         $verifiedMarkersForGate = Get-GaProperty -Object $verifiedGate -Path 'markers' -Description $Description
@@ -627,6 +752,7 @@ function Assert-GaIssue5RawVerification {
                 $runMatches = @($verifiedRuns | Where-Object { ([string](Get-GaProperty -Object $_ -Path 'platform' -Description $Description)).ToLowerInvariant() -ceq $manifestPlatform })
                 Assert-GaCondition ($runMatches.Count -eq 1) "$Description.gateEvidence.$gateName.runs must retain exactly one '$manifestPlatform' run"
                 $verifiedRun = $runMatches[0]
+                [void](Assert-GaIssue5RunProvenanceMatch -ManifestRun $manifestRun -VerifiedRun $verifiedRun -Description "$Description.gateEvidence.$gateName.runs.$manifestPlatform")
                 $manifestSelector = Get-GaIssue5RunSelector -Run $manifestRun -Description $Description
                 $verifiedSelector = Get-GaIssue5RunSelector -Run $verifiedRun -Description $Description
                 Assert-GaCondition ($verifiedSelector.Equals($manifestSelector, [System.StringComparison]::Ordinal)) "$Description.gateEvidence.$gateName.runs.$manifestPlatform.testSelector must match the manifest"

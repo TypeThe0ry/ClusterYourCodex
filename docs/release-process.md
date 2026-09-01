@@ -133,8 +133,13 @@ must contain `platforms: ["linux", "windows", "macos"]` and a non-empty
 platform-specific gate records `status: true`, its exact `platform`, exact
 `testSelector`, exact locked `command`, and `rawLogMarkers`; each matrix gate
 records `status: true`, all three `platforms`, one nested `runs` object per
-platform, and the marker set for those runs. Every nested run carries its
-exact selector, command, and raw-log markers. The required selectors are the Linux ignored native probe
+platform, and the marker set for those runs. Every gate/run evidence object
+also carries source-bound provenance: a bounded `runId` and `node`, external
+`provider` and `hostType`, `status: "passed"`, integer `exitCode: 0`, positive
+`tests.passed`, zero `tests.failed`, non-negative `tests.ignored`, and explicit
+ISO-8601 `startedAt`/`endedAt` instants in chronological order. The downloader
+cross-binds these fields instead of accepting a marker-only or relabelled run.
+Every nested run carries its exact selector, command, and raw-log markers. The required selectors are the Linux ignored native probe
 `isolation::tests::linux_live_dedicated_identity_credential_and_residual_reconciliation`,
 the Windows guard contract
 `isolation::tests::windows_external_json_contract_is_fail_closed_at_every_runtime_gate`,

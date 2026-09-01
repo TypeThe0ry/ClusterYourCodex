@@ -113,8 +113,16 @@ function New-TestIssue5Evidence {
             $markers += @('uid=1007', 'gid=1007', 'cgroup_escape=blocked', 'cgroup.threads_escape=blocked', 'residual_empty')
         }
         [void]$runs.Add([ordered]@{
+                runId = "issue5-$platform-20260830"
                 platform = $platform
                 node = "$platform-native-lab"
+                provider = 'native-lab'
+                hostType = 'external-native'
+                status = 'passed'
+                exitCode = 0
+                tests = [ordered]@{ passed = 42; failed = 0; ignored = 1 }
+                startedAt = '2026-08-30T14:00:00Z'
+                endedAt = '2026-08-30T14:01:00Z'
                 testSelector = $selector
                 command = $command
                 gates = $gates
@@ -138,7 +146,15 @@ function New-TestIssue5Evidence {
             }
             $structuredGates[$gate] = [ordered]@{
                 status = $true
+                runId = [string]$run.runId
                 platform = $platform
+                node = [string]$run.node
+                provider = [string]$run.provider
+                hostType = [string]$run.hostType
+                exitCode = $run.exitCode
+                tests = $run.tests
+                startedAt = [string]$run.startedAt
+                endedAt = [string]$run.endedAt
                 testSelector = [string]$run.testSelector
                 command = [string]$run.command
                 rawLogMarkers = $gateMarkers
@@ -162,7 +178,16 @@ function New-TestIssue5Evidence {
                 }
             }
             [void]$matrixRuns.Add([ordered]@{
+                    runId = [string]$run.runId
                     platform = $platform
+                    node = [string]$run.node
+                    provider = [string]$run.provider
+                    hostType = [string]$run.hostType
+                    status = [string]$run.status
+                    exitCode = $run.exitCode
+                    tests = $run.tests
+                    startedAt = [string]$run.startedAt
+                    endedAt = [string]$run.endedAt
                     testSelector = [string]$run.testSelector
                     command = [string]$run.command
                     rawLogMarkers = $runMarkers
@@ -205,6 +230,12 @@ Describe 'GA evidence issue acceptance contract' {
         $readinessSource | Should Match 'Assert-GaIssueEvidence -Evidence \$evidence -Path ''issue5'''
         foreach ($field in @('sourceCommit', 'provider', 'hostType', 'evidenceId', 'rawLog', 'sha256', 'gates')) {
             $readinessSource | Should Match ([regex]::Escape($field))
+        }
+        foreach ($field in @('runId', 'node', 'exitCode', 'tests', 'startedAt', 'endedAt', 'Assert-GaIssue5RunProvenance', 'Assert-GaIssue5RunProvenanceMatch')) {
+            $readinessSource | Should Match ([regex]::Escape($field))
+        }
+        foreach ($field in @('runId', 'node', 'exitCode', 'tests', 'startedAt', 'endedAt', 'Assert-RawLogIssue5RunProvenance')) {
+            $rawLogSource | Should Match ([regex]::Escape($field))
         }
         foreach ($gate in ($issue2GateNamesForTest + $issue3GateNamesForTest + $issue5GateNamesForTest | Select-Object -Unique)) {
             $readinessSource | Should Match ([regex]::Escape($gate))
@@ -374,6 +405,32 @@ Describe 'GA evidence issue acceptance contract' {
             -Path 'issue5' -Description 'Issue #5 test evidence' -ExpectedCommit $expectedCommitForTest `
             -RequiredGates $issue5GateNamesForTest
         $result.status | Should Be 'passed'
+    }
+
+    It 'requires source-bound provenance on every Issue #5 run' {
+        $record = New-TestIssue5Evidence
+        [void]$record.gates.jobsCannotReadWorkerCredentials.runs[0].PSObject.Properties.Remove('runId')
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 missing run provenance' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+
+        $record = New-TestIssue5Evidence
+        $record.gates.windowsJobObject.provider = 'github-actions'
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 hosted run provenance' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+
+        $record = New-TestIssue5Evidence
+        $record.gates.macosExternalReconciliation.tests.failed = 1
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 failed run provenance' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
     }
 
     It 'rejects a generic Linux cargo test with every Issue #5 gate set true' {

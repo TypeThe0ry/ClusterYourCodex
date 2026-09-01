@@ -69,6 +69,8 @@ $GaIssue5RequiredMarkerPrefixes = [ordered]@{
 $GaIssue5AnyMarkerPrefixes = [ordered]@{
     restartResidualProcessReconciliation = @('residual_empty', 'residualCgroupVerified=1', 'residualIdentityProcessesVerified=1')
 }
+$GaIssue5RunIdentifierPattern = '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+$GaIssue5IsoInstantPattern = '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\s]+(Z|[+-][0-9]{2}:[0-9]{2})$'
 
 function Assert-RawLogCondition {
     param(
@@ -168,6 +170,90 @@ function Get-RawLogOptionalProperty {
     $property = $Object.PSObject.Properties[$Name]
     if ($null -eq $property) { return $null }
     return $property.Value
+}
+
+function Assert-RawLogIssue5RunProvenance {
+    param(
+        [Parameter(Mandatory = $true)][object]$Run,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-RawLogCondition (($Run -is [pscustomobject]) -and -not ($Run -is [System.Array])) "$Description is a JSON object"
+    foreach ($required in @('runId', 'node', 'provider', 'hostType', 'status', 'exitCode', 'tests', 'startedAt', 'endedAt')) {
+        Assert-RawLogCondition ($null -ne $Run.PSObject.Properties[$required]) "$Description.$required is required for source-bound run provenance"
+    }
+
+    $runId = [string](Get-RawLogProperty -Object $Run -Path 'runId' -Description $Description)
+    Assert-RawLogCondition ($runId -match $GaIssue5RunIdentifierPattern) "$Description.runId is a bounded portable run identifier"
+    $node = [string](Get-RawLogProperty -Object $Run -Path 'node' -Description $Description)
+    Assert-RawLogCondition ($node -match $GaIssue5RunIdentifierPattern) "$Description.node is a bounded portable node identifier"
+    Assert-RawLogCondition ($node -notmatch '(?i)github|actions|hosted|runner') "$Description.node does not identify a GitHub-hosted execution surface"
+    foreach ($field in @('provider', 'hostType')) {
+        $value = [string](Get-RawLogProperty -Object $Run -Path $field -Description $Description)
+        Assert-RawLogCondition (-not [string]::IsNullOrWhiteSpace($value)) "$Description.$field is a non-empty external identifier"
+        Assert-RawLogCondition ($value -notmatch '(?i)github|actions|hosted|runner') "$Description.$field does not identify a GitHub-hosted execution surface"
+    }
+
+    $status = Get-RawLogProperty -Object $Run -Path 'status' -Description $Description
+    $statusPassed = (($status -is [string]) -and ([string]$status).Equals('passed', [StringComparison]::Ordinal)) -or (($status -is [bool]) -and $status)
+    Assert-RawLogCondition $statusPassed "$Description.status is 'passed' (or boolean true for a single-gate record)"
+
+    $exitCode = Get-RawLogProperty -Object $Run -Path 'exitCode' -Description $Description
+    $isInteger = ($exitCode -is [byte]) -or ($exitCode -is [sbyte]) -or ($exitCode -is [int16]) -or ($exitCode -is [uint16]) -or ($exitCode -is [int32]) -or ($exitCode -is [uint32]) -or ($exitCode -is [int64]) -or ($exitCode -is [uint64])
+    Assert-RawLogCondition ($isInteger -and ([int64]$exitCode -eq 0)) "$Description.exitCode is integer zero"
+
+    $tests = Get-RawLogProperty -Object $Run -Path 'tests' -Description $Description
+    Assert-RawLogCondition (($tests -is [pscustomobject]) -and -not ($tests -is [System.Array])) "$Description.tests is a JSON object"
+    foreach ($countName in @('passed', 'failed', 'ignored')) {
+        Assert-RawLogCondition ($null -ne $tests.PSObject.Properties[$countName]) "$Description.tests.$countName is required"
+        $count = $tests.PSObject.Properties[$countName].Value
+        $countIsInteger = ($count -is [byte]) -or ($count -is [sbyte]) -or ($count -is [int16]) -or ($count -is [uint16]) -or ($count -is [int32]) -or ($count -is [uint32]) -or ($count -is [int64]) -or ($count -is [uint64])
+        Assert-RawLogCondition ($countIsInteger -and ([int64]$count -ge 0)) "$Description.tests.$countName is a non-negative integer"
+    }
+    Assert-RawLogCondition ([int64]$tests.PSObject.Properties['passed'].Value -gt 0) "$Description.tests.passed is greater than zero"
+    Assert-RawLogCondition ([int64]$tests.PSObject.Properties['failed'].Value -eq 0) "$Description.tests.failed is zero"
+
+    $startedValue = Get-RawLogProperty -Object $Run -Path 'startedAt' -Description $Description
+    $endedValue = Get-RawLogProperty -Object $Run -Path 'endedAt' -Description $Description
+    Assert-RawLogCondition ($startedValue -is [string] -or $startedValue -is [DateTime] -or $startedValue -is [DateTimeOffset]) "$Description.startedAt is an ISO-8601 instant with an explicit timezone"
+    Assert-RawLogCondition ($endedValue -is [string] -or $endedValue -is [DateTime] -or $endedValue -is [DateTimeOffset]) "$Description.endedAt is an ISO-8601 instant with an explicit timezone"
+    try {
+        if ($startedValue -is [DateTimeOffset]) {
+            $startedAt = [DateTimeOffset]$startedValue
+        } elseif ($startedValue -is [DateTime]) {
+            Assert-RawLogCondition ($startedValue.Kind -ne [DateTimeKind]::Unspecified) "$Description.startedAt carries an explicit UTC offset"
+            $startedAt = [DateTimeOffset]$startedValue
+        } else {
+            $startedText = [string]$startedValue
+            Assert-RawLogCondition ($startedText -match $GaIssue5IsoInstantPattern) "$Description.startedAt includes a UTC designator or numeric offset"
+            $startedAt = [DateTimeOffset]::Parse($startedText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        }
+        if ($endedValue -is [DateTimeOffset]) {
+            $endedAt = [DateTimeOffset]$endedValue
+        } elseif ($endedValue -is [DateTime]) {
+            Assert-RawLogCondition ($endedValue.Kind -ne [DateTimeKind]::Unspecified) "$Description.endedAt carries an explicit UTC offset"
+            $endedAt = [DateTimeOffset]$endedValue
+        } else {
+            $endedText = [string]$endedValue
+            Assert-RawLogCondition ($endedText -match $GaIssue5IsoInstantPattern) "$Description.endedAt includes a UTC designator or numeric offset"
+            $endedAt = [DateTimeOffset]::Parse($endedText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        }
+    } catch {
+        throw "GA raw-log assertion failed: $Description timestamps are not parseable ISO-8601 instants."
+    }
+    Assert-RawLogCondition ($endedAt -ge $startedAt) "$Description.endedAt does not precede startedAt"
+
+    return [pscustomobject]@{
+        runId = $runId
+        node = $node
+        provider = [string](Get-RawLogProperty -Object $Run -Path 'provider' -Description $Description)
+        hostType = [string](Get-RawLogProperty -Object $Run -Path 'hostType' -Description $Description)
+        status = 'passed'
+        exitCode = [int64]$exitCode
+        tests = $tests
+        startedAt = $startedAt.ToUniversalTime().ToString('yyyy-MM-dd''T''HH:mm:ss.fffffffzzz', [Globalization.CultureInfo]::InvariantCulture)
+        endedAt = $endedAt.ToUniversalTime().ToString('yyyy-MM-dd''T''HH:mm:ss.fffffffzzz', [Globalization.CultureInfo]::InvariantCulture)
+    }
 }
 
 function Get-RawLogIssue5RunSelector {
@@ -299,6 +385,7 @@ function Assert-RawLogIssue5SingleGateEvidence {
     )
 
     Assert-RawLogCondition (($GateEvidence -is [pscustomobject]) -and -not ($GateEvidence -is [System.Array])) "$Description.gates.$Gate is a structured evidence object, not a bare boolean"
+    $provenance = Assert-RawLogIssue5RunProvenance -Run $GateEvidence -Description "$Description.gates.$Gate"
     $status = Get-RawLogProperty -Object $GateEvidence -Path 'status' -Description "$Description.gates.$Gate"
     Assert-RawLogCondition (($status -is [bool]) -and $status) "$Description.gates.$Gate.status is boolean true"
     $platformValue = Get-RawLogProperty -Object $GateEvidence -Path 'platform' -Description "$Description.gates.$Gate"
@@ -318,7 +405,15 @@ function Assert-RawLogIssue5SingleGateEvidence {
     Assert-RawLogIssue5RequiredMarkers -Markers $markers -Gate $Gate -Platform $platform -Description "$Description.gates.$Gate"
     return [pscustomobject]@{
         gate = $Gate
+        runId = $provenance.runId
+        node = $provenance.node
+        provider = $provenance.provider
+        hostType = $provenance.hostType
         status = $true
+        exitCode = $provenance.exitCode
+        tests = $provenance.tests
+        startedAt = $provenance.startedAt
+        endedAt = $provenance.endedAt
         platform = $platform
         selector = $selector
         command = (Normalize-RawLogIssue5Command -Command $command)
@@ -349,6 +444,7 @@ function Assert-RawLogIssue5MatrixGateEvidence {
     $runRecords = New-Object System.Collections.Generic.List[object]
     foreach ($run in @($runs)) {
         Assert-RawLogCondition (($run -is [pscustomobject]) -and -not ($run -is [System.Array])) "$Description.gates.$Gate.runs entries are JSON objects"
+        $provenance = Assert-RawLogIssue5RunProvenance -Run $run -Description "$Description.gates.$Gate.runs"
         $platformValue = Get-RawLogProperty -Object $run -Path 'platform' -Description "$Description.gates.$Gate.runs"
         Assert-RawLogCondition ($platformValue -is [string]) "$Description.gates.$Gate.runs.platform is a string"
         $platform = ([string]$platformValue).ToLowerInvariant()
@@ -373,6 +469,15 @@ function Assert-RawLogIssue5MatrixGateEvidence {
             }
         }
         [void]$runRecords.Add([pscustomobject]@{
+                runId = $provenance.runId
+                node = $provenance.node
+                provider = $provenance.provider
+                hostType = $provenance.hostType
+                status = $provenance.status
+                exitCode = $provenance.exitCode
+                tests = $provenance.tests
+                startedAt = $provenance.startedAt
+                endedAt = $provenance.endedAt
                 platform = $platform
                 selector = $selector
                 command = (Normalize-RawLogIssue5Command -Command $command)
