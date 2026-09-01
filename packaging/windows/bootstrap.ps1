@@ -2126,6 +2126,30 @@ function Resolve-CycScheduledTaskAccountName {
     # non-ASCII local accounts under the ARM64/x64 PowerShell combination.
     # Resolve the scheduler credential from the immutable SID first, then
     # verify the returned account name maps back to that exact SID.
+    # ProfileList is a UTF-16, SID-bound source that avoids the lossy WMI
+    # account-name projection.  A newly-created local profile normally uses
+    # the account leaf as its SAM name, so try that canonical candidate before
+    # the translated/display fallbacks.
+    try {
+        $profileKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $normalizedSid
+        $profileRecord = Get-ItemProperty -LiteralPath $profileKey -ErrorAction Stop
+        $profileRawPath = [string]$profileRecord.ProfileImagePath
+        if (-not [string]::IsNullOrWhiteSpace($profileRawPath)) {
+            $profilePath = [Environment]::ExpandEnvironmentVariables($profileRawPath)
+            $profileLeaf = Split-Path -Leaf ([System.IO.Path]::GetFullPath($profilePath).TrimEnd('\', '/'))
+            if (-not [string]::IsNullOrWhiteSpace($profileLeaf)) {
+                $profileAccount = if (-not [string]::IsNullOrWhiteSpace($env:COMPUTERNAME)) {
+                    '{0}\{1}' -f [string]$env:COMPUTERNAME, $profileLeaf
+                } else { $profileLeaf }
+                if (Test-CycScheduledTaskAccountNameSidBinding `
+                        -AccountName $profileAccount `
+                        -ExpectedSid $normalizedSid) {
+                    return [string]$profileAccount
+                }
+            }
+        }
+    } catch { }
+
     try {
         $translated = ([System.Security.Principal.SecurityIdentifier]::new($normalizedSid)).Translate(
             [System.Security.Principal.NTAccount]

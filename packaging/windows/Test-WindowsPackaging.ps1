@@ -396,6 +396,8 @@ try {
     Assert-True ($source -match 'Restore-CycTaskSnapshots[\s\S]+ExpectedInstallRoot') 'task rollback receives an explicit expected install root'
     Assert-True ($source -match 'function Resolve-CycScheduledTaskAccountName' -and
         $source -match 'Test-CycScheduledTaskAccountNameSidBinding' -and
+        $source -match 'ProfileList\\' -and
+        $source -match 'ProfileImagePath' -and
         $source -match 'Unable to resolve a SID-bound Scheduled Task account name') 'production Scheduled Task identities resolve from immutable SIDs with fail-closed name binding'
     $registerTaskFunction = [regex]::Match($source, 'function Register-CycTask[\s\S]+?function Unregister-CycTask')
     Assert-True ($registerTaskFunction.Success -and
@@ -4549,6 +4551,9 @@ exit 0
     Assert-True ($profileMatrixSource -match 'Add-LocalGroupMember') 'profile matrix exercises an administrator account'
     Assert-True ($profileMatrixSource -match 'Remove-LocalUser') 'profile matrix removes disposable local users'
     Assert-True ($profileMatrixSource -match 'Win32_UserProfile') 'profile matrix removes created user profiles by SID'
+    Assert-True ($profileMatrixSource -match 'ProfileList\\' -and
+        $profileMatrixSource -match 'ProfileImagePath' -and
+        $profileMatrixSource -match 'Get-ProfileMatrixProfilePathForSid') 'profile matrix resolves Unicode profile paths from the SID-bound ProfileList registry before CIM fallback'
     Assert-True ($profileMatrixSource -match 'robocopy') 'profile matrix stages a private package copy for alternate users'
     Assert-True ($profileMatrixSource -match 'Test-ProfileMatrixKnownCompatibilityJunction') 'profile matrix recognizes only the OS-created profile compatibility junctions'
     Assert-True ($profileMatrixSource -match 'Normalize-ProfileMatrixLinkTarget' -and

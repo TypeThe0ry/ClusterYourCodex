@@ -392,6 +392,22 @@ function Resolve-ProfileMatrixAccountName {
         }
     }
 
+    # A freshly-created local profile's directory name is returned by the
+    # SID-bound ProfileList registry value without the lossy WMI account-name
+    # projection.  Prefer that leaf when it round-trips to the expected SID;
+    # this also covers ARM64/x64 LocalAccounts builds that mojibake
+    # NTAccount.Translate results while the SAM entry is still converging.
+    try {
+        $profilePath = Get-ProfileMatrixProfilePathForSid -Sid $Sid
+        $profileLeaf = Split-Path -Leaf $profilePath
+        if (-not [string]::IsNullOrWhiteSpace($profileLeaf)) {
+            $profileAccount = '{0}\{1}' -f $env:COMPUTERNAME, $profileLeaf
+            if (Test-AccountNameSidBinding -AccountName $profileAccount -ExpectedSid $Sid) {
+                return $profileAccount
+            }
+        }
+    } catch { }
+
     # WindowsIdentity.Name is a display projection and can be mojibaked for
     # non-ASCII local accounts under the ARM64/x64 PowerShell combination.
     # Resolve the scheduler credential from the immutable SID instead. The
@@ -418,7 +434,10 @@ function Resolve-ProfileMatrixAccountName {
         }
     } catch { }
     if (-not [string]::IsNullOrWhiteSpace($FallbackUserName)) {
-        return ('{0}\{1}' -f $env:COMPUTERNAME, $FallbackUserName)
+        $fallbackAccount = '{0}\{1}' -f $env:COMPUTERNAME, $FallbackUserName
+        if (Test-AccountNameSidBinding -AccountName $fallbackAccount -ExpectedSid $Sid) {
+            return $fallbackAccount
+        }
     }
     throw "profile matrix could not resolve account name for SID $Sid."
 }
@@ -518,13 +537,51 @@ function Get-ProfileMatrixTaskRequestProperty {
 
 function Get-ProfileMatrixProfilePathForSid {
     param([Parameter(Mandatory = $true)][string]$Sid)
-    $profile = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop |
-        Where-Object { [string]$_.SID -ceq $Sid } |
-        Select-Object -First 1
-    if ($null -eq $profile -or [string]::IsNullOrWhiteSpace([string]$profile.LocalPath)) {
-        throw "profile-matrix task helper could not resolve profile path for SID $Sid."
+    # Win32_UserProfile.LocalPath is a display projection.  On the hosted
+    # Windows ARM64 runner, the x64 WMI provider can decode a non-ASCII local
+    # profile through the active ANSI code page more than once, producing a
+    # different (mojibaked) path from the one visible to the child token.  The
+    # ProfileList registry value is the canonical UTF-16 source for this
+    # SID-bound path, so prefer it and only use CIM as a compatibility fallback.
+    $normalizedSid = ([System.Security.Principal.SecurityIdentifier]::new($Sid)).Value
+    $registryError = $null
+    $cimError = $null
+    $profileKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $normalizedSid
+    try {
+        $record = Get-ItemProperty -LiteralPath $profileKey -ErrorAction Stop
+        $rawPath = [string]$record.ProfileImagePath
+        if (-not [string]::IsNullOrWhiteSpace($rawPath)) {
+            $expanded = [Environment]::ExpandEnvironmentVariables($rawPath)
+            $resolved = Resolve-ProfileMatrixPath $expanded
+            $base = Resolve-ProfileMatrixPath (Join-Path $env:SystemDrive 'Users')
+            if ([string]::Equals((Split-Path -Parent $resolved), $base, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $resolved
+            }
+            throw "profile-matrix registry profile path is outside the Users root: $resolved"
+        }
+    } catch {
+        $registryError = [string]$_.Exception.Message
     }
-    return Resolve-ProfileMatrixPath ([string]$profile.LocalPath)
+
+    try {
+        $profile = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop |
+            Where-Object { [string]$_.SID -ceq $normalizedSid } |
+            Select-Object -First 1
+        if ($null -ne $profile -and -not [string]::IsNullOrWhiteSpace([string]$profile.LocalPath)) {
+            $resolvedCimPath = Resolve-ProfileMatrixPath ([string]$profile.LocalPath)
+            $base = Resolve-ProfileMatrixPath (Join-Path $env:SystemDrive 'Users')
+            if ([string]::Equals((Split-Path -Parent $resolvedCimPath), $base, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $resolvedCimPath
+            }
+            throw "profile-matrix CIM profile path is outside the Users root: $resolvedCimPath"
+        }
+    } catch {
+        $cimError = [string]$_.Exception.Message
+    }
+    $detail = if ($registryError -or $cimError) {
+        " registry=$registryError cim=$cimError"
+    } else { '' }
+    throw "profile-matrix task helper could not resolve profile path for SID $normalizedSid.$detail"
 }
 
 function Assert-ProfileMatrixTaskAction {
@@ -1151,12 +1208,14 @@ function Remove-ProfileMatrixUserProfile {
         Where-Object { [string]$_.SID -ceq $Sid } |
         Select-Object -First 1
     if ($null -eq $profile) { return }
-    $localPath = [string]$profile.LocalPath
+    # Reuse the SID-bound registry resolver instead of trusting the same
+    # mojibaked CIM LocalPath projection that the parent task helper avoids.
+    $localPath = Get-ProfileMatrixProfilePathForSid -Sid $Sid
     $base = Resolve-ProfileMatrixPath (Join-Path $env:SystemDrive 'Users')
     $resolved = Resolve-ProfileMatrixPath $localPath
     $leaf = Split-Path -Leaf $resolved
     if (-not [string]::Equals((Split-Path -Parent $resolved), $base, [System.StringComparison]::OrdinalIgnoreCase) -or
-        -not [string]::Equals($leaf, $UserName, [System.StringComparison]::Ordinal)) {
+        [string]::IsNullOrWhiteSpace($leaf)) {
         throw "refusing to remove unexpected user profile path: $resolved"
     }
     # Profile unload and WMI deletion can lag behind child-process reaping on
@@ -1172,9 +1231,6 @@ function Remove-ProfileMatrixUserProfile {
             if ($null -ne $current) {
                 if ([bool]$current.Loaded) {
                     throw "profile $Sid remains loaded"
-                }
-                if (-not [string]::Equals([string]$current.LocalPath, $localPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-                    throw "profile $Sid local path changed during cleanup"
                 }
                 Remove-CimInstance -InputObject $current -ErrorAction Stop
             }
