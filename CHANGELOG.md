@@ -7,6 +7,14 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.50] - 2026-09-01
+
+### Fixed
+
+- Kept the profile-matrix helper's legacy request path StrictMode-safe when an
+  older child omits the optional `accountSid` field, while retaining the
+  SID-bound account evidence for current requests.
+
 ## [0.1.0-preview.49] - 2026-09-01
 
 ### Fixed
@@ -612,7 +620,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.49...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.50...HEAD
+[0.1.0-preview.50]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.49...v0.1.0-preview.50
 [0.1.0-preview.49]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.48...v0.1.0-preview.49
 [0.1.0-preview.48]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.47...v0.1.0-preview.48
 [0.1.0-preview.47]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.46...v0.1.0-preview.47

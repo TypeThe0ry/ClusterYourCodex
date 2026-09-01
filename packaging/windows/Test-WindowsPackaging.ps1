@@ -4477,6 +4477,7 @@ exit 0
         $profileMatrixSource -match 'function Test-AccountNameSidBinding' -and
         $profileMatrixSource -match 'accountBinding\s*=\s*''sid-bound-display-mismatch''' -and
         $profileMatrixSource -match 'credentialAccount\s*=\s*Resolve-ProfileMatrixAccountName' -and
+        $profileMatrixSource -match 'requestAccountSidValue' -and
         $profileMatrixSource -match 'accountSid') 'profile matrix resolves scheduler credentials from immutable SIDs and records Unicode display mismatches'
     Assert-True ($profileMatrixSource -match '\$actionProperty' -and
         $profileMatrixSource -match 'action binding for \$operation' -and

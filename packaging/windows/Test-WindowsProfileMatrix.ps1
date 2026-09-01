@@ -864,6 +864,7 @@ function Invoke-ProfileMatrixTaskHelperRequest {
     $ownership = $null
     $expectedAccount = $null
     $requestAccount = $null
+    $requestAccountSidValue = $null
     $accountBinding = 'unresolved'
     try {
         $request = Get-Content -LiteralPath $RequestPath -Raw -ErrorAction Stop | ConvertFrom-Json
@@ -885,6 +886,7 @@ function Invoke-ProfileMatrixTaskHelperRequest {
             if ($declaredAccountSid -cne $Sid) {
                 throw "profile-matrix task helper rejected account SID binding $declaredAccountSid."
             }
+            $requestAccountSidValue = $declaredAccountSid
             $accountBinding = 'request-account-sid'
         } else {
             $requestAccountSid = $null
@@ -1033,7 +1035,7 @@ function Invoke-ProfileMatrixTaskHelperRequest {
         } else { $null }
         expectedAccount = $expectedAccount
         requestAccount = $requestAccount
-        accountSid = if ($null -ne $request) { [string]$request.accountSid } else { $null }
+        accountSid = $requestAccountSidValue
         accountBinding = $accountBinding
         runtime = 'not-started'
         restoredRunning = if ($operation -ceq 'Restore' -and $status -ceq 'passed') { $false } else { $null }
