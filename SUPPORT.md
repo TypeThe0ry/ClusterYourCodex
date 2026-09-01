@@ -24,8 +24,10 @@ for suspected security vulnerabilities; see `SECURITY.md`.
 
 ## Supported preview boundary
 
-- Controller/Desktop: Windows x64 prerelease, with local packaging/lifecycle
-  validation; the complete clean-profile and live-fleet matrix remains pending.
+- Controller/Desktop: Windows x64 prerelease. Preview.58 passed the clean
+  Windows 11 ARM64 x64-emulation standard/admin × ASCII/non-ASCII profile
+  matrix; the native Windows x64 clean-profile and live-fleet matrix remains
+  pending.
 - Workers: Windows x64 and Linux x64/aarch64 implementations for trusted
   single-user workloads. CI and packaging validation exist, but live
   two-machine authentication/execution acceptance has not yet been completed.

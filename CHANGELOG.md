@@ -7,6 +7,24 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.59] - 2026-09-02
+
+### Documentation
+
+- Clarified the distinction between the preview.58 hosted Windows 11 ARM64
+  x64-emulation profile matrix (all standard/admin × ASCII/non-ASCII cases
+  passed) and the independent clean-VM, native Windows x64, and live-fleet
+  evidence that remains required for GA.
+- Synchronized the roadmap, compatibility table, support boundary, and release
+  checklist so prerelease evidence is not presented as stable certification.
+
+### Fixed
+
+- Stabilized the concurrent controller reservation regression test by refreshing
+  its fixture heartbeat after independent SQLite connections finish opening;
+  slow Windows runners no longer turn the reservation-atomicity test into an
+  unrelated stale-node failure.
+
 ## [0.1.0-preview.58] - 2026-09-01
 
 ### Fixed
@@ -719,7 +737,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.58...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.59...HEAD
+[0.1.0-preview.59]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.58...v0.1.0-preview.59
 [0.1.0-preview.58]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.57...v0.1.0-preview.58
 [0.1.0-preview.57]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.56...v0.1.0-preview.57
 [0.1.0-preview.56]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.55...v0.1.0-preview.56

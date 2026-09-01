@@ -12077,12 +12077,22 @@ mod tests {
                 store.submit_job(&target, None, &Scheduler::default())
             }));
         }
+        // Opening/migrating two independent SQLite connections can take long
+        // enough on a loaded Windows runner to cross the scheduler's
+        // fifteen-second heartbeat TTL. Refresh the fixture after all
+        // connections are ready so the race exercises reservation atomicity,
+        // not an incidental stale-node rejection.
+        primary.touch_node(worker.id).unwrap();
         barrier.wait();
         let results = handles
             .into_iter()
             .map(|handle| handle.join().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results.iter().filter(|result| result.is_ok()).count(),
+            1,
+            "concurrent submit results: {results:?}"
+        );
         assert_eq!(primary.active_lease_count(worker.id).unwrap(), 1);
         assert!(results.iter().any(|result| matches!(
             result,

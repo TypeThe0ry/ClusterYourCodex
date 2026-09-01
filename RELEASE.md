@@ -40,7 +40,10 @@ policy and evidence model.
       exit code, test counts, and cleanup result.
 - [ ] Protected branch/tag rules and an approved production release environment
       are active.
-- [ ] Clean Windows 11 standard/admin/non-ASCII profile matrix passes.
+- [ ] Independent externally retained clean Windows 11
+      standard/admin/non-ASCII profile/lifecycle matrix passes and is bound
+      into the GA evidence manifest; the preview.58 hosted ARM64
+      x64-emulation matrix is prerelease evidence only.
 - [ ] Signed `N-1 -> N` upgrade, interrupted upgrade rollback, downgrade policy,
       Repair, and Uninstall pass.
 - [ ] Real Windows-controller to Windows-worker and Linux-worker GUI/MCP source,

@@ -4,7 +4,7 @@
 
 | Component | Platform/architecture | Current state |
 |---|---|---|
-| Controller + desktop | Windows x64 | Implemented/CI packaged prerelease; full clean-profile/live acceptance pending |
+| Controller + desktop | Windows x64 | Implemented/CI packaged prerelease; preview.58 passed clean Windows 11 ARM64 x64-emulation profile acceptance for standard/admin × ASCII/non-ASCII; native Windows x64 clean-profile and live controller/worker acceptance pending |
 | Controller + CLI portable | Linux x64 | Developer artifact |
 | Managed worker | Windows x64 | Implemented/CI for trusted jobs; live two-machine/auth acceptance pending |
 | Managed worker | Linux x64 | Implemented/CI for trusted jobs; live two-machine/auth acceptance pending |
@@ -81,6 +81,11 @@ cleanup, not hostile-workload guards.
   Windows 11 profile acceptance, live two-worker E2E, governance, and all
   declared-scope issue gates pass. The prerelease release-asset SBOM and tagged
   provenance do not satisfy those broader GA gates.
+
+The preview.58 hosted Windows 11 ARM64 x64-emulation matrix is valid
+prerelease evidence (standard/admin × ASCII/non-ASCII, all four cases passed),
+but it does not replace the independent externally retained clean-VM evidence
+required by the stable GA manifest.
 
 ### GA evidence manifest contract
 
