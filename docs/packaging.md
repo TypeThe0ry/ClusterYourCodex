@@ -197,14 +197,19 @@ powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
 The repository's `native-worker-kits` CI matrix runs on native Linux, Intel
 macOS, and Apple Silicon macOS runners. It builds `cyc-worker`, creates an
 ephemeral test-signed five-file kit, and runs
-`scripts/Test-WorkerKitsNative.sh`. The verifier checks strict UTF-8/JSON,
-target and native architecture identity, regular-file and executable-bit
-boundaries, exact `SHA256SUMS` membership and digests, and the Ed25519 detached
-signature over the canonical manifest. The tagged preview artifact job runs
-the same verifier against the production-signed staged kit. These checks do
-not start systemd or LaunchAgent and therefore remain package-contract checks;
-live service and controller round-trip evidence is still collected on the
-external acceptance hosts described by the GA readiness contract.
+`scripts/Test-WorkerKitsNative.sh`. The verifier checks strict canonical
+UTF-8/JSON bytes and field order, fixed payload order, target and native
+architecture identity, regular-file and executable-bit boundaries, exact
+`SHA256SUMS` membership and digests, the expected publisher key id, and the
+Ed25519 detached signature over the canonical manifest. The tagged preview
+artifact job runs the same verifier against the production-signed staged kit.
+The Linux arm64 cross-compile job uses the verifier's explicit
+`--cross-compiled --expected-architecture aarch64` mode after a `readelf`
+machine check; that validates package structure and signing without claiming
+that an x86_64 runner executed an arm64 worker. These checks do not start
+systemd or LaunchAgent and therefore remain package-contract checks; live
+service and controller round-trip evidence is still collected on the external
+acceptance hosts described by the GA readiness contract.
 
 ## Codex integration
 

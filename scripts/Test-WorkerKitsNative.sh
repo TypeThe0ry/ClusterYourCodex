@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # Validate a signed Worker Kit on its native Unix host without mutating a
-# systemd manager or LaunchAgent. Live managed-worker acceptance is an
-# external GA gate and is never inferred from this check.
+# systemd manager or LaunchAgent. `--cross-compiled` validates the same signed
+# package contract on a cross-compiler host while explicitly skipping native
+# execution-architecture claims. Live managed-worker acceptance is an external
+# GA gate and is never inferred from this check.
 set -euo pipefail
 
 usage() {
   local exit_code="${1:-2}"
   cat >&2 <<'USAGE'
 Usage: Test-WorkerKitsNative.sh --platform linux|macos --kit-root PATH
-       [--public-key PATH] [--expected-version VERSION] [--skip-live]
+       [--public-key PATH] [--expected-key-id ID] [--expected-version VERSION]
+       [--expected-architecture x86_64|aarch64] [--cross-compiled] [--skip-live]
 USAGE
   exit "$exit_code"
 }
@@ -16,7 +19,10 @@ USAGE
 platform=''
 kit_root_input=''
 public_key=''
+expected_key_id='cyc-release-2026-02'
 expected_version=''
+expected_architecture=''
+cross_compiled=0
 skip_live=0
 
 while (($# > 0)); do
@@ -36,10 +42,24 @@ while (($# > 0)); do
       public_key="$2"
       shift 2
       ;;
+    --expected-key-id)
+      (($# >= 2)) || usage
+      expected_key_id="$2"
+      shift 2
+      ;;
     --expected-version)
       (($# >= 2)) || usage
       expected_version="$2"
       shift 2
+      ;;
+    --expected-architecture)
+      (($# >= 2)) || usage
+      expected_architecture="$2"
+      shift 2
+      ;;
+    --cross-compiled)
+      cross_compiled=1
+      shift
       ;;
     --skip-live)
       skip_live=1
@@ -62,6 +82,18 @@ esac
 if [[ -z "$kit_root_input" ]]; then
   echo '--kit-root is required' >&2
   usage
+fi
+if [[ ! "$expected_key_id" =~ ^[0-9A-Za-z._-]{1,96}$ ]]; then
+  echo '--expected-key-id must be 1-96 ASCII identifier characters' >&2
+  exit 1
+fi
+if [[ -n "$expected_architecture" && "$expected_architecture" != x86_64 && "$expected_architecture" != aarch64 ]]; then
+  echo '--expected-architecture must be x86_64 or aarch64' >&2
+  exit 1
+fi
+if ((cross_compiled == 1)) && [[ -z "$expected_architecture" ]]; then
+  echo '--cross-compiled requires --expected-architecture' >&2
+  exit 1
 fi
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -142,7 +174,7 @@ trap cleanup EXIT HUP INT TERM
 
 # Python performs strict UTF-8/JSON, path, digest, mode, and checksum parsing;
 # OpenSSL is kept as the verifier for the Ed25519 primitive itself.
-python3 - "$kit_root" "$platform" "$public_key" "$temporary/worker-kit-signature.raw" "$expected_version" <<'PY'
+python3 - "$kit_root" "$platform" "$public_key" "$temporary/worker-kit-signature.raw" "$expected_version" "$expected_key_id" "$expected_architecture" "$cross_compiled" <<'PY'
 import base64
 import hashlib
 import json
@@ -151,7 +183,7 @@ import platform as platform_module
 import stat
 import sys
 
-root, expected_platform, public_key_path, signature_path, expected_version = sys.argv[1:]
+root, expected_platform, public_key_path, signature_path, expected_version, expected_key_id, expected_architecture, cross_compiled = sys.argv[1:]
 
 def fail(message):
     raise SystemExit(message)
@@ -171,14 +203,20 @@ def read_utf8(path, label, limit=4 * 1024 * 1024):
     except UnicodeDecodeError:
         fail(f'{label} is not strict UTF-8')
 
-def read_json(path, label):
+def read_canonical_json(path, label, ordered_fields):
+    raw = read_utf8(path, label)
+    if '\r' in raw or not raw.endswith('\n'):
+        fail(f'{label} must be LF-terminated without carriage returns')
     try:
-        value = json.loads(read_utf8(path, label))
+        value = json.loads(raw)
     except json.JSONDecodeError as exc:
         fail(f'{label} is not valid JSON: {exc}')
-    if not isinstance(value, dict):
-        fail(f'{label} must be a JSON object')
-    return value
+    if not isinstance(value, dict) or list(value) != ordered_fields:
+        fail(f'{label} field order or set is invalid')
+    canonical = (json.dumps(value, ensure_ascii=False, separators=(',', ':')) + '\n')
+    if raw != canonical:
+        fail(f'{label} is not canonical JSON')
+    return raw, value
 
 def digest(path):
     hasher = hashlib.sha256()
@@ -189,9 +227,11 @@ def digest(path):
 
 manifest_path = os.path.join(root, 'worker-kit.json')
 signature_envelope_path = os.path.join(root, 'worker-kit.sig')
-manifest = read_json(manifest_path, 'worker-kit.json')
-if set(manifest) != {'schemaVersion', 'product', 'version', 'target', 'os', 'architecture', 'files'}:
-    fail('worker-kit.json contains an unexpected or missing field')
+manifest_raw, manifest = read_canonical_json(
+    manifest_path,
+    'worker-kit.json',
+    ['schemaVersion', 'product', 'version', 'target', 'os', 'architecture', 'files'],
+)
 if manifest['schemaVersion'] != 'cyc.dev/worker-kit/v1':
     fail('worker-kit.json schemaVersion is invalid')
 if manifest['product'] != 'ClusterYourCodex Managed Worker':
@@ -221,23 +261,21 @@ if host_arch in ('amd64', 'x86-64'):
     host_arch = 'x86_64'
 elif host_arch in ('arm64', 'aarch64'):
     host_arch = 'aarch64'
-if host_arch != manifest['architecture']:
+if expected_architecture and manifest['architecture'] != expected_architecture:
+    fail('worker-kit.json architecture does not match the requested architecture')
+if cross_compiled != '1' and host_arch != manifest['architecture']:
     fail(f"worker-kit.json architecture {manifest['architecture']} does not match native host {host_arch}")
 
 files = manifest['files']
 if not isinstance(files, list) or len(files) != 2:
     fail('worker-kit.json files must contain exactly two payload records')
-expected_payloads = {'cyc-worker': 'worker', 'install-worker.sh': 'lifecycle'}
-seen = set()
-for record in files:
-    if not isinstance(record, dict) or set(record) != {'path', 'sizeBytes', 'sha256', 'role'}:
+expected_payloads = [('cyc-worker', 'worker'), ('install-worker.sh', 'lifecycle')]
+for record, (expected_name, expected_role) in zip(files, expected_payloads):
+    if not isinstance(record, dict) or list(record) != ['path', 'sizeBytes', 'sha256', 'role']:
         fail('worker-kit.json payload record shape is invalid')
     name = record['path']
-    if name in seen or name not in expected_payloads:
-        fail('worker-kit.json payload path set is invalid')
-    seen.add(name)
-    if record['role'] != expected_payloads[name]:
-        fail(f'worker-kit.json role is invalid for {name}')
+    if name != expected_name or record['role'] != expected_role:
+        fail('worker-kit.json payload order or role is invalid')
     if (not isinstance(record['sizeBytes'], int) or
             isinstance(record['sizeBytes'], bool) or record['sizeBytes'] <= 0):
         fail(f'worker-kit.json sizeBytes is invalid for {name}')
@@ -270,13 +308,16 @@ for name, expected_digest in checksum_records.items():
     if digest(os.path.join(root, name)) != expected_digest:
         fail(f'SHA256SUMS digest mismatch: {name}')
 
-signature = read_json(signature_envelope_path, 'worker-kit.sig')
-if set(signature) != {'schemaVersion', 'algorithm', 'keyId', 'signedObject', 'manifestSha256', 'signature'}:
-    fail('worker-kit.sig contains an unexpected or missing field')
+signature_raw, signature = read_canonical_json(
+    signature_envelope_path,
+    'worker-kit.sig',
+    ['schemaVersion', 'algorithm', 'keyId', 'signedObject', 'manifestSha256', 'signature'],
+)
 if signature['schemaVersion'] != 'cyc.dev/worker-kit-signature/v1' or signature['algorithm'] != 'Ed25519':
     fail('worker-kit.sig algorithm/schema is invalid')
-if not isinstance(signature['keyId'], str) or not signature['keyId'] or len(signature['keyId']) > 96:
-    fail('worker-kit.sig keyId is invalid')
+if (not isinstance(signature['keyId'], str) or not signature['keyId'] or
+        len(signature['keyId']) > 96 or signature['keyId'] != expected_key_id):
+    fail('worker-kit.sig keyId is invalid or not the expected publisher')
 if signature['signedObject'] != 'worker-kit.json' or signature['manifestSha256'] != digest(manifest_path):
     fail('worker-kit.sig is not bound to the exact worker-kit.json bytes')
 try:
@@ -320,4 +361,6 @@ else
 fi
 
 target_value="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["target"])' "$kit_root/worker-kit.json")"
-echo "worker-kit native contract passed (platform=$platform target=$target_value)"
+verification_mode='native'
+if ((cross_compiled == 1)); then verification_mode='cross-compiled'; fi
+echo "worker-kit $verification_mode contract passed (platform=$platform target=$target_value)"

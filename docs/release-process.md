@@ -40,8 +40,11 @@ agree exactly.
 3. Run native Windows and Linux worker checks on independent exact-SHA
    workspaces. The repository CI and tagged Unix artifact jobs also run
    `scripts/Test-WorkerKitsNative.sh` on Linux, macOS Intel, and macOS arm64
-   to verify each signed Worker Kit's five-file, manifest, checksum, and
-   Ed25519 contract without mutating a service manager.
+   to verify each signed Worker Kit's canonical five-file, manifest, checksum,
+   publisher-key, and Ed25519 contract without mutating a service manager.
+   The tagged Linux arm64 cross-compile job runs the explicit structural
+   verifier mode after a `readelf` AArch64 check; this is not counted as native
+   arm64 execution evidence.
 4. Run CI on the exact SHA.
 5. Confirm the Worker Kit publisher key exists only in the protected
    `production-signing` environment, repository-level signing secrets are

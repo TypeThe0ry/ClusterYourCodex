@@ -331,6 +331,7 @@ jobs:
               & bash ./scripts/Test-WorkerKitsNative.sh `
                 --platform $nativePlatform `
                 --kit-root $workerKit `
+                --expected-key-id 'cyc-release-2026-02' `
                 --expected-version ([string]$env:CYC_PRODUCT_VERSION) `
                 --skip-live
               if ($LASTEXITCODE -ne 0) { throw "Native Worker Kit validation failed for $nativePlatform." }
@@ -574,6 +575,19 @@ jobs:
           }
           & bash -n (Join-Path $PWD 'worker-kit-artifact/install-worker.sh')
           if ($LASTEXITCODE -ne 0) { throw 'Linux arm64 lifecycle script failed syntax validation.' }
+          # This runner cross-compiles Linux arm64, so verify the signed kit
+          # contract in explicit cross-compiled mode. The readelf assertion
+          # above remains the binary architecture check; this invocation does
+          # not claim that an x86_64 runner executed the arm64 worker.
+          & bash ./scripts/Test-WorkerKitsNative.sh `
+            --platform linux `
+            --kit-root (Join-Path $PWD 'worker-kit-artifact') `
+            --expected-key-id 'cyc-release-2026-02' `
+            --expected-architecture aarch64 `
+            --cross-compiled `
+            --expected-version ([string]$env:CYC_PRODUCT_VERSION) `
+            --skip-live
+          if ($LASTEXITCODE -ne 0) { throw 'Linux arm64 Worker Kit contract validation failed.' }
       - name: Destroy worker-kit publisher key
         if: always()
         shell: pwsh

@@ -17,6 +17,10 @@ are versioned independently from the product.
   systemd or LaunchAgent state.
 - Added native Linux, Intel macOS, and Apple Silicon macOS Worker Kit CI
   coverage and invoked the same verifier from tagged Unix preview staging.
+- Aligned native verification with the lifecycle installer's canonical JSON
+  contract and publisher key id, and added explicit Linux arm64
+  cross-compiled package-contract verification without overstating native
+  execution evidence.
 
 ## [0.1.0-preview.52] - 2026-09-01
 

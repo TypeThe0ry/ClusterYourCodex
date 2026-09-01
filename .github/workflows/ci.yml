@@ -164,6 +164,7 @@ jobs:
             --platform '${{ matrix.platform }}' \
             --kit-root "$CYC_NATIVE_KIT_ROOT" \
             --public-key "$CYC_NATIVE_PUBLIC_KEY" \
+            --expected-key-id 'cyc-ci-native-${{ matrix.label }}' \
             --expected-version "$version" \
             --skip-live
 
