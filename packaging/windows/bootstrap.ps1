@@ -134,6 +134,27 @@ $script:FileCatalogSchema = 'cyc.dev/file-catalog/v1'
 $script:CodexMarketplaceRelativeRoot = 'integrations/codex-marketplace'
 $script:CodexMarketplacePrefix = 'integrations/codex-marketplace/'
 
+# Windows PowerShell 5.1 treats BOM-less JSON read through Get-Content as
+# ANSI.  Durable installer files are emitted as strict UTF-8 without a BOM,
+# and profile-matrix IPC carries Unicode account/profile paths.  Decode bytes
+# explicitly at every file-backed JSON boundary so ARM64/x64-emulation and
+# non-ASCII profiles retain the exact values that were written.
+function Read-CycUtf8Json {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $utf8Strict = New-Object System.Text.UTF8Encoding($false, $true)
+    $raw = $utf8Strict.GetString($bytes)
+    if ($raw.Length -gt 0 -and $raw[0] -eq [char]0xFEFF) {
+        $raw = $raw.Substring(1)
+    }
+    $converter = Get-Command ConvertFrom-Json -CommandType Cmdlet -ErrorAction Stop
+    if ($converter.Parameters.ContainsKey('DateKind')) {
+        return ConvertFrom-Json -InputObject $raw -DateKind String
+    }
+    return ConvertFrom-Json -InputObject $raw
+}
+
 if ($ProfileMatrixTestMode) {
     if ($ScheduledTaskLogonType -cne 'S4U') {
         throw 'ProfileMatrixTestMode requires ScheduledTaskLogonType S4U.'
@@ -177,7 +198,7 @@ if (-not [string]::IsNullOrWhiteSpace($profileMatrixGate)) {
         throw 'Profile-matrix task gate evidence declaration is missing.'
     }
     try {
-        $gateDeclaration = Get-Content -LiteralPath $gateEvidencePath -Raw -ErrorAction Stop | ConvertFrom-Json
+        $gateDeclaration = Read-CycUtf8Json -Path $gateEvidencePath
     } catch {
         throw "Profile-matrix task gate evidence is not valid JSON: $($_.Exception.Message)"
     }
@@ -1156,7 +1177,7 @@ function Read-CycAgentsJournal {
     if ((Test-ReparsePoint $item) -or $item.Length -lt 2 -or $item.Length -gt 2MB) {
         throw 'Global AGENTS.md transaction journal is not a bounded regular file.'
     }
-    try { $journal = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json } catch {
+    try { $journal = Read-CycUtf8Json -Path $Path } catch {
         throw 'Global AGENTS.md transaction journal contains invalid JSON.'
     }
     if ([string](Get-CycObjectProperty -Object $journal -Name 'schemaVersion') -cne $script:AgentsJournalSchema -or
@@ -2004,7 +2025,7 @@ function Assert-CycPackageManifest {
     if ((Test-ReparsePoint $manifestItem) -or $manifestItem.Length -gt 8MB) {
         throw 'Package manifest must be a bounded regular file, not a reparse point.'
     }
-    try { $manifest = Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json } catch {
+    try { $manifest = Read-CycUtf8Json -Path $manifestFile } catch {
         throw 'Package manifest contains invalid JSON.'
     }
     if ($manifest.schemaVersion -cne 'cyc.dev/windows-preview/v1') {
@@ -3748,13 +3769,7 @@ function Read-InstallManifest {
     if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) { return $null }
     $item = Get-Item -LiteralPath $ManifestPath -Force
     if ($item.Length -gt $script:MaxInstallManifestBytes) { throw 'Install manifest is unexpectedly large.' }
-    $raw = Get-Content -LiteralPath $ManifestPath -Raw
-    $converter = Get-Command ConvertFrom-Json -CommandType Cmdlet -ErrorAction Stop
-    $manifest = if ($converter.Parameters.ContainsKey('DateKind')) {
-        ConvertFrom-Json -InputObject $raw -DateKind String
-    } else {
-        ConvertFrom-Json -InputObject $raw
-    }
+    $manifest = Read-CycUtf8Json -Path $ManifestPath
     if ($manifest.schemaVersion -ne $script:ManifestSchema) {
         throw 'Unsupported install manifest schema.'
     }
@@ -3882,7 +3897,7 @@ function Invoke-CycProfileMatrixTaskGate {
     do {
         if (Test-Path -LiteralPath $script:ProfileMatrixTaskResponsePath -PathType Leaf) {
             try {
-                $response = Get-Content -LiteralPath $script:ProfileMatrixTaskResponsePath -Raw -ErrorAction Stop | ConvertFrom-Json
+                $response = Read-CycUtf8Json -Path $script:ProfileMatrixTaskResponsePath
             } catch {
                 $response = $null
             }
@@ -6065,7 +6080,7 @@ function Invoke-CycCommitFirewallReceipt {
     if ((Test-ReparsePoint $receiptItem) -or $receiptItem.Length -lt 2 -or $receiptItem.Length -gt 32768) {
         throw 'Durable firewall receipt must be a bounded regular file.'
     }
-    try { $receipt = Get-Content -LiteralPath $receiptFile -Raw | ConvertFrom-Json } catch {
+    try { $receipt = Read-CycUtf8Json -Path $receiptFile } catch {
         throw 'Durable firewall receipt contains invalid JSON.'
     }
     Assert-CycFirewallReceiptProperties -Receipt $receipt

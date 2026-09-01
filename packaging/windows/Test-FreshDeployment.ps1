@@ -40,6 +40,27 @@ function Assert-FreshTest {
     }
 }
 
+# Windows PowerShell 5.1 decodes BOM-less JSON with the active ANSI code
+# page when Get-Content is used.  The package and install manifests are
+# emitted as strict UTF-8 without a BOM and can contain a non-ASCII profile
+# path, so keep this acceptance harness on the same explicit decoder as the
+# production bootstrap/profile-matrix IPC boundary.
+function Read-FreshUtf8Json {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $utf8Strict = New-Object System.Text.UTF8Encoding($false, $true)
+    $raw = $utf8Strict.GetString($bytes)
+    if ($raw.Length -gt 0 -and $raw[0] -eq [char]0xFEFF) {
+        $raw = $raw.Substring(1)
+    }
+    $converter = Get-Command ConvertFrom-Json -CommandType Cmdlet -ErrorAction Stop
+    if ($converter.Parameters.ContainsKey('DateKind')) {
+        return ConvertFrom-Json -InputObject $raw -DateKind String
+    }
+    return ConvertFrom-Json -InputObject $raw
+}
+
 function Resolve-FreshPath {
     param([Parameter(Mandatory = $true)][string]$Path)
     return [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
@@ -534,7 +555,7 @@ try {
 
     $plan = Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments ($common + @('-PlanOnly')) -LogRoot $logRoot -Label 'plan'
     Assert-FreshTest ($plan.exitCode -eq 0) 'manifest-bound install plan succeeds'
-    $previewManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $previewManifest = Read-FreshUtf8Json -Path $manifestPath
     Assert-FreshTest ([string]$previewManifest.schemaVersion -eq 'cyc.dev/windows-preview/v1') 'preview manifest schema is recognized'
     Assert-FreshTest ([string]$previewManifest.productVersion -match '^[0-9]+\.[0-9]+\.[0-9]+-(preview|alpha|beta|rc)\.[0-9]+$') 'preview manifest carries a strict prerelease product version'
     Assert-FreshTest ([string]$previewManifest.releaseChannel -ceq 'prerelease') 'preview manifest release channel remains prerelease'
@@ -549,7 +570,7 @@ try {
         [void](Assert-InstalledFile -Root $installRoot -RelativePath $relative)
     }
     Assert-FreshTest (Test-Path -LiteralPath $installedManifestPath -PathType Leaf) 'install manifest is durable'
-    $installedManifest = Get-Content -LiteralPath $installedManifestPath -Raw | ConvertFrom-Json
+    $installedManifest = Read-FreshUtf8Json -Path $installedManifestPath
     Assert-FreshTest ([string]$installedManifest.schemaVersion -eq 'cyc.dev/windows-install-manifest/v1') 'installed manifest schema is recognized'
     Assert-FreshTest ([string]$installedManifest.productVersion -ceq [string]$previewManifest.productVersion) 'installed manifest preserves the package product version'
     Assert-FreshTest ([string]$installedManifest.installRoot -eq $installRoot) 'manifest binds the isolated install root'
@@ -604,7 +625,7 @@ try {
     $repairArguments = @($common)
     $repairArguments[1] = 'Repair'
     [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $repairArguments -LogRoot $logRoot -Label 'repair')
-    $repairedManifest = Get-Content -LiteralPath $installedManifestPath -Raw | ConvertFrom-Json
+    $repairedManifest = Read-FreshUtf8Json -Path $installedManifestPath
     Assert-FreshTest ([string]$repairedManifest.schemaVersion -eq 'cyc.dev/windows-install-manifest/v1') 'repair keeps a valid manifest'
     $repairedControllerTasks = @(Get-ScheduledTask -TaskName 'ClusterYourCodex Controller' -TaskPath '\' -ErrorAction SilentlyContinue)
     Assert-FreshTest ($repairedControllerTasks.Count -eq 1) 'repair keeps exactly one controller task'

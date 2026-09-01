@@ -60,6 +60,27 @@ function Assert-ProfileMatrix {
     }
 }
 
+# Windows PowerShell 5.1 decodes BOM-less files with the active ANSI code
+# page when Get-Content is used.  Profile-matrix IPC is deliberately emitted
+# as strict UTF-8 without a BOM, so read every JSON boundary explicitly with
+# a strict UTF-8 decoder before ConvertFrom-Json.  This keeps Unicode account
+# names and profile paths intact on ARM64/x64-emulation runners.
+function Read-ProfileMatrixUtf8Json {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $utf8Strict = New-Object System.Text.UTF8Encoding($false, $true)
+    $raw = $utf8Strict.GetString($bytes)
+    if ($raw.Length -gt 0 -and $raw[0] -eq [char]0xFEFF) {
+        $raw = $raw.Substring(1)
+    }
+    $converter = Get-Command ConvertFrom-Json -CommandType Cmdlet -ErrorAction Stop
+    if ($converter.Parameters.ContainsKey('DateKind')) {
+        return ConvertFrom-Json -InputObject $raw -DateKind String
+    }
+    return ConvertFrom-Json -InputObject $raw
+}
+
 function Resolve-ProfileMatrixPath {
     param([Parameter(Mandatory = $true)][string]$Path)
     return [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
@@ -924,7 +945,7 @@ function Invoke-ProfileMatrixTaskHelperRequest {
     $requestAccountSidValue = $null
     $accountBinding = 'unresolved'
     try {
-        $request = Get-Content -LiteralPath $RequestPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        $request = Read-ProfileMatrixUtf8Json -Path $RequestPath
         if ([string]$request.schemaVersion -cne 'cyc.dev/windows-profile-matrix-task-request/v2' -or
             [string]$request.requestId -notmatch '^[0-9a-f]{32}$' -or
             [string]$request.sid -cne $Sid -or
@@ -1103,7 +1124,7 @@ function Invoke-ProfileMatrixTaskHelperRequest {
     try {
         $history = @()
         if (Test-Path -LiteralPath $EvidencePath -PathType Leaf) {
-            try { $history = @(Get-Content -LiteralPath $EvidencePath -Raw | ConvertFrom-Json) } catch { $history = @() }
+            try { $history = @(Read-ProfileMatrixUtf8Json -Path $EvidencePath) } catch { $history = @() }
         }
         Write-ProfileMatrixAtomicJson -Path $EvidencePath -Value @($history + $record)
         # Consume the request before publishing the response. The child may
@@ -1426,7 +1447,7 @@ try {
                     $exitCode = $null
                     if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
                         try {
-                            $childReceipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+                            $childReceipt = Read-ProfileMatrixUtf8Json -Path $receiptPath
                             $candidateExitCode = $childReceipt.exitCode
                             $parsedExitCode = 0
                             if ($null -ne $candidateExitCode -and [int]::TryParse([string]$candidateExitCode, [ref]$parsedExitCode)) {
@@ -1445,14 +1466,14 @@ try {
                 throw "case $case child exited $exitCode. stdout=$stdout stderr=$stderr"
             }
             Assert-ProfileMatrix (Test-Path -LiteralPath $receiptPath -PathType Leaf) "case $case wrote a receipt"
-            $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+            $receipt = Read-ProfileMatrixUtf8Json -Path $receiptPath
             Assert-ProfileMatrix ([string]$receipt.status -ceq 'passed') "case $case receipt is passed"
             Assert-ProfileMatrix ([string]$receipt.caseName -ceq $case) "case $case receipt binds the case name"
             Assert-ProfileMatrix ([string]$receipt.sid -ceq $sid) "case $case receipt binds the expected SID"
             if ($isAdmin) {
                 Assert-ProfileMatrix ($null -ne $membershipEvidencePath -and
                     (Test-Path -LiteralPath $membershipEvidencePath -PathType Leaf)) "case $case preserves administrator membership evidence"
-                $membershipEvidence = Get-Content -LiteralPath $membershipEvidencePath -Raw | ConvertFrom-Json
+                $membershipEvidence = Read-ProfileMatrixUtf8Json -Path $membershipEvidencePath
                 Assert-ProfileMatrix ([string]$membershipEvidence.status -ceq 'passed') "case $case administrator membership evidence is passed"
                 Assert-ProfileMatrix ([string]$membershipEvidence.memberSid -ceq $sid) "case $case administrator membership evidence binds the expected SID"
                 $receipt | Add-Member -NotePropertyName administratorMembershipEvidence -NotePropertyValue $membershipEvidencePath -Force

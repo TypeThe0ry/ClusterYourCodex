@@ -4342,6 +4342,10 @@ exit 91
     Assert-True ($setupBuilder.IndexOf('$validationPackageRoot = $candidateRoot', [StringComparison]::Ordinal) -lt $setupBuilder.IndexOf('Assert-CycPackageManifest', [StringComparison]::Ordinal)) 'Setup builder establishes short source staging before manifest validation'
     Assert-True ($setupBuilder.IndexOf('if ($null -ne $primaryFailure)', [StringComparison]::Ordinal) -lt $setupBuilder.IndexOf('if ($null -ne $cleanupFailure)', [StringComparison]::Ordinal)) 'Setup builder preserves its primary failure ahead of subst cleanup failure'
     $freshDeploymentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-FreshDeployment.ps1') -Raw
+    Assert-True ($freshDeploymentSource -match 'function Read-FreshUtf8Json' -and
+        $freshDeploymentSource -match '\[System\.IO\.File\]::ReadAllBytes' -and
+        $freshDeploymentSource -match 'UTF8Encoding' -and
+        $freshDeploymentSource -notmatch 'Get-Content[^\r\n]+ConvertFrom-Json') 'fresh deployment smoke decodes package/install manifests as strict UTF-8 instead of the Windows PowerShell ANSI default'
     Assert-True (-not $freshDeploymentSource.Contains("'-Confirm:`$false'")) 'fresh deployment smoke never serializes a false SwitchParameter through powershell.exe -File'
     Assert-True ($freshDeploymentSource -match "'-NoLogo', '-NoProfile', '-NonInteractive'") 'fresh deployment smoke launches a clean non-interactive Windows PowerShell child'
     Assert-True ($freshDeploymentSource -match "'-WorkerConfig',\s+\`$workerConfig") 'fresh deployment smoke keeps the worker config beneath its isolated data root'
@@ -4541,6 +4545,14 @@ exit 0
     }
     $profileMatrixSource = Get-Content -LiteralPath $profileMatrix -Raw
     $profileMatrixChildSource = Get-Content -LiteralPath $profileMatrixChild -Raw
+    Assert-True ($profileMatrixSource -match 'function Read-ProfileMatrixUtf8Json' -and
+        $profileMatrixSource -match '\[System\.IO\.File\]::ReadAllBytes' -and
+        $profileMatrixSource -match 'UTF8Encoding' -and
+        $profileMatrixSource -notmatch 'Get-Content[^\r\n]+ConvertFrom-Json') 'profile matrix decodes every file-backed JSON boundary as strict UTF-8 instead of the Windows PowerShell ANSI default'
+    Assert-True ($bootstrapSource -match 'function Read-CycUtf8Json' -and
+        $bootstrapSource -match '\[System\.IO\.File\]::ReadAllBytes' -and
+        $bootstrapSource -match 'UTF8Encoding' -and
+        $bootstrapSource -notmatch 'Get-Content[^\r\n]+ConvertFrom-Json') 'bootstrap decodes durable and profile-matrix JSON as strict UTF-8 instead of the Windows PowerShell ANSI default'
     foreach ($case in @('standard-ascii', 'administrator-ascii', 'standard-non-ascii', 'administrator-non-ascii')) {
         Assert-True ($profileMatrixSource -match [regex]::Escape($case)) "profile matrix declares $case"
     }
