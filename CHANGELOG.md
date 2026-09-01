@@ -7,6 +7,22 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.54] - 2026-09-01
+
+### Fixed
+
+- Hardened hostile-workload isolation receipts so Linux claim-time checks use
+  live cgroup, identity, control-boundary, and resource evidence instead of
+  treating the startup receipt timestamp as a worker lifetime limit.
+- Extended Linux cgroup-v2 reconciliation to track both `cgroup.procs` and
+  `cgroup.threads`, including explicit escape-attempt evidence for both
+  membership interfaces.
+- Bound Issue #5 GA evidence to exact per-platform selectors, locked commands,
+  source-bound markers, native identity/cgroup markers, three-platform matrix
+  runs, and downloaded raw-log marker verification.
+- Hardened the stable-publisher shell contract with a Bash-safe jq heredoc and
+  an independent SHA-256 check for every retained Issue #5 command marker.
+
 ## [0.1.0-preview.53] - 2026-09-01
 
 ### Added
@@ -660,7 +676,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.53...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.54...HEAD
+[0.1.0-preview.54]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.53...v0.1.0-preview.54
 [0.1.0-preview.53]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.52...v0.1.0-preview.53
 [0.1.0-preview.52]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.51...v0.1.0-preview.52
 [0.1.0-preview.51]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.50...v0.1.0-preview.51

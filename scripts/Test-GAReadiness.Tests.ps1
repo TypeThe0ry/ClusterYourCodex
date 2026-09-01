@@ -274,6 +274,22 @@ Describe 'GA evidence issue acceptance contract' {
         $readinessSource | Should Match 'downloaded GA raw-log file hash matches'
     }
 
+    It 'cryptographically binds Issue #5 marker commandSha256 in the stable publisher' {
+        $rawLogIndex = $workflowSource.IndexOf('Test-GARawLogs.ps1')
+        $hashIndex = $workflowSource.IndexOf('hashlib.sha256')
+        ($rawLogIndex -ge 0 -and $hashIndex -gt $rawLogIndex) | Should Be $true
+        $workflowSource | Should Match 'python3 - "\$raw_verification" <<''PY'''
+        $workflowSource | Should Match 'gate_evidence'
+        $workflowSource | Should Match 'normalized_command'
+        $workflowSource | Should Match 're\.compile\(r"\\s\+"\)'
+        $workflowSource | Should Match 'hashlib\.sha256\(normalized\.encode\("utf-8"\)\)\.hexdigest\(\)'
+        $workflowSource | Should Match 'expected_marker'
+        $workflowSource | Should Match 'len\(matches\) != 1'
+        $workflowSource | Should Match 'binding_count != 15'
+        $workflowSource | Should Match 'jq -e --arg commit "\$CYC_GA_SOURCE_COMMIT" --slurpfile manifest "\$evidence_path" -f - "\$raw_verification" <<''JQ'''
+        $workflowSource | Should Match '(?s)<<''JQ''.*\r?\n\s*\(\$manifest\[0\]\).*\r?\n\s*JQ'
+    }
+
     It 'keeps the workflow contract semantic and checks helper exit codes' {
         $workflowSource | Should Match 'readinessExitCode = \$LASTEXITCODE'
         $readinessSource | Should Match 'versionExitCode = \$LASTEXITCODE'

@@ -483,7 +483,90 @@ jobs:
           raw_verification="$raw_log_dir/raw-log-verification.json"
           test -f "$raw_verification"
           printf 'CYC_GA_RAW_LOG_VERIFICATION_PATH=%s\n' "$raw_verification" >> "$GITHUB_ENV"
-          jq -e --arg commit "$CYC_GA_SOURCE_COMMIT" --slurpfile manifest "$evidence_path" '
+          # Test-GARawLogs has already source-bound the retained markers. Keep
+          # its gateEvidence output as the input to an independent Ubuntu-side
+          # SHA-256 calculation so a syntactically valid 64-hex marker cannot
+          # stand in for the digest of its normalized command.
+          python3 - "$raw_verification" <<'PY'
+          import hashlib
+          import json
+          import re
+          import sys
+
+          verification_path = sys.argv[1]
+          with open(verification_path, encoding="utf-8") as handle:
+              verification = json.load(handle)
+
+          records = verification.get("records")
+          if not isinstance(records, list):
+              raise SystemExit("Issue #5 raw-log verification records are not an array")
+          issue5_records = [
+              record for record in records
+              if isinstance(record, dict) and record.get("issue") == "issue5"
+          ]
+          if len(issue5_records) != 1:
+              raise SystemExit("Issue #5 raw-log verification must contain exactly one record")
+          gate_evidence = issue5_records[0].get("gateEvidence")
+          if not isinstance(gate_evidence, list) or len(gate_evidence) != 9:
+              raise SystemExit("Issue #5 raw-log verification must retain all nine gate records")
+
+          whitespace = re.compile(r"\s+")
+          seen_gates = set()
+          binding_count = 0
+
+          def normalized_command(value, description):
+              if not isinstance(value, str) or not value.strip():
+                  raise SystemExit(f"{description}.command is not a non-empty string")
+              return whitespace.sub(" ", value.strip())
+
+          for gate in gate_evidence:
+              if not isinstance(gate, dict):
+                  raise SystemExit("Issue #5 gateEvidence entry is not an object")
+              gate_name = gate.get("gate")
+              if not isinstance(gate_name, str) or not gate_name:
+                  raise SystemExit("Issue #5 gateEvidence entry has no gate name")
+              if gate_name in seen_gates:
+                  raise SystemExit(f"Issue #5 gateEvidence repeats gate {gate_name}")
+              seen_gates.add(gate_name)
+
+              runs = gate.get("runs")
+              if runs is None:
+                  runs = [gate]
+              elif not isinstance(runs, list) or len(runs) != 3:
+                  raise SystemExit(f"Issue #5 matrix gate {gate_name} does not retain three runs")
+
+              for run in runs:
+                  if not isinstance(run, dict):
+                      raise SystemExit(f"Issue #5 gate {gate_name} run is not an object")
+                  platform = run.get("platform")
+                  selector = run.get("selector")
+                  command = run.get("command")
+                  markers = run.get("markers")
+                  description = f"Issue #5 gate {gate_name}"
+                  if not isinstance(platform, str) or not platform:
+                      raise SystemExit(f"{description}.platform is not a non-empty string")
+                  if not isinstance(selector, str) or not selector:
+                      raise SystemExit(f"{description}.selector is not a non-empty string")
+                  if not isinstance(markers, list) or any(not isinstance(marker, str) for marker in markers):
+                      raise SystemExit(f"{description}.markers is not an array of strings")
+                  normalized = normalized_command(command, description)
+                  digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+                  expected_marker = (
+                      f"CYC-GA-ISSUE5|platform={platform.lower()}|selector={selector}"
+                      f"|commandSha256={digest}|gate={gate_name}|status=passed"
+                  )
+                  matches = [marker for marker in markers if marker == expected_marker]
+                  if len(matches) != 1:
+                      raise SystemExit(
+                          f"{description} marker commandSha256 does not match the normalized command"
+                      )
+                  binding_count += 1
+
+          if len(seen_gates) != 9 or binding_count != 15:
+              raise SystemExit("Issue #5 marker command bindings are incomplete")
+          print(f"Issue #5 marker commandSha256 bindings verified: {binding_count}")
+          PY
+          jq -e --arg commit "$CYC_GA_SOURCE_COMMIT" --slurpfile manifest "$evidence_path" -f - "$raw_verification" <<'JQ'
             ($manifest[0]) as $m
             | .schemaVersion == "cyc.dev/ga-raw-log-verification/v1"
             and .status == "passed"
@@ -617,7 +700,7 @@ jobs:
                 else
                   ($command | normalized_command) as $normalized
                   | ($normalized | test(
-                      "^cargo(\\.exe)? test --manifest-path (\\\"[^\\\"]*Cargo\\.toml\\\"|'[^']*Cargo\\.toml'|[^[:space:]]*Cargo\\.toml) -p cyc-worker --lib --locked -- " +
+                      "^cargo(\\.exe)? test --manifest-path (\\\"[^\\\"]*Cargo\\.toml\\\"|\\u0027[^\\u0027]*Cargo\\.toml\\u0027|[^[:space:]]*Cargo\\.toml) -p cyc-worker --lib --locked -- " +
                       (if $platform == "linux" then "--ignored --exact --nocapture" else "--exact --nocapture" end) +
                       " " + issue5_selector($platform) + "$"))
                     and (($normalized | test("(^| )--workspace( |$)")) | not)
@@ -766,11 +849,10 @@ jobs:
                 "liveLinuxControllerWorkerRoundTrip",
                 "macosDeveloperIdSigningNotarization"
               ])
-              and valid_issue5(.issue5)
-              and ([.issue2.evidenceId, .issue3.evidenceId, .issue5.evidenceId] | unique | length == 3)
-              and ([.issue2.rawLog.url, .issue3.rawLog.url, .issue5.rawLog.url] | unique | length == 3)
-            ' \
-            "$evidence_path" >/dev/null
+               and valid_issue5(.issue5)
+               and ([.issue2.evidenceId, .issue3.evidenceId, .issue5.evidenceId] | unique | length == 3)
+               and ([.issue2.rawLog.url, .issue3.rawLog.url, .issue5.rawLog.url] | unique | length == 3)
+          JQ
           echo "GA evidence, issue3/issue5 acceptance gates, and stable release-index are source-bound to $bundle_index_hash" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify every stable payload attestation cryptographically
