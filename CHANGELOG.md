@@ -7,6 +7,18 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.52] - 2026-09-01
+
+### Fixed
+
+- Decoded Windows PowerShell 5.1 profile-matrix IPC, manifests, receipts, and
+  evidence as strict UTF-8, preserving non-ASCII user/profile paths on the
+  Windows 11 ARM64 x64-emulation acceptance path.
+- Added regression coverage for explicit UTF-8 JSON decoding in the profile
+  matrix, bootstrap, and fresh-deployment lifecycle harnesses.
+- Retained SID-bound scheduled-task identity resolution and round-trip
+  validation from preview.51.
+
 ## [0.1.0-preview.51] - 2026-09-01
 
 ### Fixed
@@ -630,7 +642,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.51...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.52...HEAD
+[0.1.0-preview.52]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.51...v0.1.0-preview.52
 [0.1.0-preview.51]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.50...v0.1.0-preview.51
 [0.1.0-preview.50]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.49...v0.1.0-preview.50
 [0.1.0-preview.49]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.48...v0.1.0-preview.49
