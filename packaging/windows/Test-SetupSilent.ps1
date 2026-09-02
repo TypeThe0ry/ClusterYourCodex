@@ -47,6 +47,37 @@ function Assert-SetupSilent {
     }
 }
 
+# This script is launched through Windows PowerShell 5.1 from a pwsh workflow
+# step. The inherited pwsh PSModulePath may omit Microsoft.PowerShell.Utility,
+# making the built-in file hash command unavailable even though .NET SHA-256 is
+# present. Keep Setup acceptance hashing independent of module auto-loading and
+# stream files to avoid materializing the self-contained payload in memory.
+function Get-CycFileHash {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][ValidateSet('SHA256')][string]$Algorithm
+    )
+
+    if ($Algorithm -cne 'SHA256') {
+        throw "Unsupported file hash algorithm: $Algorithm"
+    }
+    $stream = $null
+    $sha256 = $null
+    try {
+        $stream = [System.IO.File]::OpenRead($LiteralPath)
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        [PSCustomObject]@{
+            Algorithm = 'SHA256'
+            Hash = ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '')
+            Path = [System.IO.Path]::GetFullPath($LiteralPath)
+        }
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ($null -ne $sha256) { $sha256.Dispose() }
+    }
+}
+
 function Test-SetupSilentPrivateLanAddress {
     param([Parameter(Mandatory = $true)][string]$Address)
     $parsed = $null
@@ -403,7 +434,7 @@ function Get-SetupSilentFirewallReceiptSnapshot {
             path = Resolve-SetupSilentPath $item.FullName
             name = [string]$item.Name
             transactionId = [System.IO.Path]::GetFileNameWithoutExtension($item.Name)
-            sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            sha256 = (Get-CycFileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
         }
     }
     return @($records)
@@ -464,7 +495,7 @@ function Assert-SetupSilentFirewallReceipt {
     Assert-SetupSilent ([int]$receipt.port -eq 47832) 'durable firewall receipt binds the managed-worker port'
     $verifiedAt = [DateTimeOffset]::MinValue
     Assert-SetupSilent ([DateTimeOffset]::TryParse([string]$receipt.verifiedAtUtc, [ref]$verifiedAt)) 'durable firewall receipt has a valid verification timestamp'
-    $actualReceiptSha256 = (Get-FileHash -LiteralPath $receiptFile -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actualReceiptSha256 = (Get-CycFileHash -LiteralPath $receiptFile -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-SetupSilent ($actualReceiptSha256 -ceq $ExpectedReceiptSha256) 'durable firewall receipt bytes match the committed digest'
     return [PSCustomObject]@{
         path = $receiptFile
@@ -519,7 +550,7 @@ function Assert-SetupSilentJournalRetiredOrComplete {
     Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$journal.exchangeRoot) -Right $expectedExchangeRoot) 'firewall lifecycle journal tombstone binds the per-user exchange root'
     Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$journal.requestPath) -Right (Join-Path $expectedExchangeRoot 'request.json')) 'firewall lifecycle journal tombstone binds the transaction request path'
     if (Test-Path -LiteralPath ([string]$journal.requestPath) -PathType Leaf) {
-        $requestHash = (Get-FileHash -LiteralPath ([string]$journal.requestPath) -Algorithm SHA256).Hash.ToLowerInvariant()
+        $requestHash = (Get-CycFileHash -LiteralPath ([string]$journal.requestPath) -Algorithm SHA256).Hash.ToLowerInvariant()
         Assert-SetupSilent ($requestHash -ceq $ExpectedRequestSha256) 'firewall lifecycle journal tombstone request evidence is unchanged'
     } else {
         Assert-SetupSilent ($ExpectedAction -cne 'Uninstall') 'completed Uninstall tombstone retains its request evidence'
@@ -1031,7 +1062,7 @@ function Assert-SetupSilentManifest {
         $item = Get-Item -LiteralPath $target -Force
         Assert-SetupSilent (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) "installed file is not a reparse point: $relative"
         Assert-SetupSilent ([int64]$item.Length -eq [int64]$record.length) "installed file length matches: $relative"
-        $actualHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+        $actualHash = (Get-CycFileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
         Assert-SetupSilent ($actualHash -ceq ([string]$record.sha256).ToLowerInvariant()) "installed file SHA-256 matches: $relative"
     }
     foreach ($required in @(
@@ -1353,7 +1384,7 @@ $setupBytes = [System.IO.File]::ReadAllBytes($setup)
 Assert-SetupSilent ($setupBytes.Length -ge 4096 -and $setupBytes[0] -eq 0x4d -and $setupBytes[1] -eq 0x5a) 'Setup.exe is a PE executable'
 $sidecarPath = $setup + '.sha256'
 Assert-SetupSilent (Test-Path -LiteralPath $sidecarPath -PathType Leaf) 'Setup.exe SHA-256 sidecar exists'
-$setupHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+$setupHash = (Get-CycFileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
 $sidecarLine = (Get-Content -LiteralPath $sidecarPath -Raw).Trim()
 Assert-SetupSilent ($sidecarLine -match '^[0-9a-fA-F]{64}  [^/\\\r\n]+$') 'Setup.exe sidecar has the canonical format'
 $expectedSidecar = "$setupHash  $([System.IO.Path]::GetFileName($setup))"
@@ -1374,7 +1405,7 @@ Assert-SetupSilent ([string]$previewManifest.schemaVersion -ceq $script:PreviewM
 Assert-SetupSilent ([string]$previewManifest.productVersion -match '^[0-9]+\.[0-9]+\.[0-9]+-(preview|alpha|beta|rc)\.[0-9]+$') 'preview manifest carries a strict prerelease product version'
 Assert-SetupSilent ([string]$previewManifest.releaseChannel -ceq 'prerelease') 'preview manifest release channel remains prerelease'
 Assert-SetupSilent ($null -eq $previewManifest.sourceTag -or [string]$previewManifest.sourceTag -ceq "v$($previewManifest.productVersion)") 'preview manifest source tag is absent or exactly vPRODUCT_VERSION'
-$expectedPackageManifestSha256 = (Get-FileHash -LiteralPath $packageManifest -Algorithm SHA256).Hash.ToLowerInvariant()
+$expectedPackageManifestSha256 = (Get-CycFileHash -LiteralPath $packageManifest -Algorithm SHA256).Hash.ToLowerInvariant()
 
 $taskBefore = @(Get-SetupSilentTaskSnapshot)
 $firewallBefore = @(Get-SetupSilentFirewallSnapshot)
@@ -1482,8 +1513,8 @@ try {
     [void](Assert-SetupSilentChildPath -Root $dataRoot -Candidate $privateKeyPath)
     Assert-SetupSilent (Test-Path -LiteralPath $certificatePath -PathType Leaf) 'TLS certificate exists before Repair'
     Assert-SetupSilent (Test-Path -LiteralPath $privateKeyPath -PathType Leaf) 'TLS private key exists before Repair'
-    $certificateHashBefore = (Get-FileHash -LiteralPath $certificatePath -Algorithm SHA256).Hash.ToLowerInvariant()
-    $privateKeyHashBefore = (Get-FileHash -LiteralPath $privateKeyPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $certificateHashBefore = (Get-CycFileHash -LiteralPath $certificatePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $privateKeyHashBefore = (Get-CycFileHash -LiteralPath $privateKeyPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $networkPlanJsonBefore = $manifest.managedWorker.networkPlan | ConvertTo-Json -Depth 8 -Compress
 
     $cliRecord = Get-SetupSilentManifestFile -Manifest $manifest -RelativePath 'cyc.exe'
@@ -1491,7 +1522,7 @@ try {
     $tamperBytes = [System.Text.Encoding]::UTF8.GetBytes("`ncyc-repair-regression-$([Guid]::NewGuid().ToString('N'))")
     $stream = [System.IO.File]::Open($cliPath, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
     try { $stream.Write($tamperBytes, 0, $tamperBytes.Length) } finally { $stream.Dispose() }
-    $tamperedHash = (Get-FileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $tamperedHash = (Get-CycFileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-SetupSilent ($tamperedHash -cne ([string]$cliRecord.sha256).ToLowerInvariant()) 'Repair fixture actually changes the installed CLI'
 
     $operations.Add((Invoke-SetupSilentBoundedProcess `
@@ -1519,10 +1550,10 @@ try {
         -ExpectedSid $identitySid `
         -ExpectedProfile $profile `
         -ExpectedLocalAppData $localAppData
-    $cliHashAfterRepair = (Get-FileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $cliHashAfterRepair = (Get-CycFileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-SetupSilent ($cliHashAfterRepair -ceq ([string]$cliRecord.sha256).ToLowerInvariant()) 'Repair restores the corrupted installed CLI'
-    Assert-SetupSilent ((Get-FileHash -LiteralPath $certificatePath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $certificateHashBefore) 'Repair preserves the TLS certificate identity'
-    Assert-SetupSilent ((Get-FileHash -LiteralPath $privateKeyPath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $privateKeyHashBefore) 'Repair preserves the TLS private key identity'
+    Assert-SetupSilent ((Get-CycFileHash -LiteralPath $certificatePath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $certificateHashBefore) 'Repair preserves the TLS certificate identity'
+    Assert-SetupSilent ((Get-CycFileHash -LiteralPath $privateKeyPath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $privateKeyHashBefore) 'Repair preserves the TLS private key identity'
     Assert-SetupSilent (($manifestAfterRepair.managedWorker.networkPlan | ConvertTo-Json -Depth 8 -Compress) -ceq $networkPlanJsonBefore) 'Repair reuses the immutable network plan byte-for-byte at the JSON value level'
     [void](Assert-SetupSilentControllerTask -InstallRoot $installRoot -ExpectedSid $identitySid -Manifest $manifestAfterRepair)
     $runtimeAfterRepair = Assert-SetupSilentControllerRuntime -InstallRoot $installRoot -Manifest $manifestAfterRepair
@@ -1554,7 +1585,7 @@ try {
     $secondTamperBytes = [System.Text.Encoding]::UTF8.GetBytes("`ncyc-second-repair-regression-$([Guid]::NewGuid().ToString('N'))")
     $secondTamperStream = [System.IO.File]::Open($cliPath, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
     try { $secondTamperStream.Write($secondTamperBytes, 0, $secondTamperBytes.Length) } finally { $secondTamperStream.Dispose() }
-    $secondTamperedHash = (Get-FileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $secondTamperedHash = (Get-CycFileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-SetupSilent ($secondTamperedHash -cne ([string]$cliRecord.sha256).ToLowerInvariant()) 'second Repair fixture changes the installed CLI again'
 
     $operations.Add((Invoke-SetupSilentBoundedProcess `
@@ -1583,10 +1614,10 @@ try {
         -ExpectedProfile $profile `
         -ExpectedLocalAppData $localAppData
     $cliRecordAfterSecondRepair = Get-SetupSilentManifestFile -Manifest $manifestAfterSecondRepair -RelativePath 'cyc.exe'
-    $cliHashAfterSecondRepair = (Get-FileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $cliHashAfterSecondRepair = (Get-CycFileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-SetupSilent ($cliHashAfterSecondRepair -ceq ([string]$cliRecordAfterSecondRepair.sha256).ToLowerInvariant()) 'second Repair restores the corrupted installed CLI again'
-    Assert-SetupSilent ((Get-FileHash -LiteralPath $certificatePath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $certificateHashBefore) 'second Repair preserves the TLS certificate identity'
-    Assert-SetupSilent ((Get-FileHash -LiteralPath $privateKeyPath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $privateKeyHashBefore) 'second Repair preserves the TLS private key identity'
+    Assert-SetupSilent ((Get-CycFileHash -LiteralPath $certificatePath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $certificateHashBefore) 'second Repair preserves the TLS certificate identity'
+    Assert-SetupSilent ((Get-CycFileHash -LiteralPath $privateKeyPath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $privateKeyHashBefore) 'second Repair preserves the TLS private key identity'
     Assert-SetupSilent (($manifestAfterSecondRepair.managedWorker.networkPlan | ConvertTo-Json -Depth 8 -Compress) -ceq $networkPlanJsonBefore) 'second Repair reuses the same immutable network plan exactly'
     [void](Assert-SetupSilentControllerTask -InstallRoot $installRoot -ExpectedSid $identitySid -Manifest $manifestAfterSecondRepair)
     $runtimeAfterSecondRepair = Assert-SetupSilentControllerRuntime -InstallRoot $installRoot -Manifest $manifestAfterSecondRepair
@@ -1716,7 +1747,7 @@ try {
         setupSha256 = $setupHash
         authenticodeStatus = $signatureStatus
         packageRoot = $package
-        packageManifestSha256 = (Get-FileHash -LiteralPath $packageManifest -Algorithm SHA256).Hash.ToLowerInvariant()
+        packageManifestSha256 = (Get-CycFileHash -LiteralPath $packageManifest -Algorithm SHA256).Hash.ToLowerInvariant()
         installRoot = $installRoot
         dataRoot = $dataRoot
         controllerProcessIdBeforeRepair = $runtime.processId

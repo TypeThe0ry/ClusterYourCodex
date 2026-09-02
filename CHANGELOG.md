@@ -7,6 +7,15 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.64] - 2026-09-02
+
+### Fixed
+
+- Made Windows package, fresh-deployment, and silent-Setup integrity checks
+  independent of PowerShell module auto-loading by using a streaming .NET
+  SHA-256 helper. Clean `pwsh` to Windows PowerShell 5.1 child boundaries now
+  validate manifests and lifecycle payloads consistently.
+
 ## [0.1.0-preview.63] - 2026-09-02
 
 ### Fixed
@@ -799,7 +808,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.63...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.64...HEAD
+[0.1.0-preview.64]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.63...v0.1.0-preview.64
 [0.1.0-preview.63]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.62...v0.1.0-preview.63
 [0.1.0-preview.62]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.61...v0.1.0-preview.62
 [0.1.0-preview.61]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.60...v0.1.0-preview.61

@@ -46,6 +46,37 @@ function Assert-FreshTest {
     }
 }
 
+# The harness is also launched by a pwsh parent as a Windows PowerShell 5.1
+# child. That boundary can inherit pwsh's PSModulePath and leave the Windows
+# PowerShell utility module unavailable. Use the same module-independent
+# streaming implementation as the packaged bootstrap so acceptance checks
+# remain deterministic on clean runners.
+function Get-CycFileHash {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][ValidateSet('SHA256')][string]$Algorithm
+    )
+
+    if ($Algorithm -cne 'SHA256') {
+        throw "Unsupported file hash algorithm: $Algorithm"
+    }
+    $stream = $null
+    $sha256 = $null
+    try {
+        $stream = [System.IO.File]::OpenRead($LiteralPath)
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        [PSCustomObject]@{
+            Algorithm = 'SHA256'
+            Hash = ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '')
+            Path = [System.IO.Path]::GetFullPath($LiteralPath)
+        }
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ($null -ne $sha256) { $sha256.Dispose() }
+    }
+}
+
 # Windows PowerShell 5.1 decodes BOM-less JSON with the active ANSI code
 # page when Get-Content is used.  The package and install manifests are
 # emitted as strict UTF-8 without a BOM and can contain a non-ASCII profile
@@ -387,7 +418,7 @@ function Assert-InstalledFile {
     )
     $path = Join-Path $Root ($RelativePath.Replace('/', '\'))
     Assert-FreshTest (Test-Path -LiteralPath $path -PathType Leaf) "installed file exists: $RelativePath"
-    return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    return (Get-CycFileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
 function Get-FreshProductTasks {
@@ -684,14 +715,14 @@ try {
     Assert-FreshTest ($LASTEXITCODE -eq 0) 'installed CLI --help succeeds'
 
     $installedCliPath = Join-Path $installRoot 'cyc.exe'
-    $installedCliSha256 = (Get-FileHash -LiteralPath $installedCliPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $installedCliSha256 = (Get-CycFileHash -LiteralPath $installedCliPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $installedCliBytes = [System.IO.File]::ReadAllBytes($installedCliPath)
     Assert-FreshTest ($installedCliBytes.Length -gt 4096) 'installed CLI is large enough for a deterministic repair mutation'
     Wait-FreshFileUnlocked -Path $installedCliPath
     $mutationOffset = $installedCliBytes.Length - 1
     $installedCliBytes[$mutationOffset] = $installedCliBytes[$mutationOffset] -bxor 0xff
     [System.IO.File]::WriteAllBytes($installedCliPath, $installedCliBytes)
-    $mutatedCliSha256 = (Get-FileHash -LiteralPath $installedCliPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $mutatedCliSha256 = (Get-CycFileHash -LiteralPath $installedCliPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-FreshTest ($mutatedCliSha256 -cne $installedCliSha256) 'repair precondition corrupts the installed CLI'
 
     $repairArguments = @($common)
@@ -706,7 +737,7 @@ try {
         -ExpectedLogonType $expectedTaskLogonType `
         -ExpectedSid $expectedTaskSid `
         -Label 'repaired controller task')
-    $repairedCliSha256 = (Get-FileHash -LiteralPath $installedCliPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $repairedCliSha256 = (Get-CycFileHash -LiteralPath $installedCliPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-FreshTest ($repairedCliSha256 -ceq $installedCliSha256) 'repair restores the exact packaged CLI bytes'
     & $installedCliPath '--help' *> (Join-Path $logRoot 'cli-help-after-repair.log')
     Assert-FreshTest ($LASTEXITCODE -eq 0) 'repaired CLI --help succeeds'

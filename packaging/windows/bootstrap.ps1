@@ -104,7 +104,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
-$script:ProductVersion = '0.1.0-preview.63'
+$script:ProductVersion = '0.1.0-preview.64'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
@@ -350,6 +350,38 @@ function Get-CycSha256Hex {
     }
 }
 
+# A packaged lifecycle child is intentionally launched with -NoProfile.  When
+# a pwsh parent supplies its PSModulePath, Windows PowerShell may not auto-load
+# Microsoft.PowerShell.Utility in that boundary, leaving the built-in
+# Get-FileHash command unavailable even though .NET cryptography primitives are
+# present. Keep file-integrity verification independent of module discovery and
+# stream files instead of materializing large payloads in memory.
+function Get-CycFileHash {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][ValidateSet('SHA256')][string]$Algorithm
+    )
+
+    if ($Algorithm -cne 'SHA256') {
+        throw "Unsupported file hash algorithm: $Algorithm"
+    }
+    $stream = $null
+    $sha256 = $null
+    try {
+        $stream = [System.IO.File]::OpenRead($LiteralPath)
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        [PSCustomObject]@{
+            Algorithm = 'SHA256'
+            Hash = ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '')
+            Path = [System.IO.Path]::GetFullPath($LiteralPath)
+        }
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ($null -ne $sha256) { $sha256.Dispose() }
+    }
+}
+
 function ConvertTo-CycStrictRelativePath {
     param([Parameter(Mandatory = $true)][string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path) -or $Path.Length -gt 4096 -or
@@ -542,7 +574,7 @@ function Assert-CycCodexPayloadCatalog {
         $path = Assert-CycNoReparsePathChain -Root $install -Candidate $pair.Value -LeafType File
         $item = Get-Item -LiteralPath $path -Force
         if ([long]$item.Length -ne [long]$entry.length -or
-            (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$entry.sha256) {
+            (Get-CycFileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$entry.sha256) {
             throw "Installed Codex marketplace file failed length/SHA-256 verification: $($pair.Key)"
         }
     }
@@ -2105,7 +2137,7 @@ function Assert-CycPackageManifest {
             ([string]$entry.sha256) -cnotmatch '^[0-9a-f]{64}$') {
             throw "Package manifest metadata is invalid for: $relative"
         }
-        $actualHash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+        $actualHash = (Get-CycFileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($actualHash -cne [string]$entry.sha256) {
             throw "Package payload failed SHA-256 validation: $relative"
         }
@@ -2903,7 +2935,7 @@ function Get-InstallPlan {
             relativePath = $relative
             sourcePath = $source.FullName
             targetPath = $target
-            sha256 = (Get-FileHash -LiteralPath $source.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            sha256 = (Get-CycFileHash -LiteralPath $source.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             length = [long]$source.Length
         }
     }
@@ -3911,7 +3943,7 @@ function Remove-OwnedFiles {
 function Install-PlannedFiles {
     param([Parameter(Mandatory = $true)]$Plan)
     foreach ($file in $Plan.files) {
-        $currentHash = (Get-FileHash -LiteralPath $file.sourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $currentHash = (Get-CycFileHash -LiteralPath $file.sourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($currentHash -ne $file.sha256) {
             throw "Bundle payload changed after planning: $($file.relativePath)"
         }
@@ -3921,7 +3953,7 @@ function Install-PlannedFiles {
         $temporary = $file.targetPath + '.cyc-install-' + [Guid]::NewGuid().ToString('N')
         try {
             Copy-Item -LiteralPath $file.sourcePath -Destination $temporary -Force
-            $copiedHash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash.ToLowerInvariant()
+            $copiedHash = (Get-CycFileHash -LiteralPath $temporary -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($copiedHash -ne $file.sha256) {
                 throw "Copied payload failed integrity verification: $($file.relativePath)"
             }
@@ -5730,7 +5762,7 @@ function Assert-CycInstalledManifestFile {
     if ((Test-ReparsePoint $item) -or $item.Length -ne [long]$length) {
         throw "Installed owned file metadata changed: $RelativePath"
     }
-    $actualHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actualHash = (Get-CycFileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actualHash -cne $hash) {
         throw "Installed owned file failed SHA-256 validation: $RelativePath"
     }
@@ -6235,7 +6267,7 @@ function Invoke-CycCommitFirewallReceipt {
         [string]$receipt.programSha256 -cne [string]$controllerRecord[0].sha256) {
         throw 'Firewall receipt is not bound to the exact installed plan.'
     }
-    $receiptHash = (Get-FileHash -LiteralPath $receiptFile -Algorithm SHA256).Hash.ToLowerInvariant()
+    $receiptHash = (Get-CycFileHash -LiteralPath $receiptFile -Algorithm SHA256).Hash.ToLowerInvariant()
     if ([string]$firewall.state -ceq 'applied') {
         if ([string]$firewall.receiptSha256 -cne $receiptHash) {
             throw 'A different firewall receipt is already committed.'

@@ -4354,6 +4354,12 @@ exit 91
     Assert-True ($payloadEnumerator.Success -and $payloadEnumerator.Value -match 'Stack\[string\]' -and
         $payloadEnumerator.Value -match 'Get-ChildItem -LiteralPath \$current' -and
         $payloadEnumerator.Value -notmatch 'Get-ChildItem -LiteralPath \$bundle -Recurse') 'bootstrap walks payload directories without recursively following reparse points'
+    $fileHashFunction = [regex]::Match($bootstrapSource, 'function Get-CycFileHash[\s\S]+?function ConvertTo-CycStrictRelativePath')
+    Assert-True ($fileHashFunction.Success -and
+        $fileHashFunction.Value -match 'SHA256\]::Create' -and
+        $fileHashFunction.Value -match 'ComputeHash\(\$stream\)' -and
+        $fileHashFunction.Value -match 'OpenRead\(\$LiteralPath\)') 'bootstrap hashes files through its module-independent streaming SHA-256 helper'
+    Assert-True (([regex]::Matches($bootstrapSource, 'Get-CycFileHash\s+-LiteralPath')).Count -ge 6) 'bootstrap routes every file-integrity check through the streaming SHA-256 helper'
     foreach ($atomicName in @('Write-CycDurableAtomicBytes', 'Write-DurableAtomicJson')) {
         $atomicWriter = [regex]::Match($bootstrapSource, "function $atomicName[\s\S]+?function ")
         Assert-True ($atomicWriter.Success -and
@@ -4405,6 +4411,12 @@ exit 91
     Assert-True ($setupBuilder.IndexOf('$validationPackageRoot = $candidateRoot', [StringComparison]::Ordinal) -lt $setupBuilder.IndexOf('Assert-CycPackageManifest', [StringComparison]::Ordinal)) 'Setup builder establishes short source staging before manifest validation'
     Assert-True ($setupBuilder.IndexOf('if ($null -ne $primaryFailure)', [StringComparison]::Ordinal) -lt $setupBuilder.IndexOf('if ($null -ne $cleanupFailure)', [StringComparison]::Ordinal)) 'Setup builder preserves its primary failure ahead of subst cleanup failure'
     $freshDeploymentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-FreshDeployment.ps1') -Raw
+    $freshHashFunction = [regex]::Match($freshDeploymentSource, 'function Get-CycFileHash[\s\S]+?function Resolve-FreshPath')
+    Assert-True ($freshHashFunction.Success -and
+        $freshHashFunction.Value -match 'SHA256\]::Create' -and
+        $freshHashFunction.Value -match 'ComputeHash\(\$stream\)' -and
+        $freshHashFunction.Value -match 'OpenRead\(\$LiteralPath\)') 'fresh deployment smoke hashes files without relying on Windows PowerShell module auto-loading'
+    Assert-True (([regex]::Matches($freshDeploymentSource, '(?m)^\s*(?!#).*Get-CycFileHash\s+-LiteralPath')).Count -ge 4) 'fresh deployment smoke routes every file-integrity check through the streaming SHA-256 helper'
     Assert-True ($freshDeploymentSource -match 'function Read-FreshUtf8Json' -and
         $freshDeploymentSource -match '\[System\.IO\.File\]::ReadAllBytes' -and
         $freshDeploymentSource -match 'UTF8Encoding' -and
@@ -4453,6 +4465,12 @@ exit 91
     $ownedRootRemovalIndex = $freshDeploymentSource.IndexOf('Remove-FreshOwnedIsolationRoot -Root', [StringComparison]::Ordinal)
     Assert-True ($preRootCheckIndex -ge 0 -and $ownedRootRemovalIndex -gt $preRootCheckIndex) 'fresh deployment proves lifecycle absence before deleting the synthetic root'
     $setupSilentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-SetupSilent.ps1') -Raw
+    $setupSilentHashFunction = [regex]::Match($setupSilentSource, 'function Get-CycFileHash[\s\S]+?function Test-SetupSilentPrivateLanAddress')
+    Assert-True ($setupSilentHashFunction.Success -and
+        $setupSilentHashFunction.Value -match 'SHA256\]::Create' -and
+        $setupSilentHashFunction.Value -match 'ComputeHash\(\$stream\)' -and
+        $setupSilentHashFunction.Value -match 'OpenRead\(\$LiteralPath\)') 'silent Setup smoke hashes files without relying on Windows PowerShell module auto-loading'
+    Assert-True (([regex]::Matches($setupSilentSource, '(?m)^\s*(?!#).*Get-CycFileHash\s+-LiteralPath')).Count -ge 13) 'silent Setup smoke routes every file-integrity check through the streaming SHA-256 helper'
     Assert-True ($setupSilentSource -match 'MaximumInstallManifestBytes\s*=\s*16MB') 'silent Setup smoke accepts the bounded self-contained install manifest size'
     Assert-True ($setupSilentSource -match 'ConvertTo-SetupSilentSid') 'silent Setup canonicalizes Scheduled Task identities to SIDs'
     Assert-True ($setupSilentSource -match 'Export-ScheduledTask[\s\S]+Assert-SetupSilentTaskIdentityXml') 'silent Setup verifies the persisted Scheduled Task identity definition'
