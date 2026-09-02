@@ -742,6 +742,11 @@ try {
     Assert-True ($source -match 'function Assert-CycPrivateStateTree') 'transaction journals are validated as a complete private state tree'
     Assert-True ($source -match 'Recover-CycAgentsTransactions[\s\S]+Assert-CycPrivateStateTree') 'journal recovery validates private state before enumerating records'
     Assert-True ($source -match 'New-FileRollbackSnapshot[\s\S]+Set-PrivateDirectoryAcl -Path \$transactionRoot') 'new rollback snapshots publish an exact private ACL before recovery can consume them'
+    $codexOnlyTransactionRootSource = [regex]::Match($source, 'function New-CycCodexOnlyTransactionRoot[\s\S]+?function Remove-CycCodexOnlyTransactionRoot')
+    Assert-True ($codexOnlyTransactionRootSource.Success -and
+        $codexOnlyTransactionRootSource.Value -match 'Assert-CycPrivateStateTree -Root \$transactionsRoot' -and
+        $codexOnlyTransactionRootSource.Value -match 'Set-PrivateDirectoryAcl -Path \$transactionsRoot' -and
+        $codexOnlyTransactionRootSource.Value -match 'Set-PrivateDirectoryAcl -Path \$transactionRoot') 'Codex-only transaction roots verify existing state and publish exact private ACLs for new roots'
     $installCoreStart = $source.IndexOf('function Invoke-InstallOrRepairCore')
     $installCoreEnd = $source.IndexOf('function Invoke-InstallOrRepair', $installCoreStart + 1)
     $installCoreBody = $source.Substring($installCoreStart, $installCoreEnd - $installCoreStart)

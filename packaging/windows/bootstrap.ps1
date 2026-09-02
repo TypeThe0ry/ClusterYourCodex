@@ -5887,10 +5887,18 @@ function New-CycCodexOnlyTransactionRoot {
     $transactionsRoot = Join-Path $installerRoot 'transactions'
     if (Test-Path -LiteralPath $transactionsRoot) {
         [void](Assert-CycRealDirectory -Path $transactionsRoot -Label 'Installer transactions')
+        # An existing transaction tree has already crossed the verify-only
+        # recovery boundary. Re-check it before creating a new child so a
+        # foreign or weakened journal can never be hidden by this entrypoint.
+        Assert-CycPrivateStateTree -Root $transactionsRoot
     } else {
         Assert-CycCreationPathNoReparse -Path $transactionsRoot
         [void](New-Item -ItemType Directory -Path $transactionsRoot)
         [void](Assert-CycRealDirectory -Path $transactionsRoot -Label 'Installer transactions')
+        # New-Item creates an inherited ACL even when the parent is private on
+        # some Windows profiles. Publish the exact private state-root ACL
+        # before any transaction child is created or later recovery can read.
+        Set-PrivateDirectoryAcl -Path $transactionsRoot
     }
     $transactionRoot = Assert-ChildPath `
         -Root $transactionsRoot `
@@ -5898,6 +5906,9 @@ function New-CycCodexOnlyTransactionRoot {
     Assert-CycCreationPathNoReparse -Path $transactionRoot
     [void](New-Item -ItemType Directory -Path $transactionRoot)
     [void](Assert-CycRealDirectory -Path $transactionRoot -Label 'Codex-only transaction')
+    # Protect the newly-created child explicitly; relying on parent ACL
+    # inheritance is not portable across Windows account/profile policies.
+    Set-PrivateDirectoryAcl -Path $transactionRoot
     return $transactionRoot
 }
 
