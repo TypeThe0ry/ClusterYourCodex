@@ -241,8 +241,12 @@ $GaIssue5PlatformGateNames = [ordered]@{
 }
 $GaIssue5ExpectedSelectors = [ordered]@{
     linux = 'isolation::tests::linux_live_dedicated_identity_credential_and_residual_reconciliation'
-    windows = 'isolation::tests::windows_external_json_contract_is_fail_closed_at_every_runtime_gate'
-    macos = 'isolation::tests::macos_external_reconciliation_is_fail_closed_at_every_runtime_gate'
+    windows = 'isolation::tests::windows_native_containment_job_object_and_guard'
+    macos = 'isolation::tests::macos_live_external_reconciliation'
+}
+$GaIssue5DisallowedSelectors = [ordered]@{
+    windows = @('isolation::tests::windows_external_json_contract_is_fail_closed_at_every_runtime_gate')
+    macos = @('isolation::tests::macos_external_reconciliation_is_fail_closed_at_every_runtime_gate')
 }
 $GaIssue5AggregateCommand = 'issue5-evidence-matrix'
 $GaIssue5GateExpectedPlatforms = [ordered]@{
@@ -265,8 +269,13 @@ $GaIssue5RequiredMarkerPrefixes = [ordered]@{
     linuxDedicatedExecutionIdentity = @('uid=', 'gid=')
     linuxCgroupV2Reconciliation = @('cgroup_escape=blocked', 'cgroup.threads_escape=blocked')
 }
-$GaIssue5AnyMarkerPrefixes = [ordered]@{
-    restartResidualProcessReconciliation = @('residual_empty', 'residualCgroupVerified=1', 'residualIdentityProcessesVerified=1')
+$GaIssue5ResidualMarkerPrefixes = [ordered]@{
+    # ``residual_empty`` is emitted by the Linux cgroup probe.  Windows and
+    # macOS must carry a native process-scope/guard marker; a generic empty
+    # receipt is not containment proof for either external backend.
+    linux = @('residual_empty', 'residualCgroupVerified=1', 'residualIdentityProcessesVerified=1')
+    windows = @('residualJobObjectVerified=1', 'residualProcessGroupVerified=1')
+    macos = @('residualProcessGroupVerified=1', 'residualExternalReconciliationVerified=1')
 }
 $GaIssue5RunIdentifierPattern = '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
 $GaIssue5IsoInstantPattern = '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\s]+(Z|[+-][0-9]{2}:[0-9]{2})$'
@@ -471,6 +480,23 @@ function Get-GaIssue5GateMarkers {
     return @($markers | ForEach-Object { [string]$_ })
 }
 
+function Assert-GaIssue5PositiveSelector {
+    param(
+        [Parameter(Mandatory = $true)][string]$Platform,
+        [Parameter(Mandatory = $true)][string]$Selector,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $normalizedPlatform = $Platform.ToLowerInvariant()
+    if ($GaIssue5DisallowedSelectors.Contains($normalizedPlatform)) {
+        foreach ($disallowed in @($GaIssue5DisallowedSelectors[$normalizedPlatform])) {
+            Assert-GaCondition (-not $Selector.Equals([string]$disallowed, [System.StringComparison]::Ordinal)) "$Description.testSelector '$Selector' is a fail-closed regression selector, not positive native containment evidence"
+        }
+    }
+    Assert-GaCondition ($GaIssue5ExpectedSelectors.Contains($normalizedPlatform)) "$Description.testSelector has no reviewed positive selector for platform '$normalizedPlatform'"
+    Assert-GaCondition ($Selector.Equals([string]$GaIssue5ExpectedSelectors[$normalizedPlatform], [System.StringComparison]::Ordinal)) "$Description.testSelector must be the exact positive native '$normalizedPlatform' selector"
+}
+
 function Assert-GaIssue5RequiredMarkers {
     param(
         [Parameter(Mandatory = $true)][string[]]$Markers,
@@ -489,16 +515,20 @@ function Assert-GaIssue5RequiredMarkers {
             Assert-GaCondition ($matched.Count -gt 0) "$Description.rawLogMarkers must contain a native marker beginning with '$prefix'"
         }
     }
-    if ($Platform -ceq 'linux' -and $GaIssue5AnyMarkerPrefixes.Contains($Gate)) {
-        $anyMatched = @()
-        foreach ($prefix in @($GaIssue5AnyMarkerPrefixes[$Gate])) {
-            $anyMatched += @($Markers | Where-Object {
-                    $candidate = [string]$_
-                    $candidate.Equals($prefix, [System.StringComparison]::Ordinal) -or
-                    $candidate.StartsWith($prefix, [System.StringComparison]::Ordinal)
-                })
+    if ($Gate -ceq 'restartResidualProcessReconciliation') {
+        $markerPlatforms = if ($Platform -ceq 'multi-platform') { @($GaIssue5Platforms) } else { @($Platform.ToLowerInvariant()) }
+        foreach ($markerPlatform in $markerPlatforms) {
+            Assert-GaCondition ($GaIssue5ResidualMarkerPrefixes.Contains($markerPlatform)) "$Description.rawLogMarkers has no reviewed residual marker contract for platform '$markerPlatform'"
+            $anyMatched = @()
+            foreach ($prefix in @($GaIssue5ResidualMarkerPrefixes[$markerPlatform])) {
+                $anyMatched += @($Markers | Where-Object {
+                        $candidate = [string]$_
+                        $candidate.Equals($prefix, [System.StringComparison]::Ordinal) -or
+                        $candidate.StartsWith($prefix, [System.StringComparison]::Ordinal)
+                    })
+            }
+            Assert-GaCondition ($anyMatched.Count -gt 0) "$Description.rawLogMarkers must contain a native residual-process reconciliation marker for platform '$markerPlatform'"
         }
-        Assert-GaCondition ($anyMatched.Count -gt 0) "$Description.rawLogMarkers must contain a residual-process reconciliation marker"
     }
 }
 
@@ -523,7 +553,7 @@ function Assert-GaIssue5SingleGateEvidence {
         Assert-GaIssue5RunPlatformBinding -RunPlatformMap $RunPlatformMap -RunId $provenance.runId -Platform $platform -Description "$Description.gates.$Gate"
     }
     $selector = Get-GaIssue5RunSelector -Run $GateEvidence -Description "$Description.gates.$Gate"
-    Assert-GaCondition ($selector.Equals([string]$GaIssue5ExpectedSelectors[$platform], [System.StringComparison]::Ordinal)) "$Description.gates.$Gate.testSelector must be the exact '$platform' selector"
+    Assert-GaIssue5PositiveSelector -Platform $platform -Selector $selector -Description "$Description.gates.$Gate"
     $commandValue = Get-GaProperty -Object $GateEvidence -Path 'command' -Description "$Description.gates.$Gate"
     Assert-GaCondition ($commandValue -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$commandValue)) "$Description.gates.$Gate.command must be a non-empty string"
     $command = [string]$commandValue
@@ -587,7 +617,7 @@ function Assert-GaIssue5MatrixGateEvidence {
             Assert-GaIssue5RunPlatformBinding -RunPlatformMap $RunPlatformMap -RunId $provenance.runId -Platform $platform -Description "$Description.gates.$Gate.runs.$platform"
         }
         $selector = Get-GaIssue5RunSelector -Run $run -Description "$Description.gates.$Gate.runs.$platform"
-        Assert-GaCondition ($selector.Equals([string]$GaIssue5ExpectedSelectors[$platform], [System.StringComparison]::Ordinal)) "$Description.gates.$Gate.runs.$platform.testSelector must be the exact '$platform' selector"
+        Assert-GaIssue5PositiveSelector -Platform $platform -Selector $selector -Description "$Description.gates.$Gate.runs.$platform"
         $commandValue = Get-GaProperty -Object $run -Path 'command' -Description "$Description.gates.$Gate.runs.$platform"
         Assert-GaCondition ($commandValue -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$commandValue)) "$Description.gates.$Gate.runs.$platform.command must be a non-empty string"
         $command = [string]$commandValue
@@ -854,6 +884,35 @@ function Assert-GaIssue5RawVerification {
     }
 }
 
+function Assert-GaExactGateSet {
+    param(
+        [Parameter(Mandatory = $true)][object]$Gates,
+        [Parameter(Mandatory = $true)][string[]]$RequiredGates,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-GaCondition (($Gates -is [pscustomobject]) -and -not ($Gates -is [System.Array])) "$Description.gates must be a JSON object"
+    $expected = @($RequiredGates | ForEach-Object { [string]$_ })
+    Assert-GaCondition ($expected.Count -gt 0) "$Description must declare at least one required gate"
+    $uniqueExpected = @()
+    foreach ($gate in $expected) {
+        Assert-GaCondition (-not [string]::IsNullOrWhiteSpace($gate)) "$Description.RequiredGates cannot contain a blank gate name"
+        if (@($uniqueExpected | Where-Object { $_ -ceq $gate }).Count -eq 0) {
+            $uniqueExpected += $gate
+        }
+    }
+    Assert-GaCondition ($uniqueExpected.Count -eq $expected.Count) "$Description.RequiredGates must not contain duplicate gate names"
+
+    $actual = @($Gates.PSObject.Properties | ForEach-Object { [string]$_.Name })
+    Assert-GaCondition ($actual.Count -eq $expected.Count) "$Description.gates must contain exactly the reviewed gate keys"
+    foreach ($key in $actual) {
+        Assert-GaCondition (@($expected | Where-Object { $_ -ceq $key }).Count -eq 1) "$Description.gates contains unknown gate key '$key'"
+    }
+    foreach ($gate in $expected) {
+        Assert-GaCondition (@($actual | Where-Object { $_ -ceq $gate }).Count -eq 1) "$Description.gates is missing required gate '$gate'"
+    }
+}
+
 function Assert-GaIssueEvidence {
     param(
         [Parameter(Mandatory = $true)][object]$Evidence,
@@ -957,6 +1016,7 @@ function Assert-GaIssueEvidence {
     if ($Path -ceq 'issue5') {
         [void](Assert-GaIssue5Evidence -Node $node -Description $Description -RequiredGates $RequiredGates)
     } else {
+        Assert-GaExactGateSet -Gates $gates -RequiredGates $RequiredGates -Description $Description
         foreach ($gate in $RequiredGates) {
             Assert-GaTrue -Object $node -Path "gates.$gate" -Description $Description
         }

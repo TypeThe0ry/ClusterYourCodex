@@ -47,8 +47,12 @@ $GaIssue5AllGateNames = @(
 )
 $GaIssue5ExpectedSelectors = [ordered]@{
     linux = 'isolation::tests::linux_live_dedicated_identity_credential_and_residual_reconciliation'
-    windows = 'isolation::tests::windows_external_json_contract_is_fail_closed_at_every_runtime_gate'
-    macos = 'isolation::tests::macos_external_reconciliation_is_fail_closed_at_every_runtime_gate'
+    windows = 'isolation::tests::windows_native_containment_job_object_and_guard'
+    macos = 'isolation::tests::macos_live_external_reconciliation'
+}
+$GaIssue5DisallowedSelectors = [ordered]@{
+    windows = @('isolation::tests::windows_external_json_contract_is_fail_closed_at_every_runtime_gate')
+    macos = @('isolation::tests::macos_external_reconciliation_is_fail_closed_at_every_runtime_gate')
 }
 $GaIssue5AggregateCommand = 'issue5-evidence-matrix'
 $GaIssue5GateExpectedPlatforms = [ordered]@{
@@ -66,8 +70,12 @@ $GaIssue5RequiredMarkerPrefixes = [ordered]@{
     linuxDedicatedExecutionIdentity = @('uid=', 'gid=')
     linuxCgroupV2Reconciliation = @('cgroup_escape=blocked', 'cgroup.threads_escape=blocked')
 }
-$GaIssue5AnyMarkerPrefixes = [ordered]@{
-    restartResidualProcessReconciliation = @('residual_empty', 'residualCgroupVerified=1', 'residualIdentityProcessesVerified=1')
+$GaIssue5ResidualMarkerPrefixes = [ordered]@{
+    # ``residual_empty`` is a Linux cgroup marker.  External platforms must
+    # prove their native process-scope/guard reconciliation explicitly.
+    linux = @('residual_empty', 'residualCgroupVerified=1', 'residualIdentityProcessesVerified=1')
+    windows = @('residualJobObjectVerified=1', 'residualProcessGroupVerified=1')
+    macos = @('residualProcessGroupVerified=1', 'residualExternalReconciliationVerified=1')
 }
 $GaIssue5RunIdentifierPattern = '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
 $GaIssue5IsoInstantPattern = '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\s]+(Z|[+-][0-9]{2}:[0-9]{2})$'
@@ -387,6 +395,23 @@ function Get-RawLogIssue5GateMarkers {
     return @($markers | ForEach-Object { [string]$_ })
 }
 
+function Assert-RawLogIssue5PositiveSelector {
+    param(
+        [Parameter(Mandatory = $true)][string]$Platform,
+        [Parameter(Mandatory = $true)][string]$Selector,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $normalizedPlatform = $Platform.ToLowerInvariant()
+    if ($GaIssue5DisallowedSelectors.Contains($normalizedPlatform)) {
+        foreach ($disallowed in @($GaIssue5DisallowedSelectors[$normalizedPlatform])) {
+            Assert-RawLogCondition (-not $Selector.Equals([string]$disallowed, [StringComparison]::Ordinal)) "$Description.testSelector '$Selector' is a fail-closed regression selector, not positive native containment evidence"
+        }
+    }
+    Assert-RawLogCondition ($GaIssue5ExpectedSelectors.Contains($normalizedPlatform)) "$Description.testSelector has no reviewed positive selector for platform '$normalizedPlatform'"
+    Assert-RawLogCondition ($Selector.Equals([string]$GaIssue5ExpectedSelectors[$normalizedPlatform], [StringComparison]::Ordinal)) "$Description.testSelector must be the exact positive native '$normalizedPlatform' selector"
+}
+
 function Assert-RawLogIssue5RequiredMarkers {
     param(
         [Parameter(Mandatory = $true)][string[]]$Markers,
@@ -405,16 +430,20 @@ function Assert-RawLogIssue5RequiredMarkers {
             Assert-RawLogCondition ($matched.Count -gt 0) "$Description.rawLogMarkers contains a native marker beginning with '$prefix'"
         }
     }
-    if ($Platform -ceq 'linux' -and $GaIssue5AnyMarkerPrefixes.Contains($Gate)) {
-        $anyMatched = @()
-        foreach ($prefix in @($GaIssue5AnyMarkerPrefixes[$Gate])) {
-            $anyMatched += @($Markers | Where-Object {
-                    $candidate = [string]$_
-                    $candidate.Equals($prefix, [StringComparison]::Ordinal) -or
-                    $candidate.StartsWith($prefix, [StringComparison]::Ordinal)
-                })
+    if ($Gate -ceq 'restartResidualProcessReconciliation') {
+        $markerPlatforms = if ($Platform -ceq 'multi-platform') { @($GaIssue5Platforms) } else { @($Platform.ToLowerInvariant()) }
+        foreach ($markerPlatform in $markerPlatforms) {
+            Assert-RawLogCondition ($GaIssue5ResidualMarkerPrefixes.Contains($markerPlatform)) "$Description.rawLogMarkers has no reviewed residual marker contract for platform '$markerPlatform'"
+            $anyMatched = @()
+            foreach ($prefix in @($GaIssue5ResidualMarkerPrefixes[$markerPlatform])) {
+                $anyMatched += @($Markers | Where-Object {
+                        $candidate = [string]$_
+                        $candidate.Equals($prefix, [StringComparison]::Ordinal) -or
+                        $candidate.StartsWith($prefix, [StringComparison]::Ordinal)
+                    })
+            }
+            Assert-RawLogCondition ($anyMatched.Count -gt 0) "$Description.rawLogMarkers must contain a native residual-process reconciliation marker for platform '$markerPlatform'"
         }
-        Assert-RawLogCondition ($anyMatched.Count -gt 0) "$Description.rawLogMarkers contains a residual-process reconciliation marker"
     }
 }
 
@@ -439,7 +468,7 @@ function Assert-RawLogIssue5SingleGateEvidence {
         Assert-RawLogIssue5RunPlatformBinding -RunPlatformMap $RunPlatformMap -RunId $provenance.runId -Platform $platform -Description "$Description.gates.$Gate"
     }
     $selector = Get-RawLogIssue5RunSelector -Run $GateEvidence -Description "$Description.gates.$Gate"
-    Assert-RawLogCondition ($selector.Equals([string]$GaIssue5ExpectedSelectors[$platform], [StringComparison]::Ordinal)) "$Description.gates.$Gate.testSelector is the exact '$platform' selector"
+    Assert-RawLogIssue5PositiveSelector -Platform $platform -Selector $selector -Description "$Description.gates.$Gate"
     $commandValue = Get-RawLogProperty -Object $GateEvidence -Path 'command' -Description "$Description.gates.$Gate"
     Assert-RawLogCondition ($commandValue -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$commandValue)) "$Description.gates.$Gate.command is a non-empty string"
     $command = [string]$commandValue
@@ -505,7 +534,7 @@ function Assert-RawLogIssue5MatrixGateEvidence {
         }
 
         $selector = Get-RawLogIssue5RunSelector -Run $run -Description "$Description.gates.$Gate.runs.$platform"
-        Assert-RawLogCondition ($selector.Equals([string]$GaIssue5ExpectedSelectors[$platform], [StringComparison]::Ordinal)) "$Description.gates.$Gate.runs.$platform.testSelector is the exact '$platform' selector"
+        Assert-RawLogIssue5PositiveSelector -Platform $platform -Selector $selector -Description "$Description.gates.$Gate.runs.$platform"
         $commandValue = Get-RawLogProperty -Object $run -Path 'command' -Description "$Description.gates.$Gate.runs.$platform"
         Assert-RawLogCondition ($commandValue -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$commandValue)) "$Description.gates.$Gate.runs.$platform.command is a non-empty string"
         $command = [string]$commandValue

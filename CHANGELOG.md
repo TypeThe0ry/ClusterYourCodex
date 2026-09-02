@@ -7,6 +7,17 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.66] - 2026-09-02
+
+### Fixed
+
+- Closed the GA evidence contract for legacy Issue #2/#3 boolean gate maps:
+  unknown keys are rejected by both readiness validators and the stable
+  publisher contract.
+- Separated Issue #5 positive native Windows/macOS acceptance selectors from
+  fail-closed unavailable-backend regressions, and required a platform-native
+  residual-process marker on every restart matrix row.
+
 ## [0.1.0-preview.65] - 2026-09-02
 
 ### Fixed
@@ -821,7 +832,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.65...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.66...HEAD
+[0.1.0-preview.66]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.65...v0.1.0-preview.66
 [0.1.0-preview.65]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.64...v0.1.0-preview.65
 [0.1.0-preview.64]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.63...v0.1.0-preview.64
 [0.1.0-preview.63]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.62...v0.1.0-preview.63

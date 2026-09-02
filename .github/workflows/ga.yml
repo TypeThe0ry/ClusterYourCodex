@@ -745,10 +745,19 @@ jobs:
                 if $platform == "linux" then
                   "isolation::tests::linux_live_dedicated_identity_credential_and_residual_reconciliation"
                 elif $platform == "windows" then
+                  "isolation::tests::windows_native_containment_job_object_and_guard"
+                elif $platform == "macos" then
+                  "isolation::tests::macos_live_external_reconciliation"
+                else "" end;
+              def issue5_disallowed_selector($platform):
+                if $platform == "windows" then
                   "isolation::tests::windows_external_json_contract_is_fail_closed_at_every_runtime_gate"
                 elif $platform == "macos" then
                   "isolation::tests::macos_external_reconciliation_is_fail_closed_at_every_runtime_gate"
                 else "" end;
+              def issue5_selector_is_positive($platform; $selector):
+                ($selector == issue5_selector($platform))
+                and ($selector != issue5_disallowed_selector($platform));
               def issue5_single_platform($gate):
                 if $gate == "linuxDedicatedExecutionIdentity" then "linux"
                 elif $gate == "linuxCgroupV2Reconciliation" then "linux"
@@ -834,6 +843,17 @@ jobs:
                 and (($markers | unique | length) == ($markers | length));
               def issue5_has_prefix($markers; $prefix):
                 ([ $markers[] | strings | select(startswith($prefix)) ] | length) > 0;
+              def issue5_residual_prefixes($platform):
+                if $platform == "linux" then
+                  ["residual_empty", "residualCgroupVerified=1", "residualIdentityProcessesVerified=1"]
+                elif $platform == "windows" then
+                  ["residualJobObjectVerified=1", "residualProcessGroupVerified=1"]
+                elif $platform == "macos" then
+                  ["residualProcessGroupVerified=1", "residualExternalReconciliationVerified=1"]
+                else [] end;
+              def issue5_has_native_residual_marker($markers; $platform):
+                ([ issue5_residual_prefixes($platform)[] as $prefix |
+                   select(issue5_has_prefix($markers; $prefix)) ] | length) > 0;
               def issue5_marker_valid($marker; $platform; $gate):
                 (($marker | type) == "string")
                 and ($marker | test(
@@ -865,14 +885,12 @@ jobs:
                   | (issue5_marker_array($run)) as $markers
                   | ($platform == "linux" or $platform == "windows" or $platform == "macos")
                     and (($selector | length) > 0)
-                    and ($selector == issue5_selector($platform))
+                    and issue5_selector_is_positive($platform; $selector)
                     and issue5_command_valid($platform; $run.command)
                     and issue5_markers_valid($markers)
                     and issue5_has_marker($markers; $platform; $gate)
-                    and (if ($platform == "linux" and $gate == "restartResidualProcessReconciliation") then
-                           (issue5_has_prefix($markers; "residual_empty")
-                            or issue5_has_prefix($markers; "residualCgroupVerified=1")
-                            or issue5_has_prefix($markers; "residualIdentityProcessesVerified=1"))
+                    and (if ($gate == "restartResidualProcessReconciliation") then
+                           issue5_has_native_residual_marker($markers; $platform)
                          else true end)
                 end;
               def issue5_single_gate_valid($record; $gate):
@@ -886,7 +904,7 @@ jobs:
                   | (issue5_marker_array($record.gates[$gate])) as $markers
                   | ($platform == issue5_single_platform($gate))
                     and (($selector | length) > 0)
-                    and ($selector == issue5_selector($platform))
+                    and issue5_selector_is_positive($platform; $selector)
                     and issue5_command_valid($platform; $record.gates[$gate].command)
                     and issue5_markers_valid($markers)
                     and issue5_has_marker($markers; $platform; $gate)
@@ -973,6 +991,9 @@ jobs:
                 and (($record.rawLog.platforms | map(ascii_downcase) | sort) == (issue5_platforms | sort))
                 and issue5_all_gates_valid($record)
                 and issue5_raw_markers_valid($record);
+              def gate_keys_exact($record; $gates):
+                (($record.gates | type) == "object")
+                and (($record.gates | keys_unsorted | sort) == ($gates | sort));
               def all_gates($record; $gates):
                 ([$gates[] as $gate | ($record.gates[$gate] // false) == true] | all);
               def valid_issue_evidence($record; $gates):
@@ -986,6 +1007,7 @@ jobs:
                 and ((string_value($record.hostType) | test("github|actions|hosted|runner"; "i")) | not)
                 and (string_value($record.evidenceId) | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))
                 and valid_raw_log($record)
+                and gate_keys_exact($record; $gates)
                 and all_gates($record; $gates);
               .schemaVersion == "cyc.dev/ga-evidence/v1"
               and .status == "passed"

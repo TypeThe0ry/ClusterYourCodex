@@ -144,10 +144,14 @@ but if they appear alongside canonical `testSelector` or `rawLogMarkers` they
 must be the same values byte-for-byte; conflicting spellings fail closed.
 Every nested run carries its exact selector, command, and raw-log markers. The required selectors are the Linux ignored native probe
 `isolation::tests::linux_live_dedicated_identity_credential_and_residual_reconciliation`,
-the Windows guard contract
-`isolation::tests::windows_external_json_contract_is_fail_closed_at_every_runtime_gate`,
-and the macOS reconciliation contract
-`isolation::tests::macos_external_reconciliation_is_fail_closed_at_every_runtime_gate`.
+the positive Windows native containment probe
+`isolation::tests::windows_native_containment_job_object_and_guard`,
+and the positive macOS live reconciliation probe
+`isolation::tests::macos_live_external_reconciliation`. The existing
+`windows_external_json_contract_is_fail_closed_at_every_runtime_gate` and
+`macos_external_reconciliation_is_fail_closed_at_every_runtime_gate` tests are
+unavailability regressions, not native containment acceptance, and the GA
+validators reject them as completion evidence.
 Commands must select `cyc-worker`'s library target with `--locked` and
 `--exact --nocapture`; the Linux row additionally requires `--ignored` and
 all rows must end in their exact selector. A workspace-wide
@@ -155,6 +159,15 @@ all rows must end in their exact selector. A workspace-wide
 row. Linux, Windows, and macOS each have to carry their platform-specific
 gates plus the guard-state, worker-credential, and restart residual-process
 gates.
+
+For `restartResidualProcessReconciliation`, every platform row must carry a
+native residual marker in addition to its source-bound marker. Linux accepts
+`residual_empty`, `residualCgroupVerified=1`, or
+`residualIdentityProcessesVerified=1`; Windows accepts
+`residualJobObjectVerified=1` or `residualProcessGroupVerified=1`; macOS
+accepts `residualProcessGroupVerified=1` or
+`residualExternalReconciliationVerified=1`. A generic Linux-style
+`residual_empty` marker cannot be relabelled as Windows or macOS proof.
 
 Within each three-platform matrix, `runId` values are unique. Across gates a
 run may be reused only for the same platform; a single execution identifier
@@ -175,8 +188,10 @@ Linux log, or omitting a semantic native marker cannot satisfy the Windows,
 macOS, or restart gates.
 
 The Issue #2 and Issue #3 `gates` objects remain fail-closed legacy maps: every
-required gate is a JSON boolean with value `true`; a missing, non-boolean, or
-false gate fails the manifest. Issue #5 uses the structured gate matrix above.
+required gate is a JSON boolean with value `true`; a missing, unknown,
+non-boolean, or false gate fails the manifest. The gate objects are closed sets
+and are rechecked by both the PowerShell readiness verifier and the stable
+publisher's JQ contract. Issue #5 uses the structured gate matrix above.
 Issue #2 requires `tauriDesktopHostTray`, `rendererNativeControllerProxy`,
 `perUserScheduledTasks`, `sidScopedDataDirAcl`,
 `bundledMcpInstallerMarketplace`, `installRepairUpgradeRollbackUninstall`,

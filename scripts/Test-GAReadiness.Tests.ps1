@@ -63,11 +63,15 @@ $contractResult = ($contractOutput -join "`n") | ConvertFrom-Json
 function New-TestIssueEvidence {
     param(
         [string]$Provider = 'external-lab',
-        [string]$HostType = 'macos-native'
+        [string]$HostType = 'macos-native',
+        [string[]]$GateNames = $null
     )
 
+    if ($null -eq $GateNames) {
+        $GateNames = $issue3GateNamesForTest
+    }
     $gates = [ordered]@{}
-    foreach ($gate in ($issue2GateNamesForTest + $issue3GateNamesForTest + $issue5GateNamesForTest | Select-Object -Unique)) {
+    foreach ($gate in $GateNames) {
         $gates[$gate] = $true
     }
     $record = [ordered]@{
@@ -93,7 +97,7 @@ function New-TestIssueEvidence {
 }
 
 function New-TestIssue5Evidence {
-    $record = New-TestIssueEvidence -Provider 'issue5-matrix-lab' -HostType 'external-native-matrix'
+    $record = New-TestIssueEvidence -Provider 'issue5-matrix-lab' -HostType 'external-native-matrix' -GateNames $issue5GateNamesForTest
     $record.evidenceId = 'ga-issue5-matrix-20260830'
     $record.rawLog.command = 'issue5-evidence-matrix'
     $record.rawLog.node = 'issue5-matrix-coordinator'
@@ -110,8 +114,9 @@ function New-TestIssue5Evidence {
                 Get-GaIssue5Marker -Platform $platform -Selector $selector -Command $command -Gate ([string]$_)
             })
         if ($platform -ceq 'linux') {
-            $markers += @('uid=1007', 'gid=1007', 'cgroup_escape=blocked', 'cgroup.threads_escape=blocked', 'residual_empty')
+            $markers += @('uid=1007', 'gid=1007', 'cgroup_escape=blocked', 'cgroup.threads_escape=blocked')
         }
+        $markers += [string]@($GaIssue5ResidualMarkerPrefixes[$platform])[0]
         [void]$runs.Add([ordered]@{
                 runId = "issue5-$platform-20260830"
                 platform = $platform
@@ -168,8 +173,8 @@ function New-TestIssue5Evidence {
             $run = $runByPlatform[$platform]
             $marker = Get-GaIssue5Marker -Platform $platform -Selector ([string]$run.testSelector) -Command ([string]$run.command) -Gate $gate
             $runMarkers = @($marker)
-            if ($gate -ceq 'restartResidualProcessReconciliation' -and $platform -ceq 'linux') {
-                $runMarkers += 'residual_empty'
+            if ($gate -ceq 'restartResidualProcessReconciliation') {
+                $runMarkers += [string]@($GaIssue5ResidualMarkerPrefixes[$platform])[0]
             }
             [void]$matrixMarkers.Add($marker)
             foreach ($markerValue in $runMarkers) {
@@ -249,6 +254,22 @@ Describe 'GA evidence issue acceptance contract' {
         $workflowSource | Should Match 'issue5_matrix_gate_valid'
         $workflowSource | Should Match 'issue5-evidence-matrix'
         $workflowSource | Should Match 'issue5_selector_value'
+        $workflowSource | Should Match 'issue5_selector_is_positive'
+        $workflowSource | Should Match 'issue5_residual_prefixes'
+        $workflowSource | Should Match 'issue5_has_native_residual_marker'
+        $workflowSource | Should Match 'gate_keys_exact'
+        $readinessSource | Should Match 'Assert-GaExactGateSet'
+        $readinessSource | Should Match 'Assert-GaIssue5PositiveSelector'
+        $rawLogSource | Should Match 'Assert-RawLogIssue5PositiveSelector'
+        $readinessSource | Should Match 'windows_native_containment_job_object_and_guard'
+        $readinessSource | Should Match 'macos_live_external_reconciliation'
+        $rawLogSource | Should Match 'windows_native_containment_job_object_and_guard'
+        $rawLogSource | Should Match 'macos_live_external_reconciliation'
+        foreach ($selector in @('windows_external_json_contract_is_fail_closed_at_every_runtime_gate', 'macos_external_reconciliation_is_fail_closed_at_every_runtime_gate')) {
+            $readinessSource | Should Match ([regex]::Escape($selector))
+            $rawLogSource | Should Match ([regex]::Escape($selector))
+            $workflowSource | Should Match ([regex]::Escape($selector))
+        }
         $workflowSource | Should Match 'valid_iso_order'
         $workflowSource | Should Match 'parse_iso_instant'
         $workflowSource | Should Match 'ended_at < started_at'
@@ -298,8 +319,10 @@ Describe 'GA evidence issue acceptance contract' {
         $rawLogSource | Should Match 'rawLogMarkers'
         $rawLogSource | Should Match 'gateEvidence'
         $rawLogSource | Should Match '--workspace'
-        foreach ($markerPrefix in @('uid=', 'gid=', 'cgroup_escape=blocked', 'cgroup.threads_escape=blocked', 'residual_empty')) {
+        foreach ($markerPrefix in @('uid=', 'gid=', 'cgroup_escape=blocked', 'cgroup.threads_escape=blocked', 'residual_empty', 'residualJobObjectVerified=1', 'residualProcessGroupVerified=1', 'residualExternalReconciliationVerified=1')) {
             $rawLogSource | Should Match ([regex]::Escape($markerPrefix))
+            $readinessSource | Should Match ([regex]::Escape($markerPrefix))
+            $workflowSource | Should Match ([regex]::Escape($markerPrefix))
         }
         $readinessSource | Should Match 'Assert-GaIssue5Evidence'
         $readinessSource | Should Match 'Assert-GaIssue5RawVerification'
@@ -388,7 +411,7 @@ Describe 'GA evidence issue acceptance contract' {
     }
 
     It 'accepts a complete source-bound issue 3 evidence record' {
-        $record = New-TestIssueEvidence
+        $record = New-TestIssueEvidence -GateNames $issue3GateNamesForTest
         $result = Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue3 = $record }) `
             -Path 'issue3' -Description 'Issue #3 test evidence' -ExpectedCommit $expectedCommitForTest `
             -RequiredGates $issue3GateNamesForTest
@@ -397,12 +420,30 @@ Describe 'GA evidence issue acceptance contract' {
     }
 
     It 'accepts a complete source-bound issue 2 evidence record' {
-        $record = New-TestIssueEvidence -Provider 'windows-lab' -HostType 'windows-clean-vm'
+        $record = New-TestIssueEvidence -Provider 'windows-lab' -HostType 'windows-clean-vm' -GateNames $issue2GateNamesForTest
         $result = Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue2 = $record }) `
             -Path 'issue2' -Description 'Issue #2 test evidence' -ExpectedCommit $expectedCommitForTest `
             -RequiredGates $issue2GateNamesForTest
         $result.status | Should Be 'passed'
         $result.gates.cleanWindows11Vm | Should Be $true
+    }
+
+    It 'rejects unknown gate keys in the closed Issue #2 and Issue #3 maps' {
+        $record = New-TestIssueEvidence -GateNames $issue2GateNamesForTest
+        $record.gates | Add-Member -MemberType NoteProperty -Name 'unreviewedIssue2Gate' -Value $true
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue2 = $record }) `
+                -Path 'issue2' -Description 'Issue #2 unknown gate key' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue2GateNamesForTest
+        }
+
+        $record = New-TestIssueEvidence -GateNames $issue3GateNamesForTest
+        $record.gates | Add-Member -MemberType NoteProperty -Name 'unreviewedIssue3Gate' -Value $true
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue3 = $record }) `
+                -Path 'issue3' -Description 'Issue #3 unknown gate key' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue3GateNamesForTest
+        }
     }
 
     It 'accepts a complete source-bound issue 5 evidence record' {
@@ -423,6 +464,50 @@ Describe 'GA evidence issue acceptance contract' {
             gateEvidence = @($contract.gates)
         }
         { Assert-GaIssue5RawVerification -ManifestIssue $manifest -RawRecord $rawRecord -Description 'Issue #5 raw verification fixture' } | Should Not Throw
+    }
+
+    It 'rejects fail-closed Windows and macOS selectors as Issue #5 completion evidence' {
+        $record = New-TestIssue5Evidence
+        $record.gates.windowsJobObject.testSelector = 'isolation::tests::windows_external_json_contract_is_fail_closed_at_every_runtime_gate'
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 fail-closed Windows selector' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+
+        $record = New-TestIssue5Evidence
+        $record.gates.macosExternalReconciliation.testSelector = 'isolation::tests::macos_external_reconciliation_is_fail_closed_at_every_runtime_gate'
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 fail-closed macOS selector' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+    }
+
+    It 'requires a platform-native residual marker on Windows and macOS restart rows' {
+        $record = New-TestIssue5Evidence
+        $windowsRun = $record.gates.restartResidualProcessReconciliation.runs[1]
+        $windowsRun.rawLogMarkers = @($windowsRun.rawLogMarkers | Where-Object {
+                ([string]$_) -cne 'residualJobObjectVerified=1' -and
+                ([string]$_) -cne 'residualProcessGroupVerified=1'
+            })
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 missing Windows residual marker' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+
+        $record = New-TestIssue5Evidence
+        $macosRun = $record.gates.restartResidualProcessReconciliation.runs[2]
+        $macosRun.rawLogMarkers = @($macosRun.rawLogMarkers | Where-Object {
+                ([string]$_) -cne 'residualProcessGroupVerified=1' -and
+                ([string]$_) -cne 'residualExternalReconciliationVerified=1'
+            })
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 missing macOS residual marker' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
     }
 
     It 'rejects conflicting Issue #5 selector and marker aliases' {
