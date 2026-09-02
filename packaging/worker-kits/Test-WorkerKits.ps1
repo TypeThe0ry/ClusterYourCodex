@@ -44,6 +44,18 @@ $windowsInstaller = Join-Path $PSScriptRoot 'windows\Install-Worker.ps1'
 $linuxInstaller = Join-Path $PSScriptRoot 'linux\install-worker.sh'
 $macosInstaller = Join-Path $PSScriptRoot 'macos\install-worker.sh'
 $builder = Join-Path $PSScriptRoot 'New-WorkerKit.ps1'
+$workerInstallerSource = [System.IO.File]::ReadAllText($windowsInstaller, [System.Text.Encoding]::UTF8)
+$workerHashFunctionMatch = [regex]::Match(
+    $workerInstallerSource,
+    'function Get-CycWorkerFileHash[\s\S]+?function Test-Ed25519Signature'
+)
+if (-not $workerHashFunctionMatch.Success) {
+    throw 'Windows worker installer is missing its module-independent streaming hash helper.'
+}
+$workerHashFunctionSource = $workerHashFunctionMatch.Value.Substring(
+    0,
+    $workerHashFunctionMatch.Value.IndexOf('function Test-Ed25519Signature', [StringComparison]::Ordinal)
+)
 foreach ($scriptPath in @($windowsInstaller, $builder)) {
     $tokens = $null
     $errors = $null
@@ -97,6 +109,63 @@ try {
     $env:CYC_WORKER_KIT_SIGNING_KEY_ID = 'cyc-release-2026-02'
     $env:CYC_WORKER_KIT_TRUSTED_PUBLIC_KEY_PATH = $fixturePublicRaw
     $env:CYC_WORKER_KIT_TEST_PRIVATE_KEY = $fixturePrivate
+
+    # The managed-worker lifecycle invokes Install-Worker.ps1 through a
+    # Windows PowerShell -NoProfile child.  Exercise the hash helper in that
+    # exact boundary with module discovery disabled so a future regression to
+    # Get-FileHash is caught before a release artifact is published.
+    $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
+        throw 'Windows PowerShell 5.1 is required for the worker-kit -NoProfile hash probe.'
+    }
+    $hashProbePath = Join-Path $temporary 'worker-installer-hash-probe.txt'
+    $hashProbeContent = "module-independent worker hash probe`n"
+    [System.IO.File]::WriteAllText($hashProbePath, $hashProbeContent, (New-Object System.Text.UTF8Encoding($false)))
+    $hashProbeSha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashProbeExpected = ([System.BitConverter]::ToString(
+            $hashProbeSha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($hashProbeContent))
+        )).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $hashProbeSha.Dispose()
+    }
+    $hashProbePath64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($hashProbePath))
+    $hashProbeSource = @"
+Set-StrictMode -Version Latest
+`$ErrorActionPreference = 'Stop'
+`$env:PSModulePath = 'C:\__cyc_missing_worker_modules__'
+function Get-FileHash { throw 'Get-FileHash was called by the worker installer hash probe.' }
+$workerHashFunctionSource
+`$probePath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$hashProbePath64'))
+`$observed = (Get-CycWorkerFileHash -LiteralPath `$probePath -Algorithm SHA256).Hash.ToLowerInvariant()
+if (`$observed -cne '$hashProbeExpected') { throw "Worker hash probe mismatch: `$observed" }
+"@
+    $hashProbeEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($hashProbeSource))
+    $hashProbeStdout = Join-Path $temporary 'worker-installer-hash-probe.stdout.log'
+    $hashProbeStderr = Join-Path $temporary 'worker-installer-hash-probe.stderr.log'
+    $hashProbe = Start-Process `
+        -FilePath $windowsPowerShell `
+        -ArgumentList @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-EncodedCommand', $hashProbeEncoded
+        ) `
+        -WorkingDirectory $temporary `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $hashProbeStdout `
+        -RedirectStandardError $hashProbeStderr `
+        -Wait `
+        -PassThru
+    $hashProbeStdoutText = if (Test-Path -LiteralPath $hashProbeStdout -PathType Leaf) {
+        [System.IO.File]::ReadAllText($hashProbeStdout)
+    } else { '' }
+    $hashProbeStderrText = if (Test-Path -LiteralPath $hashProbeStderr -PathType Leaf) {
+        [System.IO.File]::ReadAllText($hashProbeStderr)
+    } else { '' }
+    $hashProbeOutput = ($hashProbeStdoutText + $hashProbeStderrText).Trim()
+    if ($hashProbe.ExitCode -ne 0) {
+        throw "Windows worker installer -NoProfile hash probe failed (exit=$($hashProbe.ExitCode)): $hashProbeOutput"
+    }
+
     $fakeWorker = Join-Path $temporary 'fake-worker.bin'
     [System.IO.File]::WriteAllBytes($fakeWorker, [byte[]](0..255))
     $windowsOutput = Join-Path $temporary 'windows'

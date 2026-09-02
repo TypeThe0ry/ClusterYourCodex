@@ -4276,6 +4276,15 @@ exit 91
         $workerInstallerSource -match 'New-Object System\.Text\.UTF8Encoding\(\$false,\s*\$true\)' -and
         $workerInstallerSource -match '0xEF' -and $workerInstallerSource -match '0xBB' -and $workerInstallerSource -match '0xBF' -and
         $workerInstallerSource -notmatch 'Get-Content[^\r\n]+ConvertFrom-Json') 'Windows worker repair reads state and manifests as strict UTF-8 with BOM support'
+    $workerHashFunction = [regex]::Match($workerInstallerSource, 'function Get-CycWorkerFileHash[\s\S]+?function Test-Ed25519Signature')
+    Assert-True ($workerHashFunction.Success -and
+        $workerHashFunction.Value -match 'SHA256\]::Create' -and
+        $workerHashFunction.Value -match 'ComputeHash\(\$stream\)' -and
+        $workerHashFunction.Value -match 'OpenRead\(\$LiteralPath\)' -and
+        $workerHashFunction.Value -match '\$sha256\.Dispose\(\)' -and
+        $workerHashFunction.Value -match '\$stream\.Dispose\(\)') 'Windows worker installer hashes kit files through its module-independent streaming SHA-256 helper'
+    Assert-True (([regex]::Matches($workerInstallerSource, '(?m)^\s*(?!#).*Get-CycWorkerFileHash\s+-LiteralPath')).Count -ge 4) 'Windows worker installer routes every file-integrity check through the streaming SHA-256 helper'
+    Assert-True (([regex]::Matches($workerInstallerSource, '(?m)^\s*(?!#).*Get-FileHash\s+-LiteralPath')).Count -eq 0) 'Windows worker installer has no direct Get-FileHash dependency under -NoProfile'
     Assert-True ($workerKitsHarnessSource -match 'function Read-CycWorkerKitsUtf8Json' -and
         $workerKitsHarnessSource -match '\[System\.IO\.File\]::ReadAllBytes' -and
         $workerKitsHarnessSource -match 'New-Object System\.Text\.UTF8Encoding\(\$false,\s*\$true\)' -and

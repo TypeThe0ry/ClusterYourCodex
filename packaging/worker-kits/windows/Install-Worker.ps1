@@ -281,6 +281,36 @@ function Test-ByteArrayEqual {
     return ($difference -eq 0)
 }
 
+function Get-CycWorkerFileHash {
+    <#
+    Keep worker-kit verification independent from PowerShell module discovery.
+    The installer is launched through a Windows PowerShell -NoProfile boundary
+    on managed workers, where Get-FileHash is not guaranteed to be available.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [ValidateSet('SHA256')][string]$Algorithm = 'SHA256'
+    )
+    if ($Algorithm -cne 'SHA256') { throw "Unsupported worker-kit hash algorithm: $Algorithm" }
+
+    $stream = $null
+    $sha256 = $null
+    try {
+        $stream = [System.IO.File]::OpenRead($LiteralPath)
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        $digest = $sha256.ComputeHash($stream)
+        return [PSCustomObject]@{
+            Algorithm = 'SHA256'
+            Hash = ([System.BitConverter]::ToString($digest)).Replace('-', '')
+            Path = $LiteralPath
+        }
+    } finally {
+        if ($null -ne $sha256) { $sha256.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
 function Test-Ed25519Signature {
     param(
         [Parameter(Mandatory = $true)][byte[]]$PublicKey,
@@ -470,7 +500,7 @@ function Read-KitManifest {
         if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { throw "Worker kit file is missing: $name" }
         $candidateItem = Get-Item -LiteralPath $candidate -Force
         if (Test-ReparsePoint $candidateItem) { throw "Worker kit file is a reparse point: $name" }
-        $candidateHash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+        $candidateHash = (Get-CycWorkerFileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($candidateHash -ne $checksumMap[$name]) { throw "Worker kit checksum failed: $name" }
     }
     $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
@@ -511,7 +541,7 @@ function Read-KitManifest {
         throw 'Worker-kit publisher signature encoding is invalid.'
     }
     if ($signatureBytes.Length -ne 64) { throw 'Worker-kit publisher signature length is invalid.' }
-    $manifestDigest = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    $manifestDigest = (Get-CycWorkerFileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($manifestDigest -cne [string]$signatureEnvelope.manifestSha256) {
         throw 'Worker-kit publisher signature is not bound to this manifest.'
     }
@@ -544,7 +574,7 @@ function Read-KitManifest {
     if ((Test-ReparsePoint $binaryItem) -or $binaryItem.Length -ne [long]$worker[0].sizeBytes) {
         throw 'cyc-worker.exe size or file type is invalid.'
     }
-    $actual = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actual = (Get-CycWorkerFileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actual -ne [string]$worker[0].sha256 -or $actual -ne $checksumMap['cyc-worker.exe']) {
         throw 'cyc-worker.exe failed SHA-256 verification.'
     }
@@ -1184,7 +1214,7 @@ $transactionActive = $false
 $transactionCommitted = $false
 try {
     Copy-Item -LiteralPath $kit.binary -Destination $temporaryWorker
-    if ((Get-FileHash -LiteralPath $temporaryWorker -Algorithm SHA256).Hash.ToLowerInvariant() -ne $kit.sha256) {
+    if ((Get-CycWorkerFileHash -LiteralPath $temporaryWorker -Algorithm SHA256).Hash.ToLowerInvariant() -ne $kit.sha256) {
         throw 'Staged worker failed SHA-256 verification.'
     }
     Protect-File -Path $temporaryWorker -NewlyCreated

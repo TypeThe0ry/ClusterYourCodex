@@ -7,6 +7,16 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.65] - 2026-09-02
+
+### Fixed
+
+- Made the Windows worker-kit installer independent of PowerShell module
+  auto-loading by routing every manifest, signature, payload, and staged-copy
+  digest through a streaming .NET SHA-256 helper. The managed-worker
+  `powershell.exe -NoProfile` boundary now remains verifiable even when
+  `Get-FileHash` is unavailable.
+
 ## [0.1.0-preview.64] - 2026-09-02
 
 ### Fixed
@@ -811,7 +821,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.64...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.65...HEAD
+[0.1.0-preview.65]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.64...v0.1.0-preview.65
 [0.1.0-preview.64]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.63...v0.1.0-preview.64
 [0.1.0-preview.63]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.62...v0.1.0-preview.63
 [0.1.0-preview.62]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.61...v0.1.0-preview.62
