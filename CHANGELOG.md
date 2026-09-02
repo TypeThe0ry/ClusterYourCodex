@@ -19,6 +19,9 @@ are versioned independently from the product.
   roots and added regression fixtures for weak pre-positioned directories.
 - Restored Linux user linger on every pre-activation failure and retained the
   runtime-gated fail-closed boundary when a user systemd manager is absent.
+- Made the Windows reparse-point fixture cleanup safe in non-interactive
+  PowerShell so the managed worker-kit gate cannot fail on a confirmation
+  prompt after a successful assertion.
 
 ## [0.1.0-preview.61] - 2026-09-02
 
