@@ -1224,10 +1224,7 @@ fn validate_external_guard_executable(path: &Path, expected_sha256: &str) -> Res
     }
     let actual_sha256 = hex::encode(hasher.finalize());
     if actual_sha256 != expected_sha256 {
-        bail!(
-            "external guard executable SHA-256 mismatch (expected pinned digest, observed {})",
-            actual_sha256
-        );
+        bail!("external guard executable SHA-256 mismatch (expected pinned digest, observed {actual_sha256})");
     }
     Ok(())
 }
@@ -1490,10 +1487,7 @@ fn linux_identity_pids(uid: u32) -> Result<Vec<u32>> {
 fn ensure_linux_identity_idle(uid: u32) -> Result<()> {
     let pids = linux_identity_pids(uid)?;
     if !pids.is_empty() {
-        bail!(
-            "hostile execution identity has processes outside the empty execution boundary: {:?}",
-            pids
-        );
+        bail!("hostile execution identity has processes outside the empty execution boundary: {pids:?}");
     }
     Ok(())
 }

@@ -7,6 +7,15 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.68] - 2026-09-02
+
+### Fixed
+
+- Kept the worker isolation code clean under the minimum supported Rust 1.88
+  clippy profile by using captured format arguments in external-guard and
+  Linux identity diagnostics. This removes an MSRV-only lint failure without
+  changing the fail-closed isolation behavior.
+
 ## [0.1.0-preview.67] - 2026-09-02
 
 ### Fixed
@@ -844,7 +853,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.67...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.68...HEAD
+[0.1.0-preview.68]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.67...v0.1.0-preview.68
 [0.1.0-preview.67]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.66...v0.1.0-preview.67
 [0.1.0-preview.66]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.65...v0.1.0-preview.66
 [0.1.0-preview.65]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.64...v0.1.0-preview.65
