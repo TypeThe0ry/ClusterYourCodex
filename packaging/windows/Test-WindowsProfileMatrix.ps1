@@ -1440,7 +1440,10 @@ try {
                     $timedOut = $true
                     break
                 }
-                Start-Sleep -Milliseconds 100
+                # Wait on the process handle for a bounded slice instead of
+                # sleeping blindly; this observes exit promptly while keeping
+                # the IPC/deadline loop responsive on slow emulated runners.
+                [void]$process.WaitForExit(100)
             }
             if ($timedOut) {
                 $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
