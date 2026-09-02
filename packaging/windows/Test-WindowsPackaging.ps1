@@ -1568,6 +1568,12 @@ exit 4
         -Action Install `
         -CodexResult $codexOnlyInitialResult `
         -AgentsResult $codexOnlyDisabledAgents
+    # The Codex-only entrypoint is a verify-only lifecycle boundary.  Seed the
+    # fixture with the same protected roots a real install publishes so the
+    # first recovery/preflight check exercises the plugin gate rather than
+    # failing on an intentionally weak test directory ACL.
+    Set-PrivateDirectoryAcl -Path $codexOnlyInstall -AllowAdministratorsReadAndExecute
+    Set-PrivateDirectoryAcl -Path $codexOnlyData
 
     $codexOnlyFakeBin = Join-Path $testRoot 'codex-only-fake-bin'
     $codexOnlyFakeCli = Join-Path $codexOnlyFakeBin 'codex.cmd'
