@@ -1924,6 +1924,11 @@ exit 4
             pluginAdded = $true
         }
     } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $codexManifest -Encoding UTF8
+    # Uninstall now has the same verify-only private-root preflight as install
+    # and IntegrateCodex. Protect this legacy cleanup fixture before invoking
+    # the external Codex failure path so the assertion reaches that gate.
+    Set-PrivateDirectoryAcl -Path $codexInstall -AllowAdministratorsReadAndExecute
+    Set-PrivateDirectoryAcl -Path $codexData
     $oldPath = $env:PATH
     $oldCodexLog = $env:CYC_FAKE_CODEX_LOG
     $oldCodexCli = $env:CYC_CODEX_CLI
