@@ -242,6 +242,40 @@ function New-TestIssue5Evidence {
     return (($record | ConvertTo-Json -Depth 20) | ConvertFrom-Json)
 }
 
+function New-TestRawLogContent {
+    param(
+        [string]$IssueName = 'issue3',
+        [object]$Record = $null
+    )
+
+    if ($null -eq $Record) {
+        $Record = New-TestIssueEvidence
+    }
+    $rawLog = $Record.rawLog
+    $content = [ordered]@{
+        schemaVersion = 'cyc.dev/ga-raw-log/v1'
+        status = 'passed'
+        sourceCommit = $expectedCommitForTest
+        issue = $IssueName
+        evidenceId = [string]$Record.evidenceId
+        command = [string]$rawLog.command
+        node = [string]$rawLog.node
+        startedAt = '2026-08-30T14:00:00Z'
+        endedAt = '2026-08-30T14:01:00Z'
+        exitCode = 0
+        tests = [ordered]@{
+            passed = $rawLog.tests.passed
+            failed = $rawLog.tests.failed
+            ignored = $rawLog.tests.ignored
+        }
+        cleanup = $true
+    }
+    if ($IssueName -ceq 'issue5') {
+        $content.markers = @($rawLog.markers)
+    }
+    return (($content | ConvertTo-Json -Depth 20) | ConvertFrom-Json)
+}
+
 function Assert-TestThrows {
     param([Parameter(Mandatory = $true)][scriptblock]$ScriptBlock)
 
@@ -308,6 +342,16 @@ Describe 'GA evidence issue acceptance contract' {
         $workflowSource | Should Match 'valid_iso_order'
         $workflowSource | Should Match 'parse_iso_instant'
         $workflowSource | Should Match 'ended_at < started_at'
+        $workflowSource | Should Match 'valid_raw_content'
+        $workflowSource | Should Match 'cyc.dev/ga-raw-log/v1'
+        $workflowSource | Should Match 'integer_count'
+        $workflowSource | Should Match '1000000000'
+        $readinessSource | Should Match 'Assert-GaRawLogContent'
+        $readinessSource | Should Match 'Get-GaRawLogContentJson'
+        $readinessSource | Should Match 'Assert-GaRawLogContentMatch'
+        $rawLogSource | Should Match 'Assert-RawLogContent'
+        $rawLogSource | Should Match 'Get-RawLogContentJson'
+        $rawLogSource | Should Match 'MaximumRawLogTestCount'
         $readinessSource | Should Match 'rawLogMarkers and markers aliases must match exactly'
         $rawLogSource | Should Match 'rawLogMarkers and markers aliases must match exactly'
         $readinessSource | Should Match 'rawLogMarkers must be a JSON array'
@@ -472,6 +516,168 @@ Describe 'GA evidence issue acceptance contract' {
             -RequiredGates $issue2GateNamesForTest
         $result.status | Should Be 'passed'
         $result.gates.cleanWindows11Vm | Should Be $true
+    }
+
+    It 'requires positive bounded integer raw-log counts for Issue #2 and Issue #3' {
+        foreach ($badPassed in @(0, 1.5, [long]1000000001)) {
+            $record = New-TestIssueEvidence -GateNames $issue3GateNamesForTest
+            $record.rawLog.tests.passed = $badPassed
+            Assert-TestThrows {
+                Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue3 = $record }) `
+                    -Path 'issue3' -Description "Issue #3 invalid passed count $badPassed" -ExpectedCommit $expectedCommitForTest `
+                    -RequiredGates $issue3GateNamesForTest
+            }
+        }
+        foreach ($badCount in @{
+                field = 'failed'; value = 1.5
+            }, @{
+                field = 'ignored'; value = [long]1000000001
+            }) {
+            $record = New-TestIssueEvidence -GateNames $issue2GateNamesForTest
+            $record.rawLog.tests.($badCount.field) = $badCount.value
+            Assert-TestThrows {
+                Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue2 = $record }) `
+                    -Path 'issue2' -Description "Issue #2 invalid $($badCount.field) count" -ExpectedCommit $expectedCommitForTest `
+                    -RequiredGates $issue2GateNamesForTest
+            }
+        }
+    }
+
+    It 'accepts a parsed source-bound raw-log content envelope' {
+        $record = New-TestIssueEvidence -GateNames $issue3GateNamesForTest
+        $content = New-TestRawLogContent -IssueName 'issue3' -Record $record
+        $result = Assert-GaRawLogContent -Content $content -ManifestIssue $record -IssueName 'issue3' `
+            -ExpectedCommit $expectedCommitForTest -EvidenceId $record.evidenceId `
+            -Description 'Issue #3 parsed raw-log content'
+        $result.schemaVersion | Should Be 'cyc.dev/ga-raw-log/v1'
+        $result.tests.passed | Should Be 42
+        $binding = Get-GaRawLogContentBinding -Content $content -IssueName 'issue3' -Description 'Issue #3 parsed raw-log content'
+        $binding.node | Should Be 'p1-linux-native'
+        { Assert-GaRawLogContentMatch -Expected $content -Actual $content -IssueName 'issue3' -Description 'Issue #3 content binding' } | Should Not Throw
+    }
+
+    It 'keeps the downloader raw-log content validator positive and fail-closed' {
+        $record = New-TestIssueEvidence -GateNames $issue3GateNamesForTest
+        $content = New-TestRawLogContent -IssueName 'issue3' -Record $record
+        { Assert-RawLogContent -Content $content -ManifestIssue $record -IssueName 'issue3' `
+                -ExpectedCommit $expectedCommitForTest -EvidenceId $record.evidenceId `
+                -Description 'Issue #3 downloader content' } | Should Not Throw
+        foreach ($badCount in @(0, 1.5, [long]1000000001)) {
+            $badContent = New-TestRawLogContent -IssueName 'issue3' -Record $record
+            $badContent.tests.passed = $badCount
+            Assert-TestThrows {
+                Assert-RawLogContent -Content $badContent -ManifestIssue $record -IssueName 'issue3' `
+                    -ExpectedCommit $expectedCommitForTest -EvidenceId $record.evidenceId `
+                    -Description "Issue #3 downloader invalid count $badCount"
+            }
+        }
+        $badContent = New-TestRawLogContent -IssueName 'issue3' -Record $record
+        $badContent.command = 'different command'
+        Assert-TestThrows {
+            Assert-RawLogContent -Content $badContent -ManifestIssue $record -IssueName 'issue3' `
+                -ExpectedCommit $expectedCommitForTest -EvidenceId $record.evidenceId `
+                -Description 'Issue #3 downloader command mismatch'
+        }
+    }
+
+    It 'requires source-bound Issue #5 markers in the downloaded JSON envelope' {
+        $record = New-TestIssue5Evidence
+        $content = New-TestRawLogContent -IssueName 'issue5' -Record $record
+        { Assert-RawLogContent -Content $content -ManifestIssue $record -IssueName 'issue5' `
+                -ExpectedCommit $expectedCommitForTest -EvidenceId $record.evidenceId `
+                -Description 'Issue #5 downloader content' } | Should Not Throw
+
+        $missingMarker = New-TestRawLogContent -IssueName 'issue5' -Record $record
+        $missingMarker.markers = @($missingMarker.markers | Select-Object -Skip 1)
+        Assert-TestThrows {
+            Assert-RawLogContent -Content $missingMarker -ManifestIssue $record -IssueName 'issue5' `
+                -ExpectedCommit $expectedCommitForTest -EvidenceId $record.evidenceId `
+                -Description 'Issue #5 downloader missing marker'
+        }
+
+        $duplicateMarker = New-TestRawLogContent -IssueName 'issue5' -Record $record
+        $duplicateMarker.markers = @($duplicateMarker.markers) + @($duplicateMarker.markers[0])
+        Assert-TestThrows {
+            Assert-RawLogContent -Content $duplicateMarker -ManifestIssue $record -IssueName 'issue5' `
+                -ExpectedCommit $expectedCommitForTest -EvidenceId $record.evidenceId `
+                -Description 'Issue #5 downloader duplicate marker'
+        }
+
+        $wrongMarker = New-TestRawLogContent -IssueName 'issue5' -Record $record
+        $wrongMarker.markers[0] = 'unbound-marker'
+        Assert-TestThrows {
+            Assert-RawLogContent -Content $wrongMarker -ManifestIssue $record -IssueName 'issue5' `
+                -ExpectedCommit $expectedCommitForTest -EvidenceId $record.evidenceId `
+                -Description 'Issue #5 downloader unbound marker'
+        }
+    }
+
+    It 'rejects empty, arbitrary, and non-object downloaded raw-log content' {
+        $path = Join-Path ([IO.Path]::GetTempPath()) ('cyc-ga-raw-content-' + [Guid]::NewGuid().ToString('N') + '.json')
+        try {
+            Set-Content -LiteralPath $path -Value '' -Encoding UTF8
+            Assert-TestThrows { Get-RawLogContentJson -Path $path -Description 'empty raw-log content' }
+            Set-Content -LiteralPath $path -Value '{"arbitrary":true}' -Encoding UTF8
+            $arbitrary = Get-RawLogContentJson -Path $path -Description 'arbitrary raw-log content'
+            Assert-TestThrows {
+                Assert-RawLogContent -Content $arbitrary -ManifestIssue (New-TestIssueEvidence) -IssueName 'issue3' `
+                    -ExpectedCommit $expectedCommitForTest -EvidenceId 'ga-issue2-live-20260830' `
+                    -Description 'arbitrary raw-log content'
+            }
+            Set-Content -LiteralPath $path -Value '[]' -Encoding UTF8
+            Assert-TestThrows { Get-RawLogContentJson -Path $path -Description 'array raw-log content' }
+            Set-Content -LiteralPath $path -Value 'not-json' -Encoding UTF8
+            Assert-TestThrows { Get-RawLogContentJson -Path $path -Description 'malformed raw-log content' }
+        } finally {
+            if (Test-Path -LiteralPath $path) {
+                Remove-Item -LiteralPath $path -Force
+            }
+        }
+    }
+
+    It 'rejects raw-log content command, host, exit, count, source, and cleanup mismatches' {
+        $mutations = @(
+            @{ field = 'command'; value = 'cargo test --manifest-path /different/Cargo.toml --locked' },
+            @{ field = 'node'; value = 'another-external-node' },
+            @{ field = 'exitCode'; value = 1 },
+            @{ field = 'sourceCommit'; value = ('c' * 40) -join '' },
+            @{ field = 'issue'; value = 'issue2' },
+            @{ field = 'evidenceId'; value = 'different-evidence' },
+            @{ field = 'cleanup'; value = $false }
+        )
+        foreach ($mutation in $mutations) {
+            $record = New-TestIssueEvidence -GateNames $issue3GateNamesForTest
+            $content = New-TestRawLogContent -IssueName 'issue3' -Record $record
+            $content.($mutation.field) = $mutation.value
+            Assert-TestThrows {
+                Assert-GaRawLogContent -Content $content -ManifestIssue $record -IssueName 'issue3' `
+                    -ExpectedCommit $expectedCommitForTest -EvidenceId $record.evidenceId `
+                    -Description "Issue #3 content mismatch $($mutation.field)"
+            }
+        }
+        foreach ($badCount in @(0, 1.5, [long]1000000001)) {
+            $record = New-TestIssueEvidence -GateNames $issue3GateNamesForTest
+            $content = New-TestRawLogContent -IssueName 'issue3' -Record $record
+            $content.tests.passed = $badCount
+            Assert-TestThrows {
+                Assert-GaRawLogContent -Content $content -ManifestIssue $record -IssueName 'issue3' `
+                    -ExpectedCommit $expectedCommitForTest -EvidenceId $record.evidenceId `
+                    -Description "Issue #3 content invalid test count $badCount"
+            }
+        }
+        $record = New-TestIssueEvidence -GateNames $issue3GateNamesForTest
+        $content = New-TestRawLogContent -IssueName 'issue3' -Record $record
+        $content | Add-Member -MemberType NoteProperty -Name host -Value 'p1-linux-native'
+        [void]$content.PSObject.Properties.Remove('node')
+        { Assert-GaRawLogContent -Content $content -ManifestIssue $record -IssueName 'issue3' `
+                -ExpectedCommit $expectedCommitForTest -EvidenceId $record.evidenceId `
+                -Description 'Issue #3 host alias content' } | Should Not Throw
+        $content.host = 'different-host'
+        Assert-TestThrows {
+            Assert-GaRawLogContent -Content $content -ManifestIssue $record -IssueName 'issue3' `
+                -ExpectedCommit $expectedCommitForTest -EvidenceId $record.evidenceId `
+                -Description 'Issue #3 host alias mismatch'
+        }
     }
 
     It 'rejects unknown gate keys in the closed Issue #2 and Issue #3 maps' {

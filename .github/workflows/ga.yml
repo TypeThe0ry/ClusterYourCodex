@@ -514,6 +514,7 @@ jobs:
           whitespace = re.compile(r"\s+")
           run_id_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
           iso_instant_pattern = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\s]+(Z|[+-][0-9]{2}:[0-9]{2})$")
+          maximum_test_count = 1000000000
           issue5_required_prefixes = {
               "linuxDedicatedExecutionIdentity": {
                   "linux": ("uid=", "gid="),
@@ -597,8 +598,10 @@ jobs:
                   raise SystemExit(f"{description}.tests is not an object")
               for field in ("passed", "failed", "ignored"):
                   value = tests.get(field)
-                  if type(value) is not int or value < 0:
-                      raise SystemExit(f"{description}.tests.{field} is not a non-negative integer")
+                  if type(value) is not int or value < 0 or value > maximum_test_count:
+                      raise SystemExit(
+                          f"{description}.tests.{field} is not an integer in the range 0..{maximum_test_count}"
+                      )
               if tests["passed"] <= 0 or tests["failed"] != 0:
                   raise SystemExit(f"{description}.tests does not describe a successful run")
               started_at = parse_iso_instant(run["startedAt"], f"{description}.startedAt")
@@ -718,27 +721,124 @@ jobs:
           PY
           raw_verification_contract="$RUNNER_TEMP/cyc-ga-raw-log-contract.jq"
           cat > "$raw_verification_contract" <<'JQ'
+            def string_value($value):
+              if (($value | type) == "string") then $value else "" end;
+            def nonempty_string($value):
+              (string_value($value) | test("[^[:space:]]"));
+            def integer_count($value; $positive):
+              (($value | type) == "number")
+              and ($value == ($value | floor))
+              and ($value >= 0)
+              and ($value <= 1000000000)
+              and (if $positive then $value > 0 else true end);
+            def normalized_command:
+              gsub("[[:space:]]+"; " ") | sub("^ +"; "") | sub(" +$"; "");
+            def valid_iso_instant($value):
+              (string_value($value) | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^[:space:]]+(Z|[+-][0-9]{2}:[0-9]{2})$"));
+            def iso_epoch:
+              capture("^(?<date>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<fraction>\\.[0-9]+)?(?<zone>Z|[+-][0-9]{2}:[0-9]{2})$") as $parts
+              | (($parts.date + "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime) as $base
+              | (($parts.fraction // ".0") | tonumber) as $fraction
+              | (if $parts.zone == "Z" then 0
+                 else ($parts.zone | capture("^(?<sign>[+-])(?<hours>[0-9]{2}):(?<minutes>[0-9]{2})$")) as $offset
+                   | (($offset.hours | tonumber) * 3600 + ($offset.minutes | tonumber) * 60)
+                     * (if $offset.sign == "+" then 1 else -1 end)
+                 end) as $offsetSeconds
+              | $base + $fraction - $offsetSeconds;
+            def same_instant($left; $right):
+              (try ($left | iso_epoch) catch null) as $leftEpoch
+              | (try ($right | iso_epoch) catch null) as $rightEpoch
+              | ($leftEpoch != null and $rightEpoch != null and $leftEpoch == $rightEpoch);
+            def valid_iso_order($started; $ended):
+              (try ($started | iso_epoch) catch null) as $startedEpoch
+              | (try ($ended | iso_epoch) catch null) as $endedEpoch
+              | ($startedEpoch != null and $endedEpoch != null and $endedEpoch >= $startedEpoch);
+            def content_host:
+              if (has("node") and (.node | type) == "string" and nonempty_string(.node)) then .node
+              elif (has("host") and (.host | type) == "string" and nonempty_string(.host)) then .host
+              else "" end;
+            def content_markers_valid($content; $manifestIssue):
+              if (($content | has("markers")) | not) then false
+              elif (($content.markers | type) != "array") then false
+              else
+                (($content.markers | unique | length) == ($content.markers | length))
+                and ([ $content.markers[] | select((type != "string") or (length == 0) or (test("^[[:space:]]*$"))) ] | length == 0)
+                and ([ $manifestIssue.rawLog.markers[] as $marker |
+                       select([ $content.markers[] | select(. == $marker) ] | length == 1)
+                     ] | length == ($manifestIssue.rawLog.markers | length))
+              end;
+            def valid_raw_content($record; $issue; $manifest):
+              if (($record.content | type) != "object") then false
+              else
+                ($record.content) as $content
+                | ($manifest[$issue]) as $manifestIssue
+                | ($content | content_host) as $contentHost
+                | (($content | has("node")) and (($content.node | type) == "string") and nonempty_string($content.node)) as $hasNode
+                | (($content | has("host")) and (($content.host | type) == "string") and nonempty_string($content.host)) as $hasHost
+                | (if ($content | has("node")) then (($content.node | type) == "string" and nonempty_string($content.node)) else true end)
+                and (if ($content | has("host")) then (($content.host | type) == "string" and nonempty_string($content.host)) else true end)
+                and ($hasNode or $hasHost)
+                and ($hasNode | if . then ($hasHost | if . then $content.node == $content.host else true end) else true end)
+                and ($content.schemaVersion == "cyc.dev/ga-raw-log/v1")
+                and ($content.status == "passed")
+                and (($content.sourceCommit | type) == "string")
+                and (($content.sourceCommit | ascii_downcase) == ($commit | ascii_downcase))
+                and ($content.issue == $issue)
+                and ($content.evidenceId == $manifestIssue.evidenceId)
+                and (($content.command | type) == "string")
+                and (nonempty_string($content.command))
+                and (($content.command | normalized_command) == ($manifestIssue.rawLog.command | normalized_command))
+                and (($manifestIssue.rawLog.node | type) == "string")
+                and ($contentHost == $manifestIssue.rawLog.node)
+                and ((string_value($contentHost) | test("github|actions|hosted|runner"; "i")) | not)
+                and valid_iso_instant($content.startedAt)
+                and valid_iso_instant($content.endedAt)
+                and same_instant($content.startedAt; $manifestIssue.rawLog.startedAt)
+                and same_instant($content.endedAt; $manifestIssue.rawLog.endedAt)
+                and valid_iso_order($content.startedAt; $content.endedAt)
+                and integer_count($content.exitCode; false)
+                and ($content.exitCode == 0)
+                and integer_count($manifestIssue.rawLog.exitCode; false)
+                and ($content.exitCode == $manifestIssue.rawLog.exitCode)
+                and (($content.tests | type) == "object")
+                and (($manifestIssue.rawLog.tests | type) == "object")
+                and integer_count($content.tests.passed; true)
+                and integer_count($content.tests.failed; false)
+                and integer_count($content.tests.ignored; false)
+                and integer_count($manifestIssue.rawLog.tests.passed; true)
+                and integer_count($manifestIssue.rawLog.tests.failed; false)
+                and integer_count($manifestIssue.rawLog.tests.ignored; false)
+                and ($content.tests.passed == $manifestIssue.rawLog.tests.passed)
+                and ($content.tests.failed == $manifestIssue.rawLog.tests.failed)
+                and ($content.tests.ignored == $manifestIssue.rawLog.tests.ignored)
+                and ($content.tests.failed == 0)
+                and ($manifestIssue.rawLog.tests.failed == 0)
+                and (($content.cleanup | type) == "boolean")
+                and ($content.cleanup == true)
+                and (($manifestIssue.rawLog.cleanup | type) == "boolean")
+                and ($content.cleanup == $manifestIssue.rawLog.cleanup)
+                and (if $issue == "issue5" then content_markers_valid($content; $manifestIssue) else true end)
+              end;
+            def valid_record($record; $issue; $manifest):
+              (($record | type) == "object")
+              and ($record.status == "passed")
+              and ($record.issue == $issue)
+              and ($record.evidenceId == $manifest[$issue].evidenceId)
+              and ($record.url == $manifest[$issue].rawLog.url)
+              and ((string_value($record.expectedSha256) | ascii_downcase) == (string_value($manifest[$issue].rawLog.sha256) | ascii_downcase))
+              and ((string_value($record.actualSha256) | ascii_downcase) == (string_value($manifest[$issue].rawLog.sha256) | ascii_downcase))
+              and (($record.contentVerified | type) == "boolean")
+              and ($record.contentVerified == true)
+              and valid_raw_content($record; $issue; $manifest);
             ($manifest[0]) as $m
             | .schemaVersion == "cyc.dev/ga-raw-log-verification/v1"
             and .status == "passed"
             and ((.sourceCommit | type) == "string")
             and ((.sourceCommit | ascii_downcase) == ($commit | ascii_downcase))
             and ((.records | type) == "array" and (.records | length) == 3)
-            and ([.records[] | select(.status == "passed" and (.issue == "issue2")
-                and .evidenceId == $m.issue2.evidenceId
-                and .url == $m.issue2.rawLog.url
-                and ((.expectedSha256 | ascii_downcase) == ($m.issue2.rawLog.sha256 | ascii_downcase))
-                and ((.actualSha256 | ascii_downcase) == ($m.issue2.rawLog.sha256 | ascii_downcase)))] | length == 1)
-            and ([.records[] | select(.status == "passed" and (.issue == "issue3")
-                and .evidenceId == $m.issue3.evidenceId
-                and .url == $m.issue3.rawLog.url
-                and ((.expectedSha256 | ascii_downcase) == ($m.issue3.rawLog.sha256 | ascii_downcase))
-                and ((.actualSha256 | ascii_downcase) == ($m.issue3.rawLog.sha256 | ascii_downcase)))] | length == 1)
-            and ([.records[] | select(.status == "passed" and (.issue == "issue5")
-                and .evidenceId == $m.issue5.evidenceId
-                and .url == $m.issue5.rawLog.url
-                and ((.expectedSha256 | ascii_downcase) == ($m.issue5.rawLog.sha256 | ascii_downcase))
-                and ((.actualSha256 | ascii_downcase) == ($m.issue5.rawLog.sha256 | ascii_downcase)))] | length == 1)
+            and ([.records[] | select(valid_record(.; "issue2"; $m))] | length == 1)
+            and ([.records[] | select(valid_record(.; "issue3"; $m))] | length == 1)
+            and ([.records[] | select(valid_record(.; "issue5"; $m))] | length == 1)
           JQ
           jq -e --arg commit "$CYC_GA_SOURCE_COMMIT" --slurpfile manifest "$evidence_path" \
             -f "$raw_verification_contract" "$raw_verification" >/dev/null
@@ -764,9 +864,15 @@ jobs:
               def string_value($value):
                 if (($value | type) == "string") then $value else "" end;
               def nonempty_string($value):
-                (string_value($value) | length) > 0;
+                (string_value($value) | test("[^[:space:]]"));
               def sha256($value):
                 (string_value($value) | test("^[0-9a-fA-F]{64}$"));
+              def integer_count($value; $positive):
+                (($value | type) == "number")
+                and ($value == ($value | floor))
+                and ($value >= 0)
+                and ($value <= 1000000000)
+                and (if $positive then $value > 0 else true end);
               def valid_https_url($value):
                 (string_value($value) | test("^https://[^@/?#[:space:]]+([/?#]|$)"));
               def valid_iso_instant($value):
@@ -796,15 +902,13 @@ jobs:
                 and valid_iso_instant($record.rawLog.startedAt)
                 and valid_iso_instant($record.rawLog.endedAt)
                 and valid_iso_order($record.rawLog.startedAt; $record.rawLog.endedAt)
-                and (($record.rawLog.exitCode | type) == "number")
+                and integer_count($record.rawLog.exitCode; false)
                 and ($record.rawLog.exitCode == 0)
                 and (($record.rawLog.tests | type) == "object")
-                and (($record.rawLog.tests.passed | type) == "number")
-                and (($record.rawLog.tests.failed | type) == "number")
-                and (($record.rawLog.tests.ignored | type) == "number")
-                and ($record.rawLog.tests.passed >= 0)
+                and integer_count($record.rawLog.tests.passed; true)
+                and integer_count($record.rawLog.tests.failed; false)
+                and integer_count($record.rawLog.tests.ignored; false)
                 and ($record.rawLog.tests.failed == 0)
-                and ($record.rawLog.tests.ignored >= 0)
                 and ($record.rawLog.cleanup == true);
               def issue5_platforms:
                 ["linux", "windows", "macos"];
@@ -886,19 +990,13 @@ jobs:
                 and nonempty_string($run.hostType)
                 and ((string_value($run.hostType) | test("github|actions|hosted|runner"; "i")) | not)
                 and (($run.status == "passed") or ($run.status == true))
-                and (($run.exitCode | type) == "number")
+                and integer_count($run.exitCode; false)
                 and ($run.exitCode == 0)
-                and ($run.exitCode == ($run.exitCode | floor))
                 and (($run.tests | type) == "object")
-                and (($run.tests.passed | type) == "number")
-                and (($run.tests.failed | type) == "number")
-                and (($run.tests.ignored | type) == "number")
-                and ($run.tests.passed > 0)
-                and ($run.tests.passed == ($run.tests.passed | floor))
+                and integer_count($run.tests.passed; true)
+                and integer_count($run.tests.failed; false)
+                and integer_count($run.tests.ignored; false)
                 and ($run.tests.failed == 0)
-                and ($run.tests.failed == ($run.tests.failed | floor))
-                and ($run.tests.ignored >= 0)
-                and ($run.tests.ignored == ($run.tests.ignored | floor))
                 and valid_iso_instant($run.startedAt)
                 and valid_iso_instant($run.endedAt)
                 and valid_iso_order($run.startedAt; $run.endedAt);

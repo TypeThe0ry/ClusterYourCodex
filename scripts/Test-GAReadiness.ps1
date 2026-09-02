@@ -28,6 +28,8 @@ if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
 }
 $RepositoryRoot = [System.IO.Path]::GetFullPath($RepositoryRoot)
 $GaMaximumEvidenceBytes = 64MB
+$GaMaximumRawLogTestCount = [long]1000000000
+$GaRawLogContentSchema = 'cyc.dev/ga-raw-log/v1'
 
 function Assert-GaCondition {
     param(
@@ -84,6 +86,75 @@ function Get-GaProperty {
         $current = $property.Value
     }
     return $current
+}
+
+function Test-GaInteger {
+    param([Parameter(Mandatory = $true)][object]$Value)
+
+    return ($Value -is [byte]) -or
+        ($Value -is [sbyte]) -or
+        ($Value -is [int16]) -or
+        ($Value -is [uint16]) -or
+        ($Value -is [int32]) -or
+        ($Value -is [uint32]) -or
+        ($Value -is [int64]) -or
+        ($Value -is [uint64])
+}
+
+function Assert-GaRawLogCount {
+    param(
+        [Parameter(Mandatory = $true)][object]$Value,
+        [Parameter(Mandatory = $true)][string]$Description,
+        [bool]$RequirePositive = $false
+    )
+
+    Assert-GaCondition (Test-GaInteger -Value $Value) "$Description must be an integer"
+    try {
+        [decimal]$numeric = $Value
+    } catch {
+        throw "GA readiness assertion failed: $Description is outside the supported integer range."
+    }
+    Assert-GaCondition ($numeric -ge 0) "$Description must be non-negative"
+    Assert-GaCondition ($numeric -le [decimal]$GaMaximumRawLogTestCount) "$Description must not exceed $GaMaximumRawLogTestCount"
+    if ($RequirePositive) {
+        Assert-GaCondition ($numeric -gt 0) "$Description must be greater than zero"
+    }
+    return [long]$numeric
+}
+
+function Convert-GaRawLogInstant {
+    param(
+        [Parameter(Mandatory = $true)][object]$Value,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-GaCondition ($Value -is [string] -or
+        $Value -is [DateTime] -or $Value -is [DateTimeOffset]) "$Description must be an ISO-8601 instant"
+    try {
+        if ($Value -is [DateTimeOffset]) {
+            return [DateTimeOffset]$Value
+        }
+        if ($Value -is [DateTime]) {
+            Assert-GaCondition ($Value.Kind -ne [DateTimeKind]::Unspecified) "$Description must carry an explicit UTC offset"
+            return [DateTimeOffset]$Value
+        }
+
+        $text = [string]$Value
+        Assert-GaCondition ($text -match '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$') "$Description must include a UTC designator or numeric offset"
+        return [DateTimeOffset]::Parse(
+            $text,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        )
+    } catch {
+        throw "GA readiness assertion failed: $Description must be a valid ISO-8601 instant with an explicit offset."
+    }
+}
+
+function Normalize-GaRawLogCommand {
+    param([Parameter(Mandatory = $true)][string]$Command)
+
+    return [regex]::Replace($Command.Trim(), '\s+', ' ')
 }
 
 function Assert-GaString {
@@ -333,19 +404,16 @@ function Assert-GaIssue5RunProvenance {
     Assert-GaCondition $statusPassed "$Description.status must be 'passed' (or boolean true for a single-gate record)"
 
     $exitCode = Get-GaProperty -Object $Run -Path 'exitCode' -Description $Description
-    $isInteger = ($exitCode -is [byte]) -or ($exitCode -is [sbyte]) -or ($exitCode -is [int16]) -or ($exitCode -is [uint16]) -or ($exitCode -is [int32]) -or ($exitCode -is [uint32]) -or ($exitCode -is [int64]) -or ($exitCode -is [uint64])
-    Assert-GaCondition ($isInteger -and ([int64]$exitCode -eq 0)) "$Description.exitCode must be integer zero"
+    Assert-GaCondition ((Test-GaInteger -Value $exitCode) -and [decimal]$exitCode -eq 0) "$Description.exitCode must be integer zero"
 
     $tests = Get-GaProperty -Object $Run -Path 'tests' -Description $Description
     Assert-GaCondition (($tests -is [pscustomobject]) -and -not ($tests -is [System.Array])) "$Description.tests must be a JSON object"
     foreach ($countName in @('passed', 'failed', 'ignored')) {
         Assert-GaCondition ($null -ne $tests.PSObject.Properties[$countName]) "$Description.tests.$countName is required"
         $count = $tests.PSObject.Properties[$countName].Value
-        $countIsInteger = ($count -is [byte]) -or ($count -is [sbyte]) -or ($count -is [int16]) -or ($count -is [uint16]) -or ($count -is [int32]) -or ($count -is [uint32]) -or ($count -is [int64]) -or ($count -is [uint64])
-        Assert-GaCondition ($countIsInteger -and ([int64]$count -ge 0)) "$Description.tests.$countName must be a non-negative integer"
+        [void](Assert-GaRawLogCount -Value $count -Description "$Description.tests.$countName" -RequirePositive ($countName -ceq 'passed'))
     }
-    Assert-GaCondition ([int64]$tests.PSObject.Properties['passed'].Value -gt 0) "$Description.tests.passed must be greater than zero"
-    Assert-GaCondition ([int64]$tests.PSObject.Properties['failed'].Value -eq 0) "$Description.tests.failed must be zero"
+    Assert-GaCondition ([decimal]$tests.PSObject.Properties['failed'].Value -eq 0) "$Description.tests.failed must be zero"
 
     $startedValue = Get-GaProperty -Object $Run -Path 'startedAt' -Description $Description
     $endedValue = Get-GaProperty -Object $Run -Path 'endedAt' -Description $Description
@@ -1039,14 +1107,14 @@ function Assert-GaIssueEvidence {
     }
     Assert-GaCondition ($parsedInstants['endedAt'] -ge $parsedInstants['startedAt']) "$Description.rawLog.endedAt must not precede startedAt"
     $exitCode = Get-GaProperty -Object $rawLog -Path 'exitCode' -Description $Description
-    Assert-GaCondition (($exitCode -is [int] -or $exitCode -is [long]) -and [long]$exitCode -eq 0) "$Description.rawLog.exitCode must be integer 0 (observed '$exitCode')"
+    Assert-GaCondition ((Test-GaInteger -Value $exitCode) -and [decimal]$exitCode -eq 0) "$Description.rawLog.exitCode must be integer 0 (observed '$exitCode')"
     $tests = Get-GaProperty -Object $rawLog -Path 'tests' -Description $Description
     Assert-GaCondition (($tests -is [pscustomobject]) -and -not ($tests -is [System.Array])) "$Description.rawLog.tests must be a JSON object"
     foreach ($field in @('passed', 'failed', 'ignored')) {
         $count = Get-GaProperty -Object $tests -Path $field -Description "$Description.rawLog.tests"
-        Assert-GaCondition (($count -is [int] -or $count -is [long]) -and [long]$count -ge 0) "$Description.rawLog.tests.$field must be a non-negative integer"
+        [void](Assert-GaRawLogCount -Value $count -Description "$Description.rawLog.tests.$field" -RequirePositive ($field -ceq 'passed'))
     }
-    Assert-GaCondition ([long]$tests.failed -eq 0) "$Description.rawLog.tests.failed must be zero"
+    Assert-GaCondition ([decimal]$tests.failed -eq 0) "$Description.rawLog.tests.failed must be zero"
     $cleanup = Get-GaProperty -Object $rawLog -Path 'cleanup' -Description $Description
     Assert-GaCondition (($cleanup -is [bool]) -and $cleanup) "$Description.rawLog.cleanup must be boolean true"
 
@@ -1061,6 +1129,187 @@ function Assert-GaIssueEvidence {
         }
     }
     return $node
+}
+
+function Get-GaRawLogContentJson {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-GaCondition (Test-Path -LiteralPath $Path -PathType Leaf) "$Description exists: $Path"
+    $item = Get-Item -LiteralPath $Path -Force
+    Assert-GaCondition (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and -not $item.PSIsContainer) "$Description is a regular file"
+    Assert-GaCondition ([long]$item.Length -gt 0) "$Description is not empty"
+    Assert-GaCondition ([long]$item.Length -le [long]$GaMaximumEvidenceBytes) "$Description is within the 64 MiB limit"
+    try {
+        $text = [IO.File]::ReadAllText($Path)
+    } catch {
+        throw "GA readiness assertion failed: $Description could not be read: $($_.Exception.Message)"
+    }
+    Assert-GaCondition (-not [string]::IsNullOrWhiteSpace($text)) "$Description is not whitespace-only"
+    try {
+        $content = $text | ConvertFrom-Json
+    } catch {
+        throw "GA readiness assertion failed: $Description is not valid JSON: $($_.Exception.Message)"
+    }
+    Assert-GaCondition ($null -ne $content -and ($content -is [pscustomobject]) -and -not ($content -is [System.Array])) "$Description must be one JSON object"
+    return $content
+}
+
+function Assert-GaRawLogContent {
+    param(
+        [Parameter(Mandatory = $true)][object]$Content,
+        [Parameter(Mandatory = $true)][object]$ManifestIssue,
+        [Parameter(Mandatory = $true)][string]$IssueName,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+        [Parameter(Mandatory = $true)][string]$EvidenceId,
+        [Parameter(Mandatory = $true)][string]$Description,
+        [bool]$RequirePositivePassed = $true
+    )
+
+    Assert-GaCondition ($null -ne $Content -and ($Content -is [pscustomobject]) -and -not ($Content -is [System.Array])) "$Description must be one JSON object"
+    Assert-GaCondition ([string](Get-GaProperty -Object $Content -Path 'schemaVersion' -Description $Description) -ceq $GaRawLogContentSchema) "$Description.schemaVersion must be $GaRawLogContentSchema"
+    Assert-GaCondition ([string](Get-GaProperty -Object $Content -Path 'status' -Description $Description) -ceq 'passed') "$Description.status must be passed"
+
+    $contentCommit = Get-GaProperty -Object $Content -Path 'sourceCommit' -Description $Description
+    Assert-GaCondition ($contentCommit -is [string] -and [string]$contentCommit -match '^[0-9a-fA-F]{40}$') "$Description.sourceCommit must be a full 40-character commit SHA"
+    Assert-GaCondition ([string]$contentCommit -ieq $ExpectedCommit) "$Description.sourceCommit must match ExpectedCommit"
+    $contentIssue = Get-GaProperty -Object $Content -Path 'issue' -Description $Description
+    Assert-GaCondition ($contentIssue -is [string] -and [string]$contentIssue -ceq $IssueName) "$Description.issue must match $IssueName"
+    $contentEvidenceId = Get-GaProperty -Object $Content -Path 'evidenceId' -Description $Description
+    Assert-GaCondition ($contentEvidenceId -is [string] -and [string]$contentEvidenceId -ceq $EvidenceId) "$Description.evidenceId must match the manifest"
+
+    $manifestRawLog = Get-GaProperty -Object $ManifestIssue -Path 'rawLog' -Description $Description
+    Assert-GaCondition (($manifestRawLog -is [pscustomobject]) -and -not ($manifestRawLog -is [System.Array])) "$Description.manifest.rawLog must be a JSON object"
+    $manifestCommand = Get-GaProperty -Object $manifestRawLog -Path 'command' -Description $Description
+    Assert-GaCondition ($manifestCommand -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$manifestCommand)) "$Description.manifest.command must be a non-empty string"
+    $contentCommand = Get-GaProperty -Object $Content -Path 'command' -Description $Description
+    Assert-GaCondition ($contentCommand -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$contentCommand)) "$Description.command must be a non-empty string"
+    Assert-GaCondition ((Normalize-GaRawLogCommand -Command ([string]$contentCommand)).Equals((Normalize-GaRawLogCommand -Command ([string]$manifestCommand)), [StringComparison]::Ordinal)) "$Description.command must match the manifest command"
+
+    $manifestNode = Get-GaProperty -Object $manifestRawLog -Path 'node' -Description $Description
+    Assert-GaCondition ($manifestNode -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$manifestNode)) "$Description.manifest.node must be a non-empty string"
+    Assert-GaCondition ([string]$manifestNode -notmatch '(?i)github|actions|hosted|runner') "$Description.manifest.node must identify an external host"
+    $nodeProperty = $Content.PSObject.Properties['node']
+    $hostProperty = $Content.PSObject.Properties['host']
+    $hasNode = $null -ne $nodeProperty
+    $hasHost = $null -ne $hostProperty
+    if ($hasNode) {
+        Assert-GaCondition ($nodeProperty.Value -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$nodeProperty.Value)) "$Description.node must be a non-empty string"
+    }
+    if ($hasHost) {
+        Assert-GaCondition ($hostProperty.Value -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$hostProperty.Value)) "$Description.host must be a non-empty string"
+    }
+    Assert-GaCondition ($hasNode -or $hasHost) "$Description must contain a non-empty node or host"
+    if ($hasNode -and $hasHost) {
+        Assert-GaCondition ([string]$nodeProperty.Value -ceq [string]$hostProperty.Value) "$Description.node and $Description.host must agree"
+    }
+    $boundNode = if ($hasNode) { [string]$nodeProperty.Value } else { [string]$hostProperty.Value }
+    Assert-GaCondition ($boundNode -ceq [string]$manifestNode) "$Description.node/host must match the manifest node"
+    Assert-GaCondition ($boundNode -notmatch '(?i)github|actions|hosted|runner') "$Description.node/host must identify an external host"
+
+    $manifestStartedAt = Convert-GaRawLogInstant -Value (Get-GaProperty -Object $manifestRawLog -Path 'startedAt' -Description $Description) -Description "$Description.manifest.startedAt"
+    $manifestEndedAt = Convert-GaRawLogInstant -Value (Get-GaProperty -Object $manifestRawLog -Path 'endedAt' -Description $Description) -Description "$Description.manifest.endedAt"
+    $contentStartedAt = Convert-GaRawLogInstant -Value (Get-GaProperty -Object $Content -Path 'startedAt' -Description $Description) -Description "$Description.startedAt"
+    $contentEndedAt = Convert-GaRawLogInstant -Value (Get-GaProperty -Object $Content -Path 'endedAt' -Description $Description) -Description "$Description.endedAt"
+    Assert-GaCondition ($contentEndedAt -ge $contentStartedAt) "$Description.endedAt must not precede startedAt"
+    Assert-GaCondition ($contentStartedAt.UtcDateTime.Ticks -eq $manifestStartedAt.UtcDateTime.Ticks) "$Description.startedAt must match the manifest"
+    Assert-GaCondition ($contentEndedAt.UtcDateTime.Ticks -eq $manifestEndedAt.UtcDateTime.Ticks) "$Description.endedAt must match the manifest"
+
+    $manifestExitCode = Get-GaProperty -Object $manifestRawLog -Path 'exitCode' -Description $Description
+    $contentExitCode = Get-GaProperty -Object $Content -Path 'exitCode' -Description $Description
+    Assert-GaCondition ((Test-GaInteger -Value $manifestExitCode) -and [decimal]$manifestExitCode -eq 0) "$Description.manifest.exitCode must be integer 0"
+    Assert-GaCondition ((Test-GaInteger -Value $contentExitCode) -and [decimal]$contentExitCode -eq 0) "$Description.exitCode must be integer 0"
+    Assert-GaCondition ([decimal]$contentExitCode -eq [decimal]$manifestExitCode) "$Description.exitCode must match the manifest"
+
+    $manifestTests = Get-GaProperty -Object $manifestRawLog -Path 'tests' -Description $Description
+    $contentTests = Get-GaProperty -Object $Content -Path 'tests' -Description $Description
+    Assert-GaCondition (($manifestTests -is [pscustomobject]) -and -not ($manifestTests -is [System.Array])) "$Description.manifest.tests must be a JSON object"
+    Assert-GaCondition (($contentTests -is [pscustomobject]) -and -not ($contentTests -is [System.Array])) "$Description.tests must be a JSON object"
+    foreach ($field in @('passed', 'failed', 'ignored')) {
+        $manifestCount = Get-GaProperty -Object $manifestTests -Path $field -Description "$Description.manifest.tests"
+        $contentCount = Get-GaProperty -Object $contentTests -Path $field -Description "$Description.tests"
+        [void](Assert-GaRawLogCount -Value $manifestCount -Description "$Description.manifest.tests.$field" -RequirePositive ($RequirePositivePassed -and $field -ceq 'passed'))
+        [void](Assert-GaRawLogCount -Value $contentCount -Description "$Description.tests.$field" -RequirePositive ($RequirePositivePassed -and $field -ceq 'passed'))
+        Assert-GaCondition ([decimal]$contentCount -eq [decimal]$manifestCount) "$Description.tests.$field must match the manifest"
+    }
+    Assert-GaCondition ([decimal]$manifestTests.failed -eq 0) "$Description.manifest.tests.failed must be zero"
+    Assert-GaCondition ([decimal]$contentTests.failed -eq 0) "$Description.tests.failed must be zero"
+    $manifestCleanup = Get-GaProperty -Object $manifestRawLog -Path 'cleanup' -Description $Description
+    $contentCleanup = Get-GaProperty -Object $Content -Path 'cleanup' -Description $Description
+    Assert-GaCondition (($manifestCleanup -is [bool]) -and $manifestCleanup) "$Description.manifest.cleanup must be boolean true"
+    Assert-GaCondition (($contentCleanup -is [bool]) -and $contentCleanup) "$Description.cleanup must be boolean true"
+    Assert-GaCondition ([bool]$contentCleanup -eq [bool]$manifestCleanup) "$Description.cleanup must match the manifest"
+
+    if ($IssueName -ceq 'issue5') {
+        $manifestMarkers = Get-GaProperty -Object $manifestRawLog -Path 'markers' -Description $Description
+        $contentMarkers = Get-GaProperty -Object $Content -Path 'markers' -Description $Description
+        Assert-GaCondition (($manifestMarkers -is [System.Array]) -and $manifestMarkers.Count -gt 0) "$Description.manifest.markers must be a non-empty JSON array"
+        Assert-GaCondition (($contentMarkers -is [System.Array]) -and $contentMarkers.Count -gt 0) "$Description.markers must be a non-empty JSON array"
+        $seenContentMarkers = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+        foreach ($marker in @($contentMarkers)) {
+            Assert-GaCondition ($marker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$marker)) "$Description.markers entries must be non-empty strings"
+            Assert-GaCondition ($seenContentMarkers.Add([string]$marker)) "$Description.markers entries must be unique"
+        }
+        foreach ($marker in @($manifestMarkers)) {
+            Assert-GaCondition (@($contentMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.markers must retain the manifest marker '$marker'"
+        }
+    }
+    return $Content
+}
+
+function Get-GaRawLogContentBinding {
+    param(
+        [Parameter(Mandatory = $true)][object]$Content,
+        [Parameter(Mandatory = $true)][string]$IssueName,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $nodeProperty = $Content.PSObject.Properties['node']
+    $hostProperty = $Content.PSObject.Properties['host']
+    $node = if ($null -ne $nodeProperty) { [string]$nodeProperty.Value } else { [string]$hostProperty.Value }
+    $startedAt = Convert-GaRawLogInstant -Value (Get-GaProperty -Object $Content -Path 'startedAt' -Description $Description) -Description "$Description.startedAt"
+    $endedAt = Convert-GaRawLogInstant -Value (Get-GaProperty -Object $Content -Path 'endedAt' -Description $Description) -Description "$Description.endedAt"
+    $tests = Get-GaProperty -Object $Content -Path 'tests' -Description $Description
+    $binding = [ordered]@{
+        schemaVersion = [string](Get-GaProperty -Object $Content -Path 'schemaVersion' -Description $Description)
+        status = [string](Get-GaProperty -Object $Content -Path 'status' -Description $Description)
+        sourceCommit = ([string](Get-GaProperty -Object $Content -Path 'sourceCommit' -Description $Description)).ToLowerInvariant()
+        issue = [string](Get-GaProperty -Object $Content -Path 'issue' -Description $Description)
+        evidenceId = [string](Get-GaProperty -Object $Content -Path 'evidenceId' -Description $Description)
+        command = Normalize-GaRawLogCommand -Command ([string](Get-GaProperty -Object $Content -Path 'command' -Description $Description))
+        node = $node
+        startedAtTicks = $startedAt.UtcDateTime.Ticks
+        endedAtTicks = $endedAt.UtcDateTime.Ticks
+        exitCode = [long](Get-GaProperty -Object $Content -Path 'exitCode' -Description $Description)
+        tests = [ordered]@{
+            passed = [long](Get-GaProperty -Object $tests -Path 'passed' -Description $Description)
+            failed = [long](Get-GaProperty -Object $tests -Path 'failed' -Description $Description)
+            ignored = [long](Get-GaProperty -Object $tests -Path 'ignored' -Description $Description)
+        }
+        cleanup = [bool](Get-GaProperty -Object $Content -Path 'cleanup' -Description $Description)
+    }
+    if ($IssueName -ceq 'issue5') {
+        $markers = Get-GaProperty -Object $Content -Path 'markers' -Description $Description
+        $binding.markers = @($markers | Sort-Object)
+    }
+    return [pscustomobject]$binding
+}
+
+function Assert-GaRawLogContentMatch {
+    param(
+        [Parameter(Mandatory = $true)][object]$Expected,
+        [Parameter(Mandatory = $true)][object]$Actual,
+        [Parameter(Mandatory = $true)][string]$IssueName,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $expectedBinding = Get-GaRawLogContentBinding -Content $Expected -IssueName $IssueName -Description "$Description.expected"
+    $actualBinding = Get-GaRawLogContentBinding -Content $Actual -IssueName $IssueName -Description "$Description.actual"
+    $expectedJson = $expectedBinding | ConvertTo-Json -Depth 10 -Compress
+    $actualJson = $actualBinding | ConvertTo-Json -Depth 10 -Compress
+    Assert-GaCondition ($expectedJson -ceq $actualJson) "$Description must match the parsed downloaded raw-log content"
 }
 
 function Get-GaYamlLines {
@@ -1303,6 +1552,11 @@ function Assert-GaWorkflowContract {
         'rawLog.exitCode',
         'rawLog.tests',
         'rawLog.cleanup',
+        'cyc.dev/ga-raw-log/v1',
+        'contentVerified',
+        'valid_raw_content',
+        'integer_count',
+        '1000000000',
         'readinessDirectory = Join-Path',
         'resultLines = @(& ./scripts/Test-GAReadiness.ps1',
         'signedNMinus1ToNUpgrade',
@@ -1543,6 +1797,32 @@ if ($ContractOnly) {
         Assert-GaCondition ([long]$rawItem.Length -eq [long]$rawBytes) 'downloaded GA raw-log byte count matches the retained file'
         $recomputedRawHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $rawFullPath).Hash
         Assert-GaCondition ($recomputedRawHash.Equals($actualRawHash, [System.StringComparison]::OrdinalIgnoreCase)) 'downloaded GA raw-log file hash matches the verification record'
+        $contentVerified = Get-GaProperty -Object $rawRecord -Path 'contentVerified' -Description 'downloaded GA raw-log verification record'
+        Assert-GaCondition (($contentVerified -is [bool]) -and $contentVerified) "$issueName downloaded raw-log contentVerified must be boolean true"
+        $reportedContent = Get-GaProperty -Object $rawRecord -Path 'content' -Description 'downloaded GA raw-log verification record'
+        Assert-GaCondition ($null -ne $reportedContent -and ($reportedContent -is [pscustomobject]) -and -not ($reportedContent -is [System.Array])) "$issueName downloaded raw-log content must be a JSON object"
+        $downloadedContent = Get-GaRawLogContentJson -Path $rawFullPath -Description "$issueName downloaded raw-log content"
+        [void](Assert-GaRawLogContent `
+            -Content $downloadedContent `
+            -ManifestIssue $manifestIssue `
+            -IssueName $issueName `
+            -ExpectedCommit $ExpectedCommit `
+            -EvidenceId $manifestId `
+            -Description "$issueName downloaded raw-log content" `
+            -RequirePositivePassed $true)
+        [void](Assert-GaRawLogContent `
+            -Content $reportedContent `
+            -ManifestIssue $manifestIssue `
+            -IssueName $issueName `
+            -ExpectedCommit $ExpectedCommit `
+            -EvidenceId $manifestId `
+            -Description "$issueName reported raw-log content" `
+            -RequirePositivePassed $true)
+        Assert-GaRawLogContentMatch `
+            -Expected $downloadedContent `
+            -Actual $reportedContent `
+            -IssueName $issueName `
+            -Description "$issueName raw-log content binding"
         if ($issueName -ceq 'issue5') {
             Assert-GaIssue5RawVerification -ManifestIssue $manifestIssue -RawRecord $rawRecord -Description 'downloaded GA raw-log verification issue5'
         }

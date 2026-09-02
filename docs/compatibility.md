@@ -102,11 +102,21 @@ Each `evidenceId` is a bounded portable filename component (letters, digits,
 before a raw-log path is constructed.
 
 Each `rawLog` must additionally bind the command and external node to
-ISO-8601 start/end times, `exitCode: 0`, non-negative passed/failed/ignored
-test counts with zero failures, and `cleanup: true`. The GA workflow downloads
-each URL with `scripts/Test-GARawLogs.ps1`, rejects redirects and oversized
-responses, recomputes the SHA-256 over the retained bytes, and cross-binds the
-result back to the corresponding issue record.
+ISO-8601 start/end times, `exitCode: 0`, integer passed/failed/ignored test
+counts, and `cleanup: true`. The counts are bounded to `0..1,000,000,000`,
+`tests.passed` must be greater than zero for Issues #2 and #3, and
+`tests.failed` must be zero. The GA workflow downloads each URL with
+`scripts/Test-GARawLogs.ps1`, rejects redirects and oversized responses,
+recomputes the SHA-256 over the retained bytes, and parses the retained file as
+one non-empty JSON object using `cyc.dev/ga-raw-log/v1`. That content must be
+`status: "passed"`, repeat the reviewed `sourceCommit`, `issue`, and
+`evidenceId`, and cross-bind the normalized command, `node` (or the compatible
+`host` alias), timestamps, integer `exitCode`, all three test counts, and
+`cleanup` to the manifest descriptor. The downloader records the parsed
+content with `contentVerified: true`; the readiness gate parses the downloaded
+file again and checks it against that recorded content, so an arbitrary,
+empty, fractional, oversized, or relabelled log cannot satisfy the digest
+check alone.
 
 Issue #5 is validated as a platform matrix rather than as nine independent
 booleans. Its `rawLog` must enumerate Linux, Windows, and macOS exactly once
@@ -117,10 +127,14 @@ platform-specific gates bind one platform, exact test selector, exact locked
 platforms, one nested run per platform, and each run's `rawLogMarkers`. Every
 gate/run evidence object also binds a bounded `runId` and `node`, external
 `provider` and `hostType`, `status: "passed"`, integer `exitCode: 0`, positive
-`tests.passed`, zero `tests.failed`, non-negative `tests.ignored`, and
-chronological ISO-8601 `startedAt`/`endedAt` instants. Each nested run binds
+`tests.passed`, zero `tests.failed`, non-negative integer `tests.ignored` (all
+three counts bounded to `0..1,000,000,000`), and chronological ISO-8601
+`startedAt`/`endedAt` instants. Each nested run binds
 an external execution row to its exact test selector and locked command; the
-raw-log verifier cross-binds the provenance fields as well as the markers.
+raw-log verifier cross-binds the provenance fields as well as the markers. For
+the downloaded Issue #5 JSON envelope, `markers` is also required to be a
+unique non-empty string array retaining every manifest marker; plain text
+marker hits outside a parsed, source-bound envelope do not count.
 The compatibility aliases `selector` and `markers` are accepted only when
 they exactly match canonical `testSelector` and `rawLogMarkers` values; any
 conflicting duplicate field fails closed.

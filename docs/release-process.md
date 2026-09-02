@@ -112,12 +112,20 @@ are present and valid:
 
 The retained `rawLog` descriptor must also record the exact command and
 external node, ISO-8601 `startedAt`/`endedAt` instants, integer `exitCode=0`,
-non-negative `tests.passed`/`tests.failed`/`tests.ignored` counts with
-`tests.failed=0`, and `cleanup=true`. The readiness workflow runs
-`scripts/Test-GARawLogs.ps1`, downloads every HTTPS log without following
-redirects, enforces the size limit, recomputes SHA-256 over the downloaded
-bytes, and retains a per-log verification record. A URL plus a syntactically
-valid digest is therefore insufficient without the matching downloaded bytes.
+integer `tests.passed`/`tests.failed`/`tests.ignored` counts, and
+`cleanup=true`. Counts are bounded to `0..1,000,000,000`; `tests.passed` must
+be greater than zero for Issues #2 and #3, and `tests.failed` must be zero.
+The readiness workflow runs `scripts/Test-GARawLogs.ps1`, downloads every
+HTTPS log without following redirects, enforces the size limit, recomputes
+SHA-256 over the downloaded bytes, and parses each retained file as one
+non-empty `cyc.dev/ga-raw-log/v1` JSON object. The parsed object must repeat
+the reviewed `sourceCommit`, `issue`, and `evidenceId`, and cross-bind the
+normalized command, `node` (or the compatibility `host` alias), timestamps,
+integer `exitCode`, all three test counts, and `cleanup` to the manifest
+descriptor. The downloader retains that object with `contentVerified: true`,
+and readiness parses the file independently and compares the source-bound
+fields to the recorded object. A URL plus a syntactically valid digest is
+therefore insufficient without the matching, non-empty, source-bound content.
 The manifest and stable-bundle endpoints are additionally checked by
 `scripts/Test-ExternalHttpsUrl.py`: they must resolve to globally routable
 addresses, contain no embedded credentials or fragments, and return directly
@@ -136,8 +144,9 @@ records `status: true`, all three `platforms`, one nested `runs` object per
 platform, and the marker set for those runs. Every gate/run evidence object
 also carries source-bound provenance: a bounded `runId` and `node`, external
 `provider` and `hostType`, `status: "passed"`, integer `exitCode: 0`, positive
-`tests.passed`, zero `tests.failed`, non-negative `tests.ignored`, and explicit
-ISO-8601 `startedAt`/`endedAt` instants in chronological order. The downloader
+`tests.passed`, zero `tests.failed`, non-negative integer `tests.ignored` (all
+three counts bounded to `0..1,000,000,000`), and explicit ISO-8601
+`startedAt`/`endedAt` instants in chronological order. The downloader
 cross-binds these fields instead of accepting a marker-only or relabelled run.
 The legacy `selector` and `markers` aliases may be supplied for compatibility,
 but if they appear alongside canonical `testSelector` or `rawLogMarkers` they
@@ -196,12 +205,13 @@ Every run/gate pair has a marker in the corresponding `rawLogMarkers` array
 and in the raw-log descriptor's `markers` array, of the form
 `CYC-GA-ISSUE5|platform=<platform>|selector=<selector>|commandSha256=<digest>|gate=<gate>|status=passed`.
 The marker digest is over the normalized exact command. `Test-GARawLogs.ps1`
-requires every source-bound marker in the manifest, searches for every marker
-in the downloaded bytes, and emits `markersVerified: true` plus the verified
-`gateEvidence` records. `Test-GAReadiness.ps1` cross-binds those records back
-to the manifest, so setting all nine gates to `true`, relabelling a single
-Linux log, or omitting a semantic native marker cannot satisfy the Windows,
-macOS, or restart gates.
+requires every source-bound marker in the manifest, requires the downloaded
+`cyc.dev/ga-raw-log/v1` envelope to retain them in a unique non-empty
+`markers` array, searches for every marker in the downloaded bytes, and emits
+`markersVerified: true` plus the verified `gateEvidence` records.
+`Test-GAReadiness.ps1` cross-binds those records back to the manifest, so
+setting all nine gates to `true`, relabelling a single Linux log, or omitting
+a semantic native marker cannot satisfy the Windows, macOS, or restart gates.
 
 The Issue #2 and Issue #3 `gates` objects remain fail-closed legacy maps: every
 required gate is a JSON boolean with value `true`; a missing, unknown,

@@ -11,6 +11,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $MaximumRawLogBytes = 64MB
+$MaximumRawLogTestCount = [long]1000000000
+$GaRawLogContentSchema = 'cyc.dev/ga-raw-log/v1'
 
 # Issue #5 evidence is a three-host matrix.  These constants intentionally
 # mirror Test-GAReadiness.ps1: the downloader validates the manifest before it
@@ -197,6 +199,231 @@ function Get-RawLogOptionalProperty {
     return $property.Value
 }
 
+function Test-RawLogInteger {
+    param([Parameter(Mandatory = $true)][object]$Value)
+
+    return ($Value -is [byte]) -or
+        ($Value -is [sbyte]) -or
+        ($Value -is [int16]) -or
+        ($Value -is [uint16]) -or
+        ($Value -is [int32]) -or
+        ($Value -is [uint32]) -or
+        ($Value -is [int64]) -or
+        ($Value -is [uint64])
+}
+
+function Assert-RawLogCount {
+    param(
+        [Parameter(Mandatory = $true)][object]$Value,
+        [Parameter(Mandatory = $true)][string]$Description,
+        [bool]$RequirePositive = $false
+    )
+
+    Assert-RawLogCondition (Test-RawLogInteger -Value $Value) "$Description must be an integer"
+    try {
+        [decimal]$numeric = $Value
+    } catch {
+        throw "GA raw-log assertion failed: $Description is outside the supported integer range."
+    }
+    Assert-RawLogCondition ($numeric -ge 0) "$Description must be non-negative"
+    Assert-RawLogCondition ($numeric -le [decimal]$MaximumRawLogTestCount) "$Description must not exceed $MaximumRawLogTestCount"
+    if ($RequirePositive) {
+        Assert-RawLogCondition ($numeric -gt 0) "$Description must be greater than zero"
+    }
+    return [long]$numeric
+}
+
+function Convert-RawLogInstant {
+    param(
+        [Parameter(Mandatory = $true)][object]$Value,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-RawLogCondition ($Value -is [string] -or
+        $Value -is [DateTime] -or $Value -is [DateTimeOffset]) "$Description must be an ISO-8601 instant"
+    try {
+        if ($Value -is [DateTimeOffset]) {
+            return [DateTimeOffset]$Value
+        }
+        if ($Value -is [DateTime]) {
+            Assert-RawLogCondition ($Value.Kind -ne [DateTimeKind]::Unspecified) "$Description must carry an explicit UTC offset"
+            return [DateTimeOffset]$Value
+        }
+
+        $text = [string]$Value
+        Assert-RawLogCondition ($text -match '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$') "$Description must include a UTC designator or numeric offset"
+        return [DateTimeOffset]::Parse(
+            $text,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        )
+    } catch {
+        throw "GA raw-log assertion failed: $Description must be a valid ISO-8601 instant with an explicit offset."
+    }
+}
+
+function Normalize-RawLogCommand {
+    param([Parameter(Mandatory = $true)][string]$Command)
+
+    return [regex]::Replace($Command.Trim(), '\s+', ' ')
+}
+
+function Assert-RawLogDescriptor {
+    param(
+        [Parameter(Mandatory = $true)][object]$RawLog,
+        [Parameter(Mandatory = $true)][string]$IssueName,
+        [Parameter(Mandatory = $true)][string]$Description,
+        [bool]$RequirePositivePassed = $true
+    )
+
+    Assert-RawLogCondition (($RawLog -is [pscustomobject]) -and -not ($RawLog -is [System.Array])) "$Description.rawLog is a JSON object"
+    $command = Get-RawLogProperty -Object $RawLog -Path 'command' -Description $Description
+    Assert-RawLogCondition ($command -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$command)) "$Description.rawLog.command is a non-empty string"
+    $node = Get-RawLogProperty -Object $RawLog -Path 'node' -Description $Description
+    Assert-RawLogCondition ($node -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$node)) "$Description.rawLog.node is a non-empty string"
+    Assert-RawLogCondition ([string]$node -notmatch '(?i)github|actions|hosted|runner') "$Description.rawLog.node must identify an external host"
+
+    $startedAt = Convert-RawLogInstant -Value (Get-RawLogProperty -Object $RawLog -Path 'startedAt' -Description $Description) -Description "$Description.rawLog.startedAt"
+    $endedAt = Convert-RawLogInstant -Value (Get-RawLogProperty -Object $RawLog -Path 'endedAt' -Description $Description) -Description "$Description.rawLog.endedAt"
+    Assert-RawLogCondition ($endedAt -ge $startedAt) "$Description.rawLog.endedAt must not precede startedAt"
+
+    $exitCode = Get-RawLogProperty -Object $RawLog -Path 'exitCode' -Description $Description
+    Assert-RawLogCondition ((Test-RawLogInteger -Value $exitCode) -and [decimal]$exitCode -eq 0) "$Description.rawLog.exitCode must be integer 0"
+    $tests = Get-RawLogProperty -Object $RawLog -Path 'tests' -Description $Description
+    Assert-RawLogCondition (($tests -is [pscustomobject]) -and -not ($tests -is [System.Array])) "$Description.rawLog.tests is a JSON object"
+    foreach ($field in @('passed', 'failed', 'ignored')) {
+        $count = Get-RawLogProperty -Object $tests -Path $field -Description "$Description.rawLog.tests"
+        [void](Assert-RawLogCount -Value $count -Description "$Description.rawLog.tests.$field" -RequirePositive ($RequirePositivePassed -and $field -ceq 'passed'))
+    }
+    Assert-RawLogCondition ([decimal]$tests.failed -eq 0) "$Description.rawLog.tests.failed must be zero"
+    $cleanup = Get-RawLogProperty -Object $RawLog -Path 'cleanup' -Description $Description
+    Assert-RawLogCondition (($cleanup -is [bool]) -and $cleanup) "$Description.rawLog.cleanup must be boolean true"
+    return $RawLog
+}
+
+function Get-RawLogContentJson {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-RawLogCondition (Test-Path -LiteralPath $Path -PathType Leaf) "$Description exists: $Path"
+    $item = Get-Item -LiteralPath $Path -Force
+    Assert-RawLogCondition (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and -not $item.PSIsContainer) "$Description is a regular file"
+    Assert-RawLogCondition ([long]$item.Length -gt 0) "$Description is not empty"
+    Assert-RawLogCondition ([long]$item.Length -le [long]$MaximumRawLogBytes) "$Description is within the 64 MiB limit"
+    try {
+        $text = [IO.File]::ReadAllText($Path)
+    } catch {
+        throw "GA raw-log assertion failed: $Description could not be read: $($_.Exception.Message)"
+    }
+    Assert-RawLogCondition (-not [string]::IsNullOrWhiteSpace($text)) "$Description is not whitespace-only"
+    try {
+        $content = $text | ConvertFrom-Json
+    } catch {
+        throw "GA raw-log assertion failed: $Description is not valid JSON: $($_.Exception.Message)"
+    }
+    Assert-RawLogCondition ($null -ne $content -and ($content -is [pscustomobject]) -and -not ($content -is [System.Array])) "$Description must be one JSON object"
+    return $content
+}
+
+function Assert-RawLogContent {
+    param(
+        [Parameter(Mandatory = $true)][object]$Content,
+        [Parameter(Mandatory = $true)][object]$ManifestIssue,
+        [Parameter(Mandatory = $true)][string]$IssueName,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+        [Parameter(Mandatory = $true)][string]$EvidenceId,
+        [Parameter(Mandatory = $true)][string]$Description,
+        [bool]$RequirePositivePassed = $true
+    )
+
+    Assert-RawLogCondition ($null -ne $Content -and ($Content -is [pscustomobject]) -and -not ($Content -is [System.Array])) "$Description must be one JSON object"
+    Assert-RawLogCondition ([string](Get-RawLogProperty -Object $Content -Path 'schemaVersion' -Description $Description) -ceq $GaRawLogContentSchema) "$Description.schemaVersion must be $GaRawLogContentSchema"
+    Assert-RawLogCondition ([string](Get-RawLogProperty -Object $Content -Path 'status' -Description $Description) -ceq 'passed') "$Description.status must be passed"
+
+    $contentCommit = Get-RawLogProperty -Object $Content -Path 'sourceCommit' -Description $Description
+    Assert-RawLogCondition ($contentCommit -is [string] -and [string]$contentCommit -match '^[0-9a-fA-F]{40}$') "$Description.sourceCommit must be a full 40-character commit SHA"
+    Assert-RawLogCondition ([string]$contentCommit -ieq $ExpectedCommit) "$Description.sourceCommit must match ExpectedCommit"
+    $contentIssue = Get-RawLogProperty -Object $Content -Path 'issue' -Description $Description
+    Assert-RawLogCondition ($contentIssue -is [string] -and [string]$contentIssue -ceq $IssueName) "$Description.issue must match $IssueName"
+    $contentEvidenceId = Get-RawLogProperty -Object $Content -Path 'evidenceId' -Description $Description
+    Assert-RawLogCondition ($contentEvidenceId -is [string] -and [string]$contentEvidenceId -ceq $EvidenceId) "$Description.evidenceId must match the manifest"
+
+    $manifestRawLog = Get-RawLogProperty -Object $ManifestIssue -Path 'rawLog' -Description $Description
+    [void](Assert-RawLogDescriptor -RawLog $manifestRawLog -IssueName $IssueName -Description "$Description.manifest" -RequirePositivePassed $RequirePositivePassed)
+    $manifestCommand = [string](Get-RawLogProperty -Object $manifestRawLog -Path 'command' -Description $Description)
+    $contentCommand = Get-RawLogProperty -Object $Content -Path 'command' -Description $Description
+    Assert-RawLogCondition ($contentCommand -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$contentCommand)) "$Description.command must be a non-empty string"
+    Assert-RawLogCondition ((Normalize-RawLogCommand -Command ([string]$contentCommand)).Equals((Normalize-RawLogCommand -Command $manifestCommand), [StringComparison]::Ordinal)) "$Description.command must match the manifest command"
+
+    $manifestNode = [string](Get-RawLogProperty -Object $manifestRawLog -Path 'node' -Description $Description)
+    $nodeProperty = $Content.PSObject.Properties['node']
+    $hostProperty = $Content.PSObject.Properties['host']
+    $hasNode = $null -ne $nodeProperty
+    $hasHost = $null -ne $hostProperty
+    if ($hasNode) {
+        Assert-RawLogCondition ($nodeProperty.Value -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$nodeProperty.Value)) "$Description.node must be a non-empty string"
+    }
+    if ($hasHost) {
+        Assert-RawLogCondition ($hostProperty.Value -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$hostProperty.Value)) "$Description.host must be a non-empty string"
+    }
+    Assert-RawLogCondition ($hasNode -or $hasHost) "$Description must contain a non-empty node or host"
+    if ($hasNode -and $hasHost) {
+        Assert-RawLogCondition ([string]$nodeProperty.Value -ceq [string]$hostProperty.Value) "$Description.node and $Description.host must agree"
+    }
+    $boundNode = if ($hasNode) { [string]$nodeProperty.Value } else { [string]$hostProperty.Value }
+    Assert-RawLogCondition ($boundNode -ceq $manifestNode) "$Description.node/host must match the manifest node"
+    Assert-RawLogCondition ($boundNode -notmatch '(?i)github|actions|hosted|runner') "$Description.node/host must identify an external host"
+
+    $manifestStartedAt = Convert-RawLogInstant -Value (Get-RawLogProperty -Object $manifestRawLog -Path 'startedAt' -Description $Description) -Description "$Description.manifest.startedAt"
+    $manifestEndedAt = Convert-RawLogInstant -Value (Get-RawLogProperty -Object $manifestRawLog -Path 'endedAt' -Description $Description) -Description "$Description.manifest.endedAt"
+    $contentStartedAt = Convert-RawLogInstant -Value (Get-RawLogProperty -Object $Content -Path 'startedAt' -Description $Description) -Description "$Description.startedAt"
+    $contentEndedAt = Convert-RawLogInstant -Value (Get-RawLogProperty -Object $Content -Path 'endedAt' -Description $Description) -Description "$Description.endedAt"
+    Assert-RawLogCondition ($contentEndedAt -ge $contentStartedAt) "$Description.endedAt must not precede startedAt"
+    Assert-RawLogCondition ($contentStartedAt.UtcDateTime.Ticks -eq $manifestStartedAt.UtcDateTime.Ticks) "$Description.startedAt must match the manifest"
+    Assert-RawLogCondition ($contentEndedAt.UtcDateTime.Ticks -eq $manifestEndedAt.UtcDateTime.Ticks) "$Description.endedAt must match the manifest"
+
+    $manifestExitCode = Get-RawLogProperty -Object $manifestRawLog -Path 'exitCode' -Description $Description
+    $contentExitCode = Get-RawLogProperty -Object $Content -Path 'exitCode' -Description $Description
+    Assert-RawLogCondition ((Test-RawLogInteger -Value $contentExitCode) -and [decimal]$contentExitCode -eq 0) "$Description.exitCode must be integer 0"
+    Assert-RawLogCondition ((Test-RawLogInteger -Value $manifestExitCode) -and [decimal]$manifestExitCode -eq 0) "$Description.manifest.exitCode must be integer 0"
+    Assert-RawLogCondition ([decimal]$contentExitCode -eq [decimal]$manifestExitCode) "$Description.exitCode must match the manifest"
+
+    $manifestTests = Get-RawLogProperty -Object $manifestRawLog -Path 'tests' -Description $Description
+    $contentTests = Get-RawLogProperty -Object $Content -Path 'tests' -Description $Description
+    Assert-RawLogCondition (($contentTests -is [pscustomobject]) -and -not ($contentTests -is [System.Array])) "$Description.tests must be a JSON object"
+    Assert-RawLogCondition (($manifestTests -is [pscustomobject]) -and -not ($manifestTests -is [System.Array])) "$Description.manifest.tests must be a JSON object"
+    foreach ($field in @('passed', 'failed', 'ignored')) {
+        $contentCount = Get-RawLogProperty -Object $contentTests -Path $field -Description "$Description.tests"
+        $manifestCount = Get-RawLogProperty -Object $manifestTests -Path $field -Description "$Description.manifest.tests"
+        [void](Assert-RawLogCount -Value $contentCount -Description "$Description.tests.$field" -RequirePositive ($RequirePositivePassed -and $field -ceq 'passed'))
+        [void](Assert-RawLogCount -Value $manifestCount -Description "$Description.manifest.tests.$field" -RequirePositive ($RequirePositivePassed -and $field -ceq 'passed'))
+        Assert-RawLogCondition ([decimal]$contentCount -eq [decimal]$manifestCount) "$Description.tests.$field must match the manifest"
+    }
+    Assert-RawLogCondition ([decimal]$contentTests.failed -eq 0) "$Description.tests.failed must be zero"
+    $manifestCleanup = Get-RawLogProperty -Object $manifestRawLog -Path 'cleanup' -Description $Description
+    $contentCleanup = Get-RawLogProperty -Object $Content -Path 'cleanup' -Description $Description
+    Assert-RawLogCondition (($contentCleanup -is [bool]) -and $contentCleanup) "$Description.cleanup must be boolean true"
+    Assert-RawLogCondition (($manifestCleanup -is [bool]) -and $manifestCleanup) "$Description.manifest.cleanup must be boolean true"
+    Assert-RawLogCondition ([bool]$contentCleanup -eq [bool]$manifestCleanup) "$Description.cleanup must match the manifest"
+
+    if ($IssueName -ceq 'issue5') {
+        $manifestMarkers = Get-RawLogProperty -Object $manifestRawLog -Path 'markers' -Description $Description
+        $contentMarkers = Get-RawLogProperty -Object $Content -Path 'markers' -Description $Description
+        Assert-RawLogCondition (($contentMarkers -is [System.Array]) -and $contentMarkers.Count -gt 0) "$Description.markers must be a non-empty JSON array"
+        $seenContentMarkers = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+        foreach ($marker in @($contentMarkers)) {
+            Assert-RawLogCondition ($marker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$marker)) "$Description.markers entries must be non-empty strings"
+            Assert-RawLogCondition ($seenContentMarkers.Add([string]$marker)) "$Description.markers entries must be unique"
+        }
+        foreach ($marker in @($manifestMarkers)) {
+            Assert-RawLogCondition (@($contentMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.markers must retain the manifest marker '$marker'"
+        }
+    }
+    return $Content
+}
+
 function Assert-RawLogIssue5RunProvenance {
     param(
         [Parameter(Mandatory = $true)][object]$Run,
@@ -234,19 +461,16 @@ function Assert-RawLogIssue5RunProvenance {
     Assert-RawLogCondition $statusPassed "$Description.status is 'passed' (or boolean true for a single-gate record)"
 
     $exitCode = Get-RawLogProperty -Object $Run -Path 'exitCode' -Description $Description
-    $isInteger = ($exitCode -is [byte]) -or ($exitCode -is [sbyte]) -or ($exitCode -is [int16]) -or ($exitCode -is [uint16]) -or ($exitCode -is [int32]) -or ($exitCode -is [uint32]) -or ($exitCode -is [int64]) -or ($exitCode -is [uint64])
-    Assert-RawLogCondition ($isInteger -and ([int64]$exitCode -eq 0)) "$Description.exitCode is integer zero"
+    Assert-RawLogCondition ((Test-RawLogInteger -Value $exitCode) -and [decimal]$exitCode -eq 0) "$Description.exitCode is integer zero"
 
     $tests = Get-RawLogProperty -Object $Run -Path 'tests' -Description $Description
     Assert-RawLogCondition (($tests -is [pscustomobject]) -and -not ($tests -is [System.Array])) "$Description.tests is a JSON object"
     foreach ($countName in @('passed', 'failed', 'ignored')) {
         Assert-RawLogCondition ($null -ne $tests.PSObject.Properties[$countName]) "$Description.tests.$countName is required"
         $count = $tests.PSObject.Properties[$countName].Value
-        $countIsInteger = ($count -is [byte]) -or ($count -is [sbyte]) -or ($count -is [int16]) -or ($count -is [uint16]) -or ($count -is [int32]) -or ($count -is [uint32]) -or ($count -is [int64]) -or ($count -is [uint64])
-        Assert-RawLogCondition ($countIsInteger -and ([int64]$count -ge 0)) "$Description.tests.$countName is a non-negative integer"
+        [void](Assert-RawLogCount -Value $count -Description "$Description.tests.$countName" -RequirePositive ($countName -ceq 'passed'))
     }
-    Assert-RawLogCondition ([int64]$tests.PSObject.Properties['passed'].Value -gt 0) "$Description.tests.passed is greater than zero"
-    Assert-RawLogCondition ([int64]$tests.PSObject.Properties['failed'].Value -eq 0) "$Description.tests.failed is zero"
+    Assert-RawLogCondition ([decimal]$tests.PSObject.Properties['failed'].Value -eq 0) "$Description.tests.failed is zero"
 
     $startedValue = Get-RawLogProperty -Object $Run -Path 'startedAt' -Description $Description
     $endedValue = Get-RawLogProperty -Object $Run -Path 'endedAt' -Description $Description
@@ -328,7 +552,7 @@ function Get-RawLogIssue5RunSelector {
 function Normalize-RawLogIssue5Command {
     param([Parameter(Mandatory = $true)][string]$Command)
 
-    return [regex]::Replace($Command.Trim(), '\s+', ' ')
+    return Normalize-RawLogCommand -Command $Command
 }
 
 function Get-RawLogIssue5CommandSha256 {
@@ -876,6 +1100,7 @@ foreach ($issueName in @('issue2', 'issue3', 'issue5')) {
     $seenIds[$evidenceId] = $true
 
     $rawLog = Get-RawLogProperty -Object $issue -Path 'rawLog' -Description $issueName
+    [void](Assert-RawLogDescriptor -RawLog $rawLog -IssueName $issueName -Description $issueName -RequirePositivePassed $true)
     $urlText = [string](Get-RawLogProperty -Object $rawLog -Path 'url' -Description $issueName)
     $uri = $null
     Assert-RawLogCondition ([Uri]::TryCreate($urlText, [UriKind]::Absolute, [ref]$uri)) "$issueName.rawLog.url is an absolute URL"
@@ -895,6 +1120,15 @@ foreach ($issueName in @('issue2', 'issue3', 'issue5')) {
     [long]$bytes = Save-RawLogFromHttps -Uri $uri -Destination $logPath
     $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $logPath).Hash.ToLowerInvariant()
     Assert-RawLogCondition ($actualHash -ceq $expectedHash.ToLowerInvariant()) "$issueName raw log bytes match rawLog.sha256"
+    $downloadedContent = Get-RawLogContentJson -Path $logPath -Description "$issueName raw log content"
+    [void](Assert-RawLogContent `
+        -Content $downloadedContent `
+        -ManifestIssue $issue `
+        -IssueName $issueName `
+        -ExpectedCommit $ExpectedCommit `
+        -EvidenceId $evidenceId `
+        -Description "$issueName raw log content" `
+        -RequirePositivePassed $true)
     if ($issueName -ceq 'issue5') {
         Assert-RawLogIssue5Markers -RawLog $rawLog -LogPath $logPath -Contract $issue5Contract
     }
@@ -907,6 +1141,8 @@ foreach ($issueName in @('issue2', 'issue3', 'issue5')) {
         bytes = $bytes
         path = $logPath
         status = 'passed'
+        contentVerified = $true
+        content = $downloadedContent
     }
     if ($issueName -ceq 'issue5') {
         $record.markersVerified = $true
