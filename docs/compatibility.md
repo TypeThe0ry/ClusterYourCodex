@@ -124,6 +124,10 @@ raw-log verifier cross-binds the provenance fields as well as the markers.
 The compatibility aliases `selector` and `markers` are accepted only when
 they exactly match canonical `testSelector` and `rawLogMarkers` values; any
 conflicting duplicate field fails closed.
+Both marker spellings must be JSON arrays of non-empty native strings; marker
+arrays are unique using ordinal, case-sensitive comparison. Scalars, numeric or
+boolean entries, blank values, and duplicate entries are rejected before any
+marker is normalized.
 Each matrix gate also requires unique `runId` values and keeps every run ID
 bound to one platform across the complete Issue #5 record. Provenance
 identifiers and retained marker entries remain JSON strings; duplicates,
@@ -144,8 +148,7 @@ must end in their exact selector. The marker format is
 the digest covers the normalized command. A restart row must also include a
 platform-native residual marker: Linux uses `residual_empty`,
 `residualCgroupVerified=1`, or `residualIdentityProcessesVerified=1`; Windows
-uses `residualJobObjectVerified=1` or `residualProcessGroupVerified=1`; and
-macOS uses `residualProcessGroupVerified=1` or
+requires `residualJobObjectVerified=1`; and macOS requires
 `residualExternalReconciliationVerified=1`. A generic `residual_empty` marker
 does not satisfy the Windows or macOS row. The downloader searches for every
 marker in the downloaded log and records `markersVerified: true` plus
@@ -153,6 +156,23 @@ marker in the downloaded log and records `markersVerified: true` plus
 command, and marker sets. A generic Linux `cargo test --workspace --locked`
 run therefore cannot satisfy the Windows, macOS, or restart rows even when an
 older manifest supplies every Issue #5 gate as `true`.
+
+The platform-native marker contract is closed as well. The Windows single-host
+gates must retain `windowsExecutionIdentityVerified=1`,
+`windowsJobObjectVerified=1`, and `windowsProtectedExternalGuardVerified=1`;
+the macOS single-host gate must retain
+`macosExternalReconciliationVerified=1`. On every three-platform matrix row,
+`jobsCannotAlterGuardState` must retain
+`linuxGuardTamperRejected=1`, `windowsGuardTamperRejected=1`, and
+`macosGuardTamperRejected=1` on the corresponding runs, while
+`jobsCannotReadWorkerCredentials` must retain
+`linuxWorkerCredentialIsolationVerified=1`,
+`windowsWorkerCredentialIsolationVerified=1`, and
+`macosWorkerCredentialIsolationVerified=1`. The aggregate matrix marker set
+must retain each run marker. Restart residual proof remains platform-specific:
+Linux accepts its cgroup/identity residual markers, Windows requires
+`residualJobObjectVerified=1`, and macOS requires
+`residualExternalReconciliationVerified=1`.
 
 Issue #2 and Issue #3 retain their boolean `gates` maps, and every required
 entry must be `true`; the map is a closed set, so unknown or missing gate keys

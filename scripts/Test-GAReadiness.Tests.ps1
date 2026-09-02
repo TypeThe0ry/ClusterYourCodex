@@ -59,6 +59,9 @@ $issue5GateNamesForTest = @(
 $contractOutput = @(& $readinessScript -RepositoryRoot $testRepositoryRoot -ContractOnly -Json)
 $contractResult = ($contractOutput -join "`n") | ConvertFrom-Json
 . $readinessScript -RepositoryRoot $testRepositoryRoot -ContractOnly -Json | Out-Null
+. $rawLogScript -EvidencePath (Join-Path $testRepositoryRoot 'missing-ga-evidence.json') `
+    -OutputDirectory (Join-Path $testRepositoryRoot 'missing-ga-raw-logs') `
+    -ExpectedCommit $expectedCommitForTest -ContractOnly | Out-Null
 
 function New-TestIssueEvidence {
     param(
@@ -113,8 +116,25 @@ function New-TestIssue5Evidence {
         $markers = @($gates | ForEach-Object {
                 Get-GaIssue5Marker -Platform $platform -Selector $selector -Command $command -Gate ([string]$_)
             })
+        foreach ($gate in $gates) {
+            if ($GaIssue5RequiredMarkerPrefixes.Contains([string]$gate)) {
+                foreach ($prefix in @($GaIssue5RequiredMarkerPrefixes[[string]$gate])) {
+                    $markers += [string]$prefix
+                }
+            }
+            if ($GaIssue5PlatformGateMarkerPrefixes.Contains([string]$gate)) {
+                foreach ($prefix in @($GaIssue5PlatformGateMarkerPrefixes[[string]$gate][$platform])) {
+                    $markers += [string]$prefix
+                }
+            }
+        }
         if ($platform -ceq 'linux') {
-            $markers += @('uid=1007', 'gid=1007', 'cgroup_escape=blocked', 'cgroup.threads_escape=blocked')
+            # Use realistic dynamic identity values for the prefix contract.
+            $markers = @($markers | ForEach-Object {
+                    if ([string]$_ -ceq 'uid=') { 'uid=1007' }
+                    elseif ([string]$_ -ceq 'gid=') { 'gid=1007' }
+                    else { $_ }
+                })
         }
         $markers += [string]@($GaIssue5ResidualMarkerPrefixes[$platform])[0]
         [void]$runs.Add([ordered]@{
@@ -143,11 +163,17 @@ function New-TestIssue5Evidence {
         $run = $runByPlatform[$platform]
         foreach ($gate in @($GaIssue5PlatformGateNames[$platform])) {
             $gateMarkers = @($run.markers | Where-Object { [string]$_ -ceq (Get-GaIssue5Marker -Platform $platform -Selector ([string]$run.testSelector) -Command ([string]$run.command) -Gate $gate) })
-            if ($platform -ceq 'linux' -and $gate -ceq 'linuxDedicatedExecutionIdentity') {
-                $gateMarkers += @('uid=1007', 'gid=1007')
+            if ($GaIssue5RequiredMarkerPrefixes.Contains([string]$gate)) {
+                foreach ($prefix in @($GaIssue5RequiredMarkerPrefixes[[string]$gate])) {
+                    if ([string]$prefix -ceq 'uid=') { $gateMarkers += 'uid=1007' }
+                    elseif ([string]$prefix -ceq 'gid=') { $gateMarkers += 'gid=1007' }
+                    else { $gateMarkers += [string]$prefix }
+                }
             }
-            if ($platform -ceq 'linux' -and $gate -ceq 'linuxCgroupV2Reconciliation') {
-                $gateMarkers += @('cgroup_escape=blocked', 'cgroup.threads_escape=blocked')
+            if ($GaIssue5PlatformGateMarkerPrefixes.Contains([string]$gate)) {
+                foreach ($prefix in @($GaIssue5PlatformGateMarkerPrefixes[[string]$gate][$platform])) {
+                    $gateMarkers += [string]$prefix
+                }
             }
             $structuredGates[$gate] = [ordered]@{
                 status = $true
@@ -173,6 +199,11 @@ function New-TestIssue5Evidence {
             $run = $runByPlatform[$platform]
             $marker = Get-GaIssue5Marker -Platform $platform -Selector ([string]$run.testSelector) -Command ([string]$run.command) -Gate $gate
             $runMarkers = @($marker)
+            if ($GaIssue5PlatformGateMarkerPrefixes.Contains([string]$gate)) {
+                foreach ($prefix in @($GaIssue5PlatformGateMarkerPrefixes[[string]$gate][$platform])) {
+                    $runMarkers += [string]$prefix
+                }
+            }
             if ($gate -ceq 'restartResidualProcessReconciliation') {
                 $runMarkers += [string]@($GaIssue5ResidualMarkerPrefixes[$platform])[0]
             }
@@ -257,10 +288,14 @@ Describe 'GA evidence issue acceptance contract' {
         $workflowSource | Should Match 'issue5_selector_is_positive'
         $workflowSource | Should Match 'issue5_residual_prefixes'
         $workflowSource | Should Match 'issue5_has_native_residual_marker'
+        $workflowSource | Should Match 'issue5_required_prefixes'
+        $workflowSource | Should Match 'issue5_has_required_markers'
         $workflowSource | Should Match 'gate_keys_exact'
         $readinessSource | Should Match 'Assert-GaExactGateSet'
         $readinessSource | Should Match 'Assert-GaIssue5PositiveSelector'
+        $readinessSource | Should Match 'GaIssue5PlatformGateMarkerPrefixes'
         $rawLogSource | Should Match 'Assert-RawLogIssue5PositiveSelector'
+        $rawLogSource | Should Match 'GaIssue5PlatformGateMarkerPrefixes'
         $readinessSource | Should Match 'windows_native_containment_job_object_and_guard'
         $readinessSource | Should Match 'macos_live_external_reconciliation'
         $rawLogSource | Should Match 'windows_native_containment_job_object_and_guard'
@@ -275,6 +310,10 @@ Describe 'GA evidence issue acceptance contract' {
         $workflowSource | Should Match 'ended_at < started_at'
         $readinessSource | Should Match 'rawLogMarkers and markers aliases must match exactly'
         $rawLogSource | Should Match 'rawLogMarkers and markers aliases must match exactly'
+        $readinessSource | Should Match 'rawLogMarkers must be a JSON array'
+        $rawLogSource | Should Match 'rawLogMarkers is a JSON array'
+        $readinessSource | Should Match 'rawLogMarkers entries must be unique'
+        $rawLogSource | Should Match 'rawLogMarkers entries are unique'
         $workflowSource | Should Not Match 'valid_issue_evidence\(\.issue5'
         $workflowSource | Should Match 'valid_https_url'
         ($workflowSource.IndexOf('test("^https://[^@/?#[:space:]]+([/?#]|$)")') -ge 0) | Should Be $true
@@ -319,7 +358,14 @@ Describe 'GA evidence issue acceptance contract' {
         $rawLogSource | Should Match 'rawLogMarkers'
         $rawLogSource | Should Match 'gateEvidence'
         $rawLogSource | Should Match '--workspace'
-        foreach ($markerPrefix in @('uid=', 'gid=', 'cgroup_escape=blocked', 'cgroup.threads_escape=blocked', 'residual_empty', 'residualJobObjectVerified=1', 'residualProcessGroupVerified=1', 'residualExternalReconciliationVerified=1')) {
+        foreach ($markerPrefix in @(
+                'uid=', 'gid=', 'cgroup_escape=blocked', 'cgroup.threads_escape=blocked',
+                'windowsExecutionIdentityVerified=1', 'windowsJobObjectVerified=1',
+                'windowsProtectedExternalGuardVerified=1', 'macosExternalReconciliationVerified=1',
+                'linuxGuardTamperRejected=1', 'windowsGuardTamperRejected=1', 'macosGuardTamperRejected=1',
+                'linuxWorkerCredentialIsolationVerified=1', 'windowsWorkerCredentialIsolationVerified=1',
+                'macosWorkerCredentialIsolationVerified=1', 'residual_empty',
+                'residualJobObjectVerified=1', 'residualExternalReconciliationVerified=1')) {
             $rawLogSource | Should Match ([regex]::Escape($markerPrefix))
             $readinessSource | Should Match ([regex]::Escape($markerPrefix))
             $workflowSource | Should Match ([regex]::Escape($markerPrefix))
@@ -524,6 +570,94 @@ Describe 'GA evidence issue acceptance contract' {
         Assert-TestThrows {
             Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
                 -Path 'issue5' -Description 'Issue #5 marker alias conflict' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+    }
+
+    It 'rejects scalar, non-string, duplicate, and empty Issue #5 gate markers' {
+        $record = New-TestIssue5Evidence
+        $record.gates.windowsJobObject.rawLogMarkers = 'scalar-marker'
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 scalar gate marker' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+
+        $record = New-TestIssue5Evidence
+        $record.gates.windowsJobObject | Add-Member -MemberType NoteProperty -Name markers -Value @([int]7)
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 numeric marker alias' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+
+        $record = New-TestIssue5Evidence
+        $record.gates.windowsJobObject.rawLogMarkers = @($record.gates.windowsJobObject.rawLogMarkers) + @([string]$record.gates.windowsJobObject.rawLogMarkers[0])
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 duplicate gate marker' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+
+        $record = New-TestIssue5Evidence
+        $record.gates.windowsJobObject.rawLogMarkers = @($record.gates.windowsJobObject.rawLogMarkers) + @('')
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 empty gate marker' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+    }
+
+    It 'keeps the raw-log marker helper type-sensitive and unique' {
+        $record = New-TestIssue5Evidence
+        $gate = $record.gates.windowsJobObject
+        @(Get-RawLogIssue5GateMarkers -GateEvidence $gate -Description 'raw helper baseline').Count | Should BeGreaterThan 0
+
+        $gate.rawLogMarkers = 'scalar-marker'
+        Assert-TestThrows { Get-RawLogIssue5GateMarkers -GateEvidence $gate -Description 'raw helper scalar' }
+
+        $record = New-TestIssue5Evidence
+        $gate = $record.gates.windowsJobObject
+        $gate | Add-Member -MemberType NoteProperty -Name markers -Value @([int]7)
+        Assert-TestThrows { Get-RawLogIssue5GateMarkers -GateEvidence $gate -Description 'raw helper numeric alias' }
+
+        $record = New-TestIssue5Evidence
+        $gate = $record.gates.windowsJobObject
+        $gate.rawLogMarkers = @($gate.rawLogMarkers) + @([string]$gate.rawLogMarkers[0])
+        Assert-TestThrows { Get-RawLogIssue5GateMarkers -GateEvidence $gate -Description 'raw helper duplicate' }
+
+        $record = New-TestIssue5Evidence
+        $gate = $record.gates.windowsJobObject
+        $gate.rawLogMarkers = @($gate.rawLogMarkers) + @('')
+        Assert-TestThrows { Get-RawLogIssue5GateMarkers -GateEvidence $gate -Description 'raw helper empty' }
+    }
+
+    It 'requires platform-native Issue #5 markers for Windows and macOS gates' {
+        $record = New-TestIssue5Evidence
+        $record.gates.windowsJobObject.rawLogMarkers = @($record.gates.windowsJobObject.rawLogMarkers |
+            Where-Object { ([string]$_) -cne 'windowsJobObjectVerified=1' })
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 missing Windows Job Object marker' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+
+        $record = New-TestIssue5Evidence
+        $record.gates.macosExternalReconciliation.rawLogMarkers = @($record.gates.macosExternalReconciliation.rawLogMarkers |
+            Where-Object { ([string]$_) -cne 'macosExternalReconciliationVerified=1' })
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 missing macOS native marker' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+
+        $record = New-TestIssue5Evidence
+        $windowsRun = $record.gates.jobsCannotAlterGuardState.runs[1]
+        $windowsRun.rawLogMarkers = @($windowsRun.rawLogMarkers |
+            Where-Object { ([string]$_) -cne 'windowsGuardTamperRejected=1' })
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 missing Windows tamper marker' -ExpectedCommit $expectedCommitForTest `
                 -RequiredGates $issue5GateNamesForTest
         }
     }

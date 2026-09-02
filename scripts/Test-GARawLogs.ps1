@@ -4,7 +4,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$EvidencePath,
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
-    [Parameter(Mandatory = $true)][string]$ExpectedCommit
+    [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+    [switch]$ContractOnly
 )
 
 Set-StrictMode -Version Latest
@@ -69,13 +70,29 @@ $GaIssue5GateExpectedPlatforms = [ordered]@{
 $GaIssue5RequiredMarkerPrefixes = [ordered]@{
     linuxDedicatedExecutionIdentity = @('uid=', 'gid=')
     linuxCgroupV2Reconciliation = @('cgroup_escape=blocked', 'cgroup.threads_escape=blocked')
+    windowsIsolatedExecutionIdentity = @('windowsExecutionIdentityVerified=1')
+    windowsJobObject = @('windowsJobObjectVerified=1')
+    windowsProtectedExternalGuard = @('windowsProtectedExternalGuardVerified=1')
+    macosExternalReconciliation = @('macosExternalReconciliationVerified=1')
+}
+$GaIssue5PlatformGateMarkerPrefixes = [ordered]@{
+    jobsCannotAlterGuardState = [ordered]@{
+        linux = @('linuxGuardTamperRejected=1')
+        windows = @('windowsGuardTamperRejected=1')
+        macos = @('macosGuardTamperRejected=1')
+    }
+    jobsCannotReadWorkerCredentials = [ordered]@{
+        linux = @('linuxWorkerCredentialIsolationVerified=1')
+        windows = @('windowsWorkerCredentialIsolationVerified=1')
+        macos = @('macosWorkerCredentialIsolationVerified=1')
+    }
 }
 $GaIssue5ResidualMarkerPrefixes = [ordered]@{
     # ``residual_empty`` is a Linux cgroup marker.  External platforms must
     # prove their native process-scope/guard reconciliation explicitly.
     linux = @('residual_empty', 'residualCgroupVerified=1', 'residualIdentityProcessesVerified=1')
-    windows = @('residualJobObjectVerified=1', 'residualProcessGroupVerified=1')
-    macos = @('residualProcessGroupVerified=1', 'residualExternalReconciliationVerified=1')
+    windows = @('residualJobObjectVerified=1')
+    macos = @('residualExternalReconciliationVerified=1')
 }
 $GaIssue5RunIdentifierPattern = '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
 $GaIssue5IsoInstantPattern = '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\s]+(Z|[+-][0-9]{2}:[0-9]{2})$'
@@ -368,31 +385,32 @@ function Get-RawLogIssue5GateMarkers {
 
     $canonicalProperty = $GateEvidence.PSObject.Properties['rawLogMarkers']
     $aliasProperty = $GateEvidence.PSObject.Properties['markers']
+    # Keep raw-log verification type-sensitive with the manifest validator:
+    # scalars, non-string entries, and duplicate markers are malformed evidence,
+    # not values to coerce into a valid array.
+    if ($null -ne $canonicalProperty) {
+        Assert-RawLogCondition ($canonicalProperty.Value -is [System.Array]) "$Description.rawLogMarkers is a JSON array"
+    }
+    if ($null -ne $aliasProperty) {
+        Assert-RawLogCondition ($aliasProperty.Value -is [System.Array]) "$Description.markers is a JSON array"
+    }
+    $canonicalMarkers = if ($null -ne $canonicalProperty) { @($canonicalProperty.Value) } else { $null }
+    $aliasMarkers = if ($null -ne $aliasProperty) { @($aliasProperty.Value) } else { $null }
     if ($null -ne $canonicalProperty -and $null -ne $aliasProperty) {
-        Assert-RawLogCondition (($canonicalProperty.Value -is [System.Array]) -and ($aliasProperty.Value -is [System.Array])) "$Description.rawLogMarkers and markers must both be arrays when both are present"
-        $canonicalMarkers = @($canonicalProperty.Value | ForEach-Object { [string]$_ })
-        $aliasMarkers = @($aliasProperty.Value | ForEach-Object { [string]$_ })
-        Assert-RawLogCondition ($canonicalMarkers.Count -eq $aliasMarkers.Count) "$Description.rawLogMarkers and markers aliases must have the same length"
+        Assert-RawLogCondition ($canonicalMarkers.Count -eq $aliasMarkers.Count) "$Description.rawLogMarkers and markers aliases have the same length"
         for ($index = 0; $index -lt $canonicalMarkers.Count; $index++) {
+            Assert-RawLogCondition (($canonicalMarkers[$index] -is [string]) -and ($aliasMarkers[$index] -is [string])) "$Description.rawLogMarkers and markers aliases entries are both strings"
             Assert-RawLogCondition ($canonicalMarkers[$index] -ceq $aliasMarkers[$index]) "$Description.rawLogMarkers and markers aliases must match exactly"
         }
     }
-    $markerProperty = $canonicalProperty
-    if ($null -eq $markerProperty) {
-        $markerProperty = $aliasProperty
-    }
-    if ($null -eq $markerProperty) {
-        $markers = $null
-    } elseif ($markerProperty.Value -is [System.Array]) {
-        $markers = $markerProperty.Value
-    } else {
-        $markers = @($markerProperty.Value)
-    }
-    Assert-RawLogCondition (($markers -is [System.Array]) -and $markers.Count -gt 0) "$Description.rawLogMarkers is a non-empty array"
+    $markers = if ($null -ne $canonicalProperty) { $canonicalMarkers } else { $aliasMarkers }
+    Assert-RawLogCondition (($null -ne $markers) -and ($markers -is [System.Array]) -and $markers.Count -gt 0) "$Description.rawLogMarkers is a non-empty array"
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($marker in @($markers)) {
-        Assert-RawLogCondition ($marker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$marker)) "$Description.rawLogMarkers entries are non-empty strings"
+        Assert-RawLogCondition ($marker -is [string] -and -not [string]::IsNullOrWhiteSpace($marker)) "$Description.rawLogMarkers entries are non-empty strings"
+        Assert-RawLogCondition ($seen.Add([string]$marker)) "$Description.rawLogMarkers entries are unique"
     }
-    return @($markers | ForEach-Object { [string]$_ })
+    return [string[]]@($markers)
 }
 
 function Assert-RawLogIssue5PositiveSelector {
@@ -420,14 +438,32 @@ function Assert-RawLogIssue5RequiredMarkers {
         [Parameter(Mandatory = $true)][string]$Description
     )
 
+    $requiredPrefixes = @()
     if ($GaIssue5RequiredMarkerPrefixes.Contains($Gate)) {
-        foreach ($prefix in @($GaIssue5RequiredMarkerPrefixes[$Gate])) {
+        $requiredPrefixes = @($GaIssue5RequiredMarkerPrefixes[$Gate])
+    }
+    if ($requiredPrefixes.Count -gt 0) {
+        foreach ($prefix in $requiredPrefixes) {
             $matched = @($Markers | Where-Object {
                     $candidate = [string]$_
                     $candidate.Equals($prefix, [StringComparison]::Ordinal) -or
                     $candidate.StartsWith($prefix, [StringComparison]::Ordinal)
                 })
             Assert-RawLogCondition ($matched.Count -gt 0) "$Description.rawLogMarkers contains a native marker beginning with '$prefix'"
+        }
+    }
+    if ($GaIssue5PlatformGateMarkerPrefixes.Contains($Gate)) {
+        $markerPlatforms = if ($Platform -ceq 'multi-platform') { @($GaIssue5Platforms) } else { @($Platform.ToLowerInvariant()) }
+        foreach ($markerPlatform in $markerPlatforms) {
+            Assert-RawLogCondition ($GaIssue5PlatformGateMarkerPrefixes[$Gate].Contains($markerPlatform)) "$Description.rawLogMarkers has no reviewed platform marker contract for '$Gate' on '$markerPlatform'"
+            foreach ($prefix in @($GaIssue5PlatformGateMarkerPrefixes[$Gate][$markerPlatform])) {
+                $matched = @($Markers | Where-Object {
+                        $candidate = [string]$_
+                        $candidate.Equals($prefix, [StringComparison]::Ordinal) -or
+                        $candidate.StartsWith($prefix, [StringComparison]::Ordinal)
+                    })
+                Assert-RawLogCondition ($matched.Count -gt 0) "$Description.rawLogMarkers contains the '$markerPlatform' native marker beginning with '$prefix'"
+            }
         }
     }
     if ($Gate -ceq 'restartResidualProcessReconciliation') {
@@ -625,12 +661,11 @@ function Assert-RawLogIssue5Evidence {
 
     $rawMarkers = Get-RawLogProperty -Object $rawLog -Path 'markers' -Description $Description
     Assert-RawLogCondition (($rawMarkers -is [System.Array]) -and $rawMarkers.Count -gt 0) "$Description.markers is a non-empty array"
-    $seenRawMarkers = @{}
+    $seenRawMarkers = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($rawMarker in @($rawMarkers)) {
         Assert-RawLogCondition ($rawMarker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$rawMarker)) "$Description.markers entries are non-empty strings"
         $rawMarkerText = [string]$rawMarker
-        Assert-RawLogCondition (-not $seenRawMarkers.ContainsKey($rawMarkerText)) "$Description.markers entries are unique"
-        $seenRawMarkers[$rawMarkerText] = $true
+        Assert-RawLogCondition ($seenRawMarkers.Add($rawMarkerText)) "$Description.markers entries are unique"
     }
     $expectedMarkers = New-Object System.Collections.Generic.List[string]
     foreach ($gateRecord in $gateRecords.ToArray()) {
@@ -804,6 +839,12 @@ function Write-RawLogAtomicText {
             Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
         }
     }
+}
+
+if ($ContractOnly) {
+    # Keep the parser/contract helpers dot-sourceable for focused regression
+    # tests without touching the filesystem or making an external request.
+    return
 }
 
 Assert-RawLogCondition ($ExpectedCommit -match '^[0-9a-fA-F]{40}$') 'ExpectedCommit must be a full 40-character SHA'

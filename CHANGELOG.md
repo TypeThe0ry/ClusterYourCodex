@@ -7,6 +7,18 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.67] - 2026-09-02
+
+### Fixed
+
+- Made Issue #5 marker validation type-sensitive and fail-closed across the
+  PowerShell, raw-log, Python, and stable-publisher paths: marker fields must
+  be unique JSON string arrays, and scalar/numeric/blank/duplicate values are
+  rejected.
+- Bound the positive Windows/macOS Issue #5 selectors to explicit native
+  identity, containment, tamper, credential-isolation, and platform-specific
+  restart markers so a canonical selector alone cannot satisfy GA.
+
 ## [0.1.0-preview.66] - 2026-09-02
 
 ### Fixed
@@ -832,7 +844,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.66...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.67...HEAD
+[0.1.0-preview.67]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.66...v0.1.0-preview.67
 [0.1.0-preview.66]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.65...v0.1.0-preview.66
 [0.1.0-preview.65]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.64...v0.1.0-preview.65
 [0.1.0-preview.64]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.63...v0.1.0-preview.64

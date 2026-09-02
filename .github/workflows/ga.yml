@@ -514,6 +514,41 @@ jobs:
           whitespace = re.compile(r"\s+")
           run_id_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
           iso_instant_pattern = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\s]+(Z|[+-][0-9]{2}:[0-9]{2})$")
+          issue5_required_prefixes = {
+              "linuxDedicatedExecutionIdentity": {
+                  "linux": ("uid=", "gid="),
+              },
+              "linuxCgroupV2Reconciliation": {
+                  "linux": ("cgroup_escape=blocked", "cgroup.threads_escape=blocked"),
+              },
+              "windowsIsolatedExecutionIdentity": {
+                  "windows": ("windowsExecutionIdentityVerified=1",),
+              },
+              "windowsJobObject": {
+                  "windows": ("windowsJobObjectVerified=1",),
+              },
+              "windowsProtectedExternalGuard": {
+                  "windows": ("windowsProtectedExternalGuardVerified=1",),
+              },
+              "macosExternalReconciliation": {
+                  "macos": ("macosExternalReconciliationVerified=1",),
+              },
+              "jobsCannotAlterGuardState": {
+                  "linux": ("linuxGuardTamperRejected=1",),
+                  "windows": ("windowsGuardTamperRejected=1",),
+                  "macos": ("macosGuardTamperRejected=1",),
+              },
+              "jobsCannotReadWorkerCredentials": {
+                  "linux": ("linuxWorkerCredentialIsolationVerified=1",),
+                  "windows": ("windowsWorkerCredentialIsolationVerified=1",),
+                  "macos": ("macosWorkerCredentialIsolationVerified=1",),
+              },
+              "restartResidualProcessReconciliation": {
+                  "linux": ("residual_empty", "residualCgroupVerified=1", "residualIdentityProcessesVerified=1"),
+                  "windows": ("residualJobObjectVerified=1",),
+                  "macos": ("residualExternalReconciliationVerified=1",),
+              },
+          }
           seen_gates = set()
           seen_run_platform = {}
           binding_count = 0
@@ -626,6 +661,14 @@ jobs:
                           or any(type(marker) is not str or not marker.strip() for marker in markers)
                           or len(set(markers)) != len(markers)):
                       raise SystemExit(f"{description}.markers is not an array of strings")
+                  required_prefixes = issue5_required_prefixes.get(gate_name, {}).get(platform, ())
+                  if gate_name == "restartResidualProcessReconciliation":
+                      if not any(any(marker.startswith(prefix) for marker in markers)
+                                 for prefix in required_prefixes):
+                          raise SystemExit(f"{description}.markers is missing the native residual marker for {platform}")
+                  elif not all(any(marker.startswith(prefix) for marker in markers)
+                               for prefix in required_prefixes):
+                      raise SystemExit(f"{description}.markers is missing a required native marker for {platform}")
                   normalized = normalized_command(command, description)
                   digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
                   expected_marker = (
@@ -638,6 +681,30 @@ jobs:
                           f"{description} marker commandSha256 does not match the normalized command"
                       )
                   binding_count += 1
+
+              if is_matrix:
+                  aggregate_markers = gate.get("markers")
+                  if (not isinstance(aggregate_markers, list)
+                          or any(type(marker) is not str or not marker.strip() for marker in aggregate_markers)
+                          or len(set(aggregate_markers)) != len(aggregate_markers)):
+                      raise SystemExit(f"Issue #5 gate {gate_name}.markers is not a unique non-empty string array")
+                  expected_aggregate_markers = {
+                      marker
+                      for run in runs
+                      for marker in run.get("markers", [])
+                  }
+                  if any(aggregate_markers.count(marker) != 1 for marker in expected_aggregate_markers):
+                      raise SystemExit(f"Issue #5 gate {gate_name}.markers does not retain every run marker exactly once")
+                  for platform in ("linux", "windows", "macos"):
+                      required_prefixes = issue5_required_prefixes.get(gate_name, {}).get(platform, ())
+                      if gate_name == "restartResidualProcessReconciliation":
+                          required_ok = any(any(marker.startswith(prefix) for marker in aggregate_markers)
+                                            for prefix in required_prefixes)
+                      else:
+                          required_ok = all(any(marker.startswith(prefix) for marker in aggregate_markers)
+                                             for prefix in required_prefixes)
+                      if not required_ok:
+                          raise SystemExit(f"Issue #5 gate {gate_name}.markers is missing the retained native marker for {platform}")
 
           raw_markers = issue5_records[0].get("markers")
           if (not isinstance(raw_markers, list)
@@ -847,13 +914,46 @@ jobs:
                 if $platform == "linux" then
                   ["residual_empty", "residualCgroupVerified=1", "residualIdentityProcessesVerified=1"]
                 elif $platform == "windows" then
-                  ["residualJobObjectVerified=1", "residualProcessGroupVerified=1"]
+                  ["residualJobObjectVerified=1"]
                 elif $platform == "macos" then
-                  ["residualProcessGroupVerified=1", "residualExternalReconciliationVerified=1"]
+                  ["residualExternalReconciliationVerified=1"]
                 else [] end;
               def issue5_has_native_residual_marker($markers; $platform):
                 ([ issue5_residual_prefixes($platform)[] as $prefix |
                    select(issue5_has_prefix($markers; $prefix)) ] | length) > 0;
+              def issue5_required_prefixes($platform; $gate):
+                if $gate == "linuxDedicatedExecutionIdentity" then
+                  ["uid=", "gid="]
+                elif $gate == "linuxCgroupV2Reconciliation" then
+                  ["cgroup_escape=blocked", "cgroup.threads_escape=blocked"]
+                elif $gate == "windowsIsolatedExecutionIdentity" then
+                  ["windowsExecutionIdentityVerified=1"]
+                elif $gate == "windowsJobObject" then
+                  ["windowsJobObjectVerified=1"]
+                elif $gate == "windowsProtectedExternalGuard" then
+                  ["windowsProtectedExternalGuardVerified=1"]
+                elif $gate == "macosExternalReconciliation" then
+                  ["macosExternalReconciliationVerified=1"]
+                elif $gate == "jobsCannotAlterGuardState" then
+                  if $platform == "linux" then ["linuxGuardTamperRejected=1"]
+                  elif $platform == "windows" then ["windowsGuardTamperRejected=1"]
+                  elif $platform == "macos" then ["macosGuardTamperRejected=1"]
+                  else [] end
+                elif $gate == "jobsCannotReadWorkerCredentials" then
+                  if $platform == "linux" then ["linuxWorkerCredentialIsolationVerified=1"]
+                  elif $platform == "windows" then ["windowsWorkerCredentialIsolationVerified=1"]
+                  elif $platform == "macos" then ["macosWorkerCredentialIsolationVerified=1"]
+                  else [] end
+                elif $gate == "restartResidualProcessReconciliation" then
+                  issue5_residual_prefixes($platform)
+                else [] end;
+              def issue5_has_required_markers($markers; $platform; $gate):
+                (issue5_required_prefixes($platform; $gate)) as $prefixes
+                | if $gate == "restartResidualProcessReconciliation" then
+                    ([ $prefixes[] as $prefix | select(issue5_has_prefix($markers; $prefix)) ] | length) > 0
+                  else
+                    ([ $prefixes[] as $prefix | select(issue5_has_prefix($markers; $prefix)) ] | length) == ($prefixes | length)
+                  end;
               def issue5_marker_valid($marker; $platform; $gate):
                 (($marker | type) == "string")
                 and ($marker | test(
@@ -889,9 +989,7 @@ jobs:
                     and issue5_command_valid($platform; $run.command)
                     and issue5_markers_valid($markers)
                     and issue5_has_marker($markers; $platform; $gate)
-                    and (if ($gate == "restartResidualProcessReconciliation") then
-                           issue5_has_native_residual_marker($markers; $platform)
-                         else true end)
+                    and issue5_has_required_markers($markers; $platform; $gate)
                 end;
               def issue5_single_gate_valid($record; $gate):
                 if (($record.gates[$gate] | type) != "object"
@@ -908,12 +1006,7 @@ jobs:
                     and issue5_command_valid($platform; $record.gates[$gate].command)
                     and issue5_markers_valid($markers)
                     and issue5_has_marker($markers; $platform; $gate)
-                    and (if $gate == "linuxDedicatedExecutionIdentity" then
-                           issue5_has_prefix($markers; "uid=") and issue5_has_prefix($markers; "gid=")
-                         elif $gate == "linuxCgroupV2Reconciliation" then
-                           issue5_has_prefix($markers; "cgroup_escape=blocked")
-                           and issue5_has_prefix($markers; "cgroup.threads_escape=blocked")
-                         else true end)
+                    and issue5_has_required_markers($markers; $platform; $gate)
                 end;
               def issue5_matrix_gate_valid($record; $gate):
                 if (($record.gates[$gate] | type) != "object"
@@ -932,6 +1025,9 @@ jobs:
                     and (([$runs[].runId] | unique | length) == ($runs | length))
                     and ($valid_runs == 3)
                     and issue5_markers_valid($gate_markers)
+                    and ([ issue5_platforms[] as $platform |
+                           select(issue5_has_required_markers($gate_markers; $platform; $gate))
+                         ] | length == (issue5_platforms | length))
                     and ([ $expected_markers[] as $marker |
                            select([ $gate_markers[] | select(. == $marker) ] | length == 1)
                          ] | length == ($expected_markers | length))

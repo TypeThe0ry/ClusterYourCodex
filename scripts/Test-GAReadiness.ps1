@@ -268,14 +268,30 @@ $GaIssue5GateExpectedPlatforms = [ordered]@{
 $GaIssue5RequiredMarkerPrefixes = [ordered]@{
     linuxDedicatedExecutionIdentity = @('uid=', 'gid=')
     linuxCgroupV2Reconciliation = @('cgroup_escape=blocked', 'cgroup.threads_escape=blocked')
+    windowsIsolatedExecutionIdentity = @('windowsExecutionIdentityVerified=1')
+    windowsJobObject = @('windowsJobObjectVerified=1')
+    windowsProtectedExternalGuard = @('windowsProtectedExternalGuardVerified=1')
+    macosExternalReconciliation = @('macosExternalReconciliationVerified=1')
+}
+$GaIssue5PlatformGateMarkerPrefixes = [ordered]@{
+    jobsCannotAlterGuardState = [ordered]@{
+        linux = @('linuxGuardTamperRejected=1')
+        windows = @('windowsGuardTamperRejected=1')
+        macos = @('macosGuardTamperRejected=1')
+    }
+    jobsCannotReadWorkerCredentials = [ordered]@{
+        linux = @('linuxWorkerCredentialIsolationVerified=1')
+        windows = @('windowsWorkerCredentialIsolationVerified=1')
+        macos = @('macosWorkerCredentialIsolationVerified=1')
+    }
 }
 $GaIssue5ResidualMarkerPrefixes = [ordered]@{
     # ``residual_empty`` is emitted by the Linux cgroup probe.  Windows and
     # macOS must carry a native process-scope/guard marker; a generic empty
     # receipt is not containment proof for either external backend.
     linux = @('residual_empty', 'residualCgroupVerified=1', 'residualIdentityProcessesVerified=1')
-    windows = @('residualJobObjectVerified=1', 'residualProcessGroupVerified=1')
-    macos = @('residualProcessGroupVerified=1', 'residualExternalReconciliationVerified=1')
+    windows = @('residualJobObjectVerified=1')
+    macos = @('residualExternalReconciliationVerified=1')
 }
 $GaIssue5RunIdentifierPattern = '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
 $GaIssue5IsoInstantPattern = '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\s]+(Z|[+-][0-9]{2}:[0-9]{2})$'
@@ -451,33 +467,32 @@ function Get-GaIssue5GateMarkers {
 
     $canonicalProperty = $GateEvidence.PSObject.Properties['rawLogMarkers']
     $aliasProperty = $GateEvidence.PSObject.Properties['markers']
+    # Both spellings are compatibility aliases, but the wire contract is
+    # intentionally type-sensitive: a scalar, a numeric entry, or a duplicate
+    # marker must never be normalized into an apparently valid string array.
+    if ($null -ne $canonicalProperty) {
+        Assert-GaCondition ($canonicalProperty.Value -is [System.Array]) "$Description.rawLogMarkers must be a JSON array"
+    }
+    if ($null -ne $aliasProperty) {
+        Assert-GaCondition ($aliasProperty.Value -is [System.Array]) "$Description.markers must be a JSON array"
+    }
+    $canonicalMarkers = if ($null -ne $canonicalProperty) { @($canonicalProperty.Value) } else { $null }
+    $aliasMarkers = if ($null -ne $aliasProperty) { @($aliasProperty.Value) } else { $null }
     if ($null -ne $canonicalProperty -and $null -ne $aliasProperty) {
-        Assert-GaCondition (($canonicalProperty.Value -is [System.Array]) -and ($aliasProperty.Value -is [System.Array])) "$Description.rawLogMarkers and markers must both be arrays when both are present"
-        $canonicalMarkers = @($canonicalProperty.Value | ForEach-Object { [string]$_ })
-        $aliasMarkers = @($aliasProperty.Value | ForEach-Object { [string]$_ })
         Assert-GaCondition ($canonicalMarkers.Count -eq $aliasMarkers.Count) "$Description.rawLogMarkers and markers aliases must have the same length"
         for ($index = 0; $index -lt $canonicalMarkers.Count; $index++) {
+            Assert-GaCondition (($canonicalMarkers[$index] -is [string]) -and ($aliasMarkers[$index] -is [string])) "$Description.rawLogMarkers and markers aliases entries must both be strings"
             Assert-GaCondition ($canonicalMarkers[$index] -ceq $aliasMarkers[$index]) "$Description.rawLogMarkers and markers aliases must match exactly"
         }
     }
-    $markerProperty = $canonicalProperty
-    if ($null -eq $markerProperty) {
-        # ``markers`` is accepted as a compatibility alias; new manifests
-        # should use the unambiguous rawLogMarkers name.
-        $markerProperty = $aliasProperty
-    }
-    if ($null -eq $markerProperty) {
-        $markers = $null
-    } elseif ($markerProperty.Value -is [System.Array]) {
-        $markers = $markerProperty.Value
-    } else {
-        $markers = @($markerProperty.Value)
-    }
-    Assert-GaCondition (($markers -is [System.Array]) -and $markers.Count -gt 0) "$Description.rawLogMarkers must be a non-empty array"
+    $markers = if ($null -ne $canonicalProperty) { $canonicalMarkers } else { $aliasMarkers }
+    Assert-GaCondition (($null -ne $markers) -and ($markers -is [System.Array]) -and $markers.Count -gt 0) "$Description.rawLogMarkers must be a non-empty array"
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($marker in @($markers)) {
-        Assert-GaCondition ($marker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$marker)) "$Description.rawLogMarkers entries must be non-empty strings"
+        Assert-GaCondition ($marker -is [string] -and -not [string]::IsNullOrWhiteSpace($marker)) "$Description.rawLogMarkers entries must be non-empty strings"
+        Assert-GaCondition ($seen.Add([string]$marker)) "$Description.rawLogMarkers entries must be unique"
     }
-    return @($markers | ForEach-Object { [string]$_ })
+    return [string[]]@($markers)
 }
 
 function Assert-GaIssue5PositiveSelector {
@@ -505,14 +520,32 @@ function Assert-GaIssue5RequiredMarkers {
         [Parameter(Mandatory = $true)][string]$Description
     )
 
+    $requiredPrefixes = @()
     if ($GaIssue5RequiredMarkerPrefixes.Contains($Gate)) {
-        foreach ($prefix in @($GaIssue5RequiredMarkerPrefixes[$Gate])) {
+        $requiredPrefixes = @($GaIssue5RequiredMarkerPrefixes[$Gate])
+    }
+    if ($requiredPrefixes.Count -gt 0) {
+        foreach ($prefix in $requiredPrefixes) {
             $matched = @($Markers | Where-Object {
                     $candidate = [string]$_
                     $candidate.Equals($prefix, [System.StringComparison]::Ordinal) -or
                     $candidate.StartsWith($prefix, [System.StringComparison]::Ordinal)
                 })
             Assert-GaCondition ($matched.Count -gt 0) "$Description.rawLogMarkers must contain a native marker beginning with '$prefix'"
+        }
+    }
+    if ($GaIssue5PlatformGateMarkerPrefixes.Contains($Gate)) {
+        $markerPlatforms = if ($Platform -ceq 'multi-platform') { @($GaIssue5Platforms) } else { @($Platform.ToLowerInvariant()) }
+        foreach ($markerPlatform in $markerPlatforms) {
+            Assert-GaCondition ($GaIssue5PlatformGateMarkerPrefixes[$Gate].Contains($markerPlatform)) "$Description.rawLogMarkers has no reviewed platform marker contract for '$Gate' on '$markerPlatform'"
+            foreach ($prefix in @($GaIssue5PlatformGateMarkerPrefixes[$Gate][$markerPlatform])) {
+                $matched = @($Markers | Where-Object {
+                        $candidate = [string]$_
+                        $candidate.Equals($prefix, [System.StringComparison]::Ordinal) -or
+                        $candidate.StartsWith($prefix, [System.StringComparison]::Ordinal)
+                    })
+                Assert-GaCondition ($matched.Count -gt 0) "$Description.rawLogMarkers must contain the '$markerPlatform' native marker beginning with '$prefix'"
+            }
         }
     }
     if ($Gate -ceq 'restartResidualProcessReconciliation') {
@@ -768,12 +801,11 @@ function Assert-GaIssue5Evidence {
 
     $rawMarkers = Get-GaProperty -Object $rawLog -Path 'markers' -Description $Description
     Assert-GaCondition (($rawMarkers -is [System.Array]) -and $rawMarkers.Count -gt 0) "$Description.rawLog.markers must be a non-empty array"
-    $seenRawMarkers = @{}
+    $seenRawMarkers = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($rawMarker in @($rawMarkers)) {
         Assert-GaCondition ($rawMarker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$rawMarker)) "$Description.rawLog.markers entries must be non-empty strings"
         $rawMarkerText = [string]$rawMarker
-        Assert-GaCondition (-not $seenRawMarkers.ContainsKey($rawMarkerText)) "$Description.rawLog.markers entries must be unique"
-        $seenRawMarkers[$rawMarkerText] = $true
+        Assert-GaCondition ($seenRawMarkers.Add($rawMarkerText)) "$Description.rawLog.markers entries must be unique"
     }
     foreach ($gateRecord in $gateRecords.ToArray()) {
         foreach ($marker in @($gateRecord.markers)) {
@@ -781,9 +813,18 @@ function Assert-GaIssue5Evidence {
         }
     }
 
+    $allMarkers = New-Object System.Collections.Generic.List[string]
+    $seenAllMarkers = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($gateRecord in $gateRecords.ToArray()) {
+        foreach ($marker in @($gateRecord.markers)) {
+            if ($seenAllMarkers.Add([string]$marker)) {
+                [void]$allMarkers.Add([string]$marker)
+            }
+        }
+    }
     return [pscustomobject]@{
         platforms = @($GaIssue5Platforms)
-        markers = @($gateRecords | ForEach-Object { $_.markers } | Select-Object -Unique)
+        markers = $allMarkers.ToArray()
         gates = $gateRecords.ToArray()
     }
 }
@@ -809,12 +850,11 @@ function Assert-GaIssue5RawVerification {
 
     $verifiedMarkers = Get-GaProperty -Object $RawRecord -Path 'markers' -Description $Description
     Assert-GaCondition (($verifiedMarkers -is [System.Array]) -and $verifiedMarkers.Count -gt 0) "$Description.markers must be a non-empty array"
-    $seenVerifiedMarkers = @{}
+    $seenVerifiedMarkers = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($verifiedMarker in @($verifiedMarkers)) {
         Assert-GaCondition ($verifiedMarker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$verifiedMarker)) "$Description.markers entries must be non-empty strings"
         $verifiedMarkerText = [string]$verifiedMarker
-        Assert-GaCondition (-not $seenVerifiedMarkers.ContainsKey($verifiedMarkerText)) "$Description.markers entries must be unique"
-        $seenVerifiedMarkers[$verifiedMarkerText] = $true
+        Assert-GaCondition ($seenVerifiedMarkers.Add($verifiedMarkerText)) "$Description.markers entries must be unique"
     }
     foreach ($marker in @($manifestContract.markers)) {
         Assert-GaCondition (@($verifiedMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.markers must contain the source-bound marker '$marker'"
@@ -831,12 +871,11 @@ function Assert-GaIssue5RawVerification {
         Assert-GaCondition (($verifiedGateStatus -is [bool]) -and $verifiedGateStatus) "$Description.gateEvidence.$gateName.status must be boolean true"
         $verifiedMarkersForGate = @(Get-GaProperty -Object $verifiedGate -Path 'markers' -Description $Description)
         Assert-GaCondition (($verifiedMarkersForGate -is [System.Array]) -and $verifiedMarkersForGate.Count -gt 0) "$Description.gateEvidence.$gateName.markers must be retained"
-        $seenVerifiedGateMarkers = @{}
+        $seenVerifiedGateMarkers = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
         foreach ($verifiedGateMarker in @($verifiedMarkersForGate)) {
             Assert-GaCondition ($verifiedGateMarker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$verifiedGateMarker)) "$Description.gateEvidence.$gateName.markers entries must be non-empty strings"
             $verifiedGateMarkerText = [string]$verifiedGateMarker
-            Assert-GaCondition (-not $seenVerifiedGateMarkers.ContainsKey($verifiedGateMarkerText)) "$Description.gateEvidence.$gateName.markers entries must be unique"
-            $seenVerifiedGateMarkers[$verifiedGateMarkerText] = $true
+            Assert-GaCondition ($seenVerifiedGateMarkers.Add($verifiedGateMarkerText)) "$Description.gateEvidence.$gateName.markers entries must be unique"
         }
         foreach ($marker in @($manifestGate.markers)) {
             Assert-GaCondition (@($verifiedMarkersForGate | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.gateEvidence.$gateName.markers must match the manifest"

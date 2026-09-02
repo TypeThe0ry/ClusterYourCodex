@@ -142,6 +142,10 @@ cross-binds these fields instead of accepting a marker-only or relabelled run.
 The legacy `selector` and `markers` aliases may be supplied for compatibility,
 but if they appear alongside canonical `testSelector` or `rawLogMarkers` they
 must be the same values byte-for-byte; conflicting spellings fail closed.
+Both canonical and alias marker fields must be JSON arrays. Every entry must be
+a non-empty JSON string, and each array must be unique under ordinal,
+case-sensitive comparison. Scalar markers, numeric/boolean/null entries,
+blank values, and duplicate entries are rejected before string normalization.
 Every nested run carries its exact selector, command, and raw-log markers. The required selectors are the Linux ignored native probe
 `isolation::tests::linux_live_dedicated_identity_credential_and_residual_reconciliation`,
 the positive Windows native containment probe
@@ -163,11 +167,23 @@ gates.
 For `restartResidualProcessReconciliation`, every platform row must carry a
 native residual marker in addition to its source-bound marker. Linux accepts
 `residual_empty`, `residualCgroupVerified=1`, or
-`residualIdentityProcessesVerified=1`; Windows accepts
-`residualJobObjectVerified=1` or `residualProcessGroupVerified=1`; macOS
-accepts `residualProcessGroupVerified=1` or
+`residualIdentityProcessesVerified=1`; Windows requires
+`residualJobObjectVerified=1`; macOS requires
 `residualExternalReconciliationVerified=1`. A generic Linux-style
 `residual_empty` marker cannot be relabelled as Windows or macOS proof.
+
+Native markers are required for the positive selector as well as for restart:
+Windows single-host gates must emit `windowsExecutionIdentityVerified=1`,
+`windowsJobObjectVerified=1`, and `windowsProtectedExternalGuardVerified=1`,
+and macOS must emit `macosExternalReconciliationVerified=1`. For each matrix
+run, guard-state tamper rejection must emit the platform marker
+`<platform>GuardTamperRejected=1`, and worker-credential isolation must emit
+`<platform>WorkerCredentialIsolationVerified=1`. The aggregate matrix must
+retain all per-platform markers. Windows restart proof requires
+`residualJobObjectVerified=1`; macOS restart proof requires
+`residualExternalReconciliationVerified=1`; Linux retains its cgroup/identity
+residual alternatives. A positive selector or canonical marker by itself is
+not native containment evidence.
 
 Within each three-platform matrix, `runId` values are unique. Across gates a
 run may be reused only for the same platform; a single execution identifier
