@@ -4393,6 +4393,16 @@ exit 91
     Assert-True ($nsis -match 'StrCmp \$0 "error" cyc_lifecycle_launch_failed') 'silent Setup distinguishes nsExec launch failure from a lifecycle exit code'
     Assert-True ($lifecycleSource -match 'Start-Process[\s\S]+-Verb RunAs -WindowStyle Hidden -PassThru') 'firewall-only elevation hides its PowerShell console after UAC consent'
     Assert-True ($lifecycleSource -match ("'-WindowStyle',\s*'Hidden'[\s\S]+'-EncodedCommand',\s*" + [regex]::Escape('$encodedLoader'))) 'elevated firewall helper passes an explicit hidden host flag under ARM64 emulation'
+    $lifecycleHashFunction = [regex]::Match($lifecycleSource, 'function Get-CycLifecycleSha256[\s\S]+?function Get-CycInitiatorBinding')
+    Assert-True ($lifecycleHashFunction.Success -and
+        $lifecycleHashFunction.Value -match 'SHA256\]::Create' -and
+        $lifecycleHashFunction.Value -match 'ComputeHash\(\$stream\)' -and
+        $lifecycleHashFunction.Value -match 'OpenRead\(\$Path\)') 'lifecycle coordinator hashes transaction files without PowerShell module auto-loading'
+    $firewallHashFunction = [regex]::Match($firewallSource, 'function Get-CycFirewallSha256[\s\S]+?function Assert-CycFirewallExactProperties')
+    Assert-True ($firewallHashFunction.Success -and
+        $firewallHashFunction.Value -match 'SHA256\]::Create' -and
+        $firewallHashFunction.Value -match 'ComputeHash\(\$stream\)' -and
+        $firewallHashFunction.Value -match 'OpenRead\(\$Path\)') 'elevated firewall helper hashes receipts without PowerShell module auto-loading'
     Assert-True ($nsis -match 'SetErrorLevel \$0') 'Setup.exe preserves bootstrap failure status'
     Assert-True ($nsis -match 'MessageBox[\s\S]+/SD IDOK') 'silent Setup failure never blocks on an interactive message box'
     Assert-True ($nsis -match 'IfSilent silent_complete[\s\S]+Exec[\s\S]+silent_complete:') 'silent Setup success never launches the GUI'

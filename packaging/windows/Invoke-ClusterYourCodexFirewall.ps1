@@ -39,7 +39,16 @@ function Resolve-CycFirewallPath {
 
 function Get-CycFirewallSha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+    $stream = $null
+    $sha256 = $null
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        return ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ($null -ne $sha256) { $sha256.Dispose() }
+    }
 }
 
 function Assert-CycFirewallExactProperties {

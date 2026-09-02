@@ -15,6 +15,9 @@ are versioned independently from the product.
   independent of PowerShell module auto-loading by using a streaming .NET
   SHA-256 helper. Clean `pwsh` to Windows PowerShell 5.1 child boundaries now
   validate manifests and lifecycle payloads consistently.
+- Applied the same module-independent hashing boundary to the lifecycle
+  coordinator and elevated firewall helper so Setup/repair/rollback receipts
+  remain verifiable when launched from a PowerShell Core environment.
 
 ## [0.1.0-preview.63] - 2026-09-02
 
