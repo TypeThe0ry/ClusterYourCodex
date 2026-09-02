@@ -530,7 +530,46 @@ function Write-ProfileMatrixAtomicJson {
             $backupCreated = $true
             try { $backupStream.Flush($true) } finally { $backupStream.Dispose() }
             $backupPrepared = $true
-            [System.IO.File]::Replace($temporary, $Path, $backup, $true)
+            # The child reads the previous response/evidence file with the
+            # default FileShare.Read flags.  On Windows ARM64 x64 emulation
+            # the read handle can remain open for a short interval after the
+            # JSON parser returns, so File.Replace may report a sharing
+            # violation even though the protocol is otherwise healthy.  Keep
+            # the replace atomic, but retry only the two Win32 lock HRESULTs
+            # (or their localized equivalent) with a bounded backoff.  Any
+            # other error, or a lock that outlives the bound, remains a hard
+            # failure and cannot be hidden by this compatibility path.
+            $replaceCommitted = $false
+            $replaceAttempts = 40
+            for ($replaceAttempt = 0; $replaceAttempt -lt $replaceAttempts; $replaceAttempt++) {
+                try {
+                    [System.IO.File]::Replace($temporary, $Path, $backup, $true)
+                    $replaceCommitted = $true
+                    break
+                } catch {
+                    $sharingViolation = $false
+                    $exception = $_.Exception
+                    while ($null -ne $exception) {
+                        $hresult = 0L
+                        try { $hresult = [int64]$exception.HResult } catch { }
+                        $message = [string]$exception.Message
+                        if ($hresult -eq -2147024864 -or $hresult -eq -2147024863 -or
+                            $hresult -eq 32 -or $hresult -eq 33 -or
+                            $message -match '(?i)used by another process|sharing violation|lock violation') {
+                            $sharingViolation = $true
+                            break
+                        }
+                        $exception = $exception.InnerException
+                    }
+                    if (-not $sharingViolation -or $replaceAttempt -ge ($replaceAttempts - 1)) {
+                        throw
+                    }
+                    Start-Sleep -Milliseconds ([Math]::Min(250, 25 * ($replaceAttempt + 1)))
+                }
+            }
+            if (-not $replaceCommitted) {
+                throw "profile matrix atomic replacement did not commit after $replaceAttempts attempts."
+            }
         } else {
             [System.IO.File]::Move($temporary, $Path)
         }

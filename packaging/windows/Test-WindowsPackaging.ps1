@@ -4732,6 +4732,11 @@ exit 0
     Assert-True ($profileAtomicWriter.Value -match '\$backupStream\s*=\s*\[System\.IO\.FileStream\]::new' -and
         $profileAtomicWriter.Value -match '\$backupStream[\s\S]+\[System\.IO\.FileMode\]::CreateNew' -and
         $profileAtomicWriter.Value -match '\$backupPrepared\s*=\s*\$true') 'profile matrix atomic writer pre-creates a same-volume backup placeholder before File.Replace'
+    Assert-True ($profileAtomicWriter.Value -match '\$replaceAttempts\s*=\s*40' -and
+        $profileAtomicWriter.Value -match '\$replaceAttempt\s*-lt\s*\$replaceAttempts' -and
+        $profileAtomicWriter.Value -match '(?i)sharing violation|lock violation' -and
+        $profileAtomicWriter.Value -match '\$hresult\s*-eq\s*-2147024864' -and
+        $profileAtomicWriter.Value -match 'Start-Sleep -Milliseconds \(\[Math\]::Min\(250') 'profile matrix atomic writer retries only transient Windows file-lock errors with bounded backoff'
     Assert-True ($profileMatrixSource -match 'taskkill\.exe[\s\S]+/PID \$process\.Id[\s\S]+/T[\s\S]+/F' -and
         $profileMatrixSource -match '\$process\.WaitForExit\(30000\)' -and
         $profileMatrixSource -match 'did not exit after cleanup') 'profile matrix reaps a child after helper/IPC failure before profile cleanup'

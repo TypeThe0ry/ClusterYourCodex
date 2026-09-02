@@ -7,6 +7,16 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.71] - 2026-09-03
+
+### Fixed
+
+- Made the Windows profile-matrix task-helper IPC tolerate transient
+  `File.Replace` sharing violations on ARM64 x64 emulation with a bounded,
+  fail-closed retry window, preserving atomic evidence and response commits.
+- Added a packaging regression assertion that keeps the lock-specific retry
+  contract present in future Windows profile-matrix changes.
+
 ## [0.1.0-preview.70] - 2026-09-02
 
 ### Fixed
@@ -873,7 +883,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.70...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.71...HEAD
+[0.1.0-preview.71]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.70...v0.1.0-preview.71
 [0.1.0-preview.70]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.69...v0.1.0-preview.70
 [0.1.0-preview.69]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.68...v0.1.0-preview.69
 [0.1.0-preview.68]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.67...v0.1.0-preview.68
