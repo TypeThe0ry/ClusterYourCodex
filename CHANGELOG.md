@@ -16,6 +16,8 @@ are versioned independently from the product.
   fail-closed retry window, preserving atomic evidence and response commits.
 - Added a packaging regression assertion that keeps the lock-specific retry
   contract present in future Windows profile-matrix changes.
+- Pinned the transitive `fast-uri` runtime dependency to `3.1.6`, closing the
+  four newly published high-severity URL-normalization advisories.
 
 ## [0.1.0-preview.70] - 2026-09-02
 
