@@ -247,7 +247,15 @@ try {
             }
         } finally {
             if (Test-Path -LiteralPath $reparseJunction) {
-                Remove-Item -LiteralPath $reparseJunction -Force
+                # Windows PowerShell can prompt when Remove-Item targets a
+                # junction, which makes the non-interactive CI harness fail
+                # even though the fixture itself passed.  Use the native
+                # junction-aware rmdir command so cleanup never follows the
+                # link or requires a confirmation prompt.
+                & $env:ComSpec /d /c rmdir /q "$reparseJunction"
+                if ($LASTEXITCODE -ne 0 -and (Test-Path -LiteralPath $reparseJunction)) {
+                    throw "Failed to remove the Windows reparse fixture junction: $reparseJunction"
+                }
             }
         }
 
