@@ -824,6 +824,9 @@ jobs:
   windows-preview:
     name: Windows x64 self-contained preview
     needs: [release-identity, rust-artifacts, linux-arm64-worker-kit]
+    # Keep packaging and its disposable lifecycle checks bounded even when a
+    # runner-side process refuses to exit.
+    timeout-minutes: 120
     env:
       CYC_PRODUCT_VERSION: ${{ needs.release-identity.outputs.product_version }}
     runs-on: windows-latest
@@ -1293,6 +1296,7 @@ jobs:
           & .\packaging\windows\Test-FreshDeployment.ps1 `
             -PackageRoot $extractedPackage `
             -WorkRoot $freshWorkRoot `
+            -LifecycleTimeoutSeconds 900 `
             -KeepWorkRoot
           if ($LASTEXITCODE -ne 0) { throw 'fresh deployment lifecycle smoke failed' }
       - name: Upload fresh deployment diagnostics
@@ -1323,6 +1327,7 @@ jobs:
             -SetupPath $setup `
             -PackageRoot $preview `
             -WorkRoot $work `
+            -LifecycleTimeoutSeconds 900 `
             -DisposableEnvironment `
             -KeepWorkRoot
           if ($LASTEXITCODE -ne 0) { throw 'silent Setup lifecycle smoke failed' }
@@ -1343,6 +1348,9 @@ jobs:
     name: Clean Windows 11 ARM64 compatibility acceptance (x64 emulation)
     needs: [release-identity, windows-preview]
     runs-on: windows-11-arm
+    # A hung disposable lifecycle must never hold a hosted ARM runner
+    # indefinitely or block downstream release gates without a terminal result.
+    timeout-minutes: 120
     env:
       CYC_PRODUCT_VERSION: ${{ needs.release-identity.outputs.product_version }}
       CYC_DISPOSABLE_WINDOWS: "1"
@@ -1451,6 +1459,7 @@ jobs:
             -File .\packaging\windows\Test-FreshDeployment.ps1 `
             -PackageRoot $env:CYC_ACCEPTANCE_PACKAGE_ROOT `
             -WorkRoot $work `
+            -LifecycleTimeoutSeconds 900 `
             -KeepWorkRoot
           if ($LASTEXITCODE -ne 0) { throw "Fresh-deployment acceptance failed with exit code $LASTEXITCODE." }
       - name: Run silent Setup lifecycle on clean Windows 11 ARM64
@@ -1468,6 +1477,7 @@ jobs:
             -SetupPath $env:CYC_ACCEPTANCE_SETUP_PATH `
             -PackageRoot $env:CYC_ACCEPTANCE_PACKAGE_ROOT `
             -WorkRoot $work `
+            -LifecycleTimeoutSeconds 900 `
             -DisposableEnvironment `
             -KeepWorkRoot
           if ($LASTEXITCODE -ne 0) { throw "Silent Setup acceptance failed with exit code $LASTEXITCODE." }
@@ -1488,6 +1498,7 @@ jobs:
             -WorkRoot $matrixRoot `
             -CaseName 'standard-ascii,administrator-ascii,standard-non-ascii,administrator-non-ascii' `
             -RequireWindows11 `
+            -ChildTimeoutSeconds 900 `
             -KeepWorkRoot
           $matrixExitCode = $LASTEXITCODE
           if (-not (Test-Path -LiteralPath $matrixRoot -PathType Container)) {

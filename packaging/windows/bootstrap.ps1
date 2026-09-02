@@ -104,7 +104,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
-$script:ProductVersion = '0.1.0-preview.62'
+$script:ProductVersion = '0.1.0-preview.63'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
@@ -1276,6 +1276,10 @@ function Set-CycAgentsJournalPhase {
     if ($Journal.PSObject.Properties[$property]) { $Journal.$property = $value }
     else { $Journal | Add-Member -NotePropertyName $property -NotePropertyValue $value }
     Write-DurableAtomicJson -Path $JournalPath -Value $Journal -Depth 20
+    # File.Replace publishes a fresh sibling whose ACL may be inherited from
+    # the parent. Re-assert the private transaction tree after every journal
+    # phase transition so restart recovery can verify before it reads again.
+    Set-PrivateDirectoryAcl -Path (Split-Path -Parent $JournalPath)
 }
 
 function Start-CycAgentsInstallTransaction {
@@ -1342,6 +1346,7 @@ function Start-CycAgentsInstallTransaction {
     # before.bin and after.bin are durable before the prepared journal is
     # published. AGENTS.md is not mutated until that journal verifies.
     Write-DurableAtomicJson -Path $journalPath -Value $journal -Depth 20
+    Set-PrivateDirectoryAcl -Path $root
     $prepared = Read-CycAgentsJournal -Path $journalPath
     $transaction = [PSCustomObject]@{
         disabled = $false
@@ -1847,6 +1852,7 @@ function Start-CycAgentsRemovalTransaction {
         receipt = $Record
     }
     Write-DurableAtomicJson -Path $journalPath -Value $journal -Depth 20
+    Set-PrivateDirectoryAcl -Path $root
     $prepared = Read-CycAgentsJournal -Path $journalPath
     [void](Get-CycAgentsJournalImages -Journal $prepared -JournalPath $journalPath)
     return [PSCustomObject]@{
@@ -1970,8 +1976,14 @@ function Recover-CycAgentsTransactions {
         [Parameter(Mandatory = $true)][string]$DataRoot,
         [Parameter(Mandatory = $true)][string]$ManifestPath
     )
-    $transactionsRoot = Join-Path (Resolve-NormalizedPath $DataRoot) '.installer\transactions'
+    $resolvedData = Assert-CycExistingPrivateDirectory -Path $DataRoot
+    $installerRoot = Join-Path $resolvedData '.installer'
+    $transactionsRoot = Join-Path $installerRoot 'transactions'
     if (-not (Test-Path -LiteralPath $transactionsRoot -PathType Container)) { return @() }
+    # Do not trust or enumerate a journal until the complete private state
+    # hierarchy has passed the exact owner/DACL/reparse-point contract.
+    [void](Assert-CycExistingPrivateDirectory -Path $installerRoot)
+    Assert-CycPrivateStateTree -Root $transactionsRoot
     $manifest = Read-InstallManifest -ManifestPath $ManifestPath
     $results = New-Object System.Collections.Generic.List[object]
     foreach ($journalItem in @(Get-ChildItem -LiteralPath $transactionsRoot -Filter journal.json -File -Recurse -Force |
@@ -3265,6 +3277,66 @@ function Assert-PrivatePathAcl {
     }
     if (@($expected.Values | Where-Object { -not [bool]$_.seen }).Count -ne 0) {
         throw "Required principal is missing from $($item.FullName)"
+    }
+}
+
+function Assert-CycExistingPrivateDirectory {
+    <#
+    Verify-only preflight for lifecycle/recovery entry points.  This helper is
+    intentionally distinct from Set-PrivateDirectoryAcl: an existing weak
+    directory is evidence of foreign or tampered state and must not be repaired
+    after a journal/manifest has already been read.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$AllowAdministratorsReadAndExecute
+    )
+    $resolved = Resolve-NormalizedPath $Path
+    if (-not (Test-Path -LiteralPath $resolved)) { return $resolved }
+    Assert-CycCreationPathNoReparse -Path $resolved
+    $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or (Test-ReparsePoint $item)) {
+        throw "Existing private path is not a normal directory: $resolved"
+    }
+    Assert-PrivatePathAcl `
+        -Path $resolved `
+        -AllowAdministratorsReadAndExecute:$AllowAdministratorsReadAndExecute
+    return $resolved
+}
+
+function Assert-CycPrivateStateTree {
+    <#
+    Verify every existing transaction/journal descendant before it can be
+    enumerated, parsed, removed, or used for rollback.  The tree is created by
+    the installer with the same exact protected ACL as the surrounding data
+    root; any weak, inherited, foreign, or reparse-point entry fails closed.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [switch]$AllowAdministratorsReadAndExecute
+    )
+    $resolved = Resolve-NormalizedPath $Root
+    if (-not (Test-Path -LiteralPath $resolved)) { return }
+    $rootItem = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer -or (Test-ReparsePoint $rootItem)) {
+        throw "Private transaction state root is not a normal directory: $resolved"
+    }
+    Assert-PrivatePathAcl `
+        -Path $resolved `
+        -AllowAdministratorsReadAndExecute:$AllowAdministratorsReadAndExecute
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $pending.Push($resolved)
+    while ($pending.Count -gt 0) {
+        $current = $pending.Pop()
+        foreach ($child in @(Get-ChildItem -LiteralPath $current -Force -ErrorAction Stop)) {
+            if (Test-ReparsePoint $child) {
+                throw "Private transaction state contains a reparse point: $($child.FullName)"
+            }
+            Assert-PrivatePathAcl `
+                -Path $child.FullName `
+                -AllowAdministratorsReadAndExecute:$AllowAdministratorsReadAndExecute
+            if ($child.PSIsContainer) { $pending.Push($child.FullName) }
+        }
     }
 }
 
@@ -4652,6 +4724,7 @@ function New-FileRollbackSnapshot {
     $transactionRoot = Join-Path $transactionsRoot ([Guid]::NewGuid().ToString('N'))
     [void](Assert-ChildPath -Root $transactionsRoot -Candidate $transactionRoot)
     Assert-CycCreationPathNoReparse -Path $transactionsRoot
+    Set-PrivateDirectoryAcl -Path $transactionsRoot
     Assert-CycCreationPathNoReparse -Path $transactionRoot
     [void](New-Item -ItemType Directory -Path $transactionRoot -Force)
     $relativePaths = @($Plan.files.relativePath)
@@ -4681,6 +4754,10 @@ function New-FileRollbackSnapshot {
     if ($manifestExisted) {
         Copy-Item -LiteralPath $Plan.manifestPath -Destination $manifestBackup -Force
     }
+    # Snapshot roots and every copied descendant are durable private state. A
+    # later recovery pass must verify them before reading a journal, so
+    # normalize the exact protected ACL after all copies are present.
+    Set-PrivateDirectoryAcl -Path $transactionRoot
     return [PSCustomObject]@{
         root = $transactionRoot
         transactionsRoot = $transactionsRoot
@@ -4693,6 +4770,9 @@ function New-FileRollbackSnapshot {
 
 function Restore-FileRollbackSnapshot {
     param([Parameter(Mandatory = $true)]$Snapshot)
+    if (Test-Path -LiteralPath $Snapshot.root -PathType Container) {
+        Assert-CycPrivateStateTree -Root $Snapshot.root
+    }
     foreach ($record in $Snapshot.files) {
         if ($record.existed) {
             Assert-CycCreationPathNoReparse -Path (Split-Path -Parent $record.targetPath)
@@ -4717,6 +4797,7 @@ function Remove-FileRollbackSnapshot {
     param([Parameter(Mandatory = $true)]$Snapshot)
     $target = Assert-ChildPath -Root $Snapshot.transactionsRoot -Candidate $Snapshot.root
     if (Test-Path -LiteralPath $target -PathType Container) {
+        Assert-CycPrivateStateTree -Root $target
         # Exact transaction target was proven beneath the installer-owned root.
         Remove-Item -LiteralPath $target -Recurse -Force
     }
@@ -5947,6 +6028,10 @@ function Invoke-CycCodexOnlyIntegration {
     $receipt = $null
     $preserveTransaction = $false
     try {
+        # Recovery is allowed to read/write only after the existing private
+        # install/data roots have been verified without repairing them.
+        [void](Assert-CycExistingPrivateDirectory -Path $InstallRoot -AllowAdministratorsReadAndExecute)
+        [void](Assert-CycExistingPrivateDirectory -Path $data)
         # Validate the product-owned manifest container before any recovery
         # logic is allowed to trust a journal or manifest path.
         $state = Get-CycCodexOnlyInstallState `
@@ -6414,6 +6499,10 @@ function Invoke-InstallOrRepair {
     if ($PlanOnly) { return Invoke-InstallOrRepairCore -Plan $Plan }
     $mutex = Enter-CycAgentsMutex
     try {
+        [void](Assert-CycExistingPrivateDirectory `
+            -Path $Plan.installRoot `
+            -AllowAdministratorsReadAndExecute)
+        [void](Assert-CycExistingPrivateDirectory -Path $Plan.dataRoot)
         [void](Recover-CycAgentsTransactions -DataRoot $Plan.dataRoot -ManifestPath $Plan.manifestPath)
         return Invoke-InstallOrRepairCore -Plan $Plan
     } finally {
@@ -6429,6 +6518,10 @@ function Invoke-UninstallCore {
     )
     $install = Resolve-NormalizedPath $InstallRoot
     $data = Resolve-NormalizedPath $DataRoot
+    [void](Assert-CycExistingPrivateDirectory `
+        -Path $install `
+        -AllowAdministratorsReadAndExecute)
+    [void](Assert-CycExistingPrivateDirectory -Path $data)
     $manifestPath = Join-Path $data '.installer\install-manifest.json'
     $manifest = Read-InstallManifest -ManifestPath $manifestPath
     if (-not $manifest) {
@@ -6692,6 +6785,10 @@ function Invoke-Uninstall {
     $manifestPath = Join-Path $data '.installer\install-manifest.json'
     $mutex = Enter-CycAgentsMutex
     try {
+        [void](Assert-CycExistingPrivateDirectory `
+            -Path (Resolve-NormalizedPath $InstallRoot) `
+            -AllowAdministratorsReadAndExecute)
+        [void](Assert-CycExistingPrivateDirectory -Path $data)
         [void](Recover-CycAgentsTransactions -DataRoot $data -ManifestPath $manifestPath)
         return Invoke-UninstallCore -InstallRoot $InstallRoot -DataRoot $data
     } finally {

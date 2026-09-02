@@ -738,6 +738,10 @@ try {
     Assert-True ($source -match 'Set-CycAgentsContentCas') 'global AGENTS.md mutation uses compare-and-swap guards'
     Assert-True ($source -match 'Enter-CycAgentsMutex') 'global AGENTS.md lifecycle uses a product-wide serial boundary'
     Assert-True ($source -match 'Prepare-CycAgentsRemoval') 'global AGENTS.md uninstall uses a recoverable prepared checkpoint'
+    Assert-True ($source -match 'function Assert-CycExistingPrivateDirectory') 'lifecycle recovery has a verify-only private-root preflight'
+    Assert-True ($source -match 'function Assert-CycPrivateStateTree') 'transaction journals are validated as a complete private state tree'
+    Assert-True ($source -match 'Recover-CycAgentsTransactions[\s\S]+Assert-CycPrivateStateTree') 'journal recovery validates private state before enumerating records'
+    Assert-True ($source -match 'New-FileRollbackSnapshot[\s\S]+Set-PrivateDirectoryAcl -Path \$transactionRoot') 'new rollback snapshots publish an exact private ACL before recovery can consume them'
     $installCoreStart = $source.IndexOf('function Invoke-InstallOrRepairCore')
     $installCoreEnd = $source.IndexOf('function Invoke-InstallOrRepair', $installCoreStart + 1)
     $installCoreBody = $source.Substring($installCoreStart, $installCoreEnd - $installCoreStart)
@@ -995,6 +999,7 @@ try {
     $freshCrashManifest = Join-Path $freshCrashData '.installer\install-manifest.json'
     Remove-Item -LiteralPath $agentsPath -Force
     [void](New-Item -ItemType Directory -Path $freshCrashRoot -Force)
+    Set-PrivateDirectoryAcl -Path $freshCrashData
     $freshCrash = Start-CycAgentsInstallTransaction `
         -Plan $agentsPlan `
         -OldManifest $null `
@@ -1030,6 +1035,7 @@ try {
     $agentsPlan.agentsIntegration.templatePath = $upgradeTemplate
     $upgradeRoot = Join-Path $upgradeData '.installer\transactions\upgrade-crash'
     [void](New-Item -ItemType Directory -Path $upgradeRoot -Force)
+    Set-PrivateDirectoryAcl -Path $upgradeData
     $upgradeCrash = Start-CycAgentsInstallTransaction `
         -Plan $agentsPlan `
         -OldManifest ([PSCustomObject]@{ agentsIntegration = $upgradeBase }) `
@@ -1053,6 +1059,7 @@ try {
     $finalizeRoot = Join-Path $finalizeData '.installer\transactions\finalize-crash'
     $finalizeManifestPath = Join-Path $finalizeData '.installer\install-manifest.json'
     [void](New-Item -ItemType Directory -Path $finalizeRoot -Force)
+    Set-PrivateDirectoryAcl -Path $finalizeData
     $finalizeTx = Start-CycAgentsInstallTransaction `
         -Plan $agentsPlan `
         -OldManifest $null `
@@ -4386,6 +4393,13 @@ exit 91
         $freshDeploymentSource -match '\[System\.IO\.File\]::ReadAllBytes' -and
         $freshDeploymentSource -match 'UTF8Encoding' -and
         $freshDeploymentSource -notmatch 'Get-Content[^\r\n]+ConvertFrom-Json') 'fresh deployment smoke decodes package/install manifests as strict UTF-8 instead of the Windows PowerShell ANSI default'
+    Assert-True ($freshDeploymentSource -match 'function ConvertTo-FreshNativeArgument' -and
+        $freshDeploymentSource -match 'function Invoke-FreshPowerShell' -and
+        $freshDeploymentSource -match 'WaitForExit\(100\)' -and
+        $freshDeploymentSource -match 'taskkill\.exe' -and
+        $freshDeploymentSource -match 'timed out after \$TimeoutSeconds') 'fresh deployment lifecycle children have bounded process-tree termination'
+    Assert-True ($freshDeploymentSource -match 'LifecycleTimeoutSeconds' -and
+        ([regex]::Matches($freshDeploymentSource, 'TimeoutSeconds \$LifecycleTimeoutSeconds')).Count -ge 5) 'fresh deployment applies the bounded lifecycle timeout to plan/install/repair/uninstall/cleanup'
     Assert-True (-not $freshDeploymentSource.Contains("'-Confirm:`$false'")) 'fresh deployment smoke never serializes a false SwitchParameter through powershell.exe -File'
     Assert-True ($freshDeploymentSource -match "'-NoLogo', '-NoProfile', '-NonInteractive'") 'fresh deployment smoke launches a clean non-interactive Windows PowerShell child'
     Assert-True ($freshDeploymentSource -match "'-WorkerConfig',\s+\`$workerConfig") 'fresh deployment smoke keeps the worker config beneath its isolated data root'
@@ -4548,6 +4562,10 @@ exit 0
     Assert-True ($releaseWorkflow -match 'bundleSha256 = \$bundleHash') 'release index records the exact attestation bundle digest'
     Assert-True ($releaseWorkflow -match 'clusteryourcodex-post-archive-[\s\S]+NewGuid') 'post-archive smoke uses a fresh GUID extraction root instead of recursively deleting a fixed runner path'
     Assert-True ($releaseWorkflow -match 'Test-FreshDeployment\.ps1[\s\S]+-PackageRoot \$extractedPackage') 'fresh deployment smoke runs against the just-created ZIP after extraction'
+    Assert-True ($releaseWorkflow -match 'windows11-acceptance:[\s\S]+timeout-minutes:\s*120') 'ARM64 acceptance job has a finite hosted-runner timeout'
+    Assert-True ($releaseWorkflow -match 'Test-FreshDeployment\.ps1[\s\S]+-LifecycleTimeoutSeconds\s+900') 'ARM64 fresh-deployment smoke receives an explicit bounded child timeout'
+    Assert-True ($releaseWorkflow -match 'Test-SetupSilent\.ps1[\s\S]+-LifecycleTimeoutSeconds\s+900') 'ARM64 silent Setup smoke receives an explicit bounded child timeout'
+    Assert-True ($releaseWorkflow -match 'Test-WindowsProfileMatrix\.ps1[\s\S]+-ChildTimeoutSeconds\s+900') 'ARM64 profile matrix receives an explicit bounded child timeout'
     Assert-True ($releaseWorkflow -match 'Test-FreshDeployment\.ps1[\s\S]+-WorkRoot \$freshWorkRoot[\s\S]+-KeepWorkRoot') 'fresh deployment smoke retains a job-owned diagnostic work root'
     Assert-True ($releaseWorkflow -match 'Upload fresh deployment diagnostics[\s\S]+if: always\(\)') 'fresh deployment diagnostics upload runs even when the lifecycle smoke fails'
     Assert-True ($releaseWorkflow -match 'CYC_DISPOSABLE_WINDOWS:[\s\S]+Test-SetupSilent\.ps1[\s\S]+-PackageRoot \$preview[\s\S]+-DisposableEnvironment') 'release workflow runs silent Setup only inside the disposable Windows runner'
@@ -4601,6 +4619,11 @@ exit 0
     Assert-True ($releaseWorkflow -match "-CaseName '[^']*,[^']*,[^']*,[^']*'") 'release workflow passes profile matrix cases as one quoted comma-separated Windows PowerShell argument'
     Assert-True ($profileMatrixSource -match 'New-LocalUser') 'profile matrix creates disposable local users without shelling a password through argv'
     Assert-True ($profileMatrixSource -match 'Start-Process[\s\S]+Credential[\s\S]+LoadUserProfile') 'profile matrix launches each child with a loaded user profile'
+    Assert-True ($profileMatrixSource -match 'ChildTimeoutSeconds' -and
+        $profileMatrixSource -match 'WaitForExit\(100\)' -and
+        $profileMatrixSource -match 'taskkill\.exe' -and
+        $profileMatrixSource -match 'child timed out after \$ChildTimeoutSeconds') 'profile matrix child lifetimes have bounded process-tree termination'
+    Assert-True ($profileMatrixSource -notmatch '@\(& \$windowsPowerShell \@childArguments') 'profile matrix current-user mode does not use an unbounded synchronous child invocation'
     Assert-True ($profileMatrixSource -match 'Add-LocalGroupMember') 'profile matrix exercises an administrator account'
     Assert-True ($profileMatrixSource -match 'Remove-LocalUser') 'profile matrix removes disposable local users'
     Assert-True ($profileMatrixSource -match 'Win32_UserProfile') 'profile matrix removes created user profiles by SID'
@@ -4656,8 +4679,8 @@ exit 0
     Assert-True ($profileAtomicWriter.Value -match '\$backupStream\s*=\s*\[System\.IO\.FileStream\]::new' -and
         $profileAtomicWriter.Value -match '\$backupStream[\s\S]+\[System\.IO\.FileMode\]::CreateNew' -and
         $profileAtomicWriter.Value -match '\$backupPrepared\s*=\s*\$true') 'profile matrix atomic writer pre-creates a same-volume backup placeholder before File.Replace'
-    Assert-True ($profileMatrixSource -match 'Stop-Process\s+-Id\s+\$process\.Id' -and
-        $profileMatrixSource -match '\$process\.WaitForExit\(10000\)' -and
+    Assert-True ($profileMatrixSource -match 'taskkill\.exe[\s\S]+/PID \$process\.Id[\s\S]+/T[\s\S]+/F' -and
+        $profileMatrixSource -match '\$process\.WaitForExit\(30000\)' -and
         $profileMatrixSource -match 'did not exit after cleanup') 'profile matrix reaps a child after helper/IPC failure before profile cleanup'
     Assert-True ($profileMatrixSource -match '\$process\.Refresh\(\)' -and
         $profileMatrixSource -match 'child receipt' -and

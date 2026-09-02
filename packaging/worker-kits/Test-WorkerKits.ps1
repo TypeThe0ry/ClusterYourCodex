@@ -847,7 +847,10 @@ if [[ "$directory" -eq 1 ]]; then
   # stat shim below so newly-created private roots still exercise the exact
   # mode contract without weakening the production installer.
   if [[ "$mode" == 0700 ]]; then
-    for path in "$@"; do : >"$path/.cyc-worker-kit-test-mode-0700"; done
+    for path in "$@"; do
+      : >"$path/.cyc-worker-kit-test-mode-0700"
+      chmod 0600 -- "$path/.cyc-worker-kit-test-mode-0700"
+    done
   fi
 else
   source="$1"
@@ -865,6 +868,34 @@ cat >"$root/fake-bin/stat" <<'EOF'
 set -euo pipefail
 if [[ "${1:-}" == -c && $# -ge 3 ]]; then
   path="${@: -1}"
+  if [[ "${2:-}" == '%a' && "$path" == */.cyc-worker-kit-test-mode-0700 ]]; then
+    printf '600\n'
+    exit 0
+  fi
+  if [[ "${2:-}" == '%u' && "$path" == */.cyc-worker-kit-test-mode-0700 && "${CYC_WORKER_KIT_TEST_ROOT_MODE:-0}" == 1 ]]; then
+    printf '0\n'
+    exit 0
+  fi
+  if [[ "${2:-}" == '%u' && "${CYC_WORKER_KIT_TEST_ROOT_MODE:-0}" == 1 && "$path" == */.repair-transaction* ]]; then
+    printf '0\n'
+    exit 0
+  fi
+  if [[ "${2:-}" == '%a' && "$path" == *'/.repair-transaction'* && -f "$path" ]]; then
+    printf '600\n'
+    exit 0
+  fi
+  if [[ "${2:-}" == '%a' && "$path" == */config.json && -n "${CYC_WORKER_KIT_TEST_CONFIG_MODE:-}" ]]; then
+    printf '%s\n' "$CYC_WORKER_KIT_TEST_CONFIG_MODE"
+    exit 0
+  fi
+  # Git Bash on Windows does not retain POSIX modes for regular files. The
+  # production installers nevertheless require private transaction files to
+  # be 0600, so project the fixture's transaction tree to the expected mode
+  # while leaving the production implementation unchanged.
+  if [[ "${2:-}" == '%a' && "$path" == */.repair-transaction* ]]; then
+    if [[ -d "$path" ]]; then printf '700\n'; else printf '600\n'; fi
+    exit 0
+  fi
   if [[ -f "$path/.cyc-worker-kit-test-mode-0700" ]]; then
     if [[ "${2:-}" == '%a' ]]; then
       printf '700\n'
@@ -880,6 +911,7 @@ exec /usr/bin/stat "$@"
 EOF
 chmod +x "$root/fake-bin/stat"
 export PATH="$root/fake-bin:$PATH"
+export CYC_WORKER_KIT_TEST_CONFIG_MODE=600
 good="$root/linux-smoke-good"
 upgrade="$root/linux-smoke-upgrade"
 bad="$root/linux-smoke-bad"
@@ -1109,6 +1141,34 @@ printf '%s' "$rotation" | grep -q '"paired":true'
 grep -q '"repair":true' "$data/config.json"
 test ! -e "$root/enrollment-rotation.json"
 
+# An existing paired config is verify-only. A weak mode must fail before the
+# repair transaction or systemd is touched, and the installer must not repair
+# the pre-positioned file in place.
+paired_config_mode_before="$(stat -c '%a' -- "$data/config.json")"
+test "$paired_config_mode_before" = 600
+paired_config_hash_before="$(sha256sum "$data/config.json" | awk '{print $1}')"
+paired_worker_hash_before="$(sha256sum "$worker" | awk '{print $1}')"
+paired_manifest_hash_before="$(sha256sum "$data/install-manifest.json" | awk '{print $1}')"
+paired_systemctl_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')"
+paired_loginctl_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log" | tr -d '[:space:]')"
+chmod 0644 "$data/config.json"
+export CYC_WORKER_KIT_TEST_CONFIG_MODE=644
+set +e
+"$good/install-worker.sh" repair --bundle-root "$good" --scope user \
+  >"$root/linux-weak-config.stdout" 2>"$root/linux-weak-config.stderr"
+weak_config_exit=$?
+set -e
+test "$weak_config_exit" -ne 0
+grep -q 'Existing worker config is weak or owned by another identity' "$root/linux-weak-config.stderr"
+test "$(stat -c '%a' -- "$data/config.json")" = 644
+test "$(sha256sum "$data/config.json" | awk '{print $1}')" = "$paired_config_hash_before"
+test "$(sha256sum "$worker" | awk '{print $1}')" = "$paired_worker_hash_before"
+test "$(sha256sum "$data/install-manifest.json" | awk '{print $1}')" = "$paired_manifest_hash_before"
+test "$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')" = "$paired_systemctl_lines_before"
+test "$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log" | tr -d '[:space:]')" = "$paired_loginctl_lines_before"
+chmod 0600 "$data/config.json"
+export CYC_WORKER_KIT_TEST_CONFIG_MODE=600
+
 # A non-root auto/user activation must fail before worker/config/manifest
 # mutation when linger exists or can be enabled but the user bus is absent.
 worker_before_user_failure="$(sha256sum "$worker" | awk '{print $1}')"
@@ -1245,7 +1305,7 @@ assert_linux_manifest_binding_failure() {
 }
 
 wrong_install_root="$root/linux-wrong-install"
-mkdir -p "$wrong_install_root"
+install -d -m 0700 -- "$wrong_install_root"
 printf '%s\n' 'LINUX_PATH_BINDING_SENTINEL' >"$wrong_install_root/cyc-worker"
 chmod +x "$wrong_install_root/cyc-worker"
 assert_linux_manifest_binding_failure \
@@ -1255,7 +1315,7 @@ assert_linux_manifest_binding_failure \
   "$wrong_install_root/cyc-worker"
 
 wrong_workspace_root="$root/linux-wrong-workspace"
-mkdir -p "$wrong_workspace_root"
+install -d -m 0700 -- "$wrong_workspace_root"
 printf '%s\n' 'LINUX_PATH_BINDING_SENTINEL' >"$wrong_workspace_root/worker-sentinel"
 assert_linux_manifest_binding_failure \
   linux-wrong-workspace \
@@ -1377,6 +1437,7 @@ if [[ "$mode" == 0700 ]]; then
   for path in "$@"; do
     [[ "$path" != -* ]] || continue
     : >"$path/.cyc-worker-kit-test-mode-0700"
+    /usr/bin/chmod 0600 -- "$path/.cyc-worker-kit-test-mode-0700"
   done
 fi
 CHMOD_WRAPPER
@@ -1385,6 +1446,26 @@ cat >"$root/fake-macos-bin/stat" <<'STAT_WRAPPER'
 set -euo pipefail
 if [[ "${1:-}" == -c && $# -ge 3 ]]; then
   path="${@: -1}"
+  if [[ "${2:-}" == '%a' && "$path" == */.cyc-worker-kit-test-mode-0700 ]]; then
+    printf '600\n'
+    exit 0
+  fi
+  if [[ "${2:-}" == '%u' && "$path" == */.cyc-worker-kit-test-mode-0700 && "${CYC_WORKER_KIT_TEST_ROOT_MODE:-0}" == 1 ]]; then
+    printf '0\n'
+    exit 0
+  fi
+  if [[ "${2:-}" == '%a' && "$path" == *'/.repair-transaction'* && -f "$path" ]]; then
+    printf '600\n'
+    exit 0
+  fi
+  if [[ "${2:-}" == '%a' && "$path" == */config.json && -n "${CYC_WORKER_KIT_TEST_CONFIG_MODE:-}" ]]; then
+    printf '%s\n' "$CYC_WORKER_KIT_TEST_CONFIG_MODE"
+    exit 0
+  fi
+  if [[ "${2:-}" == '%a' && "$path" == */.repair-transaction* ]]; then
+    if [[ -d "$path" ]]; then printf '700\n'; else printf '600\n'; fi
+    exit 0
+  fi
   if [[ "${2:-}" == '%a' && -f "$path/.cyc-worker-kit-test-mode-0700" ]]; then
     printf '700\n'
     exit 0
@@ -1407,6 +1488,7 @@ export CYC_FAKE_LAUNCHCTL_LOG="$root/fake-launchctl.log"
 chmod +x "$root/fake-macos-bin/python3" "$root/fake-macos-bin/uname" "$root/fake-macos-bin/shasum" "$root/fake-macos-bin/launchctl"
 chmod +x "$root/fake-macos-bin/chmod" "$root/fake-macos-bin/stat"
 export PATH="$root/fake-macos-bin:$PATH"
+export CYC_WORKER_KIT_TEST_CONFIG_MODE=600
 
 good="$root/macos-smoke-good"
 upgrade="$root/macos-smoke-upgrade"
@@ -1543,6 +1625,34 @@ test ! -s "$root/macos-pair.stderr"
 test ! -e "$HOME/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
 ! pgrep -f -- "$install_root/cyc-worker run" >/dev/null 2>&1
 
+# Existing paired config is verify-only on the PairOnly path as well. A weak
+# pre-positioned config must fail without chmod, transaction, worker, manifest,
+# or LaunchAgent mutation.
+mac_paired_config_mode_before="$(stat -c '%a' "$data_root/config.json")"
+test "$mac_paired_config_mode_before" = 600
+mac_paired_config_hash_before="$(shasum -a 256 "$data_root/config.json" | awk '{print $1}')"
+mac_paired_worker_hash_before="$(shasum -a 256 "$install_root/cyc-worker" | awk '{print $1}')"
+mac_paired_manifest_hash_before="$(shasum -a 256 "$data_root/install-manifest.json" | awk '{print $1}')"
+mac_paired_launchctl_lines_before="$(wc -l <"$CYC_FAKE_LAUNCHCTL_LOG" | tr -d '[:space:]')"
+chmod 0644 "$data_root/config.json"
+export CYC_WORKER_KIT_TEST_CONFIG_MODE=644
+set +e
+$good/install-worker.sh repair --bundle-root "$good" "${common[@]}" --pair-only \
+  >"$root/macos-weak-config.stdout" 2>"$root/macos-weak-config.stderr"
+mac_weak_config_exit=$?
+set -e
+test "$mac_weak_config_exit" -ne 0
+grep -q 'Existing worker config is weak or owned by another identity' "$root/macos-weak-config.stderr"
+test "$(stat -c '%a' "$data_root/config.json")" = 644
+test "$(shasum -a 256 "$data_root/config.json" | awk '{print $1}')" = "$mac_paired_config_hash_before"
+test "$(shasum -a 256 "$install_root/cyc-worker" | awk '{print $1}')" = "$mac_paired_worker_hash_before"
+test "$(shasum -a 256 "$data_root/install-manifest.json" | awk '{print $1}')" = "$mac_paired_manifest_hash_before"
+test "$(wc -l <"$CYC_FAKE_LAUNCHCTL_LOG" | tr -d '[:space:]')" = "$mac_paired_launchctl_lines_before"
+test ! -e "$data_root/.repair-transaction"
+test ! -e "$HOME/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
+chmod 0600 "$data_root/config.json"
+export CYC_WORKER_KIT_TEST_CONFIG_MODE=600
+
 # A service-enabling repair is a machine-recognizable, exit-78 fail-closed
 # boundary and cannot mutate the paired installation.
 baseline_worker="$(shasum -a 256 "$install_root/cyc-worker" | awk '{print $1}')"
@@ -1661,6 +1771,7 @@ assert_macos_manifest_binding_failure() {
 
 wrong_macos_install_root="$root/macos-wrong-install"
 mkdir -p "$wrong_macos_install_root"
+chmod 0700 "$wrong_macos_install_root"
 printf '%s\n' 'MACOS_PATH_BINDING_SENTINEL' >"$wrong_macos_install_root/cyc-worker"
 chmod +x "$wrong_macos_install_root/cyc-worker"
 assert_macos_manifest_binding_failure \
@@ -1672,6 +1783,7 @@ assert_macos_manifest_binding_failure \
 
 wrong_macos_logs_root="$root/macos-wrong-logs"
 mkdir -p "$wrong_macos_logs_root"
+chmod 0700 "$wrong_macos_logs_root"
 printf '%s\n' 'MACOS_PATH_BINDING_SENTINEL' >"$wrong_macos_logs_root/log-sentinel"
 assert_macos_manifest_binding_failure \
   macos-wrong-logs \
@@ -1736,13 +1848,13 @@ test ! -e "$default_logs"
         }
     }
     $windowsSource = Get-Content -LiteralPath $windowsInstaller -Raw
-    foreach ($requiredPattern in @('SHA256SUMS', 'Get-WorkerTaskSnapshot', 'Restore-WorkerTask', 'New-WorkerTransaction', 'Restore-WorkerTransaction', 'TransactionSchema', 'AfterPair', 'AfterServiceRegistration', 'BeforeManifestWrite', 'Assert-DefaultDataPurgeTarget', 'Resolve-ServiceScope', 'Resolve-AccountSid', 'Assert-WorkerTaskOwnership', 'Wait-WorkerTaskRunning', 'ServiceAccount', 'TaskPath', 'WorkingDirectory', 'worker scheduled task principal', '--workspace-root', '--repair', 'configExistedBeforePair', 'expectedKitNames', 'actualKitNames', 'exactly five normal files', 'Assert-CreationPathNoReparse', 'GetPathRoot', 'Assert-PrivateAcl', 'NewlyCreated')) {
+    foreach ($requiredPattern in @('SHA256SUMS', 'Get-WorkerTaskSnapshot', 'Restore-WorkerTask', 'New-WorkerTransaction', 'Restore-WorkerTransaction', 'TransactionSchema', 'AfterPair', 'AfterServiceRegistration', 'BeforeManifestWrite', 'Assert-DefaultDataPurgeTarget', 'Resolve-ServiceScope', 'Resolve-AccountSid', 'Assert-WorkerTaskOwnership', 'Wait-WorkerTaskRunning', 'ServiceAccount', 'TaskPath', 'WorkingDirectory', 'worker scheduled task principal', '--workspace-root', '--repair', 'configExistedBeforePair', 'expectedKitNames', 'actualKitNames', 'exactly five normal files', 'Assert-CreationPathNoReparse', 'GetPathRoot', 'Assert-PrivateAcl', 'Assert-ExistingPrivateDirectory', 'Assert-PrivateStateTree', 'NewlyCreated')) {
         if ($windowsSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "Windows worker installer is missing rollback/integrity guard: $requiredPattern"
         }
     }
     $linuxSource = Get-Content -LiteralPath $linuxInstaller -Raw
-    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'private_dir', 'path_mode', 'path_owner', 'Existing private directory is weak or owned by another identity', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'TRANSACTION_TOMBSTONE_SCHEMA', 'TRANSACTION_TOMBSTONE_RETIRED', 'TRANSACTION_RETIRE_NAME', 'assert_transaction_retirement_tree_safe', 'rollback_tombstone_valid_for_transaction', 'validate_retired_transaction', 'after-pair', 'after-service-registration', 'before-manifest-write', 'after-marker-removal', 'remove_service', 'service_path_for_scope', 'servicePath', 'Installer service path does not match the existing owned installation.', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot', 'KillMode=control-group', 'marker-existed', 'marker-existed=0', 'Owned worker install manifest is missing or unsafe.')) {
+    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'private_dir', 'verify_private_dir_existing', 'verify_private_file_existing', 'verify_private_state_tree', 'path_mode', 'path_owner', 'verify_private_config', 'Existing private directory is weak or owned by another identity', 'Existing worker config is weak or owned by another identity', 'Private transaction state root is not a normal directory', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'TRANSACTION_TOMBSTONE_SCHEMA', 'TRANSACTION_TOMBSTONE_RETIRED', 'TRANSACTION_RETIRE_NAME', 'assert_transaction_retirement_tree_safe', 'rollback_tombstone_valid_for_transaction', 'validate_retired_transaction', 'after-pair', 'after-service-registration', 'before-manifest-write', 'after-marker-removal', 'remove_service', 'service_path_for_scope', 'servicePath', 'Installer service path does not match the existing owned installation.', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot', 'KillMode=control-group', 'marker-existed', 'marker-existed=0', 'Owned worker install manifest is missing or unsafe.')) {
         if ($linuxSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "Linux worker installer is missing rollback/integrity guard: $requiredPattern"
         }
@@ -1766,11 +1878,17 @@ test ! -e "$default_logs"
         'CYC-MACOS-PLATFORM-REQUIRED',
         'CYC-MACOS-LAUNCHAGENT-USER-SCOPE-REQUIRED',
         'Library/Application Support/ClusterYourCodex/Worker',
-        'Library/Logs/ClusterYourCodex/Worker',
-        'Library/LaunchAgents',
-        'path_mode',
-        'path_owner',
-        'Existing private directory is weak or owned by another identity',
+         'Library/Logs/ClusterYourCodex/Worker',
+         'Library/LaunchAgents',
+         'path_mode',
+         'path_owner',
+         'verify_private_dir_existing',
+         'verify_private_file_existing',
+         'verify_private_state_tree',
+         'verify_private_config',
+         'Existing private directory is weak or owned by another identity',
+         'Existing worker config is weak or owned by another identity',
+         'Private transaction state root is not a normal directory',
         'dev.clusteryourcodex.worker',
         'launchctl bootstrap',
         'launchctl bootout',

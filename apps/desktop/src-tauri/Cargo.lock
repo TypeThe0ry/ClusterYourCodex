@@ -506,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "clusteryourcodex-desktop-host"
-version = "0.1.0-preview.62"
+version = "0.1.0-preview.63"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -724,7 +724,7 @@ dependencies = [
 
 [[package]]
 name = "cyc-protocol"
-version = "0.1.0-preview.62"
+version = "0.1.0-preview.63"
 dependencies = [
  "chrono",
  "serde",
@@ -736,7 +736,7 @@ dependencies = [
 
 [[package]]
 name = "cyc-provision"
-version = "0.1.0-preview.62"
+version = "0.1.0-preview.63"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -755,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "cyc-secrets"
-version = "0.1.0-preview.62"
+version = "0.1.0-preview.63"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -765,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "cyc-ssh"
-version = "0.1.0-preview.62"
+version = "0.1.0-preview.63"
 dependencies = [
  "base64 0.22.1",
  "cyc-secrets",

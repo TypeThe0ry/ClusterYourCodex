@@ -17,7 +17,13 @@ param(
 
     # CI uses this as a fail-closed gate instead of relying only on the caller's
     # job naming or runner label.
-    [switch]$RequireWindows11
+    [switch]$RequireWindows11,
+
+    # A disposable profile child must never be allowed to strand the elevated
+    # controller.  The parent keeps the helper IPC loop and child lifetime
+    # bounded, then kills the complete child process tree on timeout.
+    [ValidateRange(60, 2400)]
+    [int]$ChildTimeoutSeconds = 900
 )
 
 Set-StrictMode -Version Latest
@@ -1393,22 +1399,35 @@ try {
                 '-ExpectedSid', $sid,
                 '-ReceiptPath', $receiptPath
             )
-            if ($CurrentUserOnly) {
-                $output = @(& $windowsPowerShell @childArguments 1> $stdoutPath 2> $stderrPath)
-                $exitCode = $LASTEXITCODE
-            } else {
+            $startArguments = $childArguments | ForEach-Object { ConvertTo-ProfileMatrixArgument ([string]$_) }
+            $startParameters = @{
+                FilePath = $windowsPowerShell
+                ArgumentList = $startArguments
+                WorkingDirectory = $caseRoot
+                WindowStyle = 'Hidden'
+                RedirectStandardOutput = $stdoutPath
+                RedirectStandardError = $stderrPath
+                PassThru = $true
+            }
+            if (-not $CurrentUserOnly) {
                 $childArguments += @('-UseParentTaskHelper')
                 $startArguments = $childArguments | ForEach-Object { ConvertTo-ProfileMatrixArgument ([string]$_) }
-                $process = Start-Process -FilePath $windowsPowerShell -ArgumentList $startArguments -Credential $credential -LoadUserProfile -WorkingDirectory $caseRoot -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
-                $output = @()
-                # The disposable account cannot cross the task scheduler's
-                # InteractiveToken boundary. Keep registration in the
-                # elevated controller, but only for the exact request emitted
-                # by the child and only while that child is alive.
-                $taskRequestPath = Join-Path $caseRoot 'task-registration-request.json'
-                $taskResponsePath = Join-Path $caseRoot 'task-registration-response.json'
-                $taskHelperEvidencePath = Join-Path $caseRoot 'task-helper-evidence.json'
-                while (-not $process.HasExited) {
+                $startParameters.ArgumentList = $startArguments
+                $startParameters.Credential = $credential
+                $startParameters.LoadUserProfile = $true
+            }
+            $process = Start-Process @startParameters
+            # The disposable account cannot cross the task scheduler's
+            # InteractiveToken boundary. Keep registration in the elevated
+            # controller, but only for the exact request emitted by the child
+            # and only while that child is alive.
+            $taskRequestPath = Join-Path $caseRoot 'task-registration-request.json'
+            $taskResponsePath = Join-Path $caseRoot 'task-registration-response.json'
+            $taskHelperEvidencePath = Join-Path $caseRoot 'task-helper-evidence.json'
+            $deadline = [DateTimeOffset]::UtcNow.AddSeconds($ChildTimeoutSeconds)
+            $timedOut = $false
+            while (-not $process.HasExited) {
+                if (-not $CurrentUserOnly) {
                     [void](Invoke-ProfileMatrixTaskHelperRequest `
                         -CaseRoot $caseRoot `
                         -RequestPath $taskRequestPath `
@@ -1416,8 +1435,28 @@ try {
                         -EvidencePath $taskHelperEvidencePath `
                         -Sid $sid `
                         -UserName $userName)
-                    Start-Sleep -Milliseconds 100
                 }
+                if ([DateTimeOffset]::UtcNow -ge $deadline) {
+                    $timedOut = $true
+                    break
+                }
+                Start-Sleep -Milliseconds 100
+            }
+            if ($timedOut) {
+                $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+                $taskKillExit = -1
+                try {
+                    & $taskKill /PID $process.Id /T /F *> $null
+                    $taskKillExit = [int]$LASTEXITCODE
+                } catch { }
+                $terminated = $false
+                try { $terminated = [bool]$process.WaitForExit(30000) } catch { }
+                if ($taskKillExit -ne 0 -or -not $terminated) {
+                    throw "case $case child timed out after $ChildTimeoutSeconds seconds and process termination was not proven (pid=$($process.Id), taskkillExit=$taskKillExit)."
+                }
+                throw "case $case child timed out after $ChildTimeoutSeconds seconds (pid=$($process.Id))."
+            }
+            if (-not $CurrentUserOnly) {
                 # Drain one final request after the child exits so a request
                 # emitted immediately before process termination is never left
                 # without a durable helper response.
@@ -1432,33 +1471,33 @@ try {
                     if (-not $handled -and -not (Test-Path -LiteralPath $taskRequestPath -PathType Leaf)) { break }
                     Start-Sleep -Milliseconds 100
                 }
-                $process.WaitForExit()
-                # Start-Process -Credential on ARM64 Windows can return a
-                # Process wrapper whose ExitCode projection is temporarily
-                # null even after WaitForExit() (the child has already
-                # published its receipt). Refresh and use the child receipt
-                # as an independently written exit-status fallback; a missing
-                # or malformed receipt remains a hard failure below.
-                try { $process.Refresh() } catch { }
-                $rawExitCode = $process.ExitCode
-                if ($null -ne $rawExitCode) {
-                    $exitCode = [int]$rawExitCode
-                } else {
-                    $exitCode = $null
-                    if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
-                        try {
-                            $childReceipt = Read-ProfileMatrixUtf8Json -Path $receiptPath
-                            $candidateExitCode = $childReceipt.exitCode
-                            $parsedExitCode = 0
-                            if ($null -ne $candidateExitCode -and [int]::TryParse([string]$candidateExitCode, [ref]$parsedExitCode)) {
-                                $exitCode = [int]$parsedExitCode
-                            }
-                        } catch {
-                            $exitCode = $null
+            }
+            $process.WaitForExit()
+            # Start-Process -Credential on ARM64 Windows can return a Process
+            # wrapper whose ExitCode projection is temporarily null even after
+            # WaitForExit() (the child has already published its receipt).
+            # Refresh and use the child receipt as an independently written
+            # exit-status fallback; a missing or malformed receipt remains a
+            # hard failure below.
+            try { $process.Refresh() } catch { }
+            $rawExitCode = $process.ExitCode
+            if ($null -ne $rawExitCode) {
+                $exitCode = [int]$rawExitCode
+            } else {
+                $exitCode = $null
+                if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
+                    try {
+                        $childReceipt = Read-ProfileMatrixUtf8Json -Path $receiptPath
+                        $candidateExitCode = $childReceipt.exitCode
+                        $parsedExitCode = 0
+                        if ($null -ne $candidateExitCode -and [int]::TryParse([string]$candidateExitCode, [ref]$parsedExitCode)) {
+                            $exitCode = [int]$parsedExitCode
                         }
+                    } catch {
+                        $exitCode = $null
                     }
-                    if ($null -eq $exitCode) { $exitCode = 1 }
                 }
+                if ($null -eq $exitCode) { $exitCode = 1 }
             }
             if ($exitCode -ne 0) {
                 $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
@@ -1498,8 +1537,13 @@ try {
             if ($null -ne $process) {
                 try {
                     if (-not $process.HasExited) {
-                        Stop-Process -Id $process.Id -Force -ErrorAction Stop
-                        [void]$process.WaitForExit(10000)
+                        # Test-WindowsProfileMatrixChild can own a nested
+                        # Test-FreshDeployment powershell process. Kill the
+                        # complete tree, then prove the root child is reaped
+                        # before deleting its user/profile.
+                        $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+                        try { & $taskKill /PID $process.Id /T /F *> $null } catch { }
+                        [void]$process.WaitForExit(30000)
                     }
                     if (-not $process.HasExited) {
                         throw "profile matrix child process $($process.Id) did not exit after cleanup."

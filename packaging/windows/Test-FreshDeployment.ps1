@@ -17,7 +17,13 @@ param(
 
     [switch]$ProfileMatrixTestMode,
 
-    [switch]$ProfileMatrixTaskHelperMode
+    [switch]$ProfileMatrixTaskHelperMode,
+
+    # Every lifecycle child is a disposable acceptance process.  Keep the
+    # parent bounded so a hung Windows PowerShell child cannot strand a
+    # hosted runner (or skip the diagnostic upload and downstream gates).
+    [ValidateRange(60, 2400)]
+    [int]$LifecycleTimeoutSeconds = 900
 )
 
 Set-StrictMode -Version Latest
@@ -275,12 +281,45 @@ function Remove-FreshOwnedWorkRoot {
     Assert-FreshTest (-not (Test-Path -LiteralPath $resolvedRoot)) 'the harness removes its owned work root'
 }
 
+function ConvertTo-FreshNativeArgument {
+    param([AllowEmptyString()][string]$Argument)
+    if ($null -eq $Argument -or $Argument.Length -eq 0) { return '""' }
+    if ($Argument -notmatch '[\s"]') { return $Argument }
+
+    # Match CommandLineToArgvW quoting so spaces, quotes, and trailing
+    # backslashes in non-ASCII profile/work paths survive powershell.exe -File.
+    $builder = New-Object System.Text.StringBuilder
+    [void]$builder.Append('"')
+    $slashes = 0
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq '\') {
+            $slashes++
+            continue
+        }
+        if ($character -eq '"') {
+            [void]$builder.Append(('\' * (($slashes * 2) + 1)))
+            [void]$builder.Append('"')
+            $slashes = 0
+            continue
+        }
+        if ($slashes -gt 0) {
+            [void]$builder.Append(('\' * $slashes))
+            $slashes = 0
+        }
+        [void]$builder.Append($character)
+    }
+    if ($slashes -gt 0) { [void]$builder.Append(('\' * ($slashes * 2))) }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
 function Invoke-FreshPowerShell {
     param(
         [Parameter(Mandatory = $true)][string]$Bootstrap,
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [Parameter(Mandatory = $true)][string]$LogRoot,
-        [Parameter(Mandatory = $true)][string]$Label
+        [Parameter(Mandatory = $true)][string]$Label,
+        [ValidateRange(60, 2400)][int]$TimeoutSeconds = 900
     )
 
     $stdoutPath = Join-Path $LogRoot ($Label + '.stdout.log')
@@ -292,19 +331,52 @@ function Invoke-FreshPowerShell {
         '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
         '-File', $Bootstrap
     ) + $Arguments
-    $output = @(& $windowsPowerShell @commandArguments 1> $stdoutPath 2> $stderrPath)
-    $exitCode = $LASTEXITCODE
-    if ($exitCode -ne 0) {
-        $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
-        $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
-        throw "bootstrap $Label failed with exit $exitCode. stdout=$stdout stderr=$stderr"
-    }
-    return [PSCustomObject]@{
-        label = $Label
-        exitCode = $exitCode
-        stdout = $stdoutPath
-        stderr = $stderrPath
-        output = $output
+    $startArguments = @($commandArguments | ForEach-Object {
+        ConvertTo-FreshNativeArgument -Argument ([string]$_)
+    })
+    $process = $null
+    try {
+        $process = Start-Process `
+            -FilePath $windowsPowerShell `
+            -ArgumentList $startArguments `
+            -WorkingDirectory (Split-Path -Parent (Resolve-FreshPath $Bootstrap)) `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -PassThru
+        $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+        while (-not $process.WaitForExit(100)) {
+            if ([DateTimeOffset]::UtcNow -lt $deadline) { continue }
+
+            $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+            $taskKillExit = -1
+            try {
+                & $taskKill /PID $process.Id /T /F *> $null
+                $taskKillExit = [int]$LASTEXITCODE
+            } catch { }
+            $terminated = $false
+            try { $terminated = [bool]$process.WaitForExit(30000) } catch { }
+            if ($taskKillExit -ne 0 -or -not $terminated) {
+                throw "bootstrap $Label timed out after $TimeoutSeconds seconds and process termination was not proven (pid=$($process.Id), taskkillExit=$taskKillExit)."
+            }
+            throw "bootstrap $Label timed out after $TimeoutSeconds seconds (pid=$($process.Id))."
+        }
+        $process.WaitForExit()
+        try { $process.Refresh() } catch { }
+        $exitCode = [int]$process.ExitCode
+        if ($exitCode -ne 0) {
+            $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
+            $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
+            throw "bootstrap $Label failed with exit $exitCode. stdout=$stdout stderr=$stderr"
+        }
+        return [PSCustomObject]@{
+            label = $Label
+            exitCode = $exitCode
+            stdout = $stdoutPath
+            stderr = $stderrPath
+        }
+    } finally {
+        if ($null -ne $process) { $process.Dispose() }
     }
 }
 
@@ -553,7 +625,7 @@ try {
     Assert-FreshTest ($productTasksBefore.Count -eq 0) 'fresh deployment runner starts without pre-existing product tasks'
     Assert-FreshTest (-not $preInstallState.lifecycleOwned) 'isolated lifecycle state did not exist before install'
 
-    $plan = Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments ($common + @('-PlanOnly')) -LogRoot $logRoot -Label 'plan'
+    $plan = Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments ($common + @('-PlanOnly')) -LogRoot $logRoot -Label 'plan' -TimeoutSeconds $LifecycleTimeoutSeconds
     Assert-FreshTest ($plan.exitCode -eq 0) 'manifest-bound install plan succeeds'
     $previewManifest = Read-FreshUtf8Json -Path $manifestPath
     Assert-FreshTest ([string]$previewManifest.schemaVersion -eq 'cyc.dev/windows-preview/v1') 'preview manifest schema is recognized'
@@ -565,7 +637,7 @@ try {
     # Mark cleanup ownership before crossing that process boundary.
     $installAttempted = $true
     $installed = $true
-    [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $common -LogRoot $logRoot -Label 'install')
+    [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $common -LogRoot $logRoot -Label 'install' -TimeoutSeconds $LifecycleTimeoutSeconds)
     foreach ($relative in @('ClusterYourCodex.exe', 'cyc-controller.exe', 'cyc-worker.exe', 'cyc.exe', 'installer/bootstrap.ps1')) {
         [void](Assert-InstalledFile -Root $installRoot -RelativePath $relative)
     }
@@ -624,7 +696,7 @@ try {
 
     $repairArguments = @($common)
     $repairArguments[1] = 'Repair'
-    [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $repairArguments -LogRoot $logRoot -Label 'repair')
+    [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $repairArguments -LogRoot $logRoot -Label 'repair' -TimeoutSeconds $LifecycleTimeoutSeconds)
     $repairedManifest = Read-FreshUtf8Json -Path $installedManifestPath
     Assert-FreshTest ([string]$repairedManifest.schemaVersion -eq 'cyc.dev/windows-install-manifest/v1') 'repair keeps a valid manifest'
     $repairedControllerTasks = @(Get-ScheduledTask -TaskName 'ClusterYourCodex Controller' -TaskPath '\' -ErrorAction SilentlyContinue)
@@ -652,7 +724,7 @@ try {
         $uninstallArguments += '-ProfileMatrixTaskHelperMode'
     }
     $uninstallAttempted = $true
-    [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $uninstallArguments -LogRoot $logRoot -Label 'uninstall')
+    [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $uninstallArguments -LogRoot $logRoot -Label 'uninstall' -TimeoutSeconds $LifecycleTimeoutSeconds)
     # A successful child exit is not the lifecycle proof. Keep cleanup armed
     # until the task, manifest, and install-root postconditions all pass.
     $uninstallPostcondition = @{
@@ -699,7 +771,7 @@ try {
                 if ($ProfileMatrixTaskHelperMode) {
                     $cleanupArguments += '-ProfileMatrixTaskHelperMode'
                 }
-                [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $cleanupArguments -LogRoot $logRoot -Label 'cleanup')
+                [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $cleanupArguments -LogRoot $logRoot -Label 'cleanup' -TimeoutSeconds $LifecycleTimeoutSeconds)
             }
         } catch {
             $message = "fresh deployment cleanup failed: $($_.Exception.Message)"

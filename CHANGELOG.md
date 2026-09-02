@@ -7,6 +7,19 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.63] - 2026-09-02
+
+### Fixed
+
+- Bounded every Windows fresh-deployment and profile-matrix child process,
+  including process-tree termination and receipt-backed exit handling, so a
+  hung acceptance child cannot strand a hosted runner or suppress diagnostics.
+- Added explicit finite timeouts to the Windows x64 and ARM64 release
+  acceptance jobs, including the silent Setup and four-case profile matrix.
+- Hardened existing private transaction/config roots across the Windows,
+  Linux, and macOS worker-kit installers with verify-only owner/mode/ACL and
+  reparse-point preflights before journal or manifest reads.
+
 ## [0.1.0-preview.62] - 2026-09-02
 
 ### Fixed
@@ -786,7 +799,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.62...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.63...HEAD
+[0.1.0-preview.63]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.62...v0.1.0-preview.63
 [0.1.0-preview.62]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.61...v0.1.0-preview.62
 [0.1.0-preview.61]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.60...v0.1.0-preview.61
 [0.1.0-preview.60]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.59...v0.1.0-preview.60

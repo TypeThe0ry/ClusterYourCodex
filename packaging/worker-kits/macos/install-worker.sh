@@ -237,6 +237,57 @@ private_dir() {
   }
 }
 
+verify_private_dir_existing() {
+  local path="$1" mode owner expected_owner
+  reject_link_chain "$path"
+  [[ -e "$path" || -L "$path" ]] || return 0
+  [[ -d "$path" && ! -L "$path" ]] || {
+    printf 'Existing private directory is invalid: %s\n' "$path" >&2
+    return 1
+  }
+  mode="$(path_mode "$path" 2>/dev/null || true)"
+  owner="$(path_owner "$path" 2>/dev/null || true)"
+  expected_owner="$(id -u)"
+  [[ "$mode" =~ ^0?700$ && "$owner" == "$expected_owner" ]] || {
+    printf 'Existing private directory is weak or owned by another identity: %s\n' "$path" >&2
+    return 1
+  }
+}
+
+verify_private_config() {
+  local path="$1" mode owner expected_owner
+  [[ -f "$path" && ! -L "$path" ]] || {
+    printf 'Worker config path is not a regular file.\n' >&2
+    return 1
+  }
+  reject_link_chain "$path"
+  private_dir "$(dirname "$path")"
+  mode="$(path_mode "$path" 2>/dev/null || true)"
+  owner="$(path_owner "$path" 2>/dev/null || true)"
+  expected_owner="$(id -u)"
+  [[ "$mode" =~ ^0?600$ && "$owner" == "$expected_owner" ]] || {
+    printf 'Existing worker config is weak or owned by another identity: %s\n' "$path" >&2
+    return 1
+  }
+}
+
+verify_private_file_existing() {
+  local path="$1" mode owner expected_owner
+  [[ -e "$path" || -L "$path" ]] || return 0
+  [[ -f "$path" && ! -L "$path" ]] || {
+    printf 'Existing private file is invalid: %s\n' "$path" >&2
+    return 1
+  }
+  reject_link_chain "$path"
+  mode="$(path_mode "$path" 2>/dev/null || true)"
+  owner="$(path_owner "$path" 2>/dev/null || true)"
+  expected_owner="$(id -u)"
+  [[ "$mode" =~ ^0?600$ && "$owner" == "$expected_owner" ]] || {
+    printf 'Existing private file is weak or owned by another identity: %s\n' "$path" >&2
+    return 1
+  }
+}
+
 hash_file() {
   shasum -a 256 "$1" | awk '{print tolower($1)}'
 }
@@ -595,6 +646,42 @@ assert_transaction_tree_safe() {
     printf 'Worker repair transaction contains a symlink.\n' >&2
     return 1
   fi
+  verify_private_state_tree "$value"
+}
+
+verify_private_state_tree() {
+  local root="$1" item mode owner expected_owner
+  [[ -d "$root" && ! -L "$root" ]] || {
+    printf 'Private transaction state root is not a normal directory: %s\n' "$root" >&2
+    return 1
+  }
+  expected_owner="$(id -u)"
+  while IFS= read -r -d '' item; do
+    [[ ! -L "$item" ]] || {
+      printf 'Private transaction state contains a symlink: %s\n' "$item" >&2
+      return 1
+    }
+    mode="$(path_mode "$item" 2>/dev/null || true)"
+    owner="$(path_owner "$item" 2>/dev/null || true)"
+    [[ "$owner" == "$expected_owner" ]] || {
+      printf 'Private transaction state has a foreign owner: %s\n' "$item" >&2
+      return 1
+    }
+    if [[ -d "$item" ]]; then
+      [[ "$mode" =~ ^0?700$ ]] || {
+        printf 'Private transaction directory mode is weak: %s\n' "$item" >&2
+        return 1
+      }
+    elif [[ -f "$item" ]]; then
+      [[ "$mode" =~ ^0?600$|^0?700$ ]] || {
+        printf 'Private transaction file mode is weak: %s\n' "$item" >&2
+        return 1
+      }
+    else
+      printf 'Private transaction state contains a non-regular entry: %s\n' "$item" >&2
+      return 1
+    fi
+  done < <(find "$root" -xdev -print0)
 }
 
 remove_transaction() {
@@ -634,6 +721,7 @@ assert_transaction_retirement_tree_safe() {
     printf 'Worker repair transaction retirement tree contains a symlink.\n' >&2
     return 1
   fi
+  verify_private_state_tree "$value"
 }
 
 remove_transaction_retirement() {
@@ -836,6 +924,7 @@ begin_transaction() {
     if [[ -f "$worker_path" && ! -L "$worker_path" ]]; then
       install -m 0700 "$worker_path" "$staging/cyc-worker"
       : >"$staging/binary-existed"
+      chmod 0600 "$staging/binary-existed"
     elif [[ -e "$worker_path" || -L "$worker_path" ]]; then
       printf 'Existing worker binary is unsafe.\n' >&2
       exit 1
@@ -855,6 +944,7 @@ begin_transaction() {
       cp -p "$install_manifest" "$staging/install-manifest.json"
       chmod 0600 "$staging/install-manifest.json"
       : >"$staging/manifest-existed"
+      chmod 0600 "$staging/manifest-existed"
     elif [[ -e "$install_manifest" || -L "$install_manifest" ]]; then
       printf 'Existing install manifest is unsafe.\n' >&2
       exit 1
@@ -864,7 +954,11 @@ begin_transaction() {
       cp -p "$launch_agent_path" "$staging/launch-agent.plist"
       chmod 0600 "$staging/launch-agent.plist"
       : >"$staging/launchagent-existed"
-      if launch_agent_loaded; then : >"$staging/launchagent-loaded"; fi
+      chmod 0600 "$staging/launchagent-existed"
+      if launch_agent_loaded; then
+        : >"$staging/launchagent-loaded"
+        chmod 0600 "$staging/launchagent-loaded"
+      fi
     elif [[ -e "$launch_agent_path" || -L "$launch_agent_path" ]]; then
       printf 'Existing LaunchAgent is unsafe.\n' >&2
       exit 1
@@ -975,6 +1069,21 @@ inject_failure() {
     return 1
   fi
 }
+
+# Verify existing lifecycle roots and durable transaction state before reading
+# any marker, tombstone, manifest, or journal. Missing roots remain
+# creation-safe for a normal fresh install; an existing weak root fails closed.
+verify_private_dir_existing "$install_root"
+verify_private_dir_existing "$data_root"
+verify_private_dir_existing "$workspace_root"
+verify_private_dir_existing "$logs_root"
+verify_private_file_existing "$transaction_tombstone_path"
+if [[ -e "$transaction_retired_root" || -L "$transaction_retired_root" ]]; then
+  verify_private_state_tree "$transaction_retired_root"
+fi
+if [[ -e "$transaction_root" || -L "$transaction_root" ]]; then
+  verify_private_state_tree "$transaction_root"
+fi
 
 if [[ -L "$marker_path" || ( -e "$marker_path" && ! -f "$marker_path" ) ]]; then
   printf 'Worker ownership marker is not a regular file.\n' >&2
@@ -1107,24 +1216,21 @@ if [[ ! -f "$marker_path" &&
   exit 1
 fi
 
-# Fail before worker/config/manifest/LaunchAgent mutation whenever this call
-# would activate a paired worker. Enrollment-free preinstall and --pair-only
-# intentionally remain available and service-independent.
-if [[ "$pair_only" -eq 0 && ( -e "$config_path" || -n "$enrollment_file" ) ]]; then
-  require_worker_containment
-fi
-
 private_dir "$install_root"
 private_dir "$data_root"
 private_dir "$workspace_root"
 private_dir "$logs_root"
 config_existed_before_pair=0
 if [[ -e "$config_path" || -L "$config_path" ]]; then
-  [[ -f "$config_path" && ! -L "$config_path" ]] || {
-    printf 'Worker config path is not a regular file.\n' >&2
-    exit 1
-  }
+  verify_private_config "$config_path"
   config_existed_before_pair=1
+fi
+
+# Fail before worker/config/manifest/LaunchAgent mutation whenever this call
+# would activate a paired worker. Enrollment-free preinstall and --pair-only
+# intentionally remain available and service-independent.
+if [[ "$pair_only" -eq 0 && ( -e "$config_path" || -n "$enrollment_file" ) ]]; then
+  require_worker_containment
 fi
 
 temporary_worker="${worker_path}.new.$$"
@@ -1185,10 +1291,7 @@ if [[ -n "$enrollment_file" ]]; then
 fi
 
 if [[ -e "$config_path" || -L "$config_path" ]]; then
-  [[ -f "$config_path" && ! -L "$config_path" ]] || {
-    printf 'Worker config path is not a regular file.\n' >&2
-    exit 1
-  }
+  verify_private_config "$config_path"
   paired=true
 else
   paired=false
@@ -1201,7 +1304,10 @@ fi
 service_state='not_enabled'
 service_enabled=false
 if [[ "$paired" == true ]]; then
-  chmod 0600 "$config_path"
+  if [[ "$config_existed_before_pair" -eq 0 ]]; then
+    chmod 0600 "$config_path"
+  fi
+  verify_private_config "$config_path"
   "$worker_path" status --config "$config_path" >/dev/null
 fi
 if [[ "$paired" == true && "$pair_only" -eq 0 ]]; then

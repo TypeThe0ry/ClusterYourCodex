@@ -230,6 +230,44 @@ function Protect-File {
     Assert-PrivateAcl -Item $item -Directory $false
 }
 
+function Assert-ExistingPrivateDirectory {
+    <# Verify-only lifecycle preflight; never repair a pre-existing weak root. #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $resolved = Resolve-NormalizedPath $Path
+    if (-not (Test-Path -LiteralPath $resolved)) { return $resolved }
+    Assert-PathChainNoReparse -Path $resolved
+    $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or (Test-ReparsePoint $item)) {
+        throw "Existing private path is not a normal directory: $resolved"
+    }
+    Assert-PrivateAcl -Item $item -Directory $true
+    return $resolved
+}
+
+function Assert-PrivateStateTree {
+    <# Verify every transaction/journal descendant before recovery can mutate it. #>
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $resolved = Resolve-NormalizedPath $Root
+    if (-not (Test-Path -LiteralPath $resolved)) { return }
+    $rootItem = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer -or (Test-ReparsePoint $rootItem)) {
+        throw "Private transaction state root is not a normal directory: $resolved"
+    }
+    Assert-PrivateAcl -Item $rootItem -Directory $true
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $pending.Push($resolved)
+    while ($pending.Count -gt 0) {
+        $current = $pending.Pop()
+        foreach ($child in @(Get-ChildItem -LiteralPath $current -Force -ErrorAction Stop)) {
+            if (Test-ReparsePoint $child) {
+                throw "Private transaction state contains a reparse point: $($child.FullName)"
+            }
+            Assert-PrivateAcl -Item $child -Directory ([bool]$child.PSIsContainer)
+            if ($child.PSIsContainer) { $pending.Push($child.FullName) }
+        }
+    }
+}
+
 function Test-ByteArrayEqual {
     param(
         [Parameter(Mandatory = $true)][byte[]]$Left,
@@ -805,6 +843,7 @@ function Assert-TransactionTreeSafe {
     foreach ($item in @(Get-ChildItem -LiteralPath $resolvedTransaction -Force -Recurse)) {
         if (Test-ReparsePoint $item) { throw 'Worker repair transaction contains a reparse point.' }
     }
+    Assert-PrivateStateTree -Root $resolvedTransaction
 }
 
 function Remove-WorkerTransaction {
@@ -834,6 +873,7 @@ function Remove-WorkerTransactionStaging {
     foreach ($item in @(Get-ChildItem -LiteralPath $resolvedStaging -Force -Recurse)) {
         if (Test-ReparsePoint $item) { throw 'Worker repair transaction staging contains a reparse point.' }
     }
+    Assert-PrivateStateTree -Root $resolvedStaging
     Remove-Item -LiteralPath $resolvedStaging -Recurse -Force
 }
 
@@ -1029,6 +1069,19 @@ $configPath = Join-Path $data 'config.json'
 $workerPath = Join-Path $install 'cyc-worker.exe'
 $markerPath = Join-Path $data $script:MarkerName
 $transactionPath = Join-Path $data $script:TransactionName
+$null = Assert-ExistingPrivateDirectory -Path $install
+$null = Assert-ExistingPrivateDirectory -Path $data
+$null = Assert-ExistingPrivateDirectory -Path $workspace
+if (Test-Path -LiteralPath $data -PathType Container) {
+    foreach ($stagingDirectory in @(Get-ChildItem -LiteralPath $data -Force -Directory | Where-Object {
+        $_.Name.StartsWith(($script:TransactionName + '.new-'), [System.StringComparison]::Ordinal)
+    })) {
+        Assert-PrivateStateTree -Root $stagingDirectory.FullName
+    }
+    if (Test-Path -LiteralPath $transactionPath -PathType Container) {
+        Assert-PrivateStateTree -Root $transactionPath
+    }
+}
 $resolvedScope = Resolve-ServiceScope -RequestedScope $Scope
 $ownedInstallation = $false
 if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
