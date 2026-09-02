@@ -7,6 +7,21 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.61] - 2026-09-02
+
+### Fixed
+
+- Made Linux and macOS worker-kit first-install rollback crash-recoverable:
+  transaction journals are retired through an atomic intermediate path and a
+  tombstone preserves recovery intent if the process stops after ownership
+  marker removal.
+- Added fail-closed validation for active, retired, and tombstone transaction
+  metadata, including schema, installer identity, marker state, and committed
+  state before any cleanup is resumed.
+- Added deterministic interrupted-rollback/re-entry fixtures for both worker
+  kit installers, including secret-redaction checks and post-recovery residue
+  assertions.
+
 ## [0.1.0-preview.60] - 2026-09-02
 
 ### Fixed
@@ -755,7 +770,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.60...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.61...HEAD
+[0.1.0-preview.61]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.60...v0.1.0-preview.61
 [0.1.0-preview.60]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.59...v0.1.0-preview.60
 [0.1.0-preview.59]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.58...v0.1.0-preview.59
 [0.1.0-preview.58]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.57...v0.1.0-preview.58

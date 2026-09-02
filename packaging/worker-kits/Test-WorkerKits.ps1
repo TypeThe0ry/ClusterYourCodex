@@ -893,6 +893,52 @@ test ! -e "$first_failure_data/.repair-transaction"
 test ! -e "$first_failure_install/cyc-worker"
 test ! -e "$first_failure_data/install-manifest.json"
 
+# If rollback is interrupted after removing the first-install marker, the
+# sidecar tombstone keeps the journal resumable. Re-entry must consume both
+# records before starting the next install, with no ownership state left over.
+interrupted_install="$root/linux-interrupted-install"
+interrupted_data="$root/linux-interrupted-data"
+interrupted_workspace="$root/linux-interrupted-workspace"
+interrupted_enrollment="$root/linux-interrupted-enrollment.json"
+interrupted_fake_systemd="$root/fake-systemd-interrupted"
+mkdir -p "$interrupted_fake_systemd"
+printf '%s\n' 'LINUX_INTERRUPTED_ENROLLMENT_SECRET_DO_NOT_LOG' >"$interrupted_enrollment"
+set +e
+CYC_FAKE_SYSTEMD_ROOT="$interrupted_fake_systemd" "$bad/install-worker.sh" install \
+  --bundle-root "$bad" \
+  --install-root "$interrupted_install" \
+  --data-root "$interrupted_data" \
+  --workspace-root "$interrupted_workspace" \
+  --scope user \
+  --enrollment "$interrupted_enrollment" \
+  --failure-injection after-marker-removal \
+  >"$root/linux-interrupted.stdout" 2>"$root/linux-interrupted.stderr"
+interrupted_exit=$?
+set -e
+test "$interrupted_exit" -ne 0
+grep -q 'Injected worker repair failure at after-marker-removal' "$root/linux-interrupted.stderr"
+! grep -q 'LINUX_.*SECRET_DO_NOT_LOG' "$root/linux-interrupted.stdout" "$root/linux-interrupted.stderr"
+test ! -e "$interrupted_enrollment"
+test ! -e "$interrupted_data/.clusteryourcodex-worker-owned"
+test -d "$interrupted_data/.repair-transaction"
+test -f "$interrupted_data/.repair-transaction.tombstone"
+test "$(cat "$interrupted_data/.repair-transaction.tombstone")" = 'cyc.dev/linux-worker-repair-tombstone/v1'
+
+interrupted_recovered="$(CYC_FAKE_SYSTEMD_ROOT="$interrupted_fake_systemd" "$good/install-worker.sh" install \
+  --bundle-root "$good" \
+  --install-root "$interrupted_install" \
+  --data-root "$interrupted_data" \
+  --workspace-root "$interrupted_workspace" \
+  --scope user)"
+printf '%s' "$interrupted_recovered" | grep -q '"paired":false'
+test -x "$interrupted_install/cyc-worker"
+test -f "$interrupted_data/.clusteryourcodex-worker-owned"
+test -f "$interrupted_data/install-manifest.json"
+test ! -e "$interrupted_data/.repair-transaction"
+test ! -e "$interrupted_data/.repair-transaction.tombstone"
+test ! -e "$interrupted_data/.repair-transaction.removing"
+test ! -e "$CYC_FAKE_SYSTEMD_ROOT/linger-enabled"
+
 # Root + auto resolves to system scope without probing or modifying a user
 # manager. This is an unpaired preinstall, so it must not touch systemd.
 root_login_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log")"
@@ -1147,8 +1193,10 @@ test ! -e "$data"
 
         $macosGoodKit = Join-Path $temporary 'macos-smoke-good'
         $macosUpgradeKit = Join-Path $temporary 'macos-smoke-upgrade'
+        $macosBadKit = Join-Path $temporary 'macos-smoke-bad'
         $null = & $builder -Target macos-x86_64 -WorkerExecutable $goodWorker -OutputDirectory $macosGoodKit -Version '0.1.0-test.1'
         $null = & $builder -Target macos-x86_64 -WorkerExecutable $upgradeWorker -OutputDirectory $macosUpgradeKit -Version '0.1.0-test.2'
+        $null = & $builder -Target macos-x86_64 -WorkerExecutable $badWorker -OutputDirectory $macosBadKit -Version '0.1.0-test.2'
         $macosSmoke = Join-Path $temporary 'macos-smoke.sh'
         [System.IO.File]::WriteAllText($macosSmoke, @'
 #!/usr/bin/env bash
@@ -1204,12 +1252,59 @@ export PATH="$root/fake-macos-bin:$PATH"
 
 good="$root/macos-smoke-good"
 upgrade="$root/macos-smoke-upgrade"
+bad="$root/macos-smoke-bad"
 chmod +x "$good/cyc-worker" "$good/install-worker.sh" "$upgrade/cyc-worker" "$upgrade/install-worker.sh"
+chmod +x "$bad/cyc-worker" "$bad/install-worker.sh"
 install_root="$root/macos-install"
 data_root="$root/macos-data"
 workspace_root="$root/macos-workspace"
 logs_root="$root/macos-logs"
 common=(--install-root "$install_root" --data-root "$data_root" --workspace-root "$workspace_root" --logs-root "$logs_root")
+
+# This deterministic fake-Darwin fixture exercises only the transaction
+# state-machine re-entry path; it does not claim live macOS LaunchAgent
+# evidence while the containment gate remains closed.
+interrupted_install="$root/macos-interrupted-install"
+interrupted_data="$root/macos-interrupted-data"
+interrupted_workspace="$root/macos-interrupted-workspace"
+interrupted_logs="$root/macos-interrupted-logs"
+interrupted_enrollment="$root/macos-interrupted-enrollment.json"
+printf '%s\n' 'MACOS_INTERRUPTED_ENROLLMENT_SECRET_DO_NOT_LOG' >"$interrupted_enrollment"
+set +e
+"$bad/install-worker.sh" install --bundle-root "$bad" \
+  --install-root "$interrupted_install" \
+  --data-root "$interrupted_data" \
+  --workspace-root "$interrupted_workspace" \
+  --logs-root "$interrupted_logs" \
+  --enrollment "$interrupted_enrollment" \
+  --pair-only \
+  --failure-injection after-marker-removal \
+  >"$root/macos-interrupted.stdout" 2>"$root/macos-interrupted.stderr"
+interrupted_exit=$?
+set -e
+test "$interrupted_exit" -ne 0
+grep -q 'Injected worker repair failure at after-marker-removal' "$root/macos-interrupted.stderr"
+! grep -q 'MACOS_.*SECRET_DO_NOT_LOG' "$root/macos-interrupted.stdout" "$root/macos-interrupted.stderr"
+test ! -e "$interrupted_enrollment"
+test ! -e "$interrupted_data/.clusteryourcodex-worker-owned"
+test ! -e "$interrupted_logs/.clusteryourcodex-worker-logs-owned"
+test -d "$interrupted_data/.repair-transaction"
+test -f "$interrupted_data/.repair-transaction.tombstone"
+test "$(cat "$interrupted_data/.repair-transaction.tombstone")" = 'cyc.dev/macos-worker-repair-tombstone/v1'
+
+interrupted_recovered="$($good/install-worker.sh install --bundle-root "$good" \
+  --install-root "$interrupted_install" \
+  --data-root "$interrupted_data" \
+  --workspace-root "$interrupted_workspace" \
+  --logs-root "$interrupted_logs")"
+printf '%s' "$interrupted_recovered" | grep -q '"paired":false'
+test -x "$interrupted_install/cyc-worker"
+test -f "$interrupted_data/.clusteryourcodex-worker-owned"
+test -f "$interrupted_logs/.clusteryourcodex-worker-logs-owned"
+test -f "$interrupted_data/install-manifest.json"
+test ! -e "$interrupted_data/.repair-transaction"
+test ! -e "$interrupted_data/.repair-transaction.tombstone"
+test ! -e "$interrupted_data/.repair-transaction.removing"
 
 # A failed first macOS install must remove both newly-created ownership
 # markers along with the restored transaction, even while LaunchAgent
@@ -1462,15 +1557,22 @@ test ! -e "$default_logs"
         }
     }
     $linuxSource = Get-Content -LiteralPath $linuxInstaller -Raw
-    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'after-pair', 'after-service-registration', 'before-manifest-write', 'remove_service', 'service_path_for_scope', 'servicePath', 'Installer service path does not match the existing owned installation.', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot', 'KillMode=control-group', 'marker-existed', 'Owned worker install manifest is missing or unsafe.')) {
+    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'TRANSACTION_TOMBSTONE_SCHEMA', 'TRANSACTION_TOMBSTONE_RETIRED', 'TRANSACTION_RETIRE_NAME', 'assert_transaction_retirement_tree_safe', 'rollback_tombstone_valid_for_transaction', 'validate_retired_transaction', 'after-pair', 'after-service-registration', 'before-manifest-write', 'after-marker-removal', 'remove_service', 'service_path_for_scope', 'servicePath', 'Installer service path does not match the existing owned installation.', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot', 'KillMode=control-group', 'marker-existed', 'marker-existed=0', 'Owned worker install manifest is missing or unsafe.')) {
         if ($linuxSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "Linux worker installer is missing rollback/integrity guard: $requiredPattern"
         }
     }
     $macosSource = Get-Content -LiteralPath $macosInstaller -Raw
     foreach ($requiredPattern in @(
-        'cyc.dev/macos-worker-install/v1',
-        'cyc.dev/macos-worker-repair-transaction/v1',
+         'cyc.dev/macos-worker-install/v1',
+         'cyc.dev/macos-worker-repair-transaction/v1',
+         'cyc.dev/macos-worker-repair-tombstone/v1',
+         'TRANSACTION_TOMBSTONE_SCHEMA',
+         'TRANSACTION_TOMBSTONE_RETIRED',
+         'TRANSACTION_RETIRE_NAME',
+         'assert_transaction_retirement_tree_safe',
+         'rollback_tombstone_valid_for_transaction',
+         'validate_retired_transaction',
         'exec /bin/bash "$0" "$@"',
         '== --',
         'readonly MACOS_WORKER_CONTAINMENT_READY=0',
@@ -1496,9 +1598,10 @@ test ! -e "$default_logs"
         'SHA256SUMS must contain exactly four signed-kit files',
         'begin_transaction',
         'restore_transaction',
-        'after-pair',
-        'after-launchagent-registration',
-        'before-manifest-write',
+         'after-pair',
+         'after-launchagent-registration',
+         'before-manifest-write',
+         'after-marker-removal',
         '--pair-only',
         '--allow-on-battery',
         '--workspace-root',
@@ -1512,8 +1615,10 @@ test ! -e "$default_logs"
         'dataRoot',
         'workspaceRoot',
         'logsRoot',
-        'launchAgent',
-        'marker-existed',
+         'launchAgent',
+         'marker-existed',
+         'marker-existed=0',
+         'committed=0',
         'Owned worker install manifest is missing or unsafe.'
     )) {
         if ($macosSource -notmatch [regex]::Escape($requiredPattern)) {

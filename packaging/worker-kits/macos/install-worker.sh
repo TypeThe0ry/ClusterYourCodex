@@ -18,6 +18,10 @@ MARKER_NAME='.clusteryourcodex-worker-owned'
 LOG_MARKER_NAME='.clusteryourcodex-worker-logs-owned'
 TRANSACTION_NAME='.repair-transaction'
 TRANSACTION_SCHEMA='cyc.dev/macos-worker-repair-transaction/v1'
+TRANSACTION_TOMBSTONE_NAME='.repair-transaction.tombstone'
+TRANSACTION_TOMBSTONE_SCHEMA='cyc.dev/macos-worker-repair-tombstone/v1'
+TRANSACTION_TOMBSTONE_RETIRED="${TRANSACTION_TOMBSTONE_SCHEMA}:retired"
+TRANSACTION_RETIRE_NAME='.repair-transaction.removing'
 EXIT_RUNTIME_GATED=78
 
 # This is deliberately a compile-time packaging gate, not an environment
@@ -56,7 +60,7 @@ Usage: install-worker.sh <install|repair|uninstall> [options]
   --allow-on-battery
   --pair-only
   --purge-data
-  --failure-injection none|after-pair|after-launchagent-registration|before-manifest-write
+  --failure-injection none|after-pair|after-launchagent-registration|before-manifest-write|after-marker-removal
 
 macOS preview contract:
   * install without an enrollment safely preinstalls an unpaired worker.
@@ -86,7 +90,7 @@ done
 case "$action" in install|repair|uninstall) ;; *) usage >&2; exit 2 ;; esac
 case "$scope" in auto|user|system) ;; *) printf 'Invalid scope.\n' >&2; exit 2 ;; esac
 case "$failure_injection" in
-  none|after-pair|after-launchagent-registration|before-manifest-write) ;;
+  none|after-pair|after-launchagent-registration|before-manifest-write|after-marker-removal) ;;
   *) printf 'Invalid failure injection point.\n' >&2; exit 2 ;;
 esac
 
@@ -142,6 +146,8 @@ workspace_root="$(normalize_path "$workspace_root")"
 logs_root="$(normalize_path "$logs_root")"
 launch_agent_path="$(normalize_path "$launch_agent_path")"
 if [[ -n "$enrollment_file" ]]; then enrollment_file="$(normalize_path "$enrollment_file")"; fi
+transaction_tombstone_path="${data_root}/${TRANSACTION_TOMBSTONE_NAME}"
+transaction_retired_root="${data_root}/${TRANSACTION_RETIRE_NAME}"
 
 default_data_root="$(normalize_path "${HOME}/Library/Application Support/ClusterYourCodex/Worker/Data")"
 default_logs_root="$(normalize_path "${HOME}/Library/Logs/ClusterYourCodex/Worker")"
@@ -552,11 +558,173 @@ assert_transaction_tree_safe() {
 }
 
 remove_transaction() {
+  local value="$1" retired_root="$transaction_retired_root"
+  if [[ ! -e "$value" && ! -L "$value" ]]; then
+    # A prior process may have atomically retired the journal and been
+    # interrupted while removing the private retirement tree. Finish that
+    # idempotently before reporting the transaction as gone.
+    remove_transaction_retirement "$retired_root"
+    return 0
+  fi
+  assert_transaction_tree_safe "$value"
+  if [[ -e "$retired_root" || -L "$retired_root" ]]; then
+    remove_transaction_retirement "$retired_root"
+  fi
+  # Recursive deletion is not atomic. Move the journal out of its authoritative
+  # name first, so an interruption can never leave a partially deleted journal
+  # that looks recoverable on the next invocation.
+  mv "$value" "$retired_root"
+  assert_transaction_retirement_tree_safe "$retired_root"
+  if [[ -e "$transaction_tombstone_path" || -L "$transaction_tombstone_path" ]]; then
+    # Validate the complete journal once, then publish the retired state in the
+    # sidecar before beginning recursive deletion. A later re-entry can safely
+    # finish deleting a partially removed retirement tree.
+    if ! mark_rollback_tombstone_retired; then return 1; fi
+  fi
+  remove_transaction_retirement "$retired_root"
+}
+
+assert_transaction_retirement_tree_safe() {
+  local value="$1"
+  [[ "$value" == "$transaction_retired_root" && -d "$value" && ! -L "$value" ]] || {
+    printf 'Worker repair transaction retirement path escaped the owned data root.\n' >&2
+    return 1
+  }
+  if [[ -n "$(find "$value" -type l -print 2>/dev/null | head -n 1)" ]]; then
+    printf 'Worker repair transaction retirement tree contains a symlink.\n' >&2
+    return 1
+  fi
+}
+
+remove_transaction_retirement() {
   local value="$1"
   [[ ! -e "$value" && ! -L "$value" ]] && return 0
-  assert_transaction_tree_safe "$value"
+  assert_transaction_retirement_tree_safe "$value"
   rm -rf "$value"
 }
+
+rollback_tombstone_contents_valid() {
+  local raw
+  [[ -f "$transaction_tombstone_path" && ! -L "$transaction_tombstone_path" ]] || return 1
+  raw="$(cat "$transaction_tombstone_path")" || return 1
+  [[ "$raw" == "$TRANSACTION_TOMBSTONE_SCHEMA" || "$raw" == "$(retired_tombstone_value)" ]]
+}
+
+rollback_tombstone_valid_for_transaction() {
+  local marker_state
+  assert_transaction_tree_safe "$transaction_root" || return 1
+  [[ -f "$transaction_tombstone_path" && ! -L "$transaction_tombstone_path" ]] || return 1
+  [[ "$(cat "$transaction_tombstone_path")" == "$TRANSACTION_TOMBSTONE_SCHEMA" ]] || return 1
+  [[ -f "$transaction_root/marker-existed" && ! -L "$transaction_root/marker-existed" ]] || return 1
+  marker_state="$(cat "$transaction_root/marker-existed")" || return 1
+  [[ "$marker_state" == 0 ]] || return 1
+  [[ ! -e "$transaction_root/committed" && ! -L "$transaction_root/committed" ]]
+}
+
+rollback_tombstone_is_retired() {
+  local raw
+  raw="$(cat "$transaction_tombstone_path")" || return 1
+  [[ "$raw" == "$(retired_tombstone_value)" ]]
+}
+
+retired_tombstone_value() {
+  printf '%s:journal=%s:uid=%s:marker-existed=0:committed=0' \
+    "$TRANSACTION_TOMBSTONE_RETIRED" "$TRANSACTION_SCHEMA" "$(id -u)"
+}
+
+validate_retired_transaction_identity() {
+  assert_transaction_retirement_tree_safe "$transaction_retired_root" || return 1
+  [[ -f "$transaction_retired_root/schema" && ! -L "$transaction_retired_root/schema" &&
+     "$(cat "$transaction_retired_root/schema")" == "$TRANSACTION_SCHEMA" ]] || return 1
+  [[ -f "$transaction_retired_root/installer-uid" && ! -L "$transaction_retired_root/installer-uid" ]] || return 1
+  [[ "$(cat "$transaction_retired_root/installer-uid")" == "$(id -u)" ]]
+}
+
+validate_retired_transaction() {
+  local marker_state
+  validate_retired_transaction_identity || return 1
+  [[ -f "$transaction_retired_root/marker-existed" && ! -L "$transaction_retired_root/marker-existed" ]] || return 1
+  marker_state="$(cat "$transaction_retired_root/marker-existed")" || return 1
+  [[ "$marker_state" == 0 ]] || return 1
+  [[ ! -e "$transaction_retired_root/committed" && ! -L "$transaction_retired_root/committed" ]]
+}
+
+mark_rollback_tombstone_retired() {
+  local temporary
+  rollback_tombstone_contents_valid || {
+    printf 'Worker repair rollback tombstone is invalid.\n' >&2
+    return 1
+  }
+  rollback_tombstone_is_retired && return 0
+  validate_retired_transaction || {
+    printf 'Worker repair retired transaction state is invalid.\n' >&2
+    return 1
+  }
+  temporary="${transaction_tombstone_path}.new.$$"
+  [[ ! -e "$temporary" && ! -L "$temporary" ]] || {
+    printf 'Worker repair rollback tombstone staging path already exists.\n' >&2
+    return 1
+  }
+  if ! retired_tombstone_value >"$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  if ! chmod 0600 "$temporary" || ! mv -f "$temporary" "$transaction_tombstone_path"; then
+    rm -f "$temporary"
+    return 1
+  fi
+}
+
+write_rollback_tombstone() {
+  local temporary
+  if [[ -e "$transaction_tombstone_path" || -L "$transaction_tombstone_path" ]]; then
+    rollback_tombstone_valid_for_transaction || {
+      printf 'Worker repair rollback tombstone is invalid.\n' >&2
+      return 1
+    }
+    return 0
+  fi
+  temporary="${transaction_tombstone_path}.new.$$"
+  [[ ! -e "$temporary" && ! -L "$temporary" ]] || {
+    printf 'Worker repair rollback tombstone staging path already exists.\n' >&2
+    return 1
+  }
+  if ! printf '%s\n' "$TRANSACTION_TOMBSTONE_SCHEMA" >"$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  if ! chmod 0600 "$temporary" || ! mv -f "$temporary" "$transaction_tombstone_path"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  rollback_tombstone_valid_for_transaction || {
+    printf 'Worker repair rollback tombstone could not be validated.\n' >&2
+    return 1
+  }
+}
+
+remove_rollback_tombstone() {
+  [[ ! -e "$transaction_tombstone_path" && ! -L "$transaction_tombstone_path" ]] && return 0
+  rollback_tombstone_contents_valid || {
+    printf 'Worker repair rollback tombstone is invalid.\n' >&2
+    return 1
+  }
+  rm -f "$transaction_tombstone_path"
+}
+
+if [[ -L "$transaction_tombstone_path" || ( -e "$transaction_tombstone_path" && ! -f "$transaction_tombstone_path" ) ]]; then
+  printf 'Worker repair rollback tombstone is not a regular file.\n' >&2
+  exit 1
+elif [[ -f "$transaction_tombstone_path" ]]; then
+  rollback_tombstone_contents_valid || {
+    printf 'Worker repair rollback tombstone is invalid.\n' >&2
+    exit 1
+  }
+fi
+if [[ -L "$transaction_retired_root" || ( -e "$transaction_retired_root" && ! -d "$transaction_retired_root" ) ]]; then
+  printf 'Worker repair transaction retirement path is unsafe.\n' >&2
+  exit 1
+fi
 
 validate_owned_manifest() {
   local raw byte_count expected
@@ -699,6 +867,17 @@ restore_transaction() {
     printf 'Worker repair transaction ownership state is invalid.\n' >&2
     return 1
   }
+  if [[ -e "$transaction_tombstone_path" || -L "$transaction_tombstone_path" ]]; then
+    # The active sidecar may have been published just before a process was
+    # stopped while removing the first-install markers. Its journal
+    # marker-existed=0 state is the authority for this recovery, not the still-
+    # present marker. A retired sidecar cannot coexist with an active journal.
+    rollback_tombstone_valid_for_transaction || {
+      printf 'Worker repair rollback tombstone is invalid for this transaction.\n' >&2
+      return 1
+    }
+    marker_existed=0
+  fi
 
   remove_launch_agent
   for candidate in "$data_root"/config.* "$data_root"/*.credential; do
@@ -736,9 +915,17 @@ restore_transaction() {
     fi
   fi
   if [[ "$marker_existed" == 0 ]]; then
-    rm -f "$marker_path" "$log_marker_path"
+    # Keep a sidecar recovery capability while the ownership markers and the
+    # recursive journal cleanup transition are in flight. The sidecar lives
+    # outside the journal so rm -rf cannot delete it before the journal root.
+    write_rollback_tombstone || return 1
+    rm -f "$marker_path" "$log_marker_path" || return 1
+    if ! inject_failure after-marker-removal; then return 1; fi
   fi
-  remove_transaction "$transaction_root"
+  if ! remove_transaction "$transaction_root"; then return 1; fi
+  if [[ "$marker_existed" == 0 ]]; then
+    remove_rollback_tombstone || return 1
+  fi
 }
 
 inject_failure() {
@@ -775,16 +962,66 @@ if [[ "$installation_owned_before" -eq 1 ]]; then
   fi
 fi
 
-if [[ -e "$transaction_root" || -L "$transaction_root" ]]; then
-  [[ "$installation_owned_before" -eq 1 ]] || {
-    printf 'Found a worker repair transaction without a valid ownership marker.\n' >&2
+if [[ -e "$transaction_retired_root" || -L "$transaction_retired_root" ]]; then
+  [[ ! -e "$transaction_root" && ! -L "$transaction_root" ]] || {
+    printf 'Worker repair transaction has both active and retired journal state.\n' >&2
     exit 1
   }
-  if [[ -f "$transaction_root/committed" && ! -L "$transaction_root/committed" ]]; then
-    remove_transaction "$transaction_root"
+  if [[ -e "$transaction_tombstone_path" && ! -L "$transaction_tombstone_path" ]]; then
+    # A tombstone makes this the first-install rollback state. Validate the
+    # retired journal identity and ownership state before deleting anything;
+    # this also covers an interruption between journal rename and tombstone
+    # state publication.
+    validate_retired_transaction || {
+      printf 'Worker repair retired transaction state is invalid.\n' >&2
+      exit 1
+    }
+    if ! rollback_tombstone_is_retired; then mark_rollback_tombstone_retired; fi
+    remove_transaction_retirement "$transaction_retired_root"
+  elif [[ "$installation_owned_before" -eq 1 ]]; then
+    # A committed repair has no tombstone. Keep the normal owned-installation
+    # cleanup path, but still bind it to this installer's journal identity.
+    validate_retired_transaction_identity || {
+      printf 'Worker repair retired transaction state is invalid.\n' >&2
+      exit 1
+    }
+    remove_transaction_retirement "$transaction_retired_root"
   else
-    restore_transaction
+    printf 'Found a worker repair transaction retirement without a valid ownership marker.\n' >&2
+    exit 1
   fi
+fi
+
+if [[ -e "$transaction_root" || -L "$transaction_root" ]]; then
+  if [[ -f "$transaction_root/committed" && ! -L "$transaction_root/committed" ]]; then
+    [[ "$installation_owned_before" -eq 1 && ! -e "$transaction_tombstone_path" && ! -L "$transaction_tombstone_path" ]] || {
+      printf 'Found a committed worker repair transaction without a valid ownership marker.\n' >&2
+      exit 1
+    }
+    remove_transaction "$transaction_root"
+  elif [[ "$installation_owned_before" -eq 1 ]]; then
+    restore_transaction
+  elif rollback_tombstone_valid_for_transaction; then
+    # The marker is intentionally absent only after rollback has published its
+    # sidecar recovery capability. Resume that transaction instead of treating
+    # the first-install state as an unowned foreign tree.
+    restore_transaction
+  else
+    printf 'Found a worker repair transaction without a valid ownership marker.\n' >&2
+    exit 1
+  fi
+elif [[ -e "$transaction_tombstone_path" || -L "$transaction_tombstone_path" ]]; then
+  [[ "$installation_owned_before" -eq 0 && ! -L "$transaction_tombstone_path" ]] || {
+    printf 'Worker repair rollback tombstone has no resumable transaction.\n' >&2
+    exit 1
+  }
+  rollback_tombstone_is_retired || {
+    printf 'Worker repair rollback tombstone has no retired journal.\n' >&2
+    exit 1
+  }
+  # The journal was already atomically retired; only the final tombstone
+  # unlink was interrupted. It is safe and idempotent to finish that unlink.
+  remove_rollback_tombstone
 fi
 
 if [[ "$action" == uninstall ]]; then

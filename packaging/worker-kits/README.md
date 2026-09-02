@@ -220,7 +220,13 @@ only after pairing (when explicitly requested), config health, service
 registration/start, the running smoke check, and atomic manifest replacement
 all succeed. A caught failure restores the old bytes and service state before
 returning; an interrupted invocation is recovered at the start of the next
-lifecycle call. Install and repair are idempotent.
+lifecycle call. Journal retirement is itself crash-safe: the journal is moved
+atomically to a private, schema/installer-UID-bound retirement path before
+recursive deletion, and a first-install rollback publishes a sidecar tombstone
+until both the journal and ownership markers have been consumed. Re-entry can
+therefore finish an interrupted marker/journal cleanup without treating a
+partial first install as an owned installation. Install and repair are
+idempotent.
 
 ### Lifecycle path binding
 
@@ -239,9 +245,13 @@ the manifest is missing or unsafe, lifecycle operations fail closed before
 touching the worker or service layer unless an uncommitted crash-recovery
 journal is present to restore the authoritative state. The journal records
 whether the marker predated the transaction, so a failed first install does
-not leave a new marker that can authorize later cleanup. Linux systemd units
-also set `KillMode=control-group` explicitly so stopping or removing the unit
-terminates every process still in that unit's cgroup. The gated macOS
+not leave a new marker that can authorize later cleanup. During first-install
+rollback, `.repair-transaction.tombstone` and the private
+`.repair-transaction.removing` retirement path are validated before any
+cleanup; malformed, symlinked, mismatched, or foreign state remains fail
+closed. Linux systemd units also set `KillMode=control-group` explicitly so
+stopping or removing the unit terminates every process still in that unit's
+cgroup. The gated macOS
 LaunchAgent plist carries the corresponding explicit
 `AbandonProcessGroup=false` contract; live LaunchAgent teardown remains an
 external acceptance gate.
