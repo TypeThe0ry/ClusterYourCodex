@@ -949,8 +949,16 @@ if [[ "${1:-}" == -c && $# -ge 3 ]]; then
     printf '0\n'
     exit 0
   fi
+  if [[ "${2:-}" == '%u' && "${CYC_WORKER_KIT_TEST_FOREIGN_SERVICE:-0}" == 1 && "$path" == */clusteryourcodex-worker.service ]]; then
+    printf '4294967294\n'
+    exit 0
+  fi
   if [[ "${2:-}" == '%a' && "$path" == *'/.repair-transaction'* && -f "$path" ]]; then
     printf '600\n'
+    exit 0
+  fi
+  if [[ "${2:-}" == '%a' && "$path" == */clusteryourcodex-worker.service && -n "${CYC_WORKER_KIT_TEST_SERVICE_MODE:-}" ]]; then
+    printf '%s\n' "$CYC_WORKER_KIT_TEST_SERVICE_MODE"
     exit 0
   fi
   if [[ "${2:-}" == '%a' && "$path" == */config.json && -n "${CYC_WORKER_KIT_TEST_CONFIG_MODE:-}" ]]; then
@@ -981,6 +989,7 @@ EOF
 chmod +x "$root/fake-bin/stat"
 export PATH="$root/fake-bin:$PATH"
 export CYC_WORKER_KIT_TEST_CONFIG_MODE=600
+export CYC_WORKER_KIT_TEST_SERVICE_MODE=600
 good="$root/linux-smoke-good"
 upgrade="$root/linux-smoke-upgrade"
 bad="$root/linux-smoke-bad"
@@ -1266,6 +1275,79 @@ test -f "$CYC_FAKE_SYSTEMD_ROOT/service-enabled"
 test -f "$CYC_FAKE_SYSTEMD_ROOT/service-active"
 grep -q -- '--user show-environment' "$CYC_FAKE_SYSTEMD_ROOT/systemctl.log"
 grep -q '^KillMode=control-group$' "$unit"
+
+# Existing user-systemd service state is verify-only. A weak unit parent must
+# fail before marker/journal/worker/config/service mutation, and a foreign or
+# weak existing unit must fail before the transaction can copy or remove it.
+service_dir="$(dirname -- "$unit")"
+service_dir_mode_marker="$service_dir/.cyc-worker-kit-test-mode-0700"
+service_preflight_worker_hash_before="$(sha256sum "$worker" | awk '{print $1}')"
+service_preflight_config_hash_before="$(sha256sum "$data/config.json" | awk '{print $1}')"
+service_preflight_manifest_hash_before="$(sha256sum "$data/install-manifest.json" | awk '{print $1}')"
+service_preflight_unit_hash_before="$(sha256sum "$unit" | awk '{print $1}')"
+service_preflight_marker_hash_before="$(sha256sum "$data/.clusteryourcodex-worker-owned" | awk '{print $1}')"
+service_preflight_systemctl_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')"
+service_preflight_loginctl_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log" | tr -d '[:space:]')"
+rm -f -- "$service_dir_mode_marker"
+chmod 0777 -- "$service_dir"
+service_dir_mode_before="$(stat -c '%a' -- "$service_dir")"
+set +e
+"$good/install-worker.sh" repair --bundle-root "$good" --scope user \
+  >"$root/linux-weak-service-dir.stdout" 2>"$root/linux-weak-service-dir.stderr"
+weak_service_dir_exit=$?
+set -e
+test "$weak_service_dir_exit" -ne 0
+grep -q 'Existing user service directory is weak or owned by another identity' "$root/linux-weak-service-dir.stderr"
+# The weak pre-positioned parent must remain exactly as supplied; the installer
+# is forbidden from chmod-adopting it during repair. Git Bash may project 0777
+# as 0755, so compare against the observed preflight mode rather than a literal.
+test "$(stat -c '%a' -- "$service_dir")" = "$service_dir_mode_before"
+test "$(sha256sum "$worker" | awk '{print $1}')" = "$service_preflight_worker_hash_before"
+test "$(sha256sum "$data/config.json" | awk '{print $1}')" = "$service_preflight_config_hash_before"
+test "$(sha256sum "$data/install-manifest.json" | awk '{print $1}')" = "$service_preflight_manifest_hash_before"
+test "$(sha256sum "$unit" | awk '{print $1}')" = "$service_preflight_unit_hash_before"
+test "$(sha256sum "$data/.clusteryourcodex-worker-owned" | awk '{print $1}')" = "$service_preflight_marker_hash_before"
+test "$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')" = "$service_preflight_systemctl_lines_before"
+test "$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log" | tr -d '[:space:]')" = "$service_preflight_loginctl_lines_before"
+test ! -e "$data/.repair-transaction"
+test ! -e "$data/.repair-transaction.tombstone"
+chmod 0700 -- "$service_dir"
+: >"$service_dir_mode_marker"
+chmod 0600 -- "$service_dir_mode_marker"
+
+set +e
+CYC_WORKER_KIT_TEST_FOREIGN_SERVICE=1 "$good/install-worker.sh" repair --bundle-root "$good" --scope user \
+  >"$root/linux-foreign-service.stdout" 2>"$root/linux-foreign-service.stderr"
+foreign_service_exit=$?
+set -e
+test "$foreign_service_exit" -ne 0
+grep -q 'Existing user service unit is weak or owned by another identity' "$root/linux-foreign-service.stderr"
+test "$(sha256sum "$worker" | awk '{print $1}')" = "$service_preflight_worker_hash_before"
+test "$(sha256sum "$data/config.json" | awk '{print $1}')" = "$service_preflight_config_hash_before"
+test "$(sha256sum "$data/install-manifest.json" | awk '{print $1}')" = "$service_preflight_manifest_hash_before"
+test "$(sha256sum "$unit" | awk '{print $1}')" = "$service_preflight_unit_hash_before"
+test "$(sha256sum "$data/.clusteryourcodex-worker-owned" | awk '{print $1}')" = "$service_preflight_marker_hash_before"
+test "$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')" = "$service_preflight_systemctl_lines_before"
+test "$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log" | tr -d '[:space:]')" = "$service_preflight_loginctl_lines_before"
+test ! -e "$data/.repair-transaction"
+test ! -e "$data/.repair-transaction.tombstone"
+
+set +e
+CYC_WORKER_KIT_TEST_SERVICE_MODE=644 "$good/install-worker.sh" repair --bundle-root "$good" --scope user \
+  >"$root/linux-weak-service-unit.stdout" 2>"$root/linux-weak-service-unit.stderr"
+weak_service_unit_exit=$?
+set -e
+test "$weak_service_unit_exit" -ne 0
+grep -q 'Existing user service unit is weak or owned by another identity' "$root/linux-weak-service-unit.stderr"
+test "$(sha256sum "$worker" | awk '{print $1}')" = "$service_preflight_worker_hash_before"
+test "$(sha256sum "$data/config.json" | awk '{print $1}')" = "$service_preflight_config_hash_before"
+test "$(sha256sum "$data/install-manifest.json" | awk '{print $1}')" = "$service_preflight_manifest_hash_before"
+test "$(sha256sum "$unit" | awk '{print $1}')" = "$service_preflight_unit_hash_before"
+test "$(sha256sum "$data/.clusteryourcodex-worker-owned" | awk '{print $1}')" = "$service_preflight_marker_hash_before"
+test "$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')" = "$service_preflight_systemctl_lines_before"
+test "$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log" | tr -d '[:space:]')" = "$service_preflight_loginctl_lines_before"
+test ! -e "$data/.repair-transaction"
+test ! -e "$data/.repair-transaction.tombstone"
 
 # An ownership marker without its manifest is not sufficient authority to
 # remove a computed same-named systemd unit. The lifecycle must fail closed
@@ -1597,6 +1679,78 @@ test ! -e "$root/macos-weak-data"
 test ! -e "$root/macos-weak-workspace"
 test ! -e "$root/macos-weak-logs"
 
+# An existing LaunchAgents parent is also verify-only. A weak parent must fail
+# before any lifecycle root, marker, plist, or launchctl state is adopted.
+weak_launch_home="$root/macos-weak-launch-home"
+weak_launch_parent="$weak_launch_home/Library/LaunchAgents"
+weak_launch_install="$root/macos-weak-launch-install"
+weak_launch_data="$root/macos-weak-launch-data"
+weak_launch_workspace="$root/macos-weak-launch-workspace"
+weak_launch_logs="$root/macos-weak-launch-logs"
+mkdir -p "$weak_launch_parent"
+printf '%s\n' 'MACOS_WEAK_LAUNCHAGENTS_SENTINEL' >"$weak_launch_parent/sentinel.txt"
+chmod 0777 "$weak_launch_parent"
+weak_launch_parent_hash_before="$(sha256sum -- "$weak_launch_parent/sentinel.txt" | awk '{print $1}')"
+weak_launch_parent_mode_before="$(stat -c '%a' -- "$weak_launch_parent")"
+weak_launchctl_lines_before="$(wc -l <"$CYC_FAKE_LAUNCHCTL_LOG" | tr -d '[:space:]')"
+set +e
+HOME="$weak_launch_home" "$good/install-worker.sh" install \
+  --bundle-root "$good" \
+  --install-root "$weak_launch_install" \
+  --data-root "$weak_launch_data" \
+  --workspace-root "$weak_launch_workspace" \
+  --logs-root "$weak_launch_logs" \
+  >"$root/macos-weak-launch-parent.stdout" 2>"$root/macos-weak-launch-parent.stderr"
+weak_launch_parent_exit=$?
+set -e
+test "$weak_launch_parent_exit" -ne 0
+grep -q 'Existing LaunchAgents directory is weak or owned by another identity' "$root/macos-weak-launch-parent.stderr"
+test "$(stat -c '%a' -- "$weak_launch_parent")" = "$weak_launch_parent_mode_before"
+test "$(sha256sum -- "$weak_launch_parent/sentinel.txt" | awk '{print $1}')" = "$weak_launch_parent_hash_before"
+test "$(wc -l <"$CYC_FAKE_LAUNCHCTL_LOG" | tr -d '[:space:]')" = "$weak_launchctl_lines_before"
+test ! -e "$weak_launch_install/cyc-worker"
+test ! -e "$weak_launch_data"
+test ! -e "$weak_launch_workspace"
+test ! -e "$weak_launch_logs"
+
+# With a private LaunchAgents parent, an existing weak plist is rejected before
+# it can be booted out or replaced by a repair transaction.
+weak_plist_home="$root/macos-weak-plist-home"
+weak_plist_parent="$weak_plist_home/Library/LaunchAgents"
+weak_plist_path="$weak_plist_parent/dev.clusteryourcodex.worker.plist"
+weak_plist_install="$root/macos-weak-plist-install"
+weak_plist_data="$root/macos-weak-plist-data"
+weak_plist_workspace="$root/macos-weak-plist-workspace"
+weak_plist_logs="$root/macos-weak-plist-logs"
+mkdir -p "$weak_plist_parent"
+chmod 0700 "$weak_plist_parent"
+printf '%s\n' 'MACOS_WEAK_PLIST_SENTINEL' >"$weak_plist_path"
+chmod 0644 "$weak_plist_path"
+weak_plist_hash_before="$(sha256sum -- "$weak_plist_path" | awk '{print $1}')"
+weak_plist_mode_before="$(stat -c '%a' -- "$weak_plist_path")"
+weak_plist_parent_mode_before="$(stat -c '%a' -- "$weak_plist_parent")"
+weak_plist_launchctl_lines_before="$(wc -l <"$CYC_FAKE_LAUNCHCTL_LOG" | tr -d '[:space:]')"
+set +e
+HOME="$weak_plist_home" "$good/install-worker.sh" install \
+  --bundle-root "$good" \
+  --install-root "$weak_plist_install" \
+  --data-root "$weak_plist_data" \
+  --workspace-root "$weak_plist_workspace" \
+  --logs-root "$weak_plist_logs" \
+  >"$root/macos-weak-plist.stdout" 2>"$root/macos-weak-plist.stderr"
+weak_plist_exit=$?
+set -e
+test "$weak_plist_exit" -ne 0
+grep -q 'Existing LaunchAgent is weak or owned by another identity' "$root/macos-weak-plist.stderr"
+test "$(stat -c '%a' -- "$weak_plist_parent")" = "$weak_plist_parent_mode_before"
+test "$(stat -c '%a' -- "$weak_plist_path")" = "$weak_plist_mode_before"
+test "$(sha256sum -- "$weak_plist_path" | awk '{print $1}')" = "$weak_plist_hash_before"
+test "$(wc -l <"$CYC_FAKE_LAUNCHCTL_LOG" | tr -d '[:space:]')" = "$weak_plist_launchctl_lines_before"
+test ! -e "$weak_plist_install/cyc-worker"
+test ! -e "$weak_plist_data"
+test ! -e "$weak_plist_workspace"
+test ! -e "$weak_plist_logs"
+
 # This deterministic fake-Darwin fixture exercises only the transaction
 # state-machine re-entry path; it does not claim live macOS LaunchAgent
 # evidence while the containment gate remains closed.
@@ -1779,7 +1933,9 @@ mac_missing_manifest_backup="$root/macos-missing-manifest.backup"
 cp "$data_root/install-manifest.json" "$mac_missing_manifest_backup"
 mac_missing_launch_agent="$HOME/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
 mkdir -p "$(dirname "$mac_missing_launch_agent")"
+chmod 0700 "$(dirname "$mac_missing_launch_agent")"
 printf '%s\n' 'MACOS_MISSING_MANIFEST_SENTINEL' >"$mac_missing_launch_agent"
+chmod 0600 "$mac_missing_launch_agent"
 mac_missing_manifest_worker_hash="$(shasum -a 256 "$install_root/cyc-worker" | awk '{print $1}')"
 mac_missing_manifest_config_hash="$(shasum -a 256 "$data_root/config.json" | awk '{print $1}')"
 mac_missing_manifest_launchctl_lines="$(wc -l <"$CYC_FAKE_LAUNCHCTL_LOG" | tr -d '[:space:]')"
@@ -1864,7 +2020,9 @@ assert_macos_manifest_binding_failure \
 wrong_macos_home="$root/macos-wrong-home"
 wrong_macos_launch_agent="$wrong_macos_home/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
 mkdir -p "$(dirname "$wrong_macos_launch_agent")"
+chmod 0700 "$(dirname "$wrong_macos_launch_agent")"
 printf '%s\n' 'MACOS_PATH_BINDING_SENTINEL' >"$wrong_macos_launch_agent"
+chmod 0600 "$wrong_macos_launch_agent"
 assert_macos_manifest_binding_failure \
   macos-wrong-launchagent \
   "$wrong_macos_home" \
@@ -1923,7 +2081,7 @@ test ! -e "$default_logs"
         }
     }
     $linuxSource = Get-Content -LiteralPath $linuxInstaller -Raw
-    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'private_dir', 'verify_private_dir_existing', 'verify_private_file_existing', 'verify_private_state_tree', 'path_mode', 'path_owner', 'verify_private_config', 'Existing private directory is weak or owned by another identity', 'Existing worker config is weak or owned by another identity', 'Private transaction state root is not a normal directory', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'TRANSACTION_TOMBSTONE_SCHEMA', 'TRANSACTION_TOMBSTONE_RETIRED', 'TRANSACTION_RETIRE_NAME', 'assert_transaction_retirement_tree_safe', 'rollback_tombstone_valid_for_transaction', 'validate_retired_transaction', 'after-pair', 'after-service-registration', 'before-manifest-write', 'after-marker-removal', 'remove_service', 'service_path_for_scope', 'servicePath', 'Installer service path does not match the existing owned installation.', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot', 'KillMode=control-group', 'marker-existed', 'marker-existed=0', 'Owned worker install manifest is missing or unsafe.')) {
+    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'private_dir', 'verify_private_dir_existing', 'verify_private_file_existing', 'verify_private_state_tree', 'path_mode', 'path_owner', 'verify_private_config', 'verify_private_service_path_existing', 'Existing private directory is weak or owned by another identity', 'Existing user service directory is weak or owned by another identity', 'Existing user service unit is weak or owned by another identity', 'Existing worker config is weak or owned by another identity', 'Private transaction state root is not a normal directory', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'TRANSACTION_TOMBSTONE_SCHEMA', 'TRANSACTION_TOMBSTONE_RETIRED', 'TRANSACTION_RETIRE_NAME', 'assert_transaction_retirement_tree_safe', 'rollback_tombstone_valid_for_transaction', 'validate_retired_transaction', 'after-pair', 'after-service-registration', 'before-manifest-write', 'after-marker-removal', 'remove_service', 'service_path_for_scope', 'servicePath', 'Installer service path does not match the existing owned installation.', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot', 'KillMode=control-group', 'marker-existed', 'marker-existed=0', 'Owned worker install manifest is missing or unsafe.')) {
         if ($linuxSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "Linux worker installer is missing rollback/integrity guard: $requiredPattern"
         }
@@ -1953,9 +2111,12 @@ test ! -e "$default_logs"
          'path_owner',
          'verify_private_dir_existing',
          'verify_private_file_existing',
+         'verify_private_launch_agent_path_existing',
          'verify_private_state_tree',
          'verify_private_config',
          'Existing private directory is weak or owned by another identity',
+         'Existing LaunchAgents directory is weak or owned by another identity',
+         'Existing LaunchAgent is weak or owned by another identity',
          'Existing worker config is weak or owned by another identity',
          'Private transaction state root is not a normal directory',
         'dev.clusteryourcodex.worker',

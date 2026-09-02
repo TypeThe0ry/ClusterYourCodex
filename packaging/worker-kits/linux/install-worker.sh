@@ -498,8 +498,46 @@ service_path() {
   service_path_for_scope "$scope"
 }
 
+verify_private_service_path_existing() {
+  local requested_scope="$1" unit unit_dir mode owner expected_owner
+  [[ "$requested_scope" == user ]] || return 0
+
+  unit="$(service_path_for_scope "$requested_scope")"
+  unit_dir="$(dirname -- "$unit")"
+  reject_link_chain "$unit_dir"
+  if [[ -e "$unit_dir" || -L "$unit_dir" ]]; then
+    [[ -d "$unit_dir" && ! -L "$unit_dir" ]] || {
+      printf 'Existing user service directory is invalid: %s\n' "$unit_dir" >&2
+      return 1
+    }
+    mode="$(path_mode "$unit_dir" 2>/dev/null || true)"
+    owner="$(path_owner "$unit_dir" 2>/dev/null || true)"
+    expected_owner="$(id -u)"
+    [[ "$mode" =~ ^0?700$ && "$owner" == "$expected_owner" ]] || {
+      printf 'Existing user service directory is weak or owned by another identity: %s\n' "$unit_dir" >&2
+      return 1
+    }
+  fi
+
+  reject_link_chain "$unit"
+  if [[ -e "$unit" || -L "$unit" ]]; then
+    [[ -f "$unit" && ! -L "$unit" ]] || {
+      printf 'Existing user service unit is invalid: %s\n' "$unit" >&2
+      return 1
+    }
+    mode="$(path_mode "$unit" 2>/dev/null || true)"
+    owner="$(path_owner "$unit" 2>/dev/null || true)"
+    expected_owner="$(id -u)"
+    [[ "$mode" =~ ^0?600$ && "$owner" == "$expected_owner" ]] || {
+      printf 'Existing user service unit is weak or owned by another identity: %s\n' "$unit" >&2
+      return 1
+    }
+  fi
+}
+
 remove_service_for_scope() {
   local requested_scope="$1" unit
+  verify_private_service_path_existing "$requested_scope" || return 1
   unit="$(service_path_for_scope "$requested_scope")"
   service_ctl_for_scope "$requested_scope" disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
   if [[ -f "$unit" && ! -L "$unit" ]]; then rm -f -- "$unit"; fi
@@ -523,6 +561,7 @@ install_service() {
     private_dir "$unit_dir"
     wanted_by='default.target'
   fi
+  verify_private_service_path_existing "$scope"
   [[ ! -L "$unit_dir" && ! -L "$unit" ]] || { printf 'Service path symlink rejected.\n' >&2; return 1; }
   tmp="${unit}.new.$$"
   cat >"$tmp" <<EOF
@@ -816,6 +855,7 @@ begin_transaction() {
   [[ ! -e "$staging" && ! -L "$staging" ]] || { printf 'Worker repair staging path already exists.\n' >&2; return 1; }
   old_scope="$(manifest_scope_or_current)"
   old_unit="$(service_path_for_scope "$old_scope")"
+  verify_private_service_path_existing "$old_scope" || return 1
   if ! (
     set -euo pipefail
     install -d -m 0700 -- "$staging" "$staging/identity"
@@ -852,6 +892,7 @@ begin_transaction() {
     fi
 
     if [[ -f "$old_unit" && ! -L "$old_unit" ]]; then
+      verify_private_service_path_existing "$old_scope"
       cp -p -- "$old_unit" "$staging/service.unit"
       chmod 0600 -- "$staging/service.unit"
       : >"$staging/unit-existed"
@@ -907,6 +948,8 @@ restore_transaction() {
     printf 'Worker repair transaction ownership state is invalid.\n' >&2
     return 1
   }
+  verify_private_service_path_existing "$scope" || return 1
+  verify_private_service_path_existing "$old_scope" || return 1
   if [[ -e "$transaction_tombstone_path" || -L "$transaction_tombstone_path" ]]; then
     # The active sidecar may have been published just before a process was
     # stopped while removing the first-install marker. Its journal
@@ -944,6 +987,7 @@ restore_transaction() {
 
   old_unit="$(service_path_for_scope "$old_scope")"
   if [[ -f "$transaction_root/unit-existed" ]]; then
+    verify_private_service_path_existing "$old_scope" || return 1
     reject_link_chain "$(dirname -- "$old_unit")"
     if [[ "$old_scope" == user ]]; then
       private_dir "$(dirname -- "$old_unit")"
@@ -1046,6 +1090,12 @@ if [[ "$installation_owned_before" -eq 1 ]]; then
     exit 1
   fi
 fi
+
+# Validate the user-systemd path after any owned-manifest/path binding checks.
+# This preserves the canonical binding error when XDG_CONFIG_HOME changes,
+# while still rejecting a pre-positioned weak or foreign service path before
+# transaction recovery or a fresh lifecycle can adopt it.
+verify_private_service_path_existing "$scope"
 
 if [[ -e "$transaction_retired_root" || -L "$transaction_retired_root" ]]; then
   [[ ! -e "$transaction_root" && ! -L "$transaction_root" ]] || {

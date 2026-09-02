@@ -7,6 +7,18 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.69] - 2026-09-02
+
+### Fixed
+
+- Hardened Linux user-systemd and macOS LaunchAgent lifecycle paths so
+  pre-existing service directories, units, and plists are verify-only: weak,
+  symlinked, or foreign-owned state fails closed before transaction recovery or
+  installation can adopt it.
+- Added regression coverage for weak and foreign service state, preserving
+  path-binding errors and proving that rejected lifecycle attempts leave worker
+  binaries, manifests, credentials, markers, logs, and service state intact.
+
 ## [0.1.0-preview.68] - 2026-09-02
 
 ### Fixed
@@ -853,7 +865,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.68...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.69...HEAD
+[0.1.0-preview.69]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.68...v0.1.0-preview.69
 [0.1.0-preview.68]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.67...v0.1.0-preview.68
 [0.1.0-preview.67]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.66...v0.1.0-preview.67
 [0.1.0-preview.66]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.65...v0.1.0-preview.66

@@ -288,6 +288,44 @@ verify_private_file_existing() {
   }
 }
 
+verify_private_launch_agent_path_existing() {
+  local plist_dir mode owner expected_owner
+  plist_dir="$(dirname -- "$launch_agent_path")"
+
+  # LaunchAgents are user-owned state. Verify-only is intentional here: a
+  # missing parent remains creation-safe, while an existing weak parent or
+  # plist must never be adopted by an install/repair transaction.
+  reject_link_chain "$plist_dir"
+  if [[ -e "$plist_dir" || -L "$plist_dir" ]]; then
+    [[ -d "$plist_dir" && ! -L "$plist_dir" ]] || {
+      printf 'Existing LaunchAgents directory is invalid: %s\n' "$plist_dir" >&2
+      return 1
+    }
+    mode="$(path_mode "$plist_dir" 2>/dev/null || true)"
+    owner="$(path_owner "$plist_dir" 2>/dev/null || true)"
+    expected_owner="$(id -u)"
+    [[ "$mode" =~ ^0?700$ && "$owner" == "$expected_owner" ]] || {
+      printf 'Existing LaunchAgents directory is weak or owned by another identity: %s\n' "$plist_dir" >&2
+      return 1
+    }
+  fi
+
+  reject_link_chain "$launch_agent_path"
+  if [[ -e "$launch_agent_path" || -L "$launch_agent_path" ]]; then
+    [[ -f "$launch_agent_path" && ! -L "$launch_agent_path" ]] || {
+      printf 'Existing LaunchAgent is invalid: %s\n' "$launch_agent_path" >&2
+      return 1
+    }
+    mode="$(path_mode "$launch_agent_path" 2>/dev/null || true)"
+    owner="$(path_owner "$launch_agent_path" 2>/dev/null || true)"
+    expected_owner="$(id -u)"
+    [[ "$mode" =~ ^0?600$ && "$owner" == "$expected_owner" ]] || {
+      printf 'Existing LaunchAgent is weak or owned by another identity: %s\n' "$launch_agent_path" >&2
+      return 1
+    }
+  fi
+}
+
 hash_file() {
   shasum -a 256 "$1" | awk '{print tolower($1)}'
 }
@@ -536,6 +574,7 @@ launch_agent_loaded() {
 }
 
 remove_launch_agent() {
+  verify_private_launch_agent_path_existing || return 1
   if command -v launchctl >/dev/null 2>&1; then
     launchctl bootout "$launch_domain" "$launch_agent_path" >/dev/null 2>&1 || true
     launchctl bootout "$launch_target" >/dev/null 2>&1 || true
@@ -572,6 +611,7 @@ install_launch_agent() {
     return "$EXIT_RUNTIME_GATED"
   }
   plist_dir="$(dirname "$launch_agent_path")"
+  verify_private_launch_agent_path_existing
   private_dir "$plist_dir"
   private_dir "$logs_root"
   worker_xml="$(xml_escape "${install_root}/cyc-worker")"
@@ -912,6 +952,7 @@ begin_transaction() {
     printf 'Worker repair staging path already exists.\n' >&2
     return 1
   }
+  verify_private_launch_agent_path_existing || return 1
   if ! (
     set -euo pipefail
     mkdir -p "$staging/identity"
@@ -951,6 +992,7 @@ begin_transaction() {
     fi
 
     if [[ -f "$launch_agent_path" && ! -L "$launch_agent_path" ]]; then
+      verify_private_launch_agent_path_existing
       cp -p "$launch_agent_path" "$staging/launch-agent.plist"
       chmod 0600 "$staging/launch-agent.plist"
       : >"$staging/launchagent-existed"
@@ -976,6 +1018,7 @@ begin_transaction() {
 
 restore_transaction() {
   local candidate marker_existed
+  verify_private_launch_agent_path_existing || return 1
   assert_transaction_tree_safe "$transaction_root"
   [[ -f "$transaction_root/schema" && ! -L "$transaction_root/schema" &&
      "$(cat "$transaction_root/schema")" == "$TRANSACTION_SCHEMA" ]] || {
@@ -1036,6 +1079,7 @@ restore_transaction() {
     install -m 0700 "$transaction_root/cyc-worker" "$worker_path"
   fi
   if [[ -f "$transaction_root/launchagent-existed" ]]; then
+    verify_private_launch_agent_path_existing || return 1
     private_dir "$(dirname "$launch_agent_path")"
     install -m 0600 "$transaction_root/launch-agent.plist" "$launch_agent_path"
     if [[ -f "$transaction_root/launchagent-loaded" ]]; then
@@ -1110,6 +1154,12 @@ if [[ "$installation_owned_before" -eq 1 ]]; then
     exit 1
   fi
 fi
+
+# Validate LaunchAgents only after any owned-manifest/path binding checks. This
+# keeps a changed HOME bound to the recorded path error while still rejecting
+# a pre-positioned weak or foreign LaunchAgents path before transaction
+# recovery, preinstall, or a fresh lifecycle can adopt it.
+verify_private_launch_agent_path_existing
 
 if [[ -e "$transaction_retired_root" || -L "$transaction_retired_root" ]]; then
   [[ ! -e "$transaction_root" && ! -L "$transaction_root" ]] || {
