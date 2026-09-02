@@ -7,6 +7,19 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.62] - 2026-09-02
+
+### Fixed
+
+- Hardened Windows worker-kit installation and lifecycle transactions against
+  reparse-point ancestors when a destination or rollback path is created.
+- Made existing Windows private roots verify-only with an exact protected ACL;
+  weak or foreign roots are rejected without repair or mutation.
+- Applied the same verify-only owner/mode contract to Linux and macOS worker
+  roots and added regression fixtures for weak pre-positioned directories.
+- Restored Linux user linger on every pre-activation failure and retained the
+  runtime-gated fail-closed boundary when a user systemd manager is absent.
+
 ## [0.1.0-preview.61] - 2026-09-02
 
 ### Fixed
@@ -770,7 +783,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.61...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.62...HEAD
+[0.1.0-preview.62]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.61...v0.1.0-preview.62
 [0.1.0-preview.61]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.60...v0.1.0-preview.61
 [0.1.0-preview.60]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.59...v0.1.0-preview.60
 [0.1.0-preview.59]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.58...v0.1.0-preview.59

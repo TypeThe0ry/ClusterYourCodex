@@ -41,7 +41,13 @@ $script:TransactionSchema = 'cyc.dev/windows-worker-repair-transaction/v1'
 
 function Resolve-NormalizedPath {
     param([Parameter(Mandatory = $true)][string]$Path)
-    return [System.IO.Path]::GetFullPath($Path).TrimEnd(
+    $full = [System.IO.Path]::GetFullPath($Path)
+    $root = [System.IO.Path]::GetPathRoot($full)
+    if (-not [string]::IsNullOrWhiteSpace($root) -and
+        [string]::Equals($full, $root, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $root
+    }
+    return $full.TrimEnd(
         [System.IO.Path]::DirectorySeparatorChar,
         [System.IO.Path]::AltDirectorySeparatorChar
     )
@@ -60,6 +66,28 @@ function Assert-PathChainNoReparse {
         if (Test-ReparsePoint $item) { throw "Path contains a reparse point: $current" }
         $parent = Split-Path -Parent $current
         if ($parent -eq $current) { break }
+        $current = $parent
+    }
+}
+
+function Assert-CreationPathNoReparse {
+    <#
+    Verify every existing component before a caller creates a missing leaf.
+    The existing-path helper above intentionally stops at the first missing
+    component; that is correct for an already-materialized trust root but is
+    unsafe before New-Item/Copy-Item can follow a junction in an ancestor.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $current = Resolve-NormalizedPath $Path
+    while ($current) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+            if (Test-ReparsePoint $item) {
+                throw "Path contains a reparse point: $current"
+            }
+        }
+        $parent = Split-Path -Parent $current
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $current) { break }
         $current = $parent
     }
 }
@@ -108,24 +136,98 @@ function Set-AclPortable {
     }
 }
 
+function Assert-PrivateAcl {
+    param(
+        [Parameter(Mandatory = $true)][System.IO.FileSystemInfo]$Item,
+        [Parameter(Mandatory = $true)][bool]$Directory
+    )
+    if ($Item.PSIsContainer -ne $Directory -or (Test-ReparsePoint $Item)) {
+        throw "Private path is not a normal $([string]$(if ($Directory) { 'directory' } else { 'file' })): $($Item.FullName)"
+    }
+    $acl = if ($null -ne $Item.PSObject.Methods['GetAccessControl']) {
+        $Item.GetAccessControl()
+    } elseif ($Directory) {
+        [System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.DirectoryInfo]$Item)
+    } else {
+        [System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.FileInfo]$Item)
+    }
+    $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    if (-not $acl.AreAccessRulesProtected -or
+        $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -cne $userSid) {
+        throw "Existing private path ACL is weak or owned by another identity: $($Item.FullName)"
+    }
+    $expectedSids = @($userSid, 'S-1-5-18')
+    $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+    if ($rules.Count -ne $expectedSids.Count) {
+        throw "Existing private path ACL contains an unexpected principal set: $($Item.FullName)"
+    }
+    $requiredInheritance = if ($Directory) {
+        [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    } else {
+        [System.Security.AccessControl.InheritanceFlags]::None
+    }
+    $seen = @{}
+    foreach ($rule in $rules) {
+        $sid = [string]$rule.IdentityReference.Value
+        if ($sid -notin $expectedSids -or $seen.ContainsKey($sid) -or
+            $rule.IsInherited -or
+            $rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or
+            $rule.InheritanceFlags -ne $requiredInheritance -or
+            $rule.PropagationFlags -ne [System.Security.AccessControl.PropagationFlags]::None -or
+            $rule.FileSystemRights -ne [System.Security.AccessControl.FileSystemRights]::FullControl) {
+            throw "Existing private path ACL is not the exact protected allowlist: $($Item.FullName)"
+        }
+        $seen[$sid] = $true
+    }
+    foreach ($sid in $expectedSids) {
+        if (-not $seen.ContainsKey($sid)) {
+            throw "Existing private path ACL is missing required principal ${sid}: $($Item.FullName)"
+        }
+    }
+}
+
 function Protect-Directory {
     param([Parameter(Mandatory = $true)][string]$Path)
-    Assert-PathChainNoReparse -Path $Path
-    [void](New-Item -ItemType Directory -Path $Path -Force)
-    $item = Get-Item -LiteralPath $Path -Force
-    if (-not $item.PSIsContainer -or (Test-ReparsePoint $item)) {
-        throw "Private path is not a normal directory: $Path"
+    $resolved = Resolve-NormalizedPath $Path
+    $existed = Test-Path -LiteralPath $resolved
+    if (-not $existed) {
+        # The complete existing ancestor chain must be checked while the leaf
+        # is still absent. This prevents New-Item from following a junction.
+        Assert-CreationPathNoReparse -Path $resolved
+        [void](New-Item -ItemType Directory -Path $resolved -Force)
+    } else {
+        Assert-PathChainNoReparse -Path $resolved
     }
-    Set-AclPortable -Item $item -Acl (New-PrivateAcl -Directory $true)
+    $item = Get-Item -LiteralPath $resolved -Force
+    if (-not $item.PSIsContainer -or (Test-ReparsePoint $item)) {
+        throw "Private path is not a normal directory: $resolved"
+    }
+    if ($existed) {
+        Assert-PrivateAcl -Item $item -Directory $true
+    } else {
+        Set-AclPortable -Item $item -Acl (New-PrivateAcl -Directory $true)
+        Assert-PrivateAcl -Item $item -Directory $true
+    }
 }
 
 function Protect-File {
-    param([Parameter(Mandatory = $true)][string]$Path)
-    $item = Get-Item -LiteralPath $Path -Force
-    if ($item.PSIsContainer -or (Test-ReparsePoint $item)) {
-        throw "Private path is not a normal file: $Path"
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$NewlyCreated
+    )
+    $resolved = Resolve-NormalizedPath $Path
+    $parent = Split-Path -Parent $resolved
+    if (-not [string]::IsNullOrWhiteSpace($parent)) {
+        Assert-CreationPathNoReparse -Path $parent
     }
-    Set-AclPortable -Item $item -Acl (New-PrivateAcl -Directory $false)
+    $item = Get-Item -LiteralPath $resolved -Force
+    if ($item.PSIsContainer -or (Test-ReparsePoint $item)) {
+        throw "Private path is not a normal file: $resolved"
+    }
+    if ($NewlyCreated) {
+        Set-AclPortable -Item $item -Acl (New-PrivateAcl -Directory $false)
+    }
+    Assert-PrivateAcl -Item $item -Directory $false
 }
 
 function Test-ByteArrayEqual {
@@ -636,7 +738,7 @@ function Write-JsonAtomic {
     $temporary = $Path + '.new-' + [Guid]::NewGuid().ToString('N')
     try {
         [System.IO.File]::WriteAllText($temporary, (($Value | ConvertTo-Json -Depth 8) + "`n"), (New-Object System.Text.UTF8Encoding($false)))
-        Protect-File -Path $temporary
+        Protect-File -Path $temporary -NewlyCreated
         Move-Item -LiteralPath $temporary -Destination $Path -Force
         Protect-File -Path $Path
     } finally {
@@ -756,7 +858,7 @@ function New-WorkerTransaction {
             if (Test-ReparsePoint $source) { throw 'Worker identity storage contains a reparse point.' }
             $destination = Join-Path $identityRoot $source.Name
             Copy-Item -LiteralPath $source.FullName -Destination $destination
-            Protect-File -Path $destination
+            Protect-File -Path $destination -NewlyCreated
         }
 
         $manifestExisted = Test-Path -LiteralPath $InstallManifestPath -PathType Leaf
@@ -768,7 +870,7 @@ function New-WorkerTransaction {
             if (Test-ReparsePoint $manifestItem) { throw 'Existing install manifest is a reparse point.' }
             $manifestBackup = Join-Path $stagingRoot 'install-manifest.json'
             Copy-Item -LiteralPath $InstallManifestPath -Destination $manifestBackup
-            Protect-File -Path $manifestBackup
+            Protect-File -Path $manifestBackup -NewlyCreated
         }
 
         $binaryExisted = Test-Path -LiteralPath $WorkerBinaryPath -PathType Leaf
@@ -780,14 +882,14 @@ function New-WorkerTransaction {
             if (Test-ReparsePoint $binaryItem) { throw 'Existing worker binary is a reparse point.' }
             $binaryBackup = Join-Path $stagingRoot 'cyc-worker.exe'
             Copy-Item -LiteralPath $WorkerBinaryPath -Destination $binaryBackup
-            Protect-File -Path $binaryBackup
+            Protect-File -Path $binaryBackup -NewlyCreated
         }
 
         $taskExisted = $null -ne $TaskSnapshot
         if ($taskExisted) {
             $taskXml = Join-Path $stagingRoot 'task.xml'
             [System.IO.File]::WriteAllText($taskXml, [string]$TaskSnapshot.Xml, (New-Object System.Text.UTF8Encoding($false)))
-            Protect-File -Path $taskXml
+            Protect-File -Path $taskXml -NewlyCreated
         }
         Write-JsonAtomic -Path (Join-Path $stagingRoot 'state.json') -Value ([ordered]@{
             schemaVersion = $script:TransactionSchema
@@ -842,7 +944,7 @@ function Restore-WorkerTransaction {
         if (Test-ReparsePoint $saved) { throw 'Worker repair identity snapshot contains a reparse point.' }
         $destination = Join-Path $DataRoot $saved.Name
         Copy-Item -LiteralPath $saved.FullName -Destination $destination
-        Protect-File -Path $destination
+        Protect-File -Path $destination -NewlyCreated
     }
 
     if (Test-Path -LiteralPath $InstallManifestPath) {
@@ -856,7 +958,7 @@ function Restore-WorkerTransaction {
         $manifestBackup = Join-Path $TransactionRoot 'install-manifest.json'
         if (-not (Test-Path -LiteralPath $manifestBackup -PathType Leaf)) { throw 'Install manifest rollback copy is missing.' }
         Copy-Item -LiteralPath $manifestBackup -Destination $InstallManifestPath
-        Protect-File -Path $InstallManifestPath
+        Protect-File -Path $InstallManifestPath -NewlyCreated
     }
 
     if (Test-Path -LiteralPath $WorkerBinaryPath) {
@@ -870,7 +972,7 @@ function Restore-WorkerTransaction {
         $binaryBackup = Join-Path $TransactionRoot 'cyc-worker.exe'
         if (-not (Test-Path -LiteralPath $binaryBackup -PathType Leaf)) { throw 'Worker binary rollback copy is missing.' }
         Copy-Item -LiteralPath $binaryBackup -Destination $WorkerBinaryPath
-        Protect-File -Path $WorkerBinaryPath
+        Protect-File -Path $WorkerBinaryPath -NewlyCreated
     }
 
     if ([bool]$state.taskExisted) {
@@ -1013,7 +1115,7 @@ Protect-Directory -Path $data
 Protect-Directory -Path $workspace
 if (-not (Test-Path -LiteralPath $markerPath)) {
     [System.IO.File]::WriteAllText($markerPath, "cyc.dev/windows-worker-install/v1`n", (New-Object System.Text.UTF8Encoding($false)))
-    Protect-File -Path $markerPath
+    Protect-File -Path $markerPath -NewlyCreated
 }
 
 $configExistedBeforePair = $false
@@ -1032,7 +1134,7 @@ try {
     if ((Get-FileHash -LiteralPath $temporaryWorker -Algorithm SHA256).Hash.ToLowerInvariant() -ne $kit.sha256) {
         throw 'Staged worker failed SHA-256 verification.'
     }
-    Protect-File -Path $temporaryWorker
+    Protect-File -Path $temporaryWorker -NewlyCreated
 
     New-WorkerTransaction `
         -TransactionRoot $transactionPath `
@@ -1055,7 +1157,7 @@ try {
         Remove-Item -LiteralPath $workerPath -Force
     }
     Move-Item -LiteralPath $temporaryWorker -Destination $workerPath
-    Protect-File -Path $workerPath
+    Protect-File -Path $workerPath -NewlyCreated
 
     if ($EnrollmentFile) {
         $sourceEnrollment = Resolve-NormalizedPath $EnrollmentFile
@@ -1067,7 +1169,7 @@ try {
         $protectedEnrollment = Join-Path $data ('enrollment-' + [Guid]::NewGuid().ToString('N') + '.json')
         try {
             Copy-Item -LiteralPath $sourceEnrollment -Destination $protectedEnrollment
-            Protect-File -Path $protectedEnrollment
+            Protect-File -Path $protectedEnrollment -NewlyCreated
             $pairArguments = @(
                 'pair',
                 '--enrollment-file', $protectedEnrollment,
@@ -1092,7 +1194,10 @@ try {
     }
     $service = 'not_enabled'
     if ($paired) {
-        Protect-File -Path $configPath
+        # A first pairing creates the config inside the already-private data
+        # root; harden that new file. Repair of an existing config remains
+        # verify-only and rejects a weak pre-positioned ACL.
+        Protect-File -Path $configPath -NewlyCreated:(!$configExistedBeforePair)
         & $workerPath status --config $configPath | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "Worker status check failed (exit=$LASTEXITCODE)." }
     }
@@ -1127,7 +1232,7 @@ try {
     Write-JsonAtomic -Path $manifestPath -Value $installManifest
     $commitPath = Join-Path $transactionPath 'committed'
     [System.IO.File]::WriteAllText($commitPath, "committed`n", (New-Object System.Text.UTF8Encoding($false)))
-    Protect-File -Path $commitPath
+    Protect-File -Path $commitPath -NewlyCreated
     $transactionCommitted = $true
     $transactionActive = $false
     try {

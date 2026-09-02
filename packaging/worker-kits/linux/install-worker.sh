@@ -292,11 +292,45 @@ reject_link_chain() {
   done
 }
 
+path_mode() {
+  # Git Bash/MSYS applies the caller's umask while projecting Windows ACLs
+  # into POSIX mode bits. Read with a neutral umask so an existing directory
+  # cannot appear private merely because this installer uses umask 077.
+  (umask 000; stat -c '%a' -- "$1")
+}
+
+path_owner() {
+  stat -c '%u' -- "$1"
+}
+
 private_dir() {
-  reject_link_chain "$1"
-  install -d -m 0700 -- "$1"
-  [[ -d "$1" && ! -L "$1" ]] || { printf 'Private directory invalid: %s\n' "$1" >&2; return 1; }
-  chmod 0700 -- "$1"
+  local path="$1" mode owner expected_owner
+  reject_link_chain "$path"
+  if [[ -e "$path" || -L "$path" ]]; then
+    [[ -d "$path" && ! -L "$path" ]] || {
+      printf 'Private directory invalid: %s\n' "$path" >&2
+      return 1
+    }
+    mode="$(path_mode "$path" 2>/dev/null || true)"
+    owner="$(path_owner "$path" 2>/dev/null || true)"
+    expected_owner="$(id -u)"
+    [[ "$mode" =~ ^0?700$ && "$owner" == "$expected_owner" ]] || {
+      printf 'Existing private directory is weak or owned by another identity: %s\n' "$path" >&2
+      return 1
+    }
+    return 0
+  fi
+  # Missing roots are created and hardened. Existing roots are verify-only so
+  # an inherited/foreign directory cannot be silently adopted by repair.
+  install -d -m 0700 -- "$path"
+  [[ -d "$path" && ! -L "$path" ]] || { printf 'Private directory invalid: %s\n' "$path" >&2; return 1; }
+  mode="$(path_mode "$path" 2>/dev/null || true)"
+  owner="$(path_owner "$path" 2>/dev/null || true)"
+  expected_owner="$(id -u)"
+  [[ "$mode" =~ ^0?700$ && "$owner" == "$expected_owner" ]] || {
+    printf 'Created private directory failed ownership/mode verification: %s\n' "$path" >&2
+    return 1
+  }
 }
 
 systemd_quote() {
@@ -332,21 +366,24 @@ fail_user_systemd_unavailable() {
 }
 
 require_user_systemd_ready() {
-  local current_user linger_enabled_here linger_state runtime_dir
+  local current_user linger_state runtime_dir
   [[ "$scope" == user ]] || return 0
 
   command -v systemctl >/dev/null 2>&1 || fail_user_systemd_unavailable
   command -v loginctl >/dev/null 2>&1 || fail_user_systemd_unavailable
   current_user="$(id -un)"
-  linger_enabled_here=0
+  linger_user="$current_user"
 
   linger_state="$(loginctl show-user "$current_user" --property=Linger --value 2>/dev/null || true)"
-  if [[ "$linger_state" != yes ]]; then
+  if [[ "$linger_state" == yes ]]; then
+    linger_was_enabled_before=1
+  else
+    linger_was_enabled_before=0
     loginctl enable-linger "$current_user" >/dev/null 2>&1 || fail_user_systemd_unavailable
-    linger_enabled_here=1
+    linger_enabled_by_installer=1
     linger_state="$(loginctl show-user "$current_user" --property=Linger --value 2>/dev/null || true)"
     if [[ "$linger_state" != yes ]]; then
-      loginctl disable-linger "$current_user" >/dev/null 2>&1 || true
+      restore_linger || true
       fail_user_systemd_unavailable
     fi
   fi
@@ -361,11 +398,39 @@ require_user_systemd_ready() {
     fi
   fi
   if ! systemctl --user show-environment >/dev/null 2>&1; then
-    if [[ "$linger_enabled_here" -eq 1 ]]; then
-      loginctl disable-linger "$current_user" >/dev/null 2>&1 || true
-    fi
+    restore_linger || true
     fail_user_systemd_unavailable
   fi
+}
+
+linger_was_enabled_before=1
+linger_enabled_by_installer=0
+linger_user=''
+
+restore_linger() {
+  local linger_state
+  if [[ "$linger_enabled_by_installer" -ne 1 || "$linger_was_enabled_before" -ne 0 || -z "$linger_user" ]]; then
+    return 0
+  fi
+  if ! loginctl disable-linger "$linger_user" >/dev/null 2>&1; then
+    printf 'Failed to roll back user linger enabled by this installer.\n' >&2
+    return 1
+  fi
+  linger_state="$(loginctl show-user "$linger_user" --property=Linger --value 2>/dev/null || true)"
+  if [[ "$linger_state" == yes ]]; then
+    printf 'User linger remained enabled after rollback.\n' >&2
+    return 1
+  fi
+  linger_enabled_by_installer=0
+  return 0
+}
+
+cleanup_linger_on_exit() {
+  local exit_code=$?
+  if [[ "$exit_code" -ne 0 ]]; then
+    restore_linger || true
+  fi
+  return "$exit_code"
 }
 
 service_path_for_scope() {
@@ -1011,6 +1076,7 @@ fi
 # invocation is expected to activate a user-scoped service. Pair-only and the
 # enrollment-free preinstall intentionally remain service-independent.
 if [[ "$scope" == user && "$pair_only" -eq 0 && ( -e "$config_path" || -n "$enrollment_file" ) ]]; then
+  trap cleanup_linger_on_exit EXIT
   require_user_systemd_ready
 fi
 
@@ -1041,6 +1107,11 @@ cleanup() {
       # The marker is an ownership capability. Do not leave a new marker
       # behind when journal creation failed before rollback became active.
       rm -f -- "$marker_path"
+    fi
+  fi
+  if [[ "$exit_code" -ne 0 ]]; then
+    if ! restore_linger; then
+      printf 'Worker repair rollback left user linger enabled by this installer.\n' >&2
     fi
   fi
   return "$exit_code"

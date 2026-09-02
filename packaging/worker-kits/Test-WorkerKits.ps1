@@ -210,6 +210,78 @@ try {
             throw 'Windows worker installer accepted an unexpected kit entry or mutated state before verification.'
         }
 
+        # A missing destination must not allow New-Item to follow an existing
+        # junction in an ancestor. Keep a sentinel outside the intended roots
+        # and prove the installer fails before creating anything through it.
+        $reparseTarget = Join-Path $temporary 'windows-reparse-target'
+        $reparseParent = Join-Path $temporary 'windows-reparse-parent'
+        $reparseJunction = Join-Path $reparseParent 'redirect'
+        $reparseSentinel = Join-Path $reparseTarget 'sentinel.txt'
+        [void](New-Item -ItemType Directory -Path $reparseTarget)
+        [void](New-Item -ItemType Directory -Path $reparseParent)
+        [System.IO.File]::WriteAllText($reparseSentinel, "unchanged`n", (New-Object System.Text.UTF8Encoding($false)))
+        $sentinelBefore = (Get-FileHash -LiteralPath $reparseSentinel -Algorithm SHA256).Hash
+        try {
+            [void](New-Item -ItemType Junction -Path $reparseJunction -Target $reparseTarget)
+            $reparseInstall = Join-Path $reparseJunction 'new-install'
+            $reparseData = Join-Path $temporary 'windows-reparse-data'
+            $reparseWorkspace = Join-Path $temporary 'windows-reparse-workspace'
+            $reparseRejected = $false
+            try {
+                $null = . $windowsSmokeInstaller `
+                    -Action Install `
+                    -BundleRoot $windowsSmokeKit `
+                    -InstallRoot $reparseInstall `
+                    -DataRoot $reparseData `
+                    -WorkspaceRoot $reparseWorkspace `
+                    -Scope User `
+                    -Confirm:$false
+            } catch {
+                $reparseRejected = $true
+            }
+            if (-not $reparseRejected -or
+                (Test-Path -LiteralPath $reparseInstall) -or
+                (Test-Path -LiteralPath (Join-Path $reparseTarget 'new-install')) -or
+                (Get-FileHash -LiteralPath $reparseSentinel -Algorithm SHA256).Hash -ne $sentinelBefore) {
+                throw 'Windows worker installer followed a reparse ancestor while creating a missing root.'
+            }
+        } finally {
+            if (Test-Path -LiteralPath $reparseJunction) {
+                Remove-Item -LiteralPath $reparseJunction -Force
+            }
+        }
+
+        # Existing trust-root state is verify-only. A pre-existing directory
+        # with the normal inherited temporary-folder ACL must be rejected and
+        # left byte-for-byte/ACL-for-ACL unchanged rather than silently
+        # repaired into an installer-owned root.
+        $weakRoot = Join-Path $temporary 'windows-weak-existing-root'
+        $weakSentinel = Join-Path $weakRoot 'sentinel.txt'
+        [void](New-Item -ItemType Directory -Path $weakRoot)
+        [System.IO.File]::WriteAllText($weakSentinel, "weak-state`n", (New-Object System.Text.UTF8Encoding($false)))
+        $weakAclBefore = (Get-Acl -LiteralPath $weakRoot).Sddl
+        $weakSentinelBefore = (Get-FileHash -LiteralPath $weakSentinel -Algorithm SHA256).Hash
+        $weakRejected = $false
+        try {
+            $null = . $windowsSmokeInstaller `
+                -Action Install `
+                -BundleRoot $windowsSmokeKit `
+                -InstallRoot $weakRoot `
+                -DataRoot (Join-Path $temporary 'windows-weak-data') `
+                -WorkspaceRoot (Join-Path $temporary 'windows-weak-workspace') `
+                -Scope User `
+                -Confirm:$false
+        } catch {
+            $weakRejected = $true
+        }
+        if (-not $weakRejected -or
+            (Get-Acl -LiteralPath $weakRoot).Sddl -cne $weakAclBefore -or
+            (Get-FileHash -LiteralPath $weakSentinel -Algorithm SHA256).Hash -ne $weakSentinelBefore -or
+            (Test-Path -LiteralPath (Join-Path $temporary 'windows-weak-data')) -or
+            (Test-Path -LiteralPath (Join-Path $temporary 'windows-weak-workspace'))) {
+            throw 'Windows worker installer repaired or mutated an existing weak private root.'
+        }
+
         $preinstallReceipt = . $windowsSmokeInstaller `
             -Action Install `
             -BundleRoot $windowsSmokeKit `
@@ -761,6 +833,14 @@ while [[ $# -gt 0 ]]; do
 done
 if [[ "$directory" -eq 1 ]]; then
   mkdir -p -- "$@"
+  if [[ -n "$mode" ]]; then chmod "$mode" -- "$@"; fi
+  # Git Bash/MSYS cannot project a Windows DACL as a stable 0700 mode after
+  # the child installer changes its umask. Leave a test-only marker for the
+  # stat shim below so newly-created private roots still exercise the exact
+  # mode contract without weakening the production installer.
+  if [[ "$mode" == 0700 ]]; then
+    for path in "$@"; do : >"$path/.cyc-worker-kit-test-mode-0700"; done
+  fi
 else
   source="$1"
   destination="$2"
@@ -772,11 +852,55 @@ chmod +x "$root/fake-bin/systemctl"
 chmod +x "$root/fake-bin/loginctl"
 chmod +x "$root/fake-bin/install"
 chmod +x "$root/fake-root-bin/id"
+cat >"$root/fake-bin/stat" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == -c && $# -ge 3 ]]; then
+  path="${@: -1}"
+  if [[ -f "$path/.cyc-worker-kit-test-mode-0700" ]]; then
+    if [[ "${2:-}" == '%a' ]]; then
+      printf '700\n'
+      exit 0
+    fi
+    if [[ "${2:-}" == '%u' && "${CYC_WORKER_KIT_TEST_ROOT_MODE:-0}" == 1 ]]; then
+      printf '0\n'
+      exit 0
+    fi
+  fi
+fi
+exec /usr/bin/stat "$@"
+EOF
+chmod +x "$root/fake-bin/stat"
 export PATH="$root/fake-bin:$PATH"
 good="$root/linux-smoke-good"
 upgrade="$root/linux-smoke-upgrade"
 bad="$root/linux-smoke-bad"
 chmod +x "$good/cyc-worker" "$good/install-worker.sh" "$upgrade/cyc-worker" "$upgrade/install-worker.sh" "$bad/cyc-worker" "$bad/install-worker.sh"
+
+# Existing private roots are verify-only. A deliberately weak directory must
+# be rejected without chmod/chown or any child state being created.
+weak_existing="$root/linux-weak-existing"
+mkdir -p "$weak_existing"
+printf '%s\n' 'LINUX_WEAK_STATE_SENTINEL' >"$weak_existing/sentinel.txt"
+chmod 0777 "$weak_existing"
+weak_mode_before="$(stat -c '%a' -- "$weak_existing")"
+weak_sentinel_before="$(sha256sum -- "$weak_existing/sentinel.txt" | awk '{print $1}')"
+set +e
+"$good/install-worker.sh" install \
+  --bundle-root "$good" \
+  --install-root "$weak_existing" \
+  --data-root "$root/linux-weak-data" \
+  --workspace-root "$root/linux-weak-workspace" \
+  --scope user \
+  >"$root/linux-weak.stdout" 2>"$root/linux-weak.stderr"
+weak_exit=$?
+set -e
+test "$weak_exit" -ne 0
+grep -q 'Existing private directory is weak or owned by another identity' "$root/linux-weak.stderr"
+test "$(stat -c '%a' -- "$weak_existing")" = "$weak_mode_before"
+test "$(sha256sum -- "$weak_existing/sentinel.txt" | awk '{print $1}')" = "$weak_sentinel_before"
+test ! -e "$root/linux-weak-data"
+test ! -e "$root/linux-weak-workspace"
 
 # A cryptographically valid kit whose signed product identity is tampered must
 # still be rejected by the Linux contract verifier before any local state is
@@ -943,7 +1067,7 @@ test ! -e "$CYC_FAKE_SYSTEMD_ROOT/linger-enabled"
 # manager. This is an unpaired preinstall, so it must not touch systemd.
 root_login_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log")"
 root_systemctl_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log")"
-root_receipt="$(PATH="$root/fake-root-bin:$PATH" "$good/install-worker.sh" install \
+root_receipt="$(CYC_WORKER_KIT_TEST_ROOT_MODE=1 PATH="$root/fake-root-bin:$PATH" "$good/install-worker.sh" install \
   --bundle-root "$good" \
   --install-root "$root/root-auto-install" \
   --data-root "$root/root-auto-data" \
@@ -1235,6 +1359,31 @@ set -euo pipefail
 [[ "${1:-}" == -a && "${2:-}" == 256 && $# -eq 3 ]] || exit 2
 sha256sum "$3"
 SHASUM_WRAPPER
+cat >"$root/fake-macos-bin/chmod" <<'CHMOD_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+mode="${1:-}"
+shift || true
+/usr/bin/chmod "$mode" "$@"
+if [[ "$mode" == 0700 ]]; then
+  for path in "$@"; do
+    [[ "$path" != -* ]] || continue
+    : >"$path/.cyc-worker-kit-test-mode-0700"
+  done
+fi
+CHMOD_WRAPPER
+cat >"$root/fake-macos-bin/stat" <<'STAT_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == -c && $# -ge 3 ]]; then
+  path="${@: -1}"
+  if [[ "${2:-}" == '%a' && -f "$path/.cyc-worker-kit-test-mode-0700" ]]; then
+    printf '700\n'
+    exit 0
+  fi
+fi
+exec /usr/bin/stat "$@"
+STAT_WRAPPER
 cat >"$root/fake-macos-bin/launchctl" <<'LAUNCHCTL_WRAPPER'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1248,6 +1397,7 @@ LAUNCHCTL_WRAPPER
 export CYC_FAKE_LAUNCHCTL_LOG="$root/fake-launchctl.log"
 : >"$CYC_FAKE_LAUNCHCTL_LOG"
 chmod +x "$root/fake-macos-bin/python3" "$root/fake-macos-bin/uname" "$root/fake-macos-bin/shasum" "$root/fake-macos-bin/launchctl"
+chmod +x "$root/fake-macos-bin/chmod" "$root/fake-macos-bin/stat"
 export PATH="$root/fake-macos-bin:$PATH"
 
 good="$root/macos-smoke-good"
@@ -1260,6 +1410,33 @@ data_root="$root/macos-data"
 workspace_root="$root/macos-workspace"
 logs_root="$root/macos-logs"
 common=(--install-root "$install_root" --data-root "$data_root" --workspace-root "$workspace_root" --logs-root "$logs_root")
+
+# Existing macOS private roots are verify-only. The fake-Darwin harness uses
+# the host stat implementation, so this also proves the mode/owner check is
+# portable across the native BSD and GNU stat spellings.
+weak_existing="$root/macos-weak-existing"
+mkdir -p "$weak_existing"
+printf '%s\n' 'MACOS_WEAK_STATE_SENTINEL' >"$weak_existing/sentinel.txt"
+chmod 0777 "$weak_existing"
+weak_mode_before="$(stat -c '%a' -- "$weak_existing")"
+weak_sentinel_before="$(sha256sum -- "$weak_existing/sentinel.txt" | awk '{print $1}')"
+set +e
+"$good/install-worker.sh" install \
+  --bundle-root "$good" \
+  --install-root "$weak_existing" \
+  --data-root "$root/macos-weak-data" \
+  --workspace-root "$root/macos-weak-workspace" \
+  --logs-root "$root/macos-weak-logs" \
+  >"$root/macos-weak.stdout" 2>"$root/macos-weak.stderr"
+weak_exit=$?
+set -e
+test "$weak_exit" -ne 0
+grep -q 'Existing private directory is weak or owned by another identity' "$root/macos-weak.stderr"
+test "$(stat -c '%a' -- "$weak_existing")" = "$weak_mode_before"
+test "$(sha256sum -- "$weak_existing/sentinel.txt" | awk '{print $1}')" = "$weak_sentinel_before"
+test ! -e "$root/macos-weak-data"
+test ! -e "$root/macos-weak-workspace"
+test ! -e "$root/macos-weak-logs"
 
 # This deterministic fake-Darwin fixture exercises only the transaction
 # state-machine re-entry path; it does not claim live macOS LaunchAgent
@@ -1551,13 +1728,13 @@ test ! -e "$default_logs"
         }
     }
     $windowsSource = Get-Content -LiteralPath $windowsInstaller -Raw
-    foreach ($requiredPattern in @('SHA256SUMS', 'Get-WorkerTaskSnapshot', 'Restore-WorkerTask', 'New-WorkerTransaction', 'Restore-WorkerTransaction', 'TransactionSchema', 'AfterPair', 'AfterServiceRegistration', 'BeforeManifestWrite', 'Assert-DefaultDataPurgeTarget', 'Resolve-ServiceScope', 'Resolve-AccountSid', 'Assert-WorkerTaskOwnership', 'Wait-WorkerTaskRunning', 'ServiceAccount', 'TaskPath', 'WorkingDirectory', 'worker scheduled task principal', '--workspace-root', '--repair', 'configExistedBeforePair', 'expectedKitNames', 'actualKitNames', 'exactly five normal files')) {
+    foreach ($requiredPattern in @('SHA256SUMS', 'Get-WorkerTaskSnapshot', 'Restore-WorkerTask', 'New-WorkerTransaction', 'Restore-WorkerTransaction', 'TransactionSchema', 'AfterPair', 'AfterServiceRegistration', 'BeforeManifestWrite', 'Assert-DefaultDataPurgeTarget', 'Resolve-ServiceScope', 'Resolve-AccountSid', 'Assert-WorkerTaskOwnership', 'Wait-WorkerTaskRunning', 'ServiceAccount', 'TaskPath', 'WorkingDirectory', 'worker scheduled task principal', '--workspace-root', '--repair', 'configExistedBeforePair', 'expectedKitNames', 'actualKitNames', 'exactly five normal files', 'Assert-CreationPathNoReparse', 'GetPathRoot', 'Assert-PrivateAcl', 'NewlyCreated')) {
         if ($windowsSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "Windows worker installer is missing rollback/integrity guard: $requiredPattern"
         }
     }
     $linuxSource = Get-Content -LiteralPath $linuxInstaller -Raw
-    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'TRANSACTION_TOMBSTONE_SCHEMA', 'TRANSACTION_TOMBSTONE_RETIRED', 'TRANSACTION_RETIRE_NAME', 'assert_transaction_retirement_tree_safe', 'rollback_tombstone_valid_for_transaction', 'validate_retired_transaction', 'after-pair', 'after-service-registration', 'before-manifest-write', 'after-marker-removal', 'remove_service', 'service_path_for_scope', 'servicePath', 'Installer service path does not match the existing owned installation.', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot', 'KillMode=control-group', 'marker-existed', 'marker-existed=0', 'Owned worker install manifest is missing or unsafe.')) {
+    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'private_dir', 'path_mode', 'path_owner', 'Existing private directory is weak or owned by another identity', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'TRANSACTION_TOMBSTONE_SCHEMA', 'TRANSACTION_TOMBSTONE_RETIRED', 'TRANSACTION_RETIRE_NAME', 'assert_transaction_retirement_tree_safe', 'rollback_tombstone_valid_for_transaction', 'validate_retired_transaction', 'after-pair', 'after-service-registration', 'before-manifest-write', 'after-marker-removal', 'remove_service', 'service_path_for_scope', 'servicePath', 'Installer service path does not match the existing owned installation.', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot', 'KillMode=control-group', 'marker-existed', 'marker-existed=0', 'Owned worker install manifest is missing or unsafe.')) {
         if ($linuxSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "Linux worker installer is missing rollback/integrity guard: $requiredPattern"
         }
@@ -1583,6 +1760,9 @@ test ! -e "$default_logs"
         'Library/Application Support/ClusterYourCodex/Worker',
         'Library/Logs/ClusterYourCodex/Worker',
         'Library/LaunchAgents',
+        'path_mode',
+        'path_owner',
+        'Existing private directory is weak or owned by another identity',
         'dev.clusteryourcodex.worker',
         'launchctl bootstrap',
         'launchctl bootout',

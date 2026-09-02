@@ -50,6 +50,28 @@ function Resolve-CycLifecyclePath {
     return $full.TrimEnd('\', '/')
 }
 
+function Assert-CycCreationPathNoReparse {
+    <#
+    Check every component that already exists before a mutation can create a
+    missing leaf. Existing-path checks that stop at the first missing segment
+    are insufficient here because New-Item would otherwise follow a junction
+    or another reparse point in an ancestor.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $current = Resolve-CycLifecyclePath $Path
+    while ($current) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Lifecycle creation path contains a reparse point: $current"
+            }
+        }
+        $parent = Split-Path -Parent $current
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $current) { break }
+        $current = $parent
+    }
+}
+
 function Assert-CycLifecycleSafeString {
     param(
         [Parameter(Mandatory = $true)][string]$Value,
@@ -96,6 +118,7 @@ function Write-CycLifecycleDiagnostic {
             -not (Test-Path -LiteralPath $directory -PathType Container)) {
             return
         }
+        Assert-CycCreationPathNoReparse -Path $directory
         $directoryItem = Get-Item -LiteralPath $directory -Force
         if (($directoryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return }
         if (Test-Path -LiteralPath $destination) {
@@ -272,6 +295,7 @@ function New-CycPrivateDirectory {
         [switch]$IncludeAdministrators
     )
     $resolved = Resolve-CycLifecyclePath $Path
+    Assert-CycCreationPathNoReparse -Path $resolved
     if (-not (Test-Path -LiteralPath $resolved -PathType Container)) {
         [void](New-Item -ItemType Directory -Path $resolved -Force)
     }
@@ -315,6 +339,7 @@ function Write-CycLifecycleAtomicJson {
     )
     $resolved = Resolve-CycLifecyclePath $Path
     $parent = Split-Path -Parent $resolved
+    Assert-CycCreationPathNoReparse -Path $parent
     if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
         throw 'Lifecycle journal parent is missing.'
     }
@@ -385,6 +410,7 @@ function Publish-CycLifecycleReceiptAtomic {
         throw 'Firewall receipt source must be a bounded regular file.'
     }
     $destinationParent = Split-Path -Parent $destination
+    Assert-CycCreationPathNoReparse -Path $destinationParent
     if (-not (Test-Path -LiteralPath $destinationParent -PathType Container)) {
         throw 'Durable firewall receipt directory is missing.'
     }
@@ -1834,6 +1860,7 @@ function New-CycFirewallExchange {
     $commonDocuments = [Environment]::GetFolderPath('CommonDocuments')
     if ([string]::IsNullOrWhiteSpace($commonDocuments)) { throw 'Public Documents is unavailable.' }
     $base = Join-Path $commonDocuments $script:CycFirewallExchangeDirectory
+    Assert-CycCreationPathNoReparse -Path $base
     if (-not (Test-Path -LiteralPath $base -PathType Container)) {
         [void](New-Item -ItemType Directory -Path $base -Force)
     }

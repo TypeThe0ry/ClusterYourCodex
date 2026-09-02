@@ -104,7 +104,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
-$script:ProductVersion = '0.1.0-preview.61'
+$script:ProductVersion = '0.1.0-preview.62'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
@@ -280,6 +280,28 @@ function Get-RelativeOwnedPath {
 function Test-ReparsePoint {
     param([Parameter(Mandatory = $true)][System.IO.FileSystemInfo]$Item)
     return (($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+}
+
+function Assert-CycCreationPathNoReparse {
+    <#
+    Check every existing component before creating a missing leaf. The
+    existing-path verifier below deliberately requires all components to be
+    present, so it cannot protect New-Item/FileStream calls from a junction
+    that already exists in a parent of a not-yet-created path.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $current = Resolve-NormalizedPath $Path
+    while ($current) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+            if (Test-ReparsePoint $item) {
+                throw "Creation path contains a reparse point: $current"
+            }
+        }
+        $parent = Split-Path -Parent $current
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $current) { break }
+        $current = $parent
+    }
 }
 
 function Get-PayloadFiles {
@@ -844,6 +866,7 @@ function Write-CycDurableAtomicBytes {
             throw "AGENTS.md parent must be a real directory: $directory"
         }
     } else {
+        Assert-CycCreationPathNoReparse -Path $directory
         [void](New-Item -ItemType Directory -Path $directory -Force)
     }
     if (Test-Path -LiteralPath $Path) {
@@ -1286,6 +1309,7 @@ function Start-CycAgentsInstallTransaction {
     if (Test-Path -LiteralPath (Join-Path $root 'journal.json')) {
         throw 'A global AGENTS.md transaction already exists in this installer transaction.'
     }
+    Assert-CycCreationPathNoReparse -Path $root
     [void](New-Item -ItemType Directory -Path $root -Force)
     $beforePath = Join-Path $root 'before.bin'
     $afterPath = Join-Path $root 'after.bin'
@@ -1548,6 +1572,7 @@ function Install-CycAgentsManagedBlock {
     $transaction = $null
     $preserveTemporary = $false
     try {
+        Assert-CycCreationPathNoReparse -Path $temporaryRoot
         [void](New-Item -ItemType Directory -Path $temporaryRoot -Force)
         $transaction = Start-CycAgentsInstallTransaction `
             -Plan $Plan `
@@ -1789,6 +1814,7 @@ function Start-CycAgentsRemovalTransaction {
     if (Test-Path -LiteralPath (Join-Path $root 'journal.json')) {
         throw 'A global AGENTS.md uninstall transaction already exists here.'
     }
+    Assert-CycCreationPathNoReparse -Path $root
     [void](New-Item -ItemType Directory -Path $root -Force)
     $beforePath = Join-Path $root 'before.bin'
     $afterPath = Join-Path $root 'after.bin'
@@ -3265,6 +3291,7 @@ function Set-PrivateDirectoryAcl {
         [switch]$AllowAdministratorsReadAndExecute
     )
     $directory = Resolve-NormalizedPath $Path
+    Assert-CycCreationPathNoReparse -Path $directory
     [void](New-Item -ItemType Directory -Path $directory -Force)
     $root = Get-Item -LiteralPath $directory -Force
     if (-not $root.PSIsContainer) { throw "Private ACL root is not a directory: $directory" }
@@ -3453,8 +3480,10 @@ function Ensure-CycTlsIdentity {
         throw 'Controller TLS identity is incomplete; refusing an implicit certificate rotation.'
     }
 
+    Assert-CycCreationPathNoReparse -Path $tlsRoot
     [void](New-Item -ItemType Directory -Path $tlsRoot -Force)
     Set-PrivateDirectoryAcl -Path $tlsRoot
+    Assert-CycCreationPathNoReparse -Path $tlsDirectory
     [void](New-Item -ItemType Directory -Path $tlsDirectory -Force)
     Set-PrivateDirectoryAcl -Path $tlsDirectory
     $created = $false
@@ -3815,6 +3844,7 @@ function Install-PlannedFiles {
             throw "Bundle payload changed after planning: $($file.relativePath)"
         }
         $parent = Split-Path -Parent $file.targetPath
+        Assert-CycCreationPathNoReparse -Path $parent
         [void](New-Item -ItemType Directory -Path $parent -Force)
         $temporary = $file.targetPath + '.cyc-install-' + [Guid]::NewGuid().ToString('N')
         try {
@@ -4621,6 +4651,8 @@ function New-FileRollbackSnapshot {
     $transactionsRoot = Join-Path $Plan.dataRoot '.installer\transactions'
     $transactionRoot = Join-Path $transactionsRoot ([Guid]::NewGuid().ToString('N'))
     [void](Assert-ChildPath -Root $transactionsRoot -Candidate $transactionRoot)
+    Assert-CycCreationPathNoReparse -Path $transactionsRoot
+    Assert-CycCreationPathNoReparse -Path $transactionRoot
     [void](New-Item -ItemType Directory -Path $transactionRoot -Force)
     $relativePaths = @($Plan.files.relativePath)
     if ($OldManifest) { $relativePaths += @($OldManifest.files | ForEach-Object { [string]$_.relativePath }) }
@@ -4634,6 +4666,7 @@ function New-FileRollbackSnapshot {
             throw "Owned file path is not a regular file: $target"
         }
         if ($existed) {
+            Assert-CycCreationPathNoReparse -Path (Split-Path -Parent $backup)
             [void](New-Item -ItemType Directory -Path (Split-Path -Parent $backup) -Force)
             Copy-Item -LiteralPath $target -Destination $backup -Force
         }
@@ -4662,6 +4695,7 @@ function Restore-FileRollbackSnapshot {
     param([Parameter(Mandatory = $true)]$Snapshot)
     foreach ($record in $Snapshot.files) {
         if ($record.existed) {
+            Assert-CycCreationPathNoReparse -Path (Split-Path -Parent $record.targetPath)
             [void](New-Item -ItemType Directory -Path (Split-Path -Parent $record.targetPath) -Force)
             $temporary = $record.targetPath + '.cyc-rollback-' + [Guid]::NewGuid().ToString('N')
             Copy-Item -LiteralPath $record.backupPath -Destination $temporary -Force
@@ -4671,6 +4705,7 @@ function Restore-FileRollbackSnapshot {
         }
     }
     if ($Snapshot.manifestExisted) {
+        Assert-CycCreationPathNoReparse -Path (Split-Path -Parent $Snapshot.manifestPath)
         [void](New-Item -ItemType Directory -Path (Split-Path -Parent $Snapshot.manifestPath) -Force)
         Copy-Item -LiteralPath $Snapshot.manifestBackup -Destination $Snapshot.manifestPath -Force
     } elseif (Test-Path -LiteralPath $Snapshot.manifestPath -PathType Leaf) {
@@ -5230,6 +5265,7 @@ function Write-DurableAtomicJson {
         [ValidateRange(2, 100)][int]$Depth = 10
     )
     $directory = Split-Path -Parent $Path
+    Assert-CycCreationPathNoReparse -Path $directory
     [void](New-Item -ItemType Directory -Path $directory -Force)
     $leaf = Split-Path -Leaf $Path
     $temporary = Join-Path $directory ($leaf + '.tmp-' + [Guid]::NewGuid().ToString('N'))
@@ -5354,6 +5390,7 @@ function Write-InstallManifest {
         $TlsIdentityResult
     )
     $manifestDirectory = Split-Path -Parent $Plan.manifestPath
+    Assert-CycCreationPathNoReparse -Path $manifestDirectory
     [void](New-Item -ItemType Directory -Path $manifestDirectory -Force)
     $record = [ordered]@{
         schemaVersion = $script:ManifestSchema
@@ -5770,12 +5807,14 @@ function New-CycCodexOnlyTransactionRoot {
     if (Test-Path -LiteralPath $transactionsRoot) {
         [void](Assert-CycRealDirectory -Path $transactionsRoot -Label 'Installer transactions')
     } else {
+        Assert-CycCreationPathNoReparse -Path $transactionsRoot
         [void](New-Item -ItemType Directory -Path $transactionsRoot)
         [void](Assert-CycRealDirectory -Path $transactionsRoot -Label 'Installer transactions')
     }
     $transactionRoot = Assert-ChildPath `
         -Root $transactionsRoot `
         -Candidate (Join-Path $transactionsRoot ('codex-only-' + [Guid]::NewGuid().ToString('N')))
+    Assert-CycCreationPathNoReparse -Path $transactionRoot
     [void](New-Item -ItemType Directory -Path $transactionRoot)
     [void](Assert-CycRealDirectory -Path $transactionRoot -Label 'Codex-only transaction')
     return $transactionRoot

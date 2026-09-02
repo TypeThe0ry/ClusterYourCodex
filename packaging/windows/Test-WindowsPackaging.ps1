@@ -4282,6 +4282,9 @@ exit 91
     Assert-True ($lifecycleSource -match 'Publish-CycLifecycleReceiptAtomic') 'private firewall receipts are published by same-directory atomic replacement'
     Assert-True ($lifecycleSource -match '\[System\.IO\.File\]::Replace\(') 'lifecycle journal replacement uses the native same-volume atomic replace primitive'
     Assert-True ($lifecycleSource -match 'Remove-CycCompletedLifecycleJournal[\s\S]+-ExpectedRequestSha256') 'normal and resumed completion retire only the expected terminal transaction'
+    Assert-True ($lifecycleSource -match 'function Assert-CycCreationPathNoReparse' -and
+        $lifecycleSource -match 'Assert-CycCreationPathNoReparse\s+-Path\s+\$base' -and
+        $lifecycleSource -match 'Assert-CycCreationPathNoReparse\s+-Path\s+\$parent') 'lifecycle checks every existing ancestor before creating private directories or durable files'
     Assert-True ($uninstallerSource -notmatch '(?i)-Verb\s+RunAs|-Elevated') 'uninstaller stays in initiating HKCU/profile context'
     Assert-True ($uninstallerSource -match 'Invoke-ClusterYourCodexLifecycle\.ps1') 'uninstaller delegates only the firewall sub-step to the coordinator'
     Assert-True ($firewallSource -notmatch '(?i)Invoke-Expression|cmd\.exe|Start-Process|&\s+\$Request') 'elevated helper has no arbitrary command or script channel'
@@ -4295,6 +4298,9 @@ exit 91
     Assert-True ($bootstrapSource -match '\$ProfileMatrixTestMode[\s\S]+requires ScheduledTaskLogonType S4U') 'bootstrap keeps its unused S4U test-mode guard fail closed'
     Assert-True ($bootstrapSource -match 'elseif \(\$ScheduledTaskLogonType -cne ''Interactive''\)') 'bootstrap rejects non-Interactive task principals outside profile-matrix test mode'
     Assert-True ($bootstrapSource -match 'New-ScheduledTaskPrincipal[\s\S]+-LogonType \$LogonType[\s\S]+-RunLevel Limited') 'bootstrap registers the validated task principal and retains least privilege'
+    Assert-True ($bootstrapSource -match 'function Assert-CycCreationPathNoReparse' -and
+        $bootstrapSource -match 'Assert-CycCreationPathNoReparse\s+-Path\s+\$directory' -and
+        $bootstrapSource -match 'Assert-CycCreationPathNoReparse\s+-Path\s+\$parent') 'bootstrap checks every existing ancestor before creating private state or payload parents'
     Assert-True ($bootstrapSource -match 'taskLogonType\s*=\s*\$script:ScheduledTaskLogonType') 'bootstrap records the selected task principal in the install manifest'
     Assert-True ($bootstrapSource -match 'taskRuntime\s*=\s*\[ordered\]@') 'bootstrap records task runtime gating separately from the production logon type'
     Assert-True ($bootstrapSource -match 'parent-elevated-registration-v1[\s\S]+not-started') 'bootstrap has an explicit parent-elevated registration-only gate'

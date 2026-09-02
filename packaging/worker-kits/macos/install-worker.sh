@@ -187,14 +187,54 @@ reject_link_chain() {
   done
 }
 
+path_mode() {
+  if stat --version >/dev/null 2>&1; then
+    (umask 000; stat -c '%a' "$1")
+  else
+    (umask 000; stat -f '%Lp' "$1")
+  fi
+}
+
+path_owner() {
+  if stat --version >/dev/null 2>&1; then
+    (umask 000; stat -c '%u' "$1")
+  else
+    (umask 000; stat -f '%u' "$1")
+  fi
+}
+
 private_dir() {
-  reject_link_chain "$1"
-  mkdir -p "$1"
-  [[ -d "$1" && ! -L "$1" ]] || {
-    printf 'Private directory invalid: %s\n' "$1" >&2
+  local path="$1" mode owner expected_owner
+  reject_link_chain "$path"
+  if [[ -e "$path" || -L "$path" ]]; then
+    [[ -d "$path" && ! -L "$path" ]] || {
+      printf 'Private directory invalid: %s\n' "$path" >&2
+      return 1
+    }
+    mode="$(path_mode "$path" 2>/dev/null || true)"
+    owner="$(path_owner "$path" 2>/dev/null || true)"
+    expected_owner="$(id -u)"
+    [[ "$mode" =~ ^0?700$ && "$owner" == "$expected_owner" ]] || {
+      printf 'Existing private directory is weak or owned by another identity: %s\n' "$path" >&2
+      return 1
+    }
+    return 0
+  fi
+  # Missing roots are created and hardened. Existing roots are verify-only so
+  # a pre-positioned weak directory cannot be silently adopted by repair.
+  mkdir -p "$path"
+  [[ -d "$path" && ! -L "$path" ]] || {
+    printf 'Private directory invalid: %s\n' "$path" >&2
     return 1
   }
-  chmod 0700 "$1"
+  chmod 0700 "$path"
+  mode="$(path_mode "$path" 2>/dev/null || true)"
+  owner="$(path_owner "$path" 2>/dev/null || true)"
+  expected_owner="$(id -u)"
+  [[ "$mode" =~ ^0?700$ && "$owner" == "$expected_owner" ]] || {
+    printf 'Created private directory failed ownership/mode verification: %s\n' "$path" >&2
+    return 1
+  }
 }
 
 hash_file() {
