@@ -76,5 +76,5 @@ jobs:
           cache: pnpm
       - name: Install exact dependency graph
         run: pnpm install --frozen-lockfile
-      - name: Reject known high or critical advisories
-        run: pnpm audit --audit-level high
+      - name: Reject known moderate or higher advisories
+        run: pnpm audit --audit-level moderate

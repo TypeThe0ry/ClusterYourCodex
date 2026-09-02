@@ -7,6 +7,14 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.70] - 2026-09-02
+
+### Fixed
+
+- Pinned the transitive `qs` runtime dependency to `6.16.0` through the
+  workspace override and refreshed the lockfile, closing the published
+  denial-of-service advisories for `qs` parsing and stringification.
+
 ## [0.1.0-preview.69] - 2026-09-02
 
 ### Fixed
@@ -865,7 +873,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.69...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.70...HEAD
+[0.1.0-preview.70]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.69...v0.1.0-preview.70
 [0.1.0-preview.69]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.68...v0.1.0-preview.69
 [0.1.0-preview.68]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.67...v0.1.0-preview.68
 [0.1.0-preview.67]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.66...v0.1.0-preview.67

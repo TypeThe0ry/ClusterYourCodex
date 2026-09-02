@@ -2,3 +2,5 @@ packages:
   - "apps/*"
   - "plugins/*/mcp"
 
+overrides:
+  qs: 6.16.0
