@@ -26,6 +26,9 @@ are versioned independently from the product.
 - Handle the Windows ARM64 x64-emulation profile helper's transiently missing
   `Process.ExitCode` by refreshing the process and consuming only a validated
   child receipt fallback; malformed or missing receipts remain failures.
+- Preserve the dependency-security gate during npm advisory API outages with a
+  strict OSV fallback over the installed pnpm graph; unknown or unavailable
+  advisory results remain fail-closed.
 
 ### Documentation
 

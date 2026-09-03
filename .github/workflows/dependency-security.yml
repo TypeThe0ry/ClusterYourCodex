@@ -76,5 +76,32 @@ jobs:
           cache: pnpm
       - name: Install exact dependency graph
         run: pnpm install --frozen-lockfile
+      - name: Test OSV fallback parser
+        run: python3 -m unittest scripts/test_npm_osv_fallback_tests.py
       - name: Reject known moderate or higher advisories
-        run: pnpm audit --audit-level moderate
+        shell: bash
+        run: |
+          set -o pipefail
+          audit_log="${RUNNER_TEMP}/clusteryourcodex-pnpm-audit.log"
+          set +e
+          pnpm audit --audit-level moderate 2>&1 | tee "${audit_log}"
+          audit_exit=${PIPESTATUS[0]}
+          set -e
+          if [ "${audit_exit}" -eq 0 ]; then
+            exit 0
+          fi
+          if ! grep -Eqi 'error \([0-9]+\)|operation was aborted due to timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|ENOTFOUND|socket hang up|fetch failed|ERR_PNPM_(FETCH|META_FETCH)' "${audit_log}"; then
+            echo "pnpm audit failed for a non-network reason; preserving the strict failure"
+            exit "${audit_exit}"
+          fi
+          inventory="${RUNNER_TEMP}/clusteryourcodex-pnpm-inventory.json"
+          pnpm list --json --depth Infinity > "${inventory}"
+          set +e
+          python3 scripts/test_npm_osv_fallback.py --inventory "${inventory}"
+          fallback_exit=$?
+          set -e
+          if [ "${fallback_exit}" -ne 0 ]; then
+            echo "OSV fallback did not produce a clean advisory result; failing closed"
+            exit "${fallback_exit}"
+          fi
+          echo "::warning::pnpm audit advisory endpoint was unavailable; strict OSV fallback passed"
