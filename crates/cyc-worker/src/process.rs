@@ -18,6 +18,13 @@ use crate::security::sanitized_environment;
 
 static PROCESS_EXECUTION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
+// A subreaper can observe the root exit before a rapidly daemonized
+// descendant has finished reparenting into the worker.  Require the managed
+// tree to remain empty for a short, bounded quiescence window before treating
+// a successful root exit as containment proof.  This closes the
+// root-exit/reparent race without adding an unbounded wait to normal jobs.
+const TREE_EMPTY_QUIESCENCE: Duration = Duration::from_millis(100);
+
 #[cfg(target_os = "linux")]
 static LINUX_SUBREAPER: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 
@@ -766,7 +773,10 @@ struct MonitorResult {
 /// A successful root exit is not permission for daemonized descendants to
 /// escape the job. Confirm the group/job is empty and terminate leftovers.
 fn cleanup_after_root_exit(tree: &mut ProcessTree) -> Result<bool> {
-    if tree.is_empty()? {
+    // A first empty observation immediately after the root is reaped can
+    // precede adoption of a double-forked descendant.  Use the same bounded
+    // quiescence check here as in post-termination cleanup.
+    if wait_for_tree_empty(tree, TREE_EMPTY_QUIESCENCE)? {
         return Ok(false);
     }
     tree.terminate()?;
@@ -826,7 +836,21 @@ fn wait_for_tree_empty(tree: &mut ProcessTree, timeout: Duration) -> Result<bool
     let deadline = Instant::now() + timeout;
     loop {
         if tree.is_empty()? {
-            return Ok(true);
+            // Do not return on the first empty observation: a double-forked
+            // descendant may still be between its parent's exit and adoption
+            // by the Linux subreaper.  Re-check for a short quiescence window
+            // so late reparenting is discovered before terminal evidence is
+            // emitted.
+            let quiescence_deadline = Instant::now() + TREE_EMPTY_QUIESCENCE;
+            loop {
+                if !tree.is_empty()? {
+                    break;
+                }
+                if Instant::now() >= quiescence_deadline {
+                    return Ok(true);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
         if Instant::now() >= deadline {
             return Ok(false);
