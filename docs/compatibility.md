@@ -4,7 +4,7 @@
 
 | Component | Platform/architecture | Current state |
 |---|---|---|
-| Controller + desktop | Windows x64 | Implemented/CI packaged prerelease; preview.73 passed clean Windows 11 ARM64 x64-emulation profile acceptance for standard/admin × ASCII/non-ASCII; preview.74 carries the selector-discovery/exit-count guard; native Windows x64 clean-profile and live controller/worker acceptance pending |
+| Controller + desktop | Windows x64 | Implemented/CI packaged prerelease; preview.75 carries the hosted profile-matrix evidence; the next tagged prerelease carries the native selector guard and Windows controller/worker live round-trip probe; native Windows x64 clean-profile, clean-VM, lifecycle, and production-signing acceptance remain pending |
 | Controller + CLI portable | Linux x64 | Developer artifact |
 | Managed worker | Windows x64 | Implemented/CI for trusted jobs; live two-machine/auth acceptance pending |
 | Managed worker | Linux x64 | Implemented/CI for trusted jobs; live two-machine/auth acceptance pending |
@@ -94,12 +94,14 @@ platform acceptance evidence are complete.
   declared-scope issue gates pass. The prerelease release-asset SBOM and tagged
   provenance do not satisfy those broader GA gates.
 
-The preview.73 hosted Windows 11 ARM64 x64-emulation matrix is valid
+The preview.75 hosted Windows 11 ARM64 x64-emulation matrix is valid
 prerelease evidence (standard/admin × ASCII/non-ASCII, all four cases passed).
-The next preview.74 adds a native-selector discovery and positive test-count
-guard; its tagged workflow must pass before it becomes release evidence. Neither
-hosted matrix replaces the independent externally retained clean-VM evidence
-required by the stable GA manifest.
+The commits after preview.75 add a native-selector discovery and positive
+test-count guard plus a same-host Windows controller/worker live protocol probe;
+the next tagged prerelease must pass its workflow before those results become
+tagged release evidence. Neither hosted matrix nor same-host fixture replaces
+the independent externally retained clean-VM, cross-machine, lifecycle, or
+production-signing evidence required by the stable GA manifest.
 
 Native Issue #5 evidence producers should invoke
 `scripts/Test-Issue5Selector.py` on the matching Linux, Windows, or macOS host.
