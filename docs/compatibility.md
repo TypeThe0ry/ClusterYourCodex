@@ -4,7 +4,7 @@
 
 | Component | Platform/architecture | Current state |
 |---|---|---|
-| Controller + desktop | Windows x64 | Implemented/CI packaged prerelease; preview.58 passed clean Windows 11 ARM64 x64-emulation profile acceptance for standard/admin × ASCII/non-ASCII; native Windows x64 clean-profile and live controller/worker acceptance pending |
+| Controller + desktop | Windows x64 | Implemented/CI packaged prerelease; preview.73 passed clean Windows 11 ARM64 x64-emulation profile acceptance for standard/admin × ASCII/non-ASCII; preview.74 carries the selector-discovery/exit-count guard; native Windows x64 clean-profile and live controller/worker acceptance pending |
 | Controller + CLI portable | Linux x64 | Developer artifact |
 | Managed worker | Windows x64 | Implemented/CI for trusted jobs; live two-machine/auth acceptance pending |
 | Managed worker | Linux x64 | Implemented/CI for trusted jobs; live two-machine/auth acceptance pending |
@@ -82,10 +82,19 @@ cleanup, not hostile-workload guards.
   declared-scope issue gates pass. The prerelease release-asset SBOM and tagged
   provenance do not satisfy those broader GA gates.
 
-The preview.58 hosted Windows 11 ARM64 x64-emulation matrix is valid
-prerelease evidence (standard/admin × ASCII/non-ASCII, all four cases passed),
-but it does not replace the independent externally retained clean-VM evidence
+The preview.73 hosted Windows 11 ARM64 x64-emulation matrix is valid
+prerelease evidence (standard/admin × ASCII/non-ASCII, all four cases passed).
+The next preview.74 adds a native-selector discovery and positive test-count
+guard; its tagged workflow must pass before it becomes release evidence. Neither
+hosted matrix replaces the independent externally retained clean-VM evidence
 required by the stable GA manifest.
+
+Native Issue #5 evidence producers should invoke
+`scripts/Test-Issue5Selector.py` on the matching Linux, Windows, or macOS host.
+The guard performs `cargo test --list`, rejects missing or duplicate positive
+selectors, executes the exact locked selector, and requires a parsed summary
+with at least one passed test and zero failures. A Cargo exit code of zero with
+`running 0 tests` is rejected and must never be promoted into a GA evidence row.
 
 ### GA evidence manifest contract
 

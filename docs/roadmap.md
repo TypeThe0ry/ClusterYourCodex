@@ -24,7 +24,7 @@ Status vocabulary:
 
 | Capability | Status |
 |---|---|
-| Self-contained Setup, Repair, Uninstall | implemented, CI/fresh-deployment verified; preview.58 passed clean Windows 11 ARM64 x64-emulation acceptance for standard/admin × ASCII/non-ASCII profiles (all four cases exitCode=0); native Windows x64 clean-profile and live controller/worker acceptance remain pending |
+| Self-contained Setup, Repair, Uninstall | implemented, CI/fresh-deployment verified; preview.73 passed clean Windows 11 ARM64 x64-emulation acceptance for standard/admin × ASCII/non-ASCII profiles (all four cases exitCode=0), including the child-receipt exit-code fallback; preview.74 carries a native-selector discovery/positive-count guard; native Windows x64 clean-profile and live controller/worker acceptance remain pending |
 | Managed worker pairing/identity | implemented, CI verified; live two-machine acceptance pending |
 | Password SSH import and host-key approval | implemented, CI verified; live GUI acceptance pending |
 | SSH key/agent authentication | implemented, CI verified; live server acceptance pending |
@@ -53,7 +53,7 @@ Status vocabulary:
 | Production Authenticode / macOS signing as applicable | GA blocker |
 | Release-asset SBOM + tagged provenance | prerelease workflow implemented; full dependency/payload SBOM, notices, and independent verification remain GA blockers |
 | Protected branch/tag/environment governance | `production-signing` and stable `production` environments require review, disable administrator bypass, wait, and accept only `v*` tags; prerelease publication uses a separate `preview-publication` environment and remains `prerelease: true`; a protected stable branch/tag workflow remains a GA blocker |
-| Clean Windows 11 standard/admin/profile matrix | preview.58 hosted ARM64 x64-emulation matrix passed; independent external GA evidence remains a GA blocker |
+| Clean Windows 11 standard/admin/profile matrix | preview.73 hosted ARM64 x64-emulation matrix passed; preview.74 repeats the acceptance after the selector guard; independent external GA evidence remains a GA blocker |
 | Signed `N-1 -> N` migration and rollback | GA blocker |
 | Windows-controller -> Windows/Linux-worker live GUI/MCP E2E | GA blocker |
 | Localization/accessibility/guided diagnostics | GA blocker |

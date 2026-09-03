@@ -173,6 +173,24 @@ row. Linux, Windows, and macOS each have to carry their platform-specific
 gates plus the guard-state, worker-credential, and restart residual-process
 gates.
 
+Before a native runner turns a test result into an Issue #5 evidence row, it
+must run the repository selector guard:
+
+```text
+python3 scripts/Test-Issue5Selector.py --repo /path/to/ClusterYourCodex \
+  --platform linux --output /path/to/retained/issue5-selector.json
+```
+
+Use `python` on Windows when `python3` is not the installed command name. The
+guard rejects a host/platform mismatch, enumerates `cargo test --list`, requires
+exactly one occurrence of the reviewed positive selector, then runs the exact
+locked selector command and parses the Rust `test result` summary. It only
+returns `status: "passed"` when the selector was listed, the command exited
+zero, at least one test passed, and no test failed. Its bounded diagnostics and
+JSON result should be retained with the native raw log. This closes Cargo's
+otherwise-successful `running 0 tests` behavior before a provider can construct
+the manifest; a positive selector string or exit code alone is not evidence.
+
 For `restartResidualProcessReconciliation`, every platform row must carry a
 native residual marker in addition to its source-bound marker. Linux accepts
 `residual_empty`, `residualCgroupVerified=1`, or

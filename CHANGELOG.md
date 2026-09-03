@@ -7,6 +7,15 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.74] - 2026-09-03
+
+### Changed
+
+- Refresh the compatibility and roadmap matrix for preview.74 and document the
+  native-selector discovery/positive test-count guard alongside the Windows
+  ARM64 child-receipt exit-code fallback. The tagged preview workflow remains
+  the source of truth for the next hosted acceptance result.
+
 ## [0.1.0-preview.73] - 2026-09-03
 
 ### Fixed

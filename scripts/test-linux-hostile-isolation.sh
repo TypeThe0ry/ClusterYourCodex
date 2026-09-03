@@ -35,6 +35,7 @@ RESULT_PATH=""
 TEST_LOG=""
 CLEANUP_LOG=""
 PREFLIGHT_LOG=""
+GUARD_SCRIPT=""
 BASELINE_CGROUPS=""
 OWNED_CGROUPS=""
 PREFLIGHT_CGROUP=""
@@ -254,13 +255,14 @@ verify_no_uid_processes() {
 }
 
 write_manifest() {
-  local repo work job manifest_log test_log cleanup_log source_sha controllers
+  local repo work job manifest_log test_log cleanup_log source_sha controllers guard_script
   repo="$(json_escape "$REPO")"
   work="$(json_escape "$WORK_ROOT")"
   job="$(json_escape "$JOB_ROOT")"
   manifest_log="$(json_escape "$PREFLIGHT_LOG")"
   test_log="$(json_escape "$TEST_LOG")"
   cleanup_log="$(json_escape "$CLEANUP_LOG")"
+  guard_script="$(json_escape "$GUARD_SCRIPT")"
   source_sha="$(json_escape "$SOURCE_SHA")"
   controllers="$(json_escape "$CGROUP_CONTROLLERS")"
   cat >"$MANIFEST_PATH" <<EOF
@@ -292,6 +294,9 @@ write_manifest() {
     "cargo", "test", "--manifest-path", "$(json_escape "$REPO/Cargo.toml")",
     "-p", "cyc-worker", "--lib", "--locked", "--",
     "--ignored", "--exact", "--nocapture", "$(json_escape "$TEST_NAME")"
+  ],
+  "selectorGuard": [
+    "python3", "$guard_script", "--repo", "$repo", "--platform", "linux"
   ],
   "artifacts": {
     "preflightLog": "$manifest_log",
@@ -548,6 +553,7 @@ preflight() {
   require_command rm
   require_command cargo
   require_command rustc
+  require_command python3
   require_command date
   require_command sleep
   require_command rmdir
@@ -576,6 +582,8 @@ preflight() {
 
   [[ -d "$REPO" ]] || die "repository directory does not exist: $REPO"
   [[ -f "$REPO/Cargo.toml" ]] || die "repository has no Cargo.toml: $REPO"
+  GUARD_SCRIPT="$REPO/scripts/Test-Issue5Selector.py"
+  [[ -f "$GUARD_SCRIPT" ]] || die "Issue #5 selector guard is missing: $GUARD_SCRIPT"
   if ! (cd "$REPO" && cargo metadata --no-deps --format-version 1 --manifest-path "$REPO/Cargo.toml") \
     >/dev/null 2>>"$PREFLIGHT_LOG"; then
     die "cargo metadata failed; see $PREFLIGHT_LOG"
@@ -646,8 +654,7 @@ run_native_test() {
   set +e
   (
     cd "$REPO" || exit 125
-    cargo test --manifest-path "$REPO/Cargo.toml" -p cyc-worker --lib --locked -- \
-      --ignored --exact --nocapture "$TEST_NAME"
+    python3 "$GUARD_SCRIPT" --repo "$REPO" --platform linux
   ) >"$TEST_LOG" 2>&1
   TEST_EXIT_CODE=$?
   set -e

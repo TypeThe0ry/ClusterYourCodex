@@ -25,6 +25,15 @@ jobs:
         run: >-
           ./scripts/Test-VersionConsistency.ps1
           -RequirePrerelease
+      - name: Run GA evidence contract regression tests
+        shell: powershell
+        run: >-
+          Invoke-Pester
+          -Script .\scripts\Test-GAReadiness.Tests.ps1
+          -EnableExit
+      - name: Run Issue #5 native selector guard unit tests
+        shell: powershell
+        run: python .\scripts\test_issue5_selector_guard.py
 
   msrv:
     name: Minimum supported Rust 1.88.0 (${{ matrix.graph }})

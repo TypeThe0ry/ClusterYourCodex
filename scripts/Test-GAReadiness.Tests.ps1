@@ -6,6 +6,14 @@ $readinessScript = Join-Path $testScriptRoot 'Test-GAReadiness.ps1'
 $readinessSource = Get-Content -LiteralPath $readinessScript -Raw
 $rawLogScript = Join-Path $testScriptRoot 'Test-GARawLogs.ps1'
 $rawLogSource = Get-Content -LiteralPath $rawLogScript -Raw
+$selectorGuardScript = Join-Path $testScriptRoot 'Test-Issue5Selector.py'
+$selectorGuardSource = Get-Content -LiteralPath $selectorGuardScript -Raw
+$selectorGuardModule = Join-Path $testScriptRoot 'issue5_selector_guard.py'
+$selectorGuardModuleSource = Get-Content -LiteralPath $selectorGuardModule -Raw
+$selectorGuardTests = Join-Path $testScriptRoot 'test_issue5_selector_guard.py'
+$selectorGuardTestsSource = Get-Content -LiteralPath $selectorGuardTests -Raw
+$linuxIsolationProbe = Join-Path $testScriptRoot 'test-linux-hostile-isolation.sh'
+$linuxIsolationProbeSource = Get-Content -LiteralPath $linuxIsolationProbe -Raw
 $workflowPath = Join-Path $testRepositoryRoot '.github/workflows/ga.yml'
 $workflowSource = Get-Content -LiteralPath $workflowPath -Raw
 $expectedCommitForTest = ('a' * 40) -join ''
@@ -292,6 +300,24 @@ Describe 'GA evidence issue acceptance contract' {
     It 'keeps the workflow contract enabled in contract-only mode' {
         $contractResult.status | Should Be 'contract-only'
         ([string]$contractResult.checks[0].name) | Should Be 'workflow-contract'
+    }
+
+    It 'requires the native Issue #5 selector guard before accepting a run' {
+        $selectorGuardSource | Should Match 'issue5_selector_guard'
+        $selectorGuardModuleSource | Should Match 'EXPECTED_SELECTORS'
+        $selectorGuardModuleSource | Should Match 'cargo test --list'
+        $selectorGuardModuleSource | Should Match 'selector_not_found'
+        $selectorGuardModuleSource | Should Match 'selector_ambiguous'
+        $selectorGuardModuleSource | Should Match 'tests_passed_zero'
+        $selectorGuardModuleSource | Should Match 'host_platform_mismatch'
+        $selectorGuardModuleSource | Should Match 'parse_test_result'
+        $selectorGuardModuleSource | Should Match '--exact'
+        $selectorGuardModuleSource | Should Match '--nocapture'
+        $selectorGuardTestsSource | Should Match 'test_nonexistent_selector_fails_before_execution'
+        $selectorGuardTestsSource | Should Match 'test_zero_tests_fails_closed'
+        $linuxIsolationProbeSource | Should Match 'Test-Issue5Selector\.py'
+        $linuxIsolationProbeSource | Should Match 'selectorGuard'
+        $linuxIsolationProbeSource | Should Match 'python3'
     }
 
     It 'wires both issue records and their canonical fields into the gate' {
