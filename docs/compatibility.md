@@ -4,7 +4,7 @@
 
 | Component | Platform/architecture | Current state |
 |---|---|---|
-| Controller + desktop | Windows x64 | Implemented/CI packaged prerelease; preview.75 carries the hosted profile-matrix evidence; the next tagged prerelease carries the native selector guard and Windows controller/worker live round-trip probe; native Windows x64 clean-profile, clean-VM, lifecycle, and production-signing acceptance remain pending |
+| Controller + desktop | Windows x64 | Implemented/CI packaged prerelease; preview.75 carries the hosted profile-matrix evidence; preview.76 carries the native selector guard and Windows controller/worker live round-trip probe; native Windows x64 clean-profile, clean-VM, lifecycle, and production-signing acceptance remain pending |
 | Controller + CLI portable | Linux x64 | Developer artifact |
 | Managed worker | Windows x64 | Implemented/CI for trusted jobs; live two-machine/auth acceptance pending |
 | Managed worker | Linux x64 | Implemented/CI for trusted jobs; live two-machine/auth acceptance pending |
@@ -98,8 +98,8 @@ The preview.75 hosted Windows 11 ARM64 x64-emulation matrix is valid
 prerelease evidence (standard/admin × ASCII/non-ASCII, all four cases passed).
 The commits after preview.75 add a native-selector discovery and positive
 test-count guard plus a same-host Windows controller/worker live protocol probe;
-the next tagged prerelease must pass its workflow before those results become
-tagged release evidence. Neither hosted matrix nor same-host fixture replaces
+preview.76 must pass its tagged workflow before those results become tagged
+release evidence. Neither hosted matrix nor same-host fixture replaces
 the independent externally retained clean-VM, cross-machine, lifecycle, or
 production-signing evidence required by the stable GA manifest.
 

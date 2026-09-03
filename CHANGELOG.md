@@ -7,6 +7,31 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.76] - 2026-09-04
+
+### Added
+
+- Add a Windows controller-to-worker live round-trip probe to the CI and
+  tagged-prerelease paths, including protected job-root ACLs, TLS pairing,
+  snapshot transfer, heartbeat/completion, artifact integrity, process-tree
+  cleanup, and secret-scan evidence.
+- Add a fail-closed Issue #5 selector guard that requires an exact native
+  platform test selector and rejects empty or receipt-only test runs.
+
+### Fixed
+
+- Bind the external hostile-guard runner to a shell-free, bounded helper
+  lifecycle with native exit-status checks, timeout termination/reaping, and
+  identity-bound protected receipts.
+- Handle the Windows ARM64 x64-emulation profile helper's transiently missing
+  `Process.ExitCode` by refreshing the process and consuming only a validated
+  child receipt fallback; malformed or missing receipts remain failures.
+
+### Documentation
+
+- Keep clean-VM, cross-machine, production-signing, macOS LaunchAgent, and
+  hostile-workload isolation evidence explicitly marked as pending GA gates.
+
 ## [0.1.0-preview.75] - 2026-09-04
 
 ### Fixed
@@ -943,7 +968,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.75...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.76...HEAD
+[0.1.0-preview.76]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.75...v0.1.0-preview.76
 [0.1.0-preview.75]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.74...v0.1.0-preview.75
 [0.1.0-preview.74]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.73...v0.1.0-preview.74
 [0.1.0-preview.73]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.72...v0.1.0-preview.73
