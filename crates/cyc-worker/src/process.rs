@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
@@ -397,6 +397,17 @@ async fn run_process_locked(
     .context("create stderr log directory")
     .map_err(ProcessRunError::confirmed_empty)?;
 
+    // Open both destinations before any hostile identity hand-off. The
+    // handles are then carried into the reader tasks, so a hostile step cannot
+    // replace the pathname with a symlink/reparse point between process spawn
+    // and the asynchronous reader opening it.
+    let stdout_file = open_log_file_no_follow(&request.stdout_path)
+        .with_context(|| format!("prepare stdout log {}", request.stdout_path.display()))
+        .map_err(ProcessRunError::confirmed_empty)?;
+    let stderr_file = open_log_file_no_follow(&request.stderr_path)
+        .with_context(|| format!("prepare stderr log {}", request.stderr_path.display()))
+        .map_err(ProcessRunError::confirmed_empty)?;
+
     ensure_process_containment_available()
         .context("secure process-tree containment is unavailable")
         .map_err(ProcessRunError::confirmed_empty)?;
@@ -451,11 +462,13 @@ async fn run_process_locked(
                 .verify_after_process()
                 .context("verify hostile containment after failed spawn")
                 .map_err(ProcessRunError::unconfirmed)?;
-            fs::write(&request.stdout_path, b"")
-                .context("create empty stdout log")
+            stdout_file
+                .sync_all()
+                .context("flush empty stdout log")
                 .map_err(ProcessRunError::confirmed_empty)?;
-            fs::write(&request.stderr_path, b"")
-                .context("create empty stderr log")
+            stderr_file
+                .sync_all()
+                .context("flush empty stderr log")
                 .map_err(ProcessRunError::confirmed_empty)?;
             return Ok(ProcessResult::not_started(error));
         }
@@ -484,6 +497,7 @@ async fn run_process_locked(
     let (sender, mut receiver) = mpsc::channel::<LogChunk>(16);
     let stdout_reader = spawn_reader(
         stdout,
+        stdout_file,
         request.stdout_path,
         LogStream::Stdout,
         request.log_budget.clone(),
@@ -491,6 +505,7 @@ async fn run_process_locked(
     );
     let stderr_reader = spawn_reader(
         stderr,
+        stderr_file,
         request.stderr_path,
         LogStream::Stderr,
         request.log_budget,
@@ -582,6 +597,47 @@ async fn run_process_locked(
     })
 }
 
+/// Open a child log destination without following a final symlink/reparse
+/// point. The caller keeps the returned handle across hostile scope
+/// preparation and process spawn, so pathname replacement after this point
+/// cannot redirect output to an attacker-selected file.
+fn open_log_file_no_follow(path: &std::path::Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("open log without following links {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect opened log {}", path.display()))?;
+    #[cfg(windows)]
+    let opened_is_reparse = {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    };
+    #[cfg(not(windows))]
+    let opened_is_reparse = false;
+    if !metadata.is_file() || opened_is_reparse {
+        bail!(
+            "log destination is not a regular non-link file: {}",
+            path.display()
+        );
+    }
+    Ok(file)
+}
+
 #[derive(Debug)]
 struct ReaderStats {
     bytes: u64,
@@ -603,6 +659,7 @@ impl From<ReaderStats> for ProcessStreamEvidence {
 
 fn spawn_reader<R>(
     mut reader: R,
+    mut file: File,
     path: PathBuf,
     stream: LogStream,
     budget: Arc<LogBudget>,
@@ -612,8 +669,6 @@ where
     R: Read + Send + 'static,
 {
     tokio::task::spawn_blocking(move || {
-        let mut file = File::create(&path)
-            .with_context(|| format!("create bounded log {}", path.display()))?;
         let mut buffer = vec![0u8; 64 * 1024];
         let mut stored = 0u64;
         let mut truncated = false;
@@ -627,7 +682,8 @@ where
             let retained = budget.retain(stream, count);
             if retained > 0 {
                 let bytes = buffer[..retained].to_vec();
-                file.write_all(&bytes).context("write bounded child log")?;
+                file.write_all(&bytes)
+                    .with_context(|| format!("write bounded child log {}", path.display()))?;
                 hasher.update(&bytes);
                 sender
                     .blocking_send(LogChunk { stream, bytes })
@@ -639,7 +695,8 @@ where
                 truncated = true;
             }
         }
-        file.sync_all().context("flush bounded child log")?;
+        file.sync_all()
+            .with_context(|| format!("flush bounded child log {}", path.display()))?;
         Ok(ReaderStats {
             bytes: stored,
             sha256: hex::encode(hasher.finalize()),
@@ -1520,6 +1577,50 @@ mod tests {
         assert!(result.process_tree_terminated);
         assert_eq!(fs::metadata(stdout).unwrap().len(), 0);
         assert_eq!(fs::metadata(stderr).unwrap().len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_file_open_rejects_final_symlink_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().unwrap();
+        let sentinel = directory.path().join("sentinel.log");
+        let log = directory.path().join("stdout.log");
+        fs::write(&sentinel, b"sentinel-preserved").unwrap();
+        symlink(&sentinel, &log).unwrap();
+
+        assert!(open_log_file_no_follow(&log).is_err());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"sentinel-preserved");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reader_handle_survives_path_replacement_with_symlink() {
+        use std::io::Cursor;
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().unwrap();
+        let sentinel = directory.path().join("sentinel.log");
+        let log = directory.path().join("stdout.log");
+        fs::write(&sentinel, b"sentinel-preserved").unwrap();
+        let file = open_log_file_no_follow(&log).unwrap();
+        fs::remove_file(&log).unwrap();
+        symlink(&sentinel, &log).unwrap();
+
+        let (sender, mut receiver) = mpsc::channel(4);
+        let reader = spawn_reader(
+            Cursor::new(b"child-output".to_vec()),
+            file,
+            log,
+            LogStream::Stdout,
+            Arc::new(LogBudget::new(1024)),
+            sender,
+        );
+        let stats = reader.await.unwrap().unwrap();
+        assert_eq!(stats.bytes, 12);
+        assert_eq!(fs::read(&sentinel).unwrap(), b"sentinel-preserved");
+        assert!(receiver.recv().await.is_some());
     }
 
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]

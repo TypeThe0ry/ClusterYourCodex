@@ -7,6 +7,31 @@ import type { Plugin } from "vite";
 const PROXY_PREFIX = "/__cyc_controller";
 const DEFAULT_CONTROLLER_URL = "http://127.0.0.1:47831";
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
+const MAX_CONTROLLER_PATH_LENGTH = 256;
+const JOB_ROUTE = /^\/v1\/jobs\/[A-Za-z0-9_-]{1,128}$/;
+const CANCEL_JOB_ROUTE = /^\/v1\/jobs\/[A-Za-z0-9_-]{1,128}\/cancel$/;
+
+/**
+ * Keep the development proxy's route surface identical to the native Tauri
+ * proxy.  Route validation must happen on the raw request target: handing an
+ * unvalidated target to WHATWG URL first would normalize `%2e%2e` and could
+ * send a different route upstream.
+ */
+export function isAllowedControllerRoute(method: string | undefined, controllerPath: string): boolean {
+  if (controllerPath.length > MAX_CONTROLLER_PATH_LENGTH || controllerPath.includes("%")) {
+    // The native route identifier accepts literal ASCII characters only. This
+    // rejects encoded dot segments, encoded slashes/backslashes, malformed
+    // percent escapes, and double encoding before URL normalization.
+    return false;
+  }
+  if (method === "GET") {
+    return controllerPath === "/v1/health" || controllerPath === "/v1/fleet" || JOB_ROUTE.test(controllerPath);
+  }
+  if (method === "POST") {
+    return controllerPath === "/v1/plans" || controllerPath === "/v1/jobs" || CANCEL_JOB_ROUTE.test(controllerPath);
+  }
+  return false;
+}
 
 export function assertLoopbackControllerUrl(value: string): string {
   let url: URL;
@@ -86,14 +111,14 @@ async function handleProxyRequest(
     jsonError(response, 404, "not_found", "development proxy route not found");
     return;
   }
-  const controllerPath = requestUrl.slice(PROXY_PREFIX.length);
-  if (!/^\/v1\/[A-Za-z0-9_./%-]+$/.test(controllerPath) || controllerPath.includes("..")) {
-    jsonError(response, 400, "invalid_path", "controller path is invalid");
-    return;
-  }
   if (method !== "GET" && method !== "POST") {
     response.setHeader("allow", "GET, POST");
     jsonError(response, 405, "method_not_allowed", "controller method is not allowed");
+    return;
+  }
+  const controllerPath = requestUrl.slice(PROXY_PREFIX.length);
+  if (!isAllowedControllerRoute(method, controllerPath)) {
+    jsonError(response, 400, "invalid_path", "controller path is invalid");
     return;
   }
   if (method === "POST" && request.headers["content-type"]?.split(";", 1)[0]?.trim() !== "application/json") {

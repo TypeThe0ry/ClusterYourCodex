@@ -102,15 +102,15 @@ describe("ControllerClient", () => {
     await expect(client.health()).resolves.toMatchObject({ status: "ready", version: "0.1.0" });
   });
 
-  it("encodes job identifiers and supplies an object body for every mutation", async () => {
+  it("uses native-route-safe job identifiers and supplies an object body for every mutation", async () => {
     const transport = mockControllerProvider(async (request) => {
-      expect(request).toMatchObject({ method: "POST", path: "/v1/jobs/job%2Fid/cancel", body: {} });
+      expect(request).toMatchObject({ method: "POST", path: `/v1/jobs/${jobId}/cancel`, body: {} });
       expect(request.deadlineMs).toEqual(expect.any(Number));
       return { status: 200, body: jobResponse };
     });
     const client = new ControllerClient({ transport });
 
-    await client.cancel("job/id");
+    await client.cancel(jobId);
   });
 
   it("strictly validates public plan bindings and JavaScript integer bounds", async () => {
