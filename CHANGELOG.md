@@ -7,6 +7,26 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.75] - 2026-09-04
+
+### Fixed
+
+- Serialize the direct worker-helper process tests with the Linux child-process
+  guard so test-only subprocesses cannot be mistaken for managed descendants
+  during process-tree cleanup.
+- Reject malformed or lower worker-kit SemVer candidates before a new upgrade
+  transaction mutates files or scheduled-task state, while preserving equal-
+  version repair as an idempotent operation.
+- Extend worker-kit fixture coverage for canonical prerelease ordering,
+  numeric-versus-text precedence, malformed-version rejection, interrupted
+  rollback, and downgrade rejection.
+
+### Documentation
+
+- Document the IPv4-only precondition for the live Linux controller-to-worker
+  round-trip harness and keep the remaining macOS, Windows, and hostile-
+  isolation acceptance gates explicit.
+
 ## [0.1.0-preview.74] - 2026-09-03
 
 ### Changed
