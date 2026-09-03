@@ -12,10 +12,8 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
-#[cfg(target_os = "linux")]
+use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
-#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -45,6 +43,8 @@ const MAX_CONFIG_BYTES: usize = 128 * 1024;
 const MAX_RECEIPT_BYTES: usize = 64 * 1024;
 const MAX_RECEIPT_AGE_MINUTES: i64 = 15;
 const SHA256_HEX_LENGTH: usize = 64;
+const EXTERNAL_GUARD_TIMEOUT: Duration = Duration::from_secs(30);
+const EXTERNAL_GUARD_POLL_INTERVAL: Duration = Duration::from_millis(20);
 #[cfg(any(target_os = "linux", test))]
 const LINUX_CGROUP_ROOT: &str = "/sys/fs/cgroup";
 #[cfg(any(target_os = "linux", test))]
@@ -224,6 +224,50 @@ impl ExternalGuardInvocation {
         let mut command = Command::new(&self.program);
         command.env_clear().args(&self.arguments);
         command
+    }
+
+    /// Run one external-guard request with a bounded lifetime.
+    ///
+    /// A guard is a control-plane helper, not a workload.  It must not inherit
+    /// worker credentials, receive stdin, or leave an unbounded child behind
+    /// during startup/restart reconciliation.  Keep stdout/stderr detached so
+    /// a malformed or hostile helper cannot copy secrets into worker logs.
+    pub fn run(&self, timeout: Duration) -> Result<ExitStatus> {
+        if timeout.is_zero() {
+            bail!("external guard timeout must be greater than zero");
+        }
+        let mut child = self
+            .command()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("spawn external hostile guard {}", self.program.display()))?;
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(status) = child.try_wait().context("poll external hostile guard")? {
+                return Ok(status);
+            }
+            if Instant::now() >= deadline {
+                let kill_result = child.kill();
+                let wait_result = child.wait();
+                if let Err(error) = kill_result {
+                    // The helper may have exited between try_wait and kill;
+                    // still reap it and report a real kill failure.
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        let _ = wait_result;
+                        return Err(error).context("terminate timed-out external hostile guard");
+                    }
+                }
+                wait_result.context("reap timed-out external hostile guard")?;
+                bail!(
+                    "external hostile guard timed out after {} ms",
+                    timeout.as_millis()
+                );
+            }
+            thread::sleep(EXTERNAL_GUARD_POLL_INTERVAL);
+        }
     }
 }
 
@@ -587,6 +631,43 @@ impl HostileIsolation {
                 OsString::from(request_json),
             ],
         })
+    }
+
+    /// Execute and validate one external reconciliation operation.
+    ///
+    /// This is deliberately separate from `ensure_runtime_backend_available`:
+    /// Windows/macOS hostile execution remains fail-closed until a native
+    /// backend proves identity and containment.  The helper is nevertheless
+    /// useful to a platform acceptance runner and to restart recovery because
+    /// it now enforces the complete request lifecycle: pinned executable,
+    /// shell-free invocation, bounded termination, successful exit, and a
+    /// protected identity-bound receipt.
+    pub fn run_external_guard(&self, operation: ExternalGuardOperation) -> Result<()> {
+        let invocation = self.external_guard_invocation(operation)?;
+        let status = invocation.run(EXTERNAL_GUARD_TIMEOUT)?;
+        if !status.success() {
+            bail!(
+                "external hostile guard {:?} exited unsuccessfully: {}",
+                operation,
+                status
+            );
+        }
+        self.validate_external_guard_receipt()
+    }
+
+    /// Reconcile residual state before a worker restart is considered clean.
+    ///
+    /// Callers must still pair this with a native OS containment probe before
+    /// enabling hostile scheduling.  A valid receipt alone is not readiness
+    /// evidence.
+    pub fn reconcile_external_guard(&self) -> Result<()> {
+        self.run_external_guard(ExternalGuardOperation::Reconcile)
+    }
+
+    /// Verify that the external guard still owns the configured containment
+    /// boundary and that its protected receipt is fresh.
+    pub fn verify_external_guard(&self) -> Result<()> {
+        self.run_external_guard(ExternalGuardOperation::Verify)
     }
 
     /// Validate the protected receipt emitted by a platform external guard.
@@ -2052,6 +2133,106 @@ mod tests {
         assert!(
             error.to_string().contains("SHA-256 mismatch"),
             "guard replacement must fail the pinned digest check: {error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_guard_runner_rejects_nonzero_exit_before_receipt_validation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let node_id = Uuid::new_v4();
+        let guard_directory = directory.path().join("guard-state");
+        prepare_private_directory(&guard_directory).unwrap();
+        let guard_executable = directory.path().join("guard");
+        let script =
+            b"#!/bin/sh\nprintf 'sensitive stdout'\nprintf 'sensitive stderr' >&2\nexit 17\n";
+        fs::write(&guard_executable, script).unwrap();
+        fs::set_permissions(&guard_executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let guard_digest = hex::encode(Sha256::digest(script));
+        let isolation = HostileIsolation {
+            config_path: None,
+            backend: Some(IsolationBackend::Windows(WindowsIsolation {
+                node_id,
+                execution_sid: "S-1-5-21-1-2-3-1001".to_owned(),
+                guard_executable,
+                guard_executable_sha256: guard_digest,
+                guard_state_directory: guard_directory.clone(),
+                guard_state_file: guard_directory.join("receipt.json"),
+            })),
+        };
+
+        let error = isolation
+            .run_external_guard(ExternalGuardOperation::Reconcile)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("exited unsuccessfully") && error.to_string().contains("17"),
+            "non-zero guard exit must block reconciliation: {error:#}"
+        );
+        assert!(!path_exists(&guard_directory.join("receipt.json")).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_guard_runner_terminates_a_timed_out_helper() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let guard_executable = directory.path().join("guard");
+        let script = b"#!/bin/sh\nwhile :; do :; done\n";
+        fs::write(&guard_executable, script).unwrap();
+        fs::set_permissions(&guard_executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let invocation = ExternalGuardInvocation {
+            program: guard_executable,
+            arguments: Vec::new(),
+        };
+
+        let error = invocation.run(Duration::from_millis(50)).unwrap_err();
+        assert!(
+            error.to_string().contains("timed out"),
+            "timed-out guard must be terminated and reported: {error:#}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn external_guard_runner_rejects_nonzero_exit_before_receipt_validation() {
+        let command = std::env::var_os("ComSpec")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("cmd.exe"));
+        let invocation = ExternalGuardInvocation {
+            program: command,
+            arguments: vec![
+                OsString::from("/D"),
+                OsString::from("/C"),
+                OsString::from("exit /b 17"),
+            ],
+        };
+
+        let status = invocation.run(Duration::from_secs(2)).unwrap();
+        assert_eq!(status.code(), Some(17));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn external_guard_runner_times_out_and_reaps_windows_helper() {
+        let command = std::env::var_os("ComSpec")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("cmd.exe"));
+        let invocation = ExternalGuardInvocation {
+            program: command,
+            arguments: vec![
+                OsString::from("/D"),
+                OsString::from("/C"),
+                OsString::from("for /L %i in (1,1,2147483647) do @rem"),
+            ],
+        };
+
+        let error = invocation.run(Duration::from_millis(50)).unwrap_err();
+        assert!(
+            error.to_string().contains("timed out"),
+            "timed-out guard must be terminated and reported: {error:#}"
         );
     }
 

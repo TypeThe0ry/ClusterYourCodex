@@ -55,9 +55,21 @@ The internal Linux dedicated-identity/cgroup-v2 mechanism has one native P1
 mechanism test, but independent review identified additional escape, identity,
 resource, and reconciliation proofs required before it can be enabled. The
 preview therefore fails every configured hostile backend closed and publishes
-no hostile scheduling capability. A Windows hostile-workload external guard is
-not implemented; the native process-group backends are trusted-job lifecycle
-cleanup, not hostile-workload guards.
+no hostile scheduling capability. A native Windows hostile-workload containment
+guard is not implemented; the native process-group backends are trusted-job
+lifecycle cleanup, not hostile-workload guards.
+
+The external-guard control path now has a bounded, shell-free runner for the
+future Windows/macOS restart reconciler. `ExternalGuardInvocation::run` clears
+the inherited environment, detaches stdout/stderr, rejects a zero timeout,
+terminates and reaps a timed-out helper, and returns its native exit status.
+`HostileIsolation::reconcile_external_guard` and
+`HostileIsolation::verify_external_guard` additionally require a successful
+exit and a protected, identity-bound receipt. This closes the helper lifecycle
+without turning a JSON receipt into native containment evidence: the Windows
+and macOS runtime gates, public readiness flags, and hostile scheduling
+capability remain fail-closed until an independent native probe and the
+platform acceptance evidence are complete.
 
 ## Authentication
 
