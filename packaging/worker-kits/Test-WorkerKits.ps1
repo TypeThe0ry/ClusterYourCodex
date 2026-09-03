@@ -687,6 +687,52 @@ internal static class Program
             if (-not (Get-Command New-WorkerTransaction -CommandType Function -ErrorAction SilentlyContinue)) {
                 throw '[fixture-only] Windows upgrade fixture cannot access the existing New-WorkerTransaction hook.'
             }
+            foreach ($semVerFunction in @('ConvertTo-CycWorkerSemVer', 'Compare-CycWorkerSemVer', 'Assert-CycWorkerKitIsNotDowngrade')) {
+                if (-not (Get-Command $semVerFunction -CommandType Function -ErrorAction SilentlyContinue)) {
+                    throw "[fixture-only] Windows SemVer fixture cannot access the existing $semVerFunction hook."
+                }
+            }
+
+            # Keep the version policy anchored to SemVer precedence rather than
+            # lexical or System.Version ordering.  The examples include the
+            # canonical prerelease chain, numeric-vs-text identifiers, and all
+            # three core-version components used by the downgrade gate.
+            $semVerOrderingCases = @(
+                [PSCustomObject]@{ Lower = '1.0.0-alpha'; Higher = '1.0.0-alpha.1' }
+                [PSCustomObject]@{ Lower = '1.0.0-alpha.1'; Higher = '1.0.0-alpha.beta' }
+                [PSCustomObject]@{ Lower = '1.0.0-alpha.beta'; Higher = '1.0.0-beta' }
+                [PSCustomObject]@{ Lower = '1.0.0-beta'; Higher = '1.0.0-beta.2' }
+                [PSCustomObject]@{ Lower = '1.0.0-beta.2'; Higher = '1.0.0-beta.11' }
+                [PSCustomObject]@{ Lower = '1.0.0-beta.11'; Higher = '1.0.0-rc.1' }
+                [PSCustomObject]@{ Lower = '1.0.0-rc.1'; Higher = '1.0.0' }
+                [PSCustomObject]@{ Lower = '1.0.0'; Higher = '1.0.1' }
+                [PSCustomObject]@{ Lower = '1.0.1'; Higher = '1.1.0' }
+                [PSCustomObject]@{ Lower = '1.1.0'; Higher = '2.0.0' }
+            )
+            foreach ($semVerCase in $semVerOrderingCases) {
+                $lowerVersion = ConvertTo-CycWorkerSemVer -Value $semVerCase.Lower -Label 'fixture lower version'
+                $higherVersion = ConvertTo-CycWorkerSemVer -Value $semVerCase.Higher -Label 'fixture higher version'
+                $comparison = Compare-CycWorkerSemVer -Left $lowerVersion -Right $higherVersion
+                if ($comparison -ge 0) {
+                    throw "[fixture-only][fail-closed] SemVer ordering regression: $($semVerCase.Lower) was not lower than $($semVerCase.Higher)."
+                }
+            }
+            $equalVersion = ConvertTo-CycWorkerSemVer -Value '7.8.9-preview.3' -Label 'fixture equal version'
+            if ((Compare-CycWorkerSemVer -Left $equalVersion -Right $equalVersion) -ne 0) {
+                throw '[fixture-only][fail-closed] SemVer ordering regression: an identical version was not equal to itself.'
+            }
+            foreach ($invalidVersion in @('01.0.0', '1.0.0-01', '1.0', 'v1.0.0', '1.0.0-')) {
+                $rejected = $false
+                try {
+                    $null = ConvertTo-CycWorkerSemVer -Value $invalidVersion -Label 'fixture invalid version'
+                } catch {
+                    $rejected = $true
+                }
+                if (-not $rejected) {
+                    throw "[fixture-only][fail-closed] SemVer parser accepted malformed version: $invalidVersion."
+                }
+            }
+            Write-Output '[fixture-only][fail-closed] SemVer ordering assertions passed: canonical prerelease precedence, core-version ordering, equality, and malformed-version rejection.'
 
             # Simulate a process interruption after the new worker/config have
             # been written but before the transaction is committed.  The
@@ -2241,7 +2287,7 @@ test ! -e "$default_logs"
         }
     }
     $windowsSource = Get-Content -LiteralPath $windowsInstaller -Raw
-    foreach ($requiredPattern in @('SHA256SUMS', 'Get-WorkerTaskSnapshot', 'Restore-WorkerTask', 'New-WorkerTransaction', 'Restore-WorkerTransaction', 'TransactionSchema', 'AfterPair', 'AfterServiceRegistration', 'BeforeManifestWrite', 'Assert-DefaultDataPurgeTarget', 'Resolve-ServiceScope', 'Resolve-AccountSid', 'Assert-WorkerTaskOwnership', 'Wait-WorkerTaskRunning', 'ServiceAccount', 'TaskPath', 'WorkingDirectory', 'worker scheduled task principal', '--workspace-root', '--repair', 'configExistedBeforePair', 'expectedKitNames', 'actualKitNames', 'exactly five normal files', 'Assert-CreationPathNoReparse', 'GetPathRoot', 'Assert-PrivateAcl', 'Assert-ExistingPrivateDirectory', 'Assert-PrivateStateTree', 'NewlyCreated')) {
+    foreach ($requiredPattern in @('SHA256SUMS', 'Get-WorkerTaskSnapshot', 'Restore-WorkerTask', 'New-WorkerTransaction', 'Restore-WorkerTransaction', 'TransactionSchema', 'AfterPair', 'AfterServiceRegistration', 'BeforeManifestWrite', 'Assert-DefaultDataPurgeTarget', 'Resolve-ServiceScope', 'Resolve-AccountSid', 'Assert-WorkerTaskOwnership', 'Wait-WorkerTaskRunning', 'ServiceAccount', 'TaskPath', 'WorkingDirectory', 'worker scheduled task principal', '--workspace-root', '--repair', 'configExistedBeforePair', 'expectedKitNames', 'actualKitNames', 'exactly five normal files', 'Assert-CreationPathNoReparse', 'GetPathRoot', 'Assert-PrivateAcl', 'Assert-ExistingPrivateDirectory', 'Assert-PrivateStateTree', 'NewlyCreated', 'ConvertTo-CycWorkerSemVer', 'Compare-CycWorkerSemVer', 'Assert-CycWorkerKitIsNotDowngrade', 'downgrade is not permitted', 'older than the installed version')) {
         if ($windowsSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "Windows worker installer is missing rollback/integrity guard: $requiredPattern"
         }

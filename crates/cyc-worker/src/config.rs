@@ -622,8 +622,14 @@ mod tests {
         std::process::exit(41);
     }
 
-    #[test]
-    fn pairing_lock_is_released_after_process_exit() {
+    #[tokio::test]
+    async fn pairing_lock_is_released_after_process_exit() {
+        // Linux enables PR_SET_CHILD_SUBREAPER in the test process. Keep the
+        // helper subprocess exclusive with managed ProcessTree tests so an
+        // unrelated lock helper cannot be mistaken for an adopted job
+        // descendant while the containment baseline is being sampled.
+        #[cfg(target_os = "linux")]
+        let _child_process_guard = crate::process::test_exclusive_child_process_guard().await;
         let directory = tempdir().unwrap();
         let protected = directory.path().join("private");
         prepare_private_directory(&protected).unwrap();
@@ -649,8 +655,13 @@ mod tests {
         ensure_protected_input(&lock_path).unwrap();
     }
 
-    #[test]
-    fn pairing_lock_contends_across_processes_and_recovers_after_release() {
+    #[tokio::test]
+    async fn pairing_lock_contends_across_processes_and_recovers_after_release() {
+        // See pairing_lock_is_released_after_process_exit: this direct
+        // current-exe child must not overlap Linux managed process-tree
+        // tests, otherwise the worker subreaper can claim and reap it.
+        #[cfg(target_os = "linux")]
+        let _child_process_guard = crate::process::test_exclusive_child_process_guard().await;
         let directory = tempdir().unwrap();
         let protected = directory.path().join("private");
         prepare_private_directory(&protected).unwrap();

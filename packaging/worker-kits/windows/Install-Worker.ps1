@@ -311,6 +311,120 @@ function Get-CycWorkerFileHash {
     }
 }
 
+function ConvertTo-CycWorkerSemVer {
+    <#
+    Parse the product version without relying on System.Version.  The worker
+    kit uses SemVer prerelease identifiers (for example, preview.75), while
+    System.Version treats those strings as invalid.  Keep numeric components
+    as canonical strings so comparison remains safe for arbitrarily large
+    SemVer integers and reject malformed versions before any state mutation.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $match = [regex]::Match(
+        $Value,
+        '^(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)(?:-(?<pre>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$',
+        [System.Text.RegularExpressions.RegexOptions]::CultureInvariant
+    )
+    if (-not $match.Success) {
+        throw "$Label is not a canonical Semantic Version: $Value"
+    }
+    $preRelease = @()
+    if ($match.Groups['pre'].Success) {
+        foreach ($identifier in $match.Groups['pre'].Value.Split('.')) {
+            $isNumeric = $identifier -match '^[0-9]+$'
+            if ($isNumeric -and $identifier.Length -gt 1 -and $identifier[0] -eq '0') {
+                throw "$Label contains a prerelease numeric identifier with leading zeroes: $Value"
+            }
+            $preRelease += [PSCustomObject]@{
+                Text = $identifier
+                Numeric = [bool]$isNumeric
+            }
+        }
+    }
+    return [PSCustomObject]@{
+        Major = $match.Groups['major'].Value
+        Minor = $match.Groups['minor'].Value
+        Patch = $match.Groups['patch'].Value
+        PreRelease = $preRelease
+        Text = $Value
+    }
+}
+
+function Compare-CycWorkerNumericIdentifier {
+    param(
+        [Parameter(Mandatory = $true)][string]$Left,
+        [Parameter(Mandatory = $true)][string]$Right
+    )
+    if ($Left.Length -lt $Right.Length) { return -1 }
+    if ($Left.Length -gt $Right.Length) { return 1 }
+    $comparison = [string]::CompareOrdinal($Left, $Right)
+    if ($comparison -lt 0) { return -1 }
+    if ($comparison -gt 0) { return 1 }
+    return 0
+}
+
+function Compare-CycWorkerSemVer {
+    param(
+        [Parameter(Mandatory = $true)]$Left,
+        [Parameter(Mandatory = $true)]$Right
+    )
+    foreach ($component in @('Major', 'Minor', 'Patch')) {
+        $comparison = Compare-CycWorkerNumericIdentifier `
+            -Left ([string]$Left.$component) `
+            -Right ([string]$Right.$component)
+        if ($comparison -ne 0) { return $comparison }
+    }
+    $leftPreRelease = @($Left.PreRelease)
+    $rightPreRelease = @($Right.PreRelease)
+    if ($leftPreRelease.Count -eq 0 -and $rightPreRelease.Count -eq 0) { return 0 }
+    if ($leftPreRelease.Count -eq 0) { return 1 }
+    if ($rightPreRelease.Count -eq 0) { return -1 }
+    $length = [Math]::Max($leftPreRelease.Count, $rightPreRelease.Count)
+    for ($index = 0; $index -lt $length; $index++) {
+        if ($index -ge $leftPreRelease.Count) { return -1 }
+        if ($index -ge $rightPreRelease.Count) { return 1 }
+        $leftIdentifier = $leftPreRelease[$index]
+        $rightIdentifier = $rightPreRelease[$index]
+        if ($leftIdentifier.Numeric -and $rightIdentifier.Numeric) {
+            $comparison = Compare-CycWorkerNumericIdentifier `
+                -Left ([string]$leftIdentifier.Text) `
+                -Right ([string]$rightIdentifier.Text)
+        } elseif ($leftIdentifier.Numeric -and -not $rightIdentifier.Numeric) {
+            $comparison = -1
+        } elseif (-not $leftIdentifier.Numeric -and $rightIdentifier.Numeric) {
+            $comparison = 1
+        } else {
+            $comparison = [string]::CompareOrdinal(
+                [string]$leftIdentifier.Text,
+                [string]$rightIdentifier.Text
+            )
+            if ($comparison -lt 0) { $comparison = -1 }
+            elseif ($comparison -gt 0) { $comparison = 1 }
+        }
+        if ($comparison -ne 0) { return $comparison }
+    }
+    return 0
+}
+
+function Assert-CycWorkerKitIsNotDowngrade {
+    param(
+        [Parameter(Mandatory = $true)]$CandidateManifest,
+        [Parameter(Mandatory = $true)]$RecordedManifest
+    )
+    $candidateVersion = ConvertTo-CycWorkerSemVer `
+        -Value ([string]$CandidateManifest.version) `
+        -Label 'Worker kit version'
+    $recordedVersion = ConvertTo-CycWorkerSemVer `
+        -Value ([string]$RecordedManifest.version) `
+        -Label 'Existing installed worker version'
+    if ((Compare-CycWorkerSemVer -Left $candidateVersion -Right $recordedVersion) -lt 0) {
+        throw "Worker kit version $($candidateVersion.Text) is older than the installed version $($recordedVersion.Text); downgrade is not permitted."
+    }
+}
+
 function Test-Ed25519Signature {
     param(
         [Parameter(Mandatory = $true)][byte[]]$PublicKey,
@@ -1114,6 +1228,7 @@ if (Test-Path -LiteralPath $data -PathType Container) {
 }
 $resolvedScope = Resolve-ServiceScope -RequestedScope $Scope
 $ownedInstallation = $false
+$recordedManifest = $null
 if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
     $markerItem = Get-Item -LiteralPath $markerPath -Force
     if (-not (Test-ReparsePoint $markerItem)) {
@@ -1193,6 +1308,15 @@ if (-not $ownedInstallation -and ($previousTask -or (Test-Path -LiteralPath $wor
 }
 
 $kit = Read-KitManifest -Root $bundle
+if ($ownedInstallation -and $null -ne $recordedManifest) {
+    # Enforce update ordering before creating a transaction, stopping a task,
+    # replacing a worker/config/credential, or writing a new install manifest.
+    # Equal versions remain valid for idempotent Repair; only a lower SemVer is
+    # rejected.  A malformed recorded version also fails closed.
+    Assert-CycWorkerKitIsNotDowngrade `
+        -CandidateManifest $kit.manifest `
+        -RecordedManifest $recordedManifest
+}
 Protect-Directory -Path $install
 Protect-Directory -Path $data
 Protect-Directory -Path $workspace

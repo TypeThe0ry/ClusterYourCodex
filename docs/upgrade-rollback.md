@@ -1,9 +1,11 @@
 # Upgrade, repair, rollback, and uninstall
 
 > **Current boundary:** Same-version Repair and Uninstall have local lifecycle
-> validation. Cross-version prerelease upgrade is an experimental acceptance
-> path, not a supported update channel. Signed `N-1 -> N`, interrupted-upgrade
-> rollback, and downgrade policy remain GA blockers.
+> validation. The installer now rejects a lower SemVer before any transaction,
+> task, or file mutation. Cross-version prerelease upgrade is still an
+> experimental acceptance path, not a supported update channel. Signed
+> `N-1 -> N`, interrupted-upgrade rollback, and production update-channel
+> evidence remain GA blockers.
 
 ## Deterministic local Issue #2 fixtures
 
@@ -20,19 +22,18 @@ existing Windows `New-WorkerTransaction` journal and failure-recovery path
 with mocked Scheduled Task state, verifies that a paired identity survives a
 successful `N-1 -> N` repair, seeds an interrupted `N` after-image and checks
 that re-entry restores `N-1` before retrying, then attempts to use `N-1` after
-`N` is committed. A downgrade is a failure unless the installer rejects it
-with an explicit version-policy error before changing worker, identity,
-manifest, task, or transaction state.
+`N` is committed. The production installer rejects that downgrade with an
+explicit version-policy error before changing worker, identity, manifest,
+task, or transaction state.
 
 This fixture uses the repository's pinned Ed25519 test key and a temporary
 mocked task provider. It does not create or assert Authenticode signatures,
 timestamping, a clean Windows 11 VM, a live controller/worker round trip, or
 an externally retained signed update-channel record. The fixture's successful
 output must therefore never be copied into the Issue #2 GA evidence manifest
-or used to set a GA boolean. The current preview has no production downgrade
-gate yet, so the opt-in run is expected to stop at the downgrade assertion
-until that external/production policy is implemented; that non-zero result is
-the intended fail-closed signal, not a downgrade pass.
+or used to set a GA boolean. It is a regression proof for local version-order
+and rollback behavior, not proof of a signed production update channel or a
+clean Windows 11 VM.
 
 ## Exercise an experimental prerelease upgrade
 
@@ -48,10 +49,10 @@ the intended fail-closed signal, not a downgrade pass.
 5. Open the GUI, verify the displayed version, run Integration Self Test, then
    Full Run Check.
 
-An older installer must not be used to silently downgrade a newer data schema.
-Until the signed update channel and formal downgrade gate ship, restore a known
-good backup/VM snapshot or test a newer prerelease in a disposable environment
-instead of forcing a downgrade.
+An older installer is rejected before it can silently downgrade a newer data
+schema. Until the signed update channel and production rollback evidence ship,
+restore a known-good backup/VM snapshot or test a newer prerelease in a
+disposable environment instead of forcing a downgrade.
 
 ## Repair
 
