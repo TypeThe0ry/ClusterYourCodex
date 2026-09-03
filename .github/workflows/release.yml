@@ -216,6 +216,32 @@ jobs:
             & $path --help | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "$name --help failed." }
           }
+      - name: Run Windows controller/worker live round trip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./scripts/Test-WindowsControllerWorkerRoundTrip.ps1 `
+            -RepositoryRoot $PWD `
+            -WorkRoot $env:RUNNER_TEMP `
+            -CycBin (Join-Path $PWD 'target\${{ matrix.target }}\release\cyc.exe') `
+            -ControllerBin (Join-Path $PWD 'target\${{ matrix.target }}\release\cyc-controller.exe') `
+            -WorkerBin (Join-Path $PWD 'target\${{ matrix.target }}\release\cyc-worker.exe') `
+            -TimeoutSeconds 180 `
+            -KeepEvidence
+          if ($LASTEXITCODE -ne 0) { throw "Windows controller/worker round trip failed with exit code $LASTEXITCODE." }
+      - name: Upload Windows controller/worker round-trip evidence
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ClusterYourCodex-windows-controller-worker-roundtrip-${{ matrix.label }}
+          path: |
+            ${{ runner.temp }}/cyc-windows-controller-worker-roundtrip.*/manifest.json
+            ${{ runner.temp }}/cyc-windows-controller-worker-roundtrip.*/result.json
+            ${{ runner.temp }}/cyc-windows-controller-worker-roundtrip.*/evidence/**
+            ${{ runner.temp }}/cyc-windows-controller-worker-roundtrip.*/logs/**
+          if-no-files-found: warn
+          retention-days: 14
       - name: Verify Linux x64 binaries, executable bits, and native smoke
         if: runner.os == 'Linux'
         shell: bash
