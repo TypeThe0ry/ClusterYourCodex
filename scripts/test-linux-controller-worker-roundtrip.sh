@@ -332,8 +332,9 @@ print(int(duration))
 PY
 }
 
-fleet_contains_node() {
+fleet_contains_fresh_online_node() {
   python3 - "$1" "$2" <<'PY'
+from datetime import datetime, timezone
 import json
 import pathlib
 import sys
@@ -341,11 +342,39 @@ import sys
 with pathlib.Path(sys.argv[1]).open("rb") as handle:
     document = json.load(handle)
 node_id = sys.argv[2]
+
+def is_fresh(timestamp):
+    if not isinstance(timestamp, str) or not timestamp:
+        return False
+    try:
+        observed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if observed.tzinfo is None:
+        return False
+    age = (datetime.now(timezone.utc) - observed).total_seconds()
+    return 0 <= age <= 15
+
 for item in document.get("nodes", []):
-    if item.get("id") == node_id:
+    if (
+        item.get("id") == node_id
+        and item.get("status") == "online"
+        and is_fresh(item.get("lastSeenAt"))
+    ):
         raise SystemExit(0)
 for item in document.get("nodeViews", []):
-    if item.get("nodeId") == node_id:
+    telemetry = item.get("telemetry")
+    if not isinstance(telemetry, dict):
+        telemetry = {}
+    telemetry_document = telemetry.get("document")
+    if not isinstance(telemetry_document, dict):
+        telemetry_document = {}
+    observed_at = telemetry_document.get("observedAt") or telemetry.get("observedAt")
+    if (
+        item.get("nodeId") == node_id
+        and item.get("availability") == "online"
+        and is_fresh(observed_at)
+    ):
         raise SystemExit(0)
 raise SystemExit(1)
 PY
@@ -801,7 +830,7 @@ on_signal() {
 }
 
 run_self_test() {
-  local escaped
+  local escaped fixture node_id
   is_uint 0 || die "self-test: is_uint(0)"
   is_uint 123 || die "self-test: is_uint(123)"
   is_uint 12x && die "self-test: is_uint accepted letters"
@@ -812,6 +841,29 @@ run_self_test() {
   is_private_ipv4 8.8.8.8 && die "self-test: public address accepted as worker address"
   escaped="$(json_escape 'a"b\c')"
   [[ "$escaped" == 'a\"b\\c' ]] || die "self-test: JSON escaping"
+  # Git for Windows may expose a Microsoft Store python3 app-execution alias
+  # that resolves in PATH but is not an installed interpreter. Probe the
+  # interpreter itself before running JSON fixture assertions so the shell
+  # self-test remains portable on a clean Windows host.
+  if python3 -c 'import sys' >/dev/null 2>&1; then
+    node_id='00000000-0000-4000-8000-000000000001'
+    fixture="$(mktemp "${TMPDIR:-/tmp}/cyc-linux-roundtrip-self-test.XXXXXX")" || {
+      die "self-test: failed to create fleet fixture"
+    }
+    printf '{"nodes":[{"id":"%s","status":"offline","lastSeenAt":"1970-01-01T00:00:00Z"}]}' \
+      "$node_id" >"$fixture"
+    if fleet_contains_fresh_online_node "$fixture" "$node_id" 2>/dev/null; then
+      rm -f -- "$fixture"
+      die "self-test: stale offline node accepted as a live report"
+    fi
+    printf '{"nodes":[{"id":"%s","status":"online","lastSeenAt":"%s"}]}' \
+      "$node_id" "$(now_iso)" >"$fixture"
+    if ! fleet_contains_fresh_online_node "$fixture" "$node_id" 2>/dev/null; then
+      rm -f -- "$fixture"
+      die "self-test: fresh online node report was rejected"
+    fi
+    rm -f -- "$fixture"
+  fi
   printf 'PASS: shell self-test passed; no Linux services were started\n'
 }
 
@@ -934,12 +986,12 @@ wait_for_pair_ready() {
 wait_for_node_report() {
   local end=$(( $(now_epoch) + 30 ))
   while (( $(now_epoch) <= end && $(now_epoch) < FLOW_DEADLINE )); do
-    if ! fleet_contains_node "$FLEET_LATEST" "$NODE_ID" 2>/dev/null; then
+    if ! fleet_contains_fresh_online_node "$FLEET_LATEST" "$NODE_ID" 2>/dev/null; then
       "${CYC_BIN}" --controller "$CONTROLLER_URL" --token-file "$CONTROLLER_TOKEN" nodes >"$FLEET_LATEST" 2>>"$EVENT_LOG" || true
     fi
-    if [[ -s "$FLEET_LATEST" ]] && fleet_contains_node "$FLEET_LATEST" "$NODE_ID" 2>/dev/null; then
+    if [[ -s "$FLEET_LATEST" ]] && fleet_contains_fresh_online_node "$FLEET_LATEST" "$NODE_ID" 2>/dev/null; then
       NODE_REPORTED=1
-      log_event "fleet contains paired node"
+      log_event "fleet contains a fresh online node report"
       return 0
     fi
     sleep 0.5

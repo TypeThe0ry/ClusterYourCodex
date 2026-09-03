@@ -17,6 +17,9 @@ are versioned independently from the product.
 - Reject malformed or lower worker-kit SemVer candidates before a new upgrade
   transaction mutates files or scheduled-task state, while preserving equal-
   version repair as an idempotent operation.
+- Bound Linux managed process-tree cleanup after a root exit: retain a short
+  quiescence probe, adopt late descendants, and preserve the graceful
+  termination window before fail-closed escalation.
 - Extend worker-kit fixture coverage for canonical prerelease ordering,
   numeric-versus-text precedence, malformed-version rejection, interrupted
   rollback, and downgrade rejection.
@@ -940,7 +943,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.74...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.75...HEAD
+[0.1.0-preview.75]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.74...v0.1.0-preview.75
 [0.1.0-preview.74]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.73...v0.1.0-preview.74
 [0.1.0-preview.73]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.72...v0.1.0-preview.73
 [0.1.0-preview.72]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.71...v0.1.0-preview.72
