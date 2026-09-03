@@ -774,13 +774,12 @@ struct MonitorResult {
 /// escape the job. Confirm the group/job is empty and terminate leftovers.
 fn cleanup_after_root_exit(tree: &mut ProcessTree) -> Result<bool> {
     // A first empty observation immediately after the root is reaped can
-    // precede adoption of a double-forked descendant.  Keep the original
-    // graceful cleanup window for ordinary short-lived child processes, while
-    // wait_for_tree_empty performs the bounded quiescence check whenever the
-    // tree becomes empty.  Using TREE_EMPTY_QUIESCENCE as the total timeout
-    // would terminate a normal helper (for example git-remote-https) merely
-    // because it needs more than 100 ms to exit after its parent.
-    if wait_for_tree_empty(tree, Duration::from_secs(3))? {
+    // precede adoption of a double-forked descendant.  Use the same bounded
+    // quiescence check here as in post-termination cleanup.  Once a live
+    // descendant is observed, terminate it immediately; waiting for an
+    // arbitrary child to finish could let a successful root exit release
+    // work that is still running.
+    if wait_for_tree_empty(tree, TREE_EMPTY_QUIESCENCE)? {
         return Ok(false);
     }
     tree.terminate()?;
