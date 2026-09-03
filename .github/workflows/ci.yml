@@ -25,9 +25,20 @@ jobs:
         run: >-
           ./scripts/Test-VersionConsistency.ps1
           -RequirePrerelease
+      - name: Install the pinned Pester 3.4 test runner
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $available = @(Get-Module -ListAvailable -Name Pester |
+            Where-Object { $_.Version -eq [version]'3.4.0' })
+          if ($available.Count -eq 0) {
+            Install-Module -Name Pester -RequiredVersion 3.4.0 -Scope CurrentUser -Force -AllowClobber
+          }
+          Import-Module Pester -RequiredVersion 3.4.0 -Force
       - name: Run GA evidence contract regression tests
         shell: powershell
         run: >-
+          Import-Module Pester -RequiredVersion 3.4.0 -Force;
           Invoke-Pester
           -Script .\scripts\Test-GAReadiness.Tests.ps1
           -EnableExit
