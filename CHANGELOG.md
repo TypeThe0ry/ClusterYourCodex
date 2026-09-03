@@ -7,6 +7,23 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.72] - 2026-09-03
+
+### Fixed
+
+- Bound the development controller proxy to the same native route allowlist,
+  validating raw request targets before URL normalization and rejecting encoded
+  path traversal, slash, backslash, malformed-percent, and unknown routes.
+- Added regression coverage proving encoded dot segments never reach the
+  upstream controller and that client job identifiers remain native-route safe.
+- Opened child stdout/stderr log files before hostile identity hand-off without
+  following final symlinks or Windows reparse points, then carried the handles
+  through reader tasks so path replacement cannot redirect evidence output.
+- Added Unix symlink-race regression coverage for process log destinations.
+- Hardened GA raw-log evidence to require a source-bound JSON envelope, positive
+  bounded test counts, zero exit status, cleanup confirmation, and content/hash
+  cross-binding across readiness and preview-publisher checks.
+
 ## [0.1.0-preview.71] - 2026-09-03
 
 ### Fixed
@@ -885,7 +902,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.71...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.72...HEAD
+[0.1.0-preview.72]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.71...v0.1.0-preview.72
 [0.1.0-preview.71]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.70...v0.1.0-preview.71
 [0.1.0-preview.70]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.69...v0.1.0-preview.70
 [0.1.0-preview.69]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.68...v0.1.0-preview.69
