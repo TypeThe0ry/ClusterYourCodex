@@ -2,9 +2,12 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$EvidencePath,
-    [Parameter(Mandatory = $true)][string]$OutputDirectory,
-    [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+    # These are required for a real download/verification run, but remain
+    # optional at binding time so `-ContractOnly` can exercise the parser
+    # contract without touching the filesystem or an external URL.
+    [string]$EvidencePath,
+    [string]$OutputDirectory,
+    [string]$ExpectedCommit,
     [switch]$ContractOnly
 )
 
@@ -1071,6 +1074,8 @@ if ($ContractOnly) {
     return
 }
 
+Assert-RawLogCondition (-not [string]::IsNullOrWhiteSpace($EvidencePath)) 'EvidencePath is required unless -ContractOnly is used'
+Assert-RawLogCondition (-not [string]::IsNullOrWhiteSpace($OutputDirectory)) 'OutputDirectory is required unless -ContractOnly is used'
 Assert-RawLogCondition ($ExpectedCommit -match '^[0-9a-fA-F]{40}$') 'ExpectedCommit must be a full 40-character SHA'
 $evidence = Get-RawLogJson -Path $EvidencePath
 Assert-RawLogCondition ([string]$evidence.schemaVersion -ceq 'cyc.dev/ga-evidence/v1') 'evidence schemaVersion is v1'

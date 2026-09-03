@@ -7,6 +7,15 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.73] - 2026-09-03
+
+### Fixed
+
+- Allow `scripts/Test-GARawLogs.ps1 -ContractOnly` to run without runtime
+  evidence/download parameters, while retaining explicit validation for all
+  required inputs during a real raw-log verification run.
+- Add a regression test covering the parameter-free contract-only invocation.
+
 ## [0.1.0-preview.72] - 2026-09-03
 
 ### Fixed
@@ -902,7 +911,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.72...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.73...HEAD
+[0.1.0-preview.73]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.72...v0.1.0-preview.73
 [0.1.0-preview.72]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.71...v0.1.0-preview.72
 [0.1.0-preview.71]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.70...v0.1.0-preview.71
 [0.1.0-preview.70]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.69...v0.1.0-preview.70

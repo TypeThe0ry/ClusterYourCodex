@@ -424,6 +424,13 @@ Describe 'GA evidence issue acceptance contract' {
         $readinessSource | Should Match 'downloaded GA raw-log file hash matches'
     }
 
+    It 'allows raw-log contract-only checks without runtime parameters' {
+        $result = Start-Process -FilePath 'pwsh' -ArgumentList @(
+            '-NoProfile', '-NonInteractive', '-File', $rawLogScript, '-ContractOnly'
+        ) -Wait -PassThru -NoNewWindow
+        $result.ExitCode | Should Be 0
+    }
+
     It 'cryptographically binds Issue #5 marker commandSha256 in the stable publisher' {
         $rawLogIndex = $workflowSource.IndexOf('Test-GARawLogs.ps1')
         $hashIndex = $workflowSource.IndexOf('hashlib.sha256')
