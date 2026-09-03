@@ -1,6 +1,12 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param()
+param(
+    # Issue #2's cross-version lifecycle fixture is opt-in because it is a
+    # local, fixture-only regression run.  The normal packaging gate remains
+    # deterministic and does not imply Authenticode, clean-VM, or external GA
+    # evidence.
+    [switch]$RunUpgradeRollbackFixtures
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -568,6 +574,12 @@ internal static class Program
         $installedWorker = Join-Path $windowsTransactionInstall 'cyc-worker.exe'
         $installedConfig = Join-Path $windowsTransactionData 'config.json'
         $installedManifest = Join-Path $windowsTransactionData 'install-manifest.json'
+        $baselineInstallManifest = Read-CycWorkerKitsUtf8Json -Path $installedManifest
+        if ([string]$baselineInstallManifest.version -cne '0.1.0-test.1' -or
+            -not [bool]$baselineInstallManifest.paired -or
+            -not [bool]$baselineInstallManifest.serviceEnabled) {
+            throw 'Windows N-1 fixture did not publish a paired, service-enabled install manifest.'
+        }
         $baselineCredentialPath = (Read-CycWorkerKitsUtf8Json -Path $installedConfig).credentialFile
         $baseline = [ordered]@{
             worker = (Get-FileHash -LiteralPath $installedWorker -Algorithm SHA256).Hash
@@ -670,6 +682,109 @@ internal static class Program
             }
         }
 
+        if ($RunUpgradeRollbackFixtures) {
+            Write-Output '[fixture-only][fail-closed] Windows upgrade fixtures use the pinned local Ed25519 test key and mocked Scheduled Task state; they do not prove Authenticode, a clean Windows 11 VM, or any external GA gate.'
+            if (-not (Get-Command New-WorkerTransaction -CommandType Function -ErrorAction SilentlyContinue)) {
+                throw '[fixture-only] Windows upgrade fixture cannot access the existing New-WorkerTransaction hook.'
+            }
+
+            # Simulate a process interruption after the new worker/config have
+            # been written but before the transaction is committed.  The
+            # protected journal is created by the production helper itself;
+            # only the interrupted after-image is fixture data.  Re-entering
+            # the N-1 installer must restore the old identity, binary,
+            # manifest version, and running task before retrying the repair.
+            Write-Output '[fixture-only] interrupted upgrade rollback: seeding the existing protected transaction hook and an interrupted N after-image.'
+            $interruptedTransaction = Join-Path $windowsTransactionData '.repair-transaction'
+            $interruptedCredential = Join-Path $windowsTransactionData 'config.interrupted.credential'
+            $interruptedSnapshot = [PSCustomObject]@{
+                Xml = $baseline.taskXml
+                WasRunning = $true
+            }
+            New-WorkerTransaction `
+                -TransactionRoot $interruptedTransaction `
+                -DataRoot $windowsTransactionData `
+                -InstallManifestPath $installedManifest `
+                -WorkerBinaryPath $installedWorker `
+                -TaskSnapshot $interruptedSnapshot
+
+            Copy-Item -LiteralPath (Join-Path $windowsUpgradeKit 'cyc-worker.exe') -Destination $installedWorker -Force
+            [System.IO.File]::WriteAllText(
+                $interruptedCredential,
+                "WINDOWS_INTERRUPTED_SECRET_DO_NOT_LOG`n",
+                (New-Object System.Text.UTF8Encoding($false))
+            )
+            Protect-File -Path $interruptedCredential -NewlyCreated
+            $interruptedConfig = [ordered]@{
+                paired = $true
+                worker = 'upgrade'
+                repair = $true
+                workspaceRoot = $windowsTransactionWorkspace
+                credentialFile = $interruptedCredential
+            }
+            [System.IO.File]::WriteAllText(
+                $installedConfig,
+                (($interruptedConfig | ConvertTo-Json -Depth 8 -Compress) + "`n"),
+                (New-Object System.Text.UTF8Encoding($false))
+            )
+            # The kit manifest and the installed manifest intentionally have
+            # different schemas.  Start from the committed N-1 install
+            # manifest so the seeded after-image exercises the production
+            # install-manifest recovery contract rather than inventing a
+            # kit-shaped state file.
+            $interruptedManifest = ($baselineInstallManifest | ConvertTo-Json -Depth 8 -Compress) | ConvertFrom-Json
+            $interruptedManifest.version = '0.1.0-test.2'
+            $interruptedManifest.workerSha256 = (Get-FileHash `
+                    -LiteralPath (Join-Path $windowsUpgradeKit 'cyc-worker.exe') `
+                    -Algorithm SHA256).Hash.ToLowerInvariant()
+            [System.IO.File]::WriteAllText(
+                $installedManifest,
+                (($interruptedManifest | ConvertTo-Json -Depth 8 -Compress) + "`n"),
+                (New-Object System.Text.UTF8Encoding($false))
+            )
+            Remove-Item -LiteralPath $baselineCredentialPath -Force
+            $script:FakeTaskExists = $false
+            $script:FakeTaskRunning = $false
+
+            $recoveryArguments = @{
+                Action = 'Repair'
+                BundleRoot = $windowsOldKit
+                InstallRoot = $windowsTransactionInstall
+                DataRoot = $windowsTransactionData
+                WorkspaceRoot = $windowsTransactionWorkspace
+                Scope = 'User'
+                Confirm = $false
+            }
+            $recoveryText = ''
+            $recoveryReceipt = $null
+            try {
+                $recoveryText = (. $windowsOldInstaller @recoveryArguments 2>&1 | Out-String)
+                $recoveryReceipt = $recoveryText | ConvertFrom-Json
+            } catch {
+                $recoveryText += $_.Exception.Message
+            }
+            if ($recoveryText -match 'WINDOWS_.*SECRET_DO_NOT_LOG') {
+                throw '[fixture-only] interrupted upgrade recovery leaked fixture credential material.'
+            }
+            $recoveredConfig = Read-CycWorkerKitsUtf8Json -Path $installedConfig
+            $recoveredManifest = Read-CycWorkerKitsUtf8Json -Path $installedManifest
+            if ($null -eq $recoveryReceipt -or
+                [string]$recoveryReceipt.version -cne '0.1.0-test.1' -or
+                [string]$recoveredManifest.version -cne '0.1.0-test.1' -or
+                [string]$recoveredManifest.workerSha256 -cne [string]$baselineInstallManifest.workerSha256 -or
+                [string]$recoveredConfig.worker -cne 'old' -or
+                (Get-FileHash -LiteralPath $installedWorker -Algorithm SHA256).Hash -ne $baseline.worker -or
+                (Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash -ne $baseline.config -or
+                (Get-FileHash -LiteralPath $baselineCredentialPath -Algorithm SHA256).Hash -ne $baseline.credential -or
+                @((Get-ChildItem -LiteralPath $windowsTransactionData -Filter 'config.*.credential' -File)).Count -ne 1 -or
+                -not $script:FakeTaskExists -or -not $script:FakeTaskRunning -or
+                [string]::IsNullOrWhiteSpace([string]$script:FakeTaskXml) -or
+                (Test-Path -LiteralPath $interruptedTransaction)) {
+                throw '[fixture-only] interrupted upgrade rollback did not restore the complete N-1 state before re-entry.'
+            }
+            Write-Output '[fixture-only][fail-closed] interrupted upgrade rollback passed: the seeded transaction was reconciled before the N-1 repair retry.'
+        }
+
         $routineConfig = (Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash
         $routineCredential = (Get-FileHash -LiteralPath $baselineCredentialPath -Algorithm SHA256).Hash
         $routineReceipt = . $windowsUpgradeInstaller `
@@ -685,6 +800,57 @@ internal static class Program
             (Get-FileHash -LiteralPath $baselineCredentialPath -Algorithm SHA256).Hash -ne $routineCredential -or
             (Get-FileHash -LiteralPath $installedWorker -Algorithm SHA256).Hash -eq $baseline.worker) {
             throw 'Windows Ready-node routine repair did not preserve identity while swapping the worker.'
+        }
+        $routineManifest = Read-CycWorkerKitsUtf8Json -Path $installedManifest
+        if ([string]$routineReceipt.version -cne '0.1.0-test.2' -or
+            [string]$routineManifest.version -cne '0.1.0-test.2' -or
+            [string]$routineManifest.workerSha256 -ne (Get-FileHash `
+                    -LiteralPath $installedWorker -Algorithm SHA256).Hash.ToLowerInvariant()) {
+            throw 'Windows N-1 to N fixture did not commit the candidate kit version and digest.'
+        }
+        if ($RunUpgradeRollbackFixtures) {
+            Write-Output '[fixture-only][fail-closed] signed N-1 to N upgrade passed: detached fixture signatures were verified, the worker changed, and the paired identity was preserved.'
+
+            # A downgrade must be rejected before any transaction or task
+            # mutation.  This invokes the real fixture installer so a future
+            # version gate becomes a regression check.  The current preview
+            # intentionally has no downgrade gate; in that state this block
+            # fails closed with the observed acceptance rather than silently
+            # treating a downgrade as passing evidence.
+            Write-Output '[fixture-only] downgrade rejection: invoking the N-1 installer against the committed N state; acceptance is a fail-closed regression.'
+            $downgradeWorkerBefore = (Get-FileHash -LiteralPath $installedWorker -Algorithm SHA256).Hash
+            $downgradeConfigBefore = (Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash
+            $downgradeCredentialBefore = (Get-FileHash -LiteralPath $baselineCredentialPath -Algorithm SHA256).Hash
+            $downgradeManifestBefore = (Get-FileHash -LiteralPath $installedManifest -Algorithm SHA256).Hash
+            $downgradeTaskXmlBefore = $script:FakeTaskXml
+            $downgradeText = ''
+            $downgradeReceipt = $null
+            try {
+                $downgradeText = (. $windowsOldInstaller @recoveryArguments 2>&1 | Out-String)
+                try { $downgradeReceipt = $downgradeText | ConvertFrom-Json } catch { $downgradeReceipt = $null }
+            } catch {
+                $downgradeText += $_.Exception.Message
+            }
+            if ($downgradeText -match 'WINDOWS_.*SECRET_DO_NOT_LOG') {
+                throw '[fixture-only] downgrade rejection leaked fixture credential material.'
+            }
+            if ($null -ne $downgradeReceipt) {
+                throw "[fixture-only][fail-closed] downgrade rejection failed: N-1 installer was accepted after N was committed (receipt version=$([string]$downgradeReceipt.version))."
+            }
+            if ($downgradeText -notmatch '(?i)downgrade|older.*(version|kit)|version.*(older|downgrade)|newer.*(installed|already)') {
+                throw "[fixture-only][fail-closed] downgrade rejection failed: installer failed without an explicit version-policy error ($($downgradeText.Trim()))."
+            }
+            if ((Get-FileHash -LiteralPath $installedWorker -Algorithm SHA256).Hash -ne $downgradeWorkerBefore -or
+                (Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash -ne $downgradeConfigBefore -or
+                (Get-FileHash -LiteralPath $baselineCredentialPath -Algorithm SHA256).Hash -ne $downgradeCredentialBefore -or
+                (Get-FileHash -LiteralPath $installedManifest -Algorithm SHA256).Hash -ne $downgradeManifestBefore -or
+                -not $script:FakeTaskExists -or -not $script:FakeTaskRunning -or
+                -not [string]::Equals($script:FakeTaskXml, $downgradeTaskXmlBefore, [StringComparison]::Ordinal) -or
+                (Test-Path -LiteralPath (Join-Path $windowsTransactionData '.repair-transaction'))) {
+                throw '[fixture-only][fail-closed] downgrade rejection mutated the committed N state.'
+            }
+            Write-Output '[fixture-only][fail-closed] downgrade rejection passed: the explicit older-version policy rejected the candidate before mutation.'
+            Write-Output '[fixture-only][fail-closed] Issue #2 local upgrade fixtures passed; Authenticode, clean Windows 11 VM, live controller/worker, and externally retained signed GA evidence remain unverified.'
         }
     } finally {
         foreach ($functionName in @(
