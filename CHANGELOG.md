@@ -7,6 +7,26 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.83] - 2026-09-05
+
+### Fixed
+
+- Bind stable GA readiness to a fresh, complete paginated GitHub open-issue
+  snapshot, with a 24-hour freshness limit and canonical issue/label
+  reconciliation against the retained P0/P1 blocker inventory.
+- Add exact-source CI proof for the canonical push workflow, including the
+  complete run/job/check-run set, GitHub Actions producer binding, and a
+  repeated pre-publish verification.
+- Harden Windows atomic writers and rollback paths to reject directories and
+  reparse-point leaves at both the initial check and replacement boundary.
+
+### Tests
+
+- Add PowerShell 5.1/Pester 3.4 coverage for live blocker snapshots and
+  exact-source CI pagination/provenance; all local GA contract suites pass.
+- Main CI run 33923073540 passed all ten Linux, macOS, Windows, MSRV, native
+  worker-kit, desktop, and controller/worker bridge jobs on the source commit.
+
 ## [0.1.0-preview.82] - 2026-09-05
 
 ### Fixed
@@ -1077,7 +1097,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.82...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.83...HEAD
+[0.1.0-preview.83]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.82...v0.1.0-preview.83
 [0.1.0-preview.82]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.81...v0.1.0-preview.82
 [0.1.0-preview.81]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.80...v0.1.0-preview.81
 [0.1.0-preview.80]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.79...v0.1.0-preview.80
