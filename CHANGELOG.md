@@ -23,6 +23,9 @@ are versioned independently from the product.
   host-architecture, coverage, Rust/kit target, command, selector, and
   command/selector digest contract; anchored selectors now reject substring
   or echo-only evidence.
+- Rebind every Issue #3 v2 semantic field and exact marker set in raw
+  verification summaries, and make the raw workflow contract invoke the shared
+  semantic validator directly.
 - Fix Windows Repair and upgrade ordering so the ownership-checked controller
   and worker runtime stop before port availability probing, while foreign
   listeners still fail closed and rollback restores the prior running task.
@@ -34,8 +37,9 @@ are versioned independently from the product.
 - Add v2 Issue #3 semantic-marker regression coverage and Windows
   Install/Repair port-order fixtures, including foreign-listener preservation
   and rollback of a previously running task.
-- Main CI run 33923073540 passed all ten Linux, macOS, Windows, MSRV, native
-  worker-kit, desktop, and controller/worker bridge jobs on the source commit.
+- Main CI is required to pass all ten Linux, macOS, Windows, MSRV, native
+  worker-kit, desktop, and controller/worker bridge jobs for the exact source
+  commit before a tagged prerelease is published.
 
 ## [0.1.0-preview.82] - 2026-09-05
 
