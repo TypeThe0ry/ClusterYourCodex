@@ -644,6 +644,22 @@ impl HostileIsolation {
     /// protected identity-bound receipt.
     pub fn run_external_guard(&self, operation: ExternalGuardOperation) -> Result<()> {
         let invocation = self.external_guard_invocation(operation)?;
+        let guard_state_file = match &self.backend {
+            Some(IsolationBackend::Windows(config)) => &config.guard_state_file,
+            Some(IsolationBackend::Macos(config)) => &config.guard_state_file,
+            Some(IsolationBackend::Linux(_)) | None => {
+                bail!("external guard requested while no external backend is configured")
+            }
+        };
+        prepare_guard_parent(guard_state_file)?;
+        if path_exists(guard_state_file)? {
+            ensure_protected_input(guard_state_file).with_context(|| {
+                format!(
+                    "refuse to run external guard with unprotected state {}",
+                    guard_state_file.display()
+                )
+            })?;
+        }
         let status = invocation.run(EXTERNAL_GUARD_TIMEOUT)?;
         if !status.success() {
             bail!(
@@ -2171,6 +2187,44 @@ mod tests {
             "non-zero guard exit must block reconciliation: {error:#}"
         );
         assert!(!path_exists(&guard_directory.join("receipt.json")).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_guard_runner_prepares_state_parent_before_helper() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let node_id = Uuid::new_v4();
+        let guard_directory = directory.path().join("guard-state");
+        let guard_executable = directory.path().join("guard");
+        let script = b"#!/bin/sh\nexit 17\n";
+        fs::write(&guard_executable, script).unwrap();
+        fs::set_permissions(&guard_executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let guard_digest = hex::encode(Sha256::digest(script));
+        let isolation = HostileIsolation {
+            config_path: None,
+            backend: Some(IsolationBackend::Windows(WindowsIsolation {
+                node_id,
+                execution_sid: "S-1-5-21-1-2-3-1001".to_owned(),
+                guard_executable,
+                guard_executable_sha256: guard_digest,
+                guard_state_directory: guard_directory.clone(),
+                guard_state_file: guard_directory.join("receipt.json"),
+            })),
+        };
+
+        assert!(!guard_directory.exists());
+        let error = isolation
+            .run_external_guard(ExternalGuardOperation::Reconcile)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("exited unsuccessfully"),
+            "helper should run only after state parent preparation: {error:#}"
+        );
+        assert!(guard_directory.is_dir());
+        let mode = fs::metadata(&guard_directory).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     #[cfg(unix)]
