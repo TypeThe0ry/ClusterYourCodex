@@ -1538,22 +1538,22 @@ if [[ "${1:-}" == -c && $# -ge 3 ]]; then
     exit 0
   fi
   if [[ -n "${CYC_FAKE_SYSTEMD_SERVICE_DIR:-}" &&
-        "$CYC_FAKE_SYSTEMD_SERVICE_DIR" == /tmp/* && "$path" == /tmp &&
-        "${2:-}" == '%a' ]]; then
-    printf '0755\n'
-    exit 0
-  fi
-  if [[ -n "${CYC_FAKE_SYSTEMD_SERVICE_DIR:-}" &&
-        "$CYC_FAKE_SYSTEMD_SERVICE_DIR" == /tmp/* && "$path" == /tmp &&
-        "${2:-}" == '%u' ]]; then
-    printf '0\n'
-    exit 0
-  fi
-  if [[ -n "${CYC_FAKE_SYSTEMD_SERVICE_DIR:-}" &&
         "$path" == "${CYC_FAKE_SYSTEMD_SERVICE_DIR%/*}" &&
         ( "${2:-}" == '%a' || "${2:-}" == '%u' ) ]]; then
     if [[ "${2:-}" == '%a' ]]; then printf '0755\n'; else printf '0\n'; fi
     exit 0
+  fi
+  # The production preflight walks every existing ancestor. Git Bash maps
+  # Windows %TEMP% either to /tmp or to /c/.../AppData/Local/Temp, so project
+  # the fixture root's complete ancestor chain as root-owned/0755 instead of
+  # relying on one host-specific prefix.
+  if [[ -n "${CYC_FAKE_SYSTEMD_SERVICE_DIR:-}" &&
+        ( "${2:-}" == '%a' || "${2:-}" == '%u' ) ]]; then
+    fake_system_root="${CYC_FAKE_SYSTEMD_SERVICE_DIR%/*}"
+    if [[ "$path" == / || "$fake_system_root" == "$path" || "$fake_system_root" == "$path"/* ]]; then
+      if [[ "${2:-}" == '%a' ]]; then printf '0755\n'; else printf '0\n'; fi
+      exit 0
+    fi
   fi
   if [[ -n "${CYC_FAKE_SYSTEMD_SERVICE_DIR:-}" &&
         "$path" == "$CYC_FAKE_SYSTEMD_SERVICE_DIR/clusteryourcodex-worker.service" &&

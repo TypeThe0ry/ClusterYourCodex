@@ -320,6 +320,131 @@ try {
         }
     }
 
+    # Manifest reads must reject a reparse-point ancestor instead of treating a
+    # missing leaf beneath it as an absent installation.
+    $reparseManifestRoot = Join-Path $testRoot 'reparse-manifest-root'
+    $reparseManifestForeignRoot = Join-Path $testRoot 'reparse-manifest-foreign-root'
+    $reparseManifestInstaller = Join-Path $reparseManifestRoot '.installer'
+    [void](New-Item -ItemType Directory -Path $reparseManifestRoot,$reparseManifestForeignRoot -Force)
+    [void](New-Item -ItemType Junction -Path $reparseManifestInstaller -Target $reparseManifestForeignRoot -Force)
+    try {
+        Assert-ThrowsLike `
+            -Action {
+                [void](Read-InstallManifest -ManifestPath (Join-Path $reparseManifestRoot '.installer\install-manifest.json'))
+            } `
+            -Pattern 'reparse' `
+            -Message 'install manifest reader rejects a reparse-point ancestor before absence handling'
+    } finally {
+        if (Test-Path -LiteralPath $reparseManifestInstaller) {
+            Remove-CycTestJunction -Path $reparseManifestInstaller
+        }
+        if (Test-Path -LiteralPath $reparseManifestRoot) {
+            Remove-Item -LiteralPath $reparseManifestRoot -Recurse -Force
+        }
+        if (Test-Path -LiteralPath $reparseManifestForeignRoot) {
+            Remove-Item -LiteralPath $reparseManifestForeignRoot -Recurse -Force
+        }
+    }
+
+    # ACL normalization must discover nested reparses before changing the root
+    # or any child ACL.  The junction and foreign sentinel remain untouched.
+    $aclReparseRoot = Join-Path $testRoot 'acl-reparse-root'
+    $aclReparseForeignRoot = Join-Path $testRoot 'acl-reparse-foreign-root'
+    $aclReparseJunction = Join-Path $aclReparseRoot 'foreign-link'
+    [void](New-Item -ItemType Directory -Path $aclReparseRoot,$aclReparseForeignRoot -Force)
+    [System.IO.File]::WriteAllText((Join-Path $aclReparseForeignRoot 'sentinel.txt'), 'foreign-acl-data')
+    [void](New-Item -ItemType Junction -Path $aclReparseJunction -Target $aclReparseForeignRoot -Force)
+    try {
+        Assert-ThrowsLike `
+            -Action { Set-PrivateDirectoryAcl -Path $aclReparseRoot } `
+            -Pattern 'reparse' `
+            -Message 'private ACL normalization preflights nested reparses before mutation'
+        Assert-True (Test-Path -LiteralPath $aclReparseJunction) 'ACL preflight leaves the nested junction untouched'
+        Assert-True (Test-Path -LiteralPath (Join-Path $aclReparseForeignRoot 'sentinel.txt') -PathType Leaf) 'ACL preflight leaves the foreign sentinel untouched'
+    } finally {
+        if (Test-Path -LiteralPath $aclReparseJunction) {
+            Remove-CycTestJunction -Path $aclReparseJunction
+        }
+        if (Test-Path -LiteralPath $aclReparseRoot) {
+            Remove-Item -LiteralPath $aclReparseRoot -Recurse -Force
+        }
+        if (Test-Path -LiteralPath $aclReparseForeignRoot) {
+            Remove-Item -LiteralPath $aclReparseForeignRoot -Recurse -Force
+        }
+    }
+
+    # PurgeData must reject a nested junction before the eventual recursive
+    # delete.  Point LOCALAPPDATA at a disposable fixture so the production
+    # default-root guard remains exercised without touching the real profile.
+    $purgeFixtureLocalAppData = Join-Path $testRoot 'purge-localappdata'
+    $purgeFixtureDataRoot = Join-Path $purgeFixtureLocalAppData 'ClusterYourCodex'
+    $purgeFixtureForeignRoot = Join-Path $testRoot 'purge-foreign-root'
+    $purgeFixtureNested = Join-Path $purgeFixtureDataRoot 'nested\foreign-link'
+    $previousLocalAppData = $env:LOCALAPPDATA
+    [void](New-Item -ItemType Directory -Path $purgeFixtureDataRoot,$purgeFixtureForeignRoot -Force)
+    [void](New-Item -ItemType Directory -Path (Split-Path -Parent $purgeFixtureNested) -Force)
+    [System.IO.File]::WriteAllText((Join-Path $purgeFixtureForeignRoot 'sentinel.txt'), 'foreign-purge-data')
+    [void](New-Item -ItemType Junction -Path $purgeFixtureNested -Target $purgeFixtureForeignRoot -Force)
+    [void](New-Item -ItemType Directory -Path (Join-Path $purgeFixtureDataRoot '.installer') -Force)
+    [System.IO.File]::WriteAllText(
+        (Join-Path $purgeFixtureDataRoot '.installer\install-manifest.json'),
+        '{"schemaVersion":"cyc.dev/windows-install-manifest/v1"}'
+    )
+    $env:LOCALAPPDATA = $purgeFixtureLocalAppData
+    try {
+        $purgeManifest = [PSCustomObject]@{
+            dataRoot = $purgeFixtureDataRoot
+        }
+        Assert-ThrowsLike `
+            -Action { [void](Assert-SafePurgeTarget -DataRoot $purgeFixtureDataRoot -Manifest $purgeManifest) } `
+            -Pattern 'reparse' `
+            -Message 'PurgeData rejects nested reparses before recursive deletion'
+        Assert-True (Test-Path -LiteralPath $purgeFixtureNested) 'PurgeData preflight leaves the nested junction untouched'
+        Assert-True (Test-Path -LiteralPath (Join-Path $purgeFixtureForeignRoot 'sentinel.txt') -PathType Leaf) 'PurgeData preflight leaves the foreign sentinel untouched'
+    } finally {
+        $env:LOCALAPPDATA = $previousLocalAppData
+        if (Test-Path -LiteralPath $purgeFixtureNested) {
+            Remove-CycTestJunction -Path $purgeFixtureNested
+        }
+        if (Test-Path -LiteralPath $purgeFixtureDataRoot) {
+            Remove-Item -LiteralPath $purgeFixtureDataRoot -Recurse -Force
+        }
+        if (Test-Path -LiteralPath $purgeFixtureForeignRoot) {
+            Remove-Item -LiteralPath $purgeFixtureForeignRoot -Recurse -Force
+        }
+        if (Test-Path -LiteralPath $purgeFixtureLocalAppData) {
+            Remove-Item -LiteralPath $purgeFixtureLocalAppData -Recurse -Force
+        }
+    }
+
+    # Codex-only transaction cleanup has the same recursive-delete boundary;
+    # a nested junction must fail closed and preserve its foreign target.
+    $transactionFixtureRoot = Join-Path $data '.installer\transactions\codex-only-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    $transactionFixtureForeignRoot = Join-Path $testRoot 'transaction-foreign-root'
+    $transactionFixtureNested = Join-Path $transactionFixtureRoot 'journal\nested\foreign-link'
+    [void](New-Item -ItemType Directory -Path $transactionFixtureRoot,$transactionFixtureForeignRoot -Force)
+    [void](New-Item -ItemType Directory -Path (Split-Path -Parent $transactionFixtureNested) -Force)
+    [System.IO.File]::WriteAllText((Join-Path $transactionFixtureForeignRoot 'sentinel.txt'), 'foreign-transaction-data')
+    [void](New-Item -ItemType Junction -Path $transactionFixtureNested -Target $transactionFixtureForeignRoot -Force)
+    try {
+        Assert-ThrowsLike `
+            -Action { Remove-CycCodexOnlyTransactionRoot -DataRoot $data -TransactionRoot $transactionFixtureRoot } `
+            -Pattern 'reparse' `
+            -Message 'Codex-only transaction cleanup rejects nested reparses before recursive deletion'
+        Assert-True (Test-Path -LiteralPath $transactionFixtureNested) 'Codex-only cleanup leaves the nested junction untouched'
+        Assert-True (Test-Path -LiteralPath (Join-Path $transactionFixtureForeignRoot 'sentinel.txt') -PathType Leaf) 'Codex-only cleanup leaves the foreign sentinel untouched'
+    } finally {
+        if (Test-Path -LiteralPath $transactionFixtureNested) {
+            Remove-CycTestJunction -Path $transactionFixtureNested
+        }
+        if (Test-Path -LiteralPath $transactionFixtureRoot) {
+            Remove-Item -LiteralPath $transactionFixtureRoot -Recurse -Force
+        }
+        if (Test-Path -LiteralPath $transactionFixtureForeignRoot) {
+            Remove-Item -LiteralPath $transactionFixtureForeignRoot -Recurse -Force
+        }
+    }
+
     $networkConfigurations = @(
         [PSCustomObject]@{
             InterfaceIndex = 3
@@ -755,6 +880,27 @@ try {
     Assert-True ($source -match 'AreAccessRulesProtected') 'ACL inheritance is verified'
     Assert-True ($source -match "S-1-5-32-544[\s\S]+ReadAndExecute") 'install ACL grants BUILTIN Administrators only the read/execute access needed by over-the-shoulder elevation'
     Assert-True ($source -match 'Set-PrivateDirectoryAcl -Path \$Plan\.installRoot -AllowAdministratorsReadAndExecute[\s\S]+Set-PrivateDirectoryAcl -Path \$Plan\.dataRoot') 'only the install tree, never private data/TLS state, receives the administrator read contract'
+    $catalogFunctionSource = [regex]::Match($source, 'function Assert-CycCodexPayloadCatalog[\s\S]+?function Get-CycObjectProperty')
+    Assert-True ($catalogFunctionSource.Success -and
+        $catalogFunctionSource.Value -match 'Stack\[string\]' -and
+        $catalogFunctionSource.Value -notmatch 'Get-ChildItem -LiteralPath \$marketplaceRoot -Recurse') 'Codex marketplace catalog uses a non-recursive fail-closed directory walk'
+    $manifestFunctionSource = [regex]::Match($source, 'function Read-InstallManifest[\s\S]+?function Remove-OwnedFiles')
+    $manifestPathCheckIndex = $manifestFunctionSource.Value.IndexOf('Assert-CycCreationPathNoReparse', [StringComparison]::Ordinal)
+    $manifestReadIndex = $manifestFunctionSource.Value.IndexOf('Get-Item -LiteralPath $ManifestPath', [StringComparison]::Ordinal)
+    Assert-True ($manifestFunctionSource.Success -and
+        $manifestPathCheckIndex -ge 0 -and $manifestReadIndex -gt $manifestPathCheckIndex) 'install manifest reads validate the complete creation path before probing the leaf'
+    $aclFunctionSource = [regex]::Match($source, 'function Set-PrivateDirectoryAcl[\s\S]+?function Invoke-CycIdentityCommand')
+    $aclPreflightIndex = $aclFunctionSource.Value.IndexOf('foreach ($item in $items)', [StringComparison]::Ordinal)
+    $aclMutationIndex = $aclFunctionSource.Value.IndexOf('Set-PrivatePathAcl', [StringComparison]::Ordinal)
+    Assert-True ($aclFunctionSource.Success -and $aclPreflightIndex -ge 0 -and $aclMutationIndex -gt $aclPreflightIndex) 'private ACL normalization enumerates the complete tree before the first ACL mutation'
+    $purgeFunctionSource = [regex]::Match($source, 'function Assert-SafePurgeTarget[\s\S]+?function Invoke-InstallOrRepairCore')
+    $purgeTreePreflightIndex = $purgeFunctionSource.Value.IndexOf('Get-CycRegularDirectories -Root $target', [StringComparison]::Ordinal)
+    $purgeReturnIndex = $purgeFunctionSource.Value.IndexOf('return $target', [StringComparison]::Ordinal)
+    Assert-True ($purgeFunctionSource.Success -and $purgeTreePreflightIndex -ge 0 -and $purgeReturnIndex -gt $purgeTreePreflightIndex) 'PurgeData preflights the complete data tree before returning the recursive-delete target'
+    $transactionCleanupSource = [regex]::Match($source, 'function Remove-CycCodexOnlyTransactionRoot[\s\S]+?function New-CycCodexOnlyReceipt')
+    $transactionTreePreflightIndex = $transactionCleanupSource.Value.IndexOf('Get-CycRegularDirectories -Root $target', [StringComparison]::Ordinal)
+    $transactionRecursiveDeleteIndex = $transactionCleanupSource.Value.IndexOf('Remove-Item -LiteralPath $target -Recurse', [StringComparison]::Ordinal)
+    Assert-True ($transactionCleanupSource.Success -and $transactionTreePreflightIndex -ge 0 -and $transactionRecursiveDeleteIndex -gt $transactionTreePreflightIndex) 'Codex-only transaction cleanup preflights the complete tree before recursive deletion'
     Assert-True ($source -match 'Assert-SafePurgeTarget') 'recursive purge is guarded'
     Assert-True ($source -match 'Stop-CycRuntime') 'owned runtime is stopped before replacement'
     Assert-True ($source -match 'Get-Process -Id \$process\.Id -ErrorAction SilentlyContinue') 'runtime stop tolerates a process exiting between snapshot and stop'
@@ -812,6 +958,16 @@ try {
     $uninstallCoreEnd = $source.IndexOf('function Invoke-Uninstall', $uninstallCoreStart + 1)
     $uninstallCoreBody = $source.Substring($uninstallCoreStart, $uninstallCoreEnd - $uninstallCoreStart)
     Assert-True ($uninstallCoreBody -notmatch 'Set-CycFirewallRule|New-NetFirewallRule|Remove-CycFirewallRule') 'unelevated uninstall core has no firewall mutation call'
+    $uninstallDataTreePreflightIndex = $uninstallCoreBody.IndexOf('Get-CycRegularDirectories -Root $data', [StringComparison]::Ordinal)
+    $uninstallPreCleanupSnapshotIndex = $uninstallCoreBody.IndexOf('$codexPreCleanupSnapshot = New-FileRollbackSnapshot', [StringComparison]::Ordinal)
+    $uninstallCodexMutationIndex = $uninstallCoreBody.IndexOf('Invoke-CodexIntegration', [StringComparison]::Ordinal)
+    $uninstallCheckpointMutationIndex = $uninstallCoreBody.IndexOf('Write-CodexCleanupState', [StringComparison]::Ordinal)
+    Assert-True ($uninstallDataTreePreflightIndex -ge 0 -and
+        $uninstallPreCleanupSnapshotIndex -gt $uninstallDataTreePreflightIndex -and
+        $uninstallPreCleanupSnapshotIndex -lt $uninstallCodexMutationIndex -and
+        $uninstallPreCleanupSnapshotIndex -lt $uninstallCheckpointMutationIndex) 'uninstall preflights the complete data tree and snapshots files before any Codex or manifest checkpoint mutation'
+    Assert-True ($uninstallCoreBody -match 'codexPreCleanupSnapshot' -and
+        $uninstallCoreBody -match 'post-cleanup manifest') 'uninstall keeps a separate post-cleanup rollback image so local rollback preserves durable Codex cleanup checkpoints'
 
     [void](New-Item -ItemType Directory -Path $install -Force)
     [void](New-Item -ItemType Directory -Path (Split-Path -Parent $plan.manifestPath) -Force)
@@ -1993,6 +2149,33 @@ exit 4
         $env:PATH = $fakeCodexBin + [System.IO.Path]::PathSeparator + $oldPath
         $env:CYC_FAKE_CODEX_LOG = $fakeCodexLog
         $env:CYC_CODEX_CLI = $fakeCodex
+
+        # A file-snapshot failure is a pre-Codex transaction gate.  Override the
+        # snapshot primitive in this fixture so the poison CLI would leave a
+        # marker if Invoke-Uninstall reached external cleanup too early.
+        $originalRollbackSnapshotFunction = (Get-Command `
+            New-FileRollbackSnapshot `
+            -CommandType Function `
+            -ErrorAction Stop).ScriptBlock
+        if (Test-Path -LiteralPath $fakeCodexLog) {
+            Remove-Item -LiteralPath $fakeCodexLog -Force
+        }
+        [byte[]]$beforeSnapshotFailureManifest = [System.IO.File]::ReadAllBytes($codexManifest)
+        function New-FileRollbackSnapshot {
+            throw 'fixture rollback snapshot failure'
+        }
+        $snapshotFailureDetected = $false
+        try {
+            [void](Invoke-Uninstall -InstallRoot $codexInstall -DataRoot $codexData)
+        } catch {
+            $snapshotFailureDetected = ($_.Exception.Message -match 'fixture rollback snapshot failure')
+        } finally {
+            Set-Item Function:\New-FileRollbackSnapshot -Value $originalRollbackSnapshotFunction
+        }
+        Assert-True $snapshotFailureDetected 'file snapshot failure aborts uninstall before Codex cleanup'
+        Assert-True (-not (Test-Path -LiteralPath $fakeCodexLog)) 'file snapshot failure never launches the Codex CLI'
+        Assert-BytesEqual $beforeSnapshotFailureManifest ([System.IO.File]::ReadAllBytes($codexManifest)) 'file snapshot failure leaves the cleanup manifest byte-for-byte unchanged'
+
         $cleanupFailureDetected = $false
         try { [void](Invoke-Uninstall -InstallRoot $codexInstall -DataRoot $codexData) } catch { $cleanupFailureDetected = $true }
         Assert-True $cleanupFailureDetected 'Codex cleanup failure makes uninstall explicitly fail'

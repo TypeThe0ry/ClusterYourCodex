@@ -582,22 +582,36 @@ function Assert-CycCodexPayloadCatalog {
     $actual = [System.Collections.Generic.Dictionary[string, string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase
     )
-    foreach ($item in @(Get-ChildItem -LiteralPath $marketplaceRoot -Recurse -Force)) {
-        if (Test-ReparsePoint $item) {
-            throw "Installed Codex marketplace contains a reparse point: $($item.FullName)"
+    # Do not use Get-ChildItem -Recurse here. Windows PowerShell 5.1 can
+    # follow a directory junction before the returned item is inspected. Walk
+    # only regular directories and reject every reparse point before descending
+    # so an installed marketplace can never enumerate outside this install.
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $pending.Push($marketplaceRoot)
+    while ($pending.Count -gt 0) {
+        $current = $pending.Pop()
+        $currentItem = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+        if (-not $currentItem.PSIsContainer -or (Test-ReparsePoint $currentItem)) {
+            throw "Installed Codex marketplace contains a reparse point: $current"
         }
-        if ($item.PSIsContainer) {
-            $directoryRelative = Get-RelativeOwnedPath -Root $marketplaceRoot -Path $item.FullName
-            if (-not $expectedDirectories.Contains($directoryRelative)) {
-                throw "Installed Codex marketplace contains an extra directory: $directoryRelative"
+        foreach ($item in @(Get-ChildItem -LiteralPath $current -Force -ErrorAction Stop)) {
+            if (Test-ReparsePoint $item) {
+                throw "Installed Codex marketplace contains a reparse point: $($item.FullName)"
             }
-            continue
+            if ($item.PSIsContainer) {
+                $directoryRelative = Get-RelativeOwnedPath -Root $marketplaceRoot -Path $item.FullName
+                if (-not $expectedDirectories.Contains($directoryRelative)) {
+                    throw "Installed Codex marketplace contains an extra directory: $directoryRelative"
+                }
+                $pending.Push($item.FullName)
+                continue
+            }
+            $relative = Get-RelativeOwnedPath -Root $install -Path $item.FullName
+            if ($actual.ContainsKey($relative)) {
+                throw "Installed Codex marketplace contains a case-colliding file: $relative"
+            }
+            $actual.Add($relative, $item.FullName)
         }
-        $relative = Get-RelativeOwnedPath -Root $install -Path $item.FullName
-        if ($actual.ContainsKey($relative)) {
-            throw "Installed Codex marketplace contains a case-colliding file: $relative"
-        }
-        $actual.Add($relative, $item.FullName)
     }
     if ($actual.Count -ne $expected.Count) {
         throw 'Installed Codex marketplace has missing or extra files.'
@@ -3438,20 +3452,31 @@ function Set-PrivateDirectoryAcl {
     [void](New-Item -ItemType Directory -Path $directory -Force)
     $root = Get-Item -LiteralPath $directory -Force
     if (-not $root.PSIsContainer) { throw "Private ACL root is not a directory: $directory" }
-    Set-PrivatePathAcl `
-        -Item $root `
-        -AllowAdministratorsReadAndExecute:$AllowAdministratorsReadAndExecute
-
+    # Preflight the complete tree before changing even the root ACL.  A
+    # reparse point discovered after the root was rewritten would otherwise
+    # leave a partially-normalized private tree and complicate rollback.
+    $items = New-Object 'System.Collections.Generic.List[System.IO.FileSystemInfo]'
+    [void]$items.Add($root)
     $pending = New-Object 'System.Collections.Generic.Stack[string]'
     $pending.Push($directory)
     while ($pending.Count -gt 0) {
         $current = $pending.Pop()
-        foreach ($child in @(Get-ChildItem -LiteralPath $current -Force)) {
-            Set-PrivatePathAcl `
-                -Item $child `
-                -AllowAdministratorsReadAndExecute:$AllowAdministratorsReadAndExecute
+        $currentItem = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+        if (-not $currentItem.PSIsContainer -or (Test-ReparsePoint $currentItem)) {
+            throw "Private ACL tree contains a reparse point: $current"
+        }
+        foreach ($child in @(Get-ChildItem -LiteralPath $current -Force -ErrorAction Stop)) {
+            if (Test-ReparsePoint $child) {
+                throw "Private ACL tree contains a reparse point: $($child.FullName)"
+            }
+            [void]$items.Add($child)
             if ($child.PSIsContainer) { $pending.Push($child.FullName) }
         }
+    }
+    foreach ($item in $items) {
+        Set-PrivatePathAcl `
+            -Item $item `
+            -AllowAdministratorsReadAndExecute:$AllowAdministratorsReadAndExecute
     }
 }
 
@@ -3938,8 +3963,19 @@ function Remove-CycUninstallRegistration {
 
 function Read-InstallManifest {
     param([Parameter(Mandatory = $true)][string]$ManifestPath)
-    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) { return $null }
-    $item = Get-Item -LiteralPath $ManifestPath -Force
+    # Check every existing ancestor before probing for the leaf.  A missing
+    # manifest beneath a pre-positioned junction must not be treated as an
+    # absent installation, because a later write would follow that junction.
+    Assert-CycCreationPathNoReparse -Path $ManifestPath
+    $item = $null
+    try {
+        $item = Get-Item -LiteralPath $ManifestPath -Force -ErrorAction Stop
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        return $null
+    }
+    if ($item.PSIsContainer -or (Test-ReparsePoint $item)) {
+        throw 'Install manifest must be a bounded regular file.'
+    }
     if ($item.Length -gt $script:MaxInstallManifestBytes) { throw 'Install manifest is unexpectedly large.' }
     $manifest = Read-CycUtf8Json -Path $ManifestPath
     if ($manifest.schemaVersion -ne $script:ManifestSchema) {
@@ -4844,8 +4880,37 @@ function New-FileRollbackSnapshot {
         }
     }
     $manifestBackup = Join-Path $transactionRoot 'install-manifest.json'
-    $manifestExisted = Test-Path -LiteralPath $Plan.manifestPath -PathType Leaf
+    # The manifest is an owned rollback input just like an installed binary.
+    # Validate its full source chain and destination parent before Copy-Item;
+    # otherwise a manifest junction (or a pre-positioned backup link) can make
+    # snapshotting read from or write into a path outside the transaction.
+    Assert-CycCreationPathNoReparse -Path $Plan.manifestPath
+    $manifestItem = $null
+    try {
+        $manifestItem = Get-Item -LiteralPath $Plan.manifestPath -Force -ErrorAction Stop
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        # A missing manifest is valid for a fresh install or an interrupted
+        # attempt that never published its first after-image.
+    }
+    if ($null -ne $manifestItem -and (Test-ReparsePoint $manifestItem)) {
+        throw "Install manifest must not be a reparse point: $($Plan.manifestPath)"
+    }
+    if ($null -ne $manifestItem -and $manifestItem.PSIsContainer) {
+        throw "Install manifest must be a regular file: $($Plan.manifestPath)"
+    }
+    $manifestExisted = $null -ne $manifestItem
     if ($manifestExisted) {
+        Assert-CycCreationPathNoReparse -Path $manifestBackup
+        $manifestBackupItem = $null
+        try {
+            $manifestBackupItem = Get-Item -LiteralPath $manifestBackup -Force -ErrorAction Stop
+        } catch [System.Management.Automation.ItemNotFoundException] {
+            # The transaction root is fresh; a missing backup is the normal case.
+        }
+        if ($null -ne $manifestBackupItem -and (
+            $manifestBackupItem.PSIsContainer -or (Test-ReparsePoint $manifestBackupItem))) {
+            throw "Rollback manifest backup must be a regular file: $manifestBackup"
+        }
         Copy-Item -LiteralPath $Plan.manifestPath -Destination $manifestBackup -Force
     }
     # Snapshot roots and every copied descendant are durable private state. A
@@ -6021,6 +6086,10 @@ function Remove-CycCodexOnlyTransactionRoot {
         if (Test-ReparsePoint $item) {
             throw 'Refusing to clean a reparse-point transaction directory.'
         }
+        # Preflight the complete transaction tree before the only recursive
+        # delete.  Windows PowerShell can otherwise follow a nested junction
+        # after the root check and remove files outside the owned transaction.
+        $null = @(Get-CycRegularDirectories -Root $target)
         # The exact absolute target and owned name were proven before this
         # only recursive cleanup in the Codex-only lifecycle.
         Remove-Item -LiteralPath $target -Recurse -Force
@@ -6361,6 +6430,10 @@ function Assert-SafePurgeTarget {
     if (-not (Test-Path -LiteralPath (Join-Path $target '.installer\install-manifest.json') -PathType Leaf)) {
         throw 'PurgeData requires the owned install manifest.'
     }
+    # PurgeData eventually performs one recursive delete of the data root.
+    # Enumerate and reject every descendant reparse point before returning the
+    # target so a nested junction can never redirect that delete to foreign data.
+    $null = @(Get-CycRegularDirectories -Root $target)
     return $target
 }
 
@@ -6380,21 +6453,21 @@ function Invoke-InstallOrRepairCore {
     }
     if (-not $PSCmdlet.ShouldProcess($Plan.installRoot, "$Action ClusterYourCodex")) { return }
 
+    # Core may be invoked directly by the lifecycle coordinator as well as
+    # through Invoke-InstallOrRepair. Verify the existing roots before reading
+    # a manifest or inspecting task state; an install/data junction must never
+    # be allowed to influence either preflight result.
+    [void](Assert-CycExistingPrivateDirectory `
+        -Path $Plan.installRoot `
+        -AllowAdministratorsReadAndExecute)
+    [void](Assert-CycExistingPrivateDirectory -Path $Plan.dataRoot)
     $oldManifest = Read-InstallManifest -ManifestPath $Plan.manifestPath
-    # Snapshot and validate existing product tasks before touching ACLs or any
-    # other lifecycle resource.  A same-name task from another SID/root is a
-    # hard stop for Install/Repair.
+    # Validate existing product tasks before touching ACLs or any other
+    # lifecycle resource. A same-name task from another SID/root is a hard stop
+    # for Install/Repair.
     $taskSnapshots = @(Get-CycTaskSnapshots `
         -ExpectedInstallRoot $Plan.installRoot `
         -ExpectedSid $Plan.initiator.sid)
-    # The elevated firewall-only helper may run as a different administrator
-    # during over-the-shoulder UAC. It needs read/execute access to hash the
-    # request-bound controller, but receives no write/delete/control rights.
-    Set-PrivateDirectoryAcl -Path $Plan.installRoot -AllowAdministratorsReadAndExecute
-    Set-PrivateDirectoryAcl -Path $Plan.dataRoot
-    Stop-CycRuntime `
-        -InstallRoot $Plan.installRoot `
-        -ExpectedSid $Plan.initiator.sid
     $requiredPorts = @(47831)
     if ($Plan.managedWorker.enabled) { $requiredPorts += [int]$Plan.managedWorker.listenPort }
     Assert-CycListenPortsAvailable -Ports $requiredPorts
@@ -6407,7 +6480,17 @@ function Invoke-InstallOrRepairCore {
     $preserveRollbackSnapshot = $false
     $coreCommitPublished = $false
     try {
+        Stop-CycRuntime `
+            -InstallRoot $Plan.installRoot `
+            -ExpectedSid $Plan.initiator.sid
         $rollback = New-FileRollbackSnapshot -Plan $Plan -OldManifest $oldManifest
+        # The elevated firewall-only helper may run as a different administrator
+        # during over-the-shoulder UAC. It needs read/execute access to hash the
+        # request-bound controller, but receives no write/delete/control rights.
+        # Delay these ACL mutations until after all verify-only preflights and
+        # the durable file rollback snapshot have succeeded.
+        Set-PrivateDirectoryAcl -Path $Plan.installRoot -AllowAdministratorsReadAndExecute
+        Set-PrivateDirectoryAcl -Path $Plan.dataRoot
         Install-PlannedFiles -Plan $Plan
         Set-PrivateDirectoryAcl -Path $Plan.installRoot -AllowAdministratorsReadAndExecute
         Set-PrivateDirectoryAcl -Path $Plan.dataRoot
@@ -6716,44 +6799,83 @@ function Invoke-UninstallCore {
         pluginExitCode = $null
         marketplaceExitCode = $null
     }
-    if ($codexCleanupRequired) {
-        # Re-check immediately before the first external mutation to narrow the
-        # task replacement race after the initial preflight.
-        [void](Get-CycTaskSnapshots `
-            -ExpectedInstallRoot $install `
-            -ExpectedSid $currentBinding.sid)
-        $checkpoint = {
-            param($result)
-            Write-CodexCleanupState -Manifest $manifest -ManifestPath $manifestPath -Result $result
-        }
-        $codexResult = Invoke-CodexIntegration `
-            -Plan $plan `
-            -Operation Uninstall `
-            -CleanupCheckpoint $checkpoint
-        Write-CodexCleanupState -Manifest $manifest -ManifestPath $manifestPath -Result $codexResult
-        if (-not $codexResult.succeeded) {
-            throw 'Codex integration cleanup failed; installation was left intact and uninstall can be retried.'
-        }
-    }
-
-    # Re-read the durable cleanup checkpoint before making local lifecycle
-    # changes so a rollback never resurrects stale plugin cleanup state.
-    $manifest = Read-InstallManifest -ManifestPath $manifestPath
-    $agentsRecord = if ($manifest.PSObject.Properties['agentsIntegration']) {
-        $manifest.agentsIntegration
-    } else { $null }
-    $agentsRemovalPlan = if ($agentsRecord) {
-        Get-CycAgentsRemovalPlan -Record $agentsRecord
-    } else {
-        [PSCustomObject]@{ required = $false; alreadyApplied = $true }
-    }
     $uninstallRollbackPlan = [PSCustomObject]@{
         installRoot = $install
         dataRoot = $data
         manifestPath = $manifestPath
         files = @($manifest.files)
     }
-    $fileSnapshot = New-FileRollbackSnapshot -Plan $uninstallRollbackPlan -OldManifest $manifest
+
+    # Establish a complete tree boundary before any Codex CLI call or manifest
+    # cleanup checkpoint.  New-FileRollbackSnapshot also validates the install
+    # tree while copying it, but the explicit data-root walk closes the gap for
+    # unowned private state (for example, a nested junction) that a later purge
+    # could otherwise discover only after external Codex state had changed.
+    $null = @(Get-CycRegularDirectories -Root $install)
+    $null = @(Get-CycRegularDirectories -Root $data)
+    # Keep this pre-cleanup snapshot separate from the local rollback snapshot
+    # below.  The latter must capture the post-cleanup manifest so a local
+    # failure never resurrects stale Codex cleanup state.
+    $codexPreCleanupSnapshot = New-FileRollbackSnapshot `
+        -Plan $uninstallRollbackPlan `
+        -OldManifest $manifest
+    $fileSnapshot = $codexPreCleanupSnapshot
+
+    try {
+        if ($codexCleanupRequired) {
+            # Re-check immediately before the first external mutation to narrow
+            # the task replacement race after the initial preflight.
+            [void](Get-CycTaskSnapshots `
+                -ExpectedInstallRoot $install `
+                -ExpectedSid $currentBinding.sid)
+            $checkpoint = {
+                param($result)
+                Write-CodexCleanupState -Manifest $manifest -ManifestPath $manifestPath -Result $result
+            }
+            $codexResult = Invoke-CodexIntegration `
+                -Plan $plan `
+                -Operation Uninstall `
+                -CleanupCheckpoint $checkpoint
+            Write-CodexCleanupState -Manifest $manifest -ManifestPath $manifestPath -Result $codexResult
+            if (-not $codexResult.succeeded) {
+                throw 'Codex integration cleanup failed; installation was left intact and uninstall can be retried.'
+            }
+        }
+    } catch {
+        # A failed or interrupted external cleanup keeps its durable manifest
+        # checkpoint for retry.  Remove only the pre-cleanup file snapshot; do
+        # not restore its old manifest here, because doing so would erase the
+        # checkpoint that records completed Codex steps.
+        try { Remove-FileRollbackSnapshot -Snapshot $codexPreCleanupSnapshot } catch { }
+        throw
+    }
+
+    try {
+        # Re-read the durable cleanup checkpoint before making local lifecycle
+        # changes so a rollback never resurrects stale plugin cleanup state.
+        $manifest = Read-InstallManifest -ManifestPath $manifestPath
+        $agentsRecord = if ($manifest.PSObject.Properties['agentsIntegration']) {
+            $manifest.agentsIntegration
+        } else { $null }
+        $agentsRemovalPlan = if ($agentsRecord) {
+            Get-CycAgentsRemovalPlan -Record $agentsRecord
+        } else {
+            [PSCustomObject]@{ required = $false; alreadyApplied = $true }
+        }
+        if ($codexCleanupRequired) {
+            # Once the external cleanup is durably checkpointed, take the local
+            # rollback image from that after-state.  This preserves the existing
+            # uninstall rollback contract while the earlier snapshot guarantees
+            # that a snapshot failure cannot precede an external mutation.
+            $fileSnapshot = New-FileRollbackSnapshot `
+                -Plan $uninstallRollbackPlan `
+                -OldManifest $manifest
+            try { Remove-FileRollbackSnapshot -Snapshot $codexPreCleanupSnapshot } catch { }
+        }
+    } catch {
+        try { Remove-FileRollbackSnapshot -Snapshot $codexPreCleanupSnapshot } catch { }
+        throw
+    }
     $agentsRemovalTransaction = if ($agentsRecord -and $agentsRemovalPlan.required -and
         -not $agentsRemovalPlan.alreadyApplied) {
         Start-CycAgentsRemovalTransaction `
