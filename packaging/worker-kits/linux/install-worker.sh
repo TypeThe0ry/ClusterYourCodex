@@ -536,12 +536,80 @@ verify_private_service_path_existing() {
 }
 
 remove_service_for_scope() {
-  local requested_scope="$1" unit
+  local requested_scope="$1" unit unit_present=0 was_active=0 disable_succeeded=0
+  local pending_unit=''
   verify_private_service_path_existing "$requested_scope" || return 1
   unit="$(service_path_for_scope "$requested_scope")"
-  service_ctl_for_scope "$requested_scope" disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
-  if [[ -f "$unit" && ! -L "$unit" ]]; then rm -f -- "$unit"; fi
-  service_ctl_for_scope "$requested_scope" daemon-reload >/dev/null 2>&1 || true
+  if [[ -f "$unit" && ! -L "$unit" ]]; then unit_present=1; fi
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    # Removing an owned unit without systemctl could leave a running worker
+    # behind. A missing unit remains idempotent, but an existing one fails
+    # closed until the service manager is available to prove it is stopped.
+    if [[ "$unit_present" -eq 1 ]]; then
+      printf 'systemctl is required to remove an existing worker service safely.\n' >&2
+      return 1
+    fi
+    return 0
+  fi
+
+  if [[ "$requested_scope" == user ]]; then
+    service_ctl_for_scope "$requested_scope" show-environment >/dev/null 2>&1 || {
+      printf '%s\n' '[CYC-LINUX-USER-SYSTEMD-UNAVAILABLE] Cannot remove a worker service while the user systemd manager is unavailable.' >&2
+      return 1
+    }
+  fi
+
+  if service_ctl_for_scope "$requested_scope" is-active --quiet "$SERVICE_NAME" >/dev/null 2>&1; then
+    was_active=1
+  fi
+
+  # A unit file (or an already-active named service) must be successfully
+  # disabled before its bytes are removed. Never turn a failed stop into a
+  # successful uninstall receipt.
+  if [[ "$unit_present" -eq 1 || "$was_active" -eq 1 ]]; then
+    if service_ctl_for_scope "$requested_scope" disable --now "$SERVICE_NAME" >/dev/null 2>&1; then
+      disable_succeeded=1
+    fi
+    if service_ctl_for_scope "$requested_scope" is-active --quiet "$SERVICE_NAME" >/dev/null 2>&1; then
+      printf 'Worker service remained active after disable; refusing to remove unit.\n' >&2
+      return 1
+    fi
+    if [[ "$disable_succeeded" -ne 1 ]]; then
+      printf 'Worker service disable failed; refusing to remove unit.\n' >&2
+      return 1
+    fi
+  fi
+
+  if [[ "$unit_present" -eq 1 ]]; then
+    # Keep the unit bytes in the same private directory until the manager has
+    # accepted the removal. If daemon-reload fails, restore the exact file so
+    # a retry can reconcile the service without leaving an orphaned backup or
+    # a partially-applied uninstall on disk.
+    pending_unit="${unit}.cyc-uninstall.$$.pending"
+    [[ ! -e "$pending_unit" && ! -L "$pending_unit" ]] || {
+      printf 'Worker service uninstall transaction path already exists.\n' >&2
+      return 1
+    }
+    if ! mv -- "$unit" "$pending_unit"; then
+      printf 'Worker service uninstall could not stage its unit transaction.\n' >&2
+      return 1
+    fi
+    if ! service_ctl_for_scope "$requested_scope" daemon-reload >/dev/null 2>&1; then
+      if [[ ! -e "$unit" && ! -L "$unit" ]]; then
+        mv -- "$pending_unit" "$unit" || {
+          printf 'Worker service uninstall could not restore its unit after daemon-reload failure.\n' >&2
+          return 1
+        }
+      fi
+      printf 'systemd daemon-reload failed after removing the worker unit.\n' >&2
+      return 1
+    fi
+    rm -f -- "$pending_unit" || {
+      printf 'Worker service uninstall could not retire its staged unit transaction.\n' >&2
+      return 1
+    }
+  fi
 }
 
 remove_service() {

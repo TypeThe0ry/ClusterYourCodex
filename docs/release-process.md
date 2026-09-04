@@ -228,7 +228,7 @@ requires every source-bound marker in the manifest, requires the downloaded
 `markers` array, searches for every marker in the downloaded bytes, and emits
 `markersVerified: true` plus the verified `gateEvidence` records.
 `Test-GAReadiness.ps1` cross-binds those records back to the manifest, so
-setting all nine gates to `true`, relabelling a single Linux log, or omitting
+setting all nine Issue #5 structured gates to `true`, relabelling a single Linux log, or omitting
 a semantic native marker cannot satisfy the Windows, macOS, or restart gates.
 
 The Issue #2 and Issue #3 `gates` objects remain fail-closed legacy maps: every

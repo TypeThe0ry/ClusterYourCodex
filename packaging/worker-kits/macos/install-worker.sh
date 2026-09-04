@@ -574,10 +574,40 @@ launch_agent_loaded() {
 }
 
 remove_launch_agent() {
+  local was_loaded=0 bootout_succeeded=0
   verify_private_launch_agent_path_existing || return 1
-  if command -v launchctl >/dev/null 2>&1; then
-    launchctl bootout "$launch_domain" "$launch_agent_path" >/dev/null 2>&1 || true
-    launchctl bootout "$launch_target" >/dev/null 2>&1 || true
+  if ! command -v launchctl >/dev/null 2>&1; then
+    # A plist that may still be registered cannot be removed without launchctl
+    # proving that the user launchd service is unloaded. A missing plist needs
+    # no lifecycle action and remains idempotent on stripped-down hosts.
+    if [[ -e "$launch_agent_path" || -L "$launch_agent_path" ]]; then
+      printf 'launchctl is required to remove an existing LaunchAgent safely.\n' >&2
+      return 1
+    fi
+    return 0
+  fi
+
+  if launch_agent_loaded; then was_loaded=1; fi
+
+  # The domain/path form is the canonical bootout. Older launchctl versions
+  # and already-registered jobs may only accept the label form, so try it only
+  # while the service still reports as loaded. We never unlink the plist until
+  # launchctl independently reports the label as unloaded.
+  if launchctl bootout "$launch_domain" "$launch_agent_path" >/dev/null 2>&1; then
+    bootout_succeeded=1
+  fi
+  if launch_agent_loaded; then
+    if launchctl bootout "$launch_target" >/dev/null 2>&1; then
+      bootout_succeeded=1
+    fi
+  fi
+  if launch_agent_loaded; then
+    printf 'LaunchAgent remained loaded after bootout; refusing to remove plist.\n' >&2
+    return 1
+  fi
+  if [[ "$was_loaded" -eq 1 && "$bootout_succeeded" -ne 1 ]]; then
+    printf 'LaunchAgent bootout failed; refusing to remove plist.\n' >&2
+    return 1
   fi
   if [[ -f "$launch_agent_path" && ! -L "$launch_agent_path" ]]; then
     rm -f "$launch_agent_path"

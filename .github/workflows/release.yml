@@ -112,6 +112,7 @@ jobs:
     needs: [release-identity, signing-key-protection]
     if: github.ref_type == 'tag' && needs.release-identity.outputs.source_tag != ''
     environment: production-signing
+    timeout-minutes: 60
     env:
       CYC_PRODUCT_VERSION: ${{ needs.release-identity.outputs.product_version }}
     strategy:
@@ -537,6 +538,7 @@ jobs:
     needs: [release-identity, signing-key-protection]
     if: github.ref_type == 'tag' && needs.release-identity.outputs.source_tag != ''
     environment: production-signing
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     env:
       CYC_PRODUCT_VERSION: ${{ needs.release-identity.outputs.product_version }}
@@ -630,6 +632,7 @@ jobs:
   integration-artifact:
     name: Desktop renderer and Codex plugin preview
     needs: [release-identity]
+    timeout-minutes: 30
     env:
       CYC_PRODUCT_VERSION: ${{ needs.release-identity.outputs.product_version }}
     runs-on: windows-latest
@@ -1549,6 +1552,7 @@ jobs:
       contents: read
       id-token: write
       attestations: write
+    timeout-minutes: 15
     env:
       CYC_PRODUCT_VERSION: ${{ needs.release-identity.outputs.product_version }}
     runs-on: ubuntu-latest
@@ -1853,6 +1857,7 @@ jobs:
     if: github.ref_type == 'tag' && needs.release-identity.outputs.source_tag != ''
     needs: [release-identity, release-index]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Keep public prerelease publication separate from the protected stable
     # production environment.  The stable GA workflow remains the only path
     # that targets `production` and can create a non-prerelease release.

@@ -1064,7 +1064,9 @@ case "$command_name" in
   show-environment)
     [[ "${CYC_FAKE_USER_SYSTEMD_MODE:-ready}" != no-bus ]]
     ;;
-  daemon-reload) ;;
+  daemon-reload)
+    if [[ "${CYC_FAKE_SYSTEMCTL_DAEMON_RELOAD_FAIL:-0}" == 1 ]]; then exit 1; fi
+    ;;
   is-enabled) test -f "$CYC_FAKE_SYSTEMD_ROOT/service-enabled" ;;
   is-active) test -f "$CYC_FAKE_SYSTEMD_ROOT/service-active" ;;
   enable)
@@ -1072,6 +1074,7 @@ case "$command_name" in
     if [[ "${1:-}" == --now ]]; then : >"$CYC_FAKE_SYSTEMD_ROOT/service-active"; fi
     ;;
   disable)
+    if [[ "${CYC_FAKE_SYSTEMCTL_DISABLE_FAIL:-0}" == 1 ]]; then exit 1; fi
     rm -f -- "$CYC_FAKE_SYSTEMD_ROOT/service-enabled"
     if [[ "${1:-}" == --now ]]; then rm -f -- "$CYC_FAKE_SYSTEMD_ROOT/service-active"; fi
     ;;
@@ -1149,6 +1152,18 @@ cat >"$root/fake-bin/stat" <<'EOF'
 set -euo pipefail
 if [[ "${1:-}" == -c && $# -ge 3 ]]; then
   path="${@: -1}"
+  if [[ "${CYC_FAKE_LAUNCHCTL_PRIVATE_PATHS:-0}" == 1 &&
+        "${2:-}" == '%a' &&
+        "$path" == */Library/LaunchAgents ]]; then
+    printf '700\n'
+    exit 0
+  fi
+  if [[ "${CYC_FAKE_LAUNCHCTL_PRIVATE_PATHS:-0}" == 1 &&
+        "${2:-}" == '%a' &&
+        "$path" == */Library/LaunchAgents/*.plist ]]; then
+    printf '600\n'
+    exit 0
+  fi
   if [[ "${2:-}" == '%a' && "$path" == */.cyc-worker-kit-test-mode-0700 ]]; then
     printf '600\n'
     exit 0
@@ -1728,6 +1743,47 @@ test "$(sha256sum "$worker" | awk '{print $1}')" != "$baseline_worker"
 test -f "$CYC_FAKE_SYSTEMD_ROOT/service-enabled"
 test -f "$CYC_FAKE_SYSTEMD_ROOT/service-active"
 
+# Uninstall must fail closed when systemd leaves the owned worker active.
+# A failed disable cannot be converted into a successful receipt by deleting
+# the unit file; the worker, unit, and active marker must all remain for retry.
+linux_loaded_worker_hash="$(sha256sum "$worker" | awk '{print $1}')"
+linux_loaded_unit_hash="$(sha256sum "$unit" | awk '{print $1}')"
+export CYC_FAKE_SYSTEMCTL_DISABLE_FAIL=1
+set +e
+"$good/install-worker.sh" uninstall --bundle-root "$good" \
+  >"$root/linux-active-disable-failure.stdout" 2>"$root/linux-active-disable-failure.stderr"
+linux_active_disable_exit=$?
+set -e
+test "$linux_active_disable_exit" -ne 0
+grep -q 'Worker service remained active after disable; refusing to remove unit' "$root/linux-active-disable-failure.stderr"
+test -x "$worker"
+test -f "$unit"
+test "$(sha256sum "$worker" | awk '{print $1}')" = "$linux_loaded_worker_hash"
+test "$(sha256sum "$unit" | awk '{print $1}')" = "$linux_loaded_unit_hash"
+test -f "$CYC_FAKE_SYSTEMD_ROOT/service-active"
+unset CYC_FAKE_SYSTEMCTL_DISABLE_FAIL
+
+# A daemon-reload failure must roll the unit bytes back into place after the
+# service has been stopped. The staged transaction path must not be left as an
+# orphan, and a retry with a working manager must still complete uninstall.
+daemon_reload_worker_hash="$(sha256sum "$worker" | awk '{print $1}')"
+daemon_reload_unit_hash="$(sha256sum "$unit" | awk '{print $1}')"
+export CYC_FAKE_SYSTEMCTL_DAEMON_RELOAD_FAIL=1
+set +e
+"$good/install-worker.sh" uninstall --bundle-root "$good" \
+  >"$root/linux-daemon-reload-failure.stdout" 2>"$root/linux-daemon-reload-failure.stderr"
+linux_daemon_reload_exit=$?
+set -e
+test "$linux_daemon_reload_exit" -ne 0
+grep -q 'systemd daemon-reload failed after removing the worker unit' "$root/linux-daemon-reload-failure.stderr"
+test -x "$worker"
+test -f "$unit"
+test "$(sha256sum "$worker" | awk '{print $1}')" = "$daemon_reload_worker_hash"
+test "$(sha256sum "$unit" | awk '{print $1}')" = "$daemon_reload_unit_hash"
+test ! -e "${unit}.cyc-uninstall.$$.pending"
+test ! -f "$CYC_FAKE_SYSTEMD_ROOT/service-active"
+unset CYC_FAKE_SYSTEMCTL_DAEMON_RELOAD_FAIL
+
 before="$(sha256sum "$worker" | awk '{print $1}')"
 if "$bad/install-worker.sh" repair --bundle-root "$bad" >/dev/null 2>&1; then
   printf 'Expected bad-worker repair to fail.\n' >&2
@@ -1841,13 +1897,35 @@ cat >"$root/fake-macos-bin/launchctl" <<'LAUNCHCTL_WRAPPER'
 set -euo pipefail
 printf '%s\n' "$*" >>"$CYC_FAKE_LAUNCHCTL_LOG"
 case "${1:-}" in
-  print) exit 1 ;;
-  bootout|bootstrap|kickstart) exit 0 ;;
+  print)
+    if [[ -n "${CYC_FAKE_LAUNCHCTL_STATE:-}" &&
+          -f "$CYC_FAKE_LAUNCHCTL_STATE" &&
+          "$(cat "$CYC_FAKE_LAUNCHCTL_STATE")" == loaded ]]; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  bootout)
+    if [[ "${CYC_FAKE_LAUNCHCTL_BOOTOUT_FAIL:-0}" == 1 ]]; then exit 1; fi
+    if [[ -n "${CYC_FAKE_LAUNCHCTL_STATE:-}" ]]; then
+      printf '%s\n' unloaded >"$CYC_FAKE_LAUNCHCTL_STATE"
+    fi
+    exit 0
+    ;;
+  bootstrap|kickstart)
+    if [[ -n "${CYC_FAKE_LAUNCHCTL_STATE:-}" ]]; then
+      printf '%s\n' loaded >"$CYC_FAKE_LAUNCHCTL_STATE"
+    fi
+    exit 0
+    ;;
   *) exit 0 ;;
 esac
 LAUNCHCTL_WRAPPER
 export CYC_FAKE_LAUNCHCTL_LOG="$root/fake-launchctl.log"
+export CYC_FAKE_LAUNCHCTL_STATE="$root/fake-launchctl-state"
 : >"$CYC_FAKE_LAUNCHCTL_LOG"
+rm -f "$CYC_FAKE_LAUNCHCTL_STATE"
+unset CYC_FAKE_LAUNCHCTL_BOOTOUT_FAIL
 chmod +x "$root/fake-macos-bin/python3" "$root/fake-macos-bin/uname" "$root/fake-macos-bin/shasum" "$root/fake-macos-bin/launchctl"
 chmod +x "$root/fake-macos-bin/chmod" "$root/fake-macos-bin/stat"
 export PATH="$root/fake-macos-bin:$PATH"
@@ -2256,6 +2334,46 @@ grep -q '"succeeded":true' <<<"$uninstall_two"
 test -s "$data_root/config.json"
 test ! -e "$install_root/cyc-worker"
 
+# Uninstall must fail closed when launchd keeps the owned LaunchAgent loaded.
+# A bootout error cannot be treated as success: retaining the plist and worker
+# proves that a later retry can reconcile the live service without data loss.
+loaded_install="$root/macos-loaded-install"
+loaded_data="$root/macos-loaded-data"
+loaded_workspace="$root/macos-loaded-workspace"
+loaded_logs="$root/macos-loaded-logs"
+loaded_common=(--install-root "$loaded_install" --data-root "$loaded_data" --workspace-root "$loaded_workspace" --logs-root "$loaded_logs")
+loaded_enrollment="$root/macos-loaded-enrollment.json"
+printf '%s\n' 'MACOS_LOADED_ENROLLMENT_SECRET_DO_NOT_LOG' >"$loaded_enrollment"
+$good/install-worker.sh install --bundle-root "$good" "${loaded_common[@]}" >/dev/null
+$good/install-worker.sh repair --bundle-root "$good" "${loaded_common[@]}" \
+  --enrollment "$loaded_enrollment" --pair-only >/dev/null
+loaded_plist="$HOME/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
+mkdir -p "$(dirname "$loaded_plist")"
+chmod 0700 "$(dirname "$loaded_plist")"
+printf '%s\n' 'MACOS_LOADED_LAUNCHAGENT_SENTINEL' >"$loaded_plist"
+chmod 0600 "$loaded_plist"
+export CYC_FAKE_LAUNCHCTL_PRIVATE_PATHS=1
+printf '%s\n' loaded >"$CYC_FAKE_LAUNCHCTL_STATE"
+export CYC_FAKE_LAUNCHCTL_BOOTOUT_FAIL=1
+set +e
+$good/install-worker.sh uninstall --bundle-root "$good" "${loaded_common[@]}" \
+  >"$root/macos-loaded-failure.stdout" 2>"$root/macos-loaded-failure.stderr"
+loaded_failure_exit=$?
+set -e
+test "$loaded_failure_exit" -ne 0
+grep -q 'LaunchAgent remained loaded after bootout; refusing to remove plist' "$root/macos-loaded-failure.stderr"
+test -x "$loaded_install/cyc-worker"
+test -s "$loaded_data/config.json"
+test -f "$loaded_plist"
+test "$(cat "$CYC_FAKE_LAUNCHCTL_STATE")" = loaded
+unset CYC_FAKE_LAUNCHCTL_BOOTOUT_FAIL
+loaded_uninstall="$($good/install-worker.sh uninstall --bundle-root "$good" "${loaded_common[@]}")"
+grep -q '"succeeded":true' <<<"$loaded_uninstall"
+test ! -e "$loaded_install/cyc-worker"
+test ! -e "$loaded_plist"
+test "$(cat "$CYC_FAKE_LAUNCHCTL_STATE")" = unloaded
+unset CYC_FAKE_LAUNCHCTL_PRIVATE_PATHS
+
 # Default macOS roots deliberately exercise spaces in Application Support and
 # bind explicit purge to the installer-owned Data, workspace, and Logs roots.
 export HOME="$root/macos-default-home"
@@ -2293,7 +2411,7 @@ test ! -e "$default_logs"
         }
     }
     $linuxSource = Get-Content -LiteralPath $linuxInstaller -Raw
-    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'private_dir', 'verify_private_dir_existing', 'verify_private_file_existing', 'verify_private_state_tree', 'path_mode', 'path_owner', 'verify_private_config', 'verify_private_service_path_existing', 'Existing private directory is weak or owned by another identity', 'Existing user service directory is weak or owned by another identity', 'Existing user service unit is weak or owned by another identity', 'Existing worker config is weak or owned by another identity', 'Private transaction state root is not a normal directory', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'TRANSACTION_TOMBSTONE_SCHEMA', 'TRANSACTION_TOMBSTONE_RETIRED', 'TRANSACTION_RETIRE_NAME', 'assert_transaction_retirement_tree_safe', 'rollback_tombstone_valid_for_transaction', 'validate_retired_transaction', 'after-pair', 'after-service-registration', 'before-manifest-write', 'after-marker-removal', 'remove_service', 'service_path_for_scope', 'servicePath', 'Installer service path does not match the existing owned installation.', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot', 'KillMode=control-group', 'marker-existed', 'marker-existed=0', 'Owned worker install manifest is missing or unsafe.')) {
+    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'private_dir', 'verify_private_dir_existing', 'verify_private_file_existing', 'verify_private_state_tree', 'path_mode', 'path_owner', 'verify_private_config', 'verify_private_service_path_existing', 'Existing private directory is weak or owned by another identity', 'Existing user service directory is weak or owned by another identity', 'Existing user service unit is weak or owned by another identity', 'Existing worker config is weak or owned by another identity', 'Private transaction state root is not a normal directory', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'TRANSACTION_TOMBSTONE_SCHEMA', 'TRANSACTION_TOMBSTONE_RETIRED', 'TRANSACTION_RETIRE_NAME', 'assert_transaction_retirement_tree_safe', 'rollback_tombstone_valid_for_transaction', 'validate_retired_transaction', 'after-pair', 'after-service-registration', 'before-manifest-write', 'after-marker-removal', 'remove_service', 'systemctl is required to remove an existing worker service safely', 'Worker service remained active after disable; refusing to remove unit', 'Worker service disable failed; refusing to remove unit', 'Worker service uninstall transaction path already exists', 'Worker service uninstall could not stage its unit transaction', 'Worker service uninstall could not restore its unit after daemon-reload failure', 'Worker service uninstall could not retire its staged unit transaction', 'cyc-uninstall', 'systemd daemon-reload failed after removing the worker unit', 'service_path_for_scope', 'servicePath', 'Installer service path does not match the existing owned installation.', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot', 'KillMode=control-group', 'marker-existed', 'marker-existed=0', 'Owned worker install manifest is missing or unsafe.')) {
         if ($linuxSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "Linux worker installer is missing rollback/integrity guard: $requiredPattern"
         }
@@ -2336,6 +2454,8 @@ test ! -e "$default_logs"
         'launchctl bootout',
         'launchctl kickstart',
         'launchctl print',
+        'LaunchAgent remained loaded after bootout; refusing to remove plist',
+        'launchctl is required to remove an existing LaunchAgent safely',
         'ProgramArguments',
         'StandardOutPath',
         'StandardErrorPath',
