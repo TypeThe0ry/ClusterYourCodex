@@ -259,14 +259,17 @@ the exact command, and unique `rawLogMarkers` (the `markers` alias is accepted
 only when identical). Run provenance also includes integer `exitCode: 0`,
 bounded `tests.passed`/`tests.failed`/`tests.ignored` counts, and source-bound
 chronological `startedAt`/`endedAt` timestamps. Each marker is bound to its normalized command using
-`CYC-GA-ISSUE2|gate=<gate>|commandSha256=<digest>|status=passed` or the
-corresponding `ISSUE3` form; the aggregate raw-log marker list and downloaded
+  `CYC-GA-ISSUE2|gate=<gate>|commandSha256=<digest>|status=passed` or the
+  corresponding `ISSUE3` form; the aggregate raw-log marker list and downloaded
 envelope must retain every marker exactly once. Issue #3 additionally uses the
-versioned contract in `scripts/ga-issue3-gate-contract.json`: every gate record
-must declare lower-case `platform`, `architecture`, `operation`, and an exact
-`platforms` array, satisfy the gate-specific command/selector patterns, and
-retain the derived semantic marker
-`CYC-GA-ISSUE3|gate=<gate>|platform=<platform>|architecture=<architecture>|operation=<operation>|platforms=<sorted-platforms>|status=passed`.
+  versioned v2 contract in `scripts/ga-issue3-gate-contract.json`: every gate
+  record must declare lower-case `platform`, `hostArchitecture`, and
+  `architecture`, the reviewed `target`, exact `coverageTargets`,
+  `rustTarget`/`kitTarget`, `operation`, `commandId`, and `selectorId`, plus an
+  exact `platforms` array. The command and selector must satisfy the anchored
+  gate-specific patterns; a substring such as `echo systemd --user` is not
+  evidence. The record must retain the derived semantic marker
+  `CYC-GA-ISSUE3|v=2|gate=<gate>|target=<target>|platform=<platform>|hostArchitecture=<hostArchitecture>|architecture=<architecture>|coverageTargets=<sorted-targets>|rustTarget=<rustTarget>|kitTarget=<kitTarget>|operation=<operation>|selectorSha256=<digest>|commandSha256=<digest>|status=passed`.
 This binds Linux systemd, macOS LaunchAgent, x86_64/arm64 artifacts, native
 shell/process-group/path-ACL matrices, live controller/worker probes, and
 Developer ID signing/notarization to the named gate instead of accepting a

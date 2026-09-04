@@ -1,94 +1,171 @@
 {
-  "schemaVersion": "cyc.dev/ga-issue3-gate-contract/v1",
+  "schemaVersion": "cyc.dev/ga-issue3-gate-contract/v2",
   "platforms": ["linux", "macos", "windows"],
   "gates": {
     "linuxSystemdUserServicePackage": {
       "platform": "linux",
       "platforms": ["linux"],
+      "hostArchitectures": ["x86_64", "aarch64"],
       "architectures": ["any"],
+      "target": "linux-worker",
+      "coverageTargets": ["linux-x86_64"],
+      "rustTargets": ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"],
+      "kitTargets": ["linux-x86_64", "linux-aarch64"],
       "operation": "systemd-user-package",
-      "commandPatterns": ["(?i)(systemd|systemctl)", "(?i)(--user|systemd-user|user[ -]service)"],
-      "selectorPatterns": ["(?i)linuxSystemdUserServicePackage", "(?i)(systemd|systemctl)"]
+      "commandId": "cyc.issue3.linux.systemd-user-package.v1",
+      "selectorId": "issue3.linuxSystemdUserServicePackage",
+      "commandPatterns": ["(?i)^(?:\\./)?packaging/worker-kits/linux/install-worker\\.sh install --scope user\\b.*(?:systemctl --user|systemd --user).*$"],
+      "selectorPatterns": ["^issue3\\.linuxSystemdUserServicePackage$"]
     },
     "macosLaunchAgentPackage": {
       "platform": "macos",
       "platforms": ["macos"],
+      "hostArchitectures": ["x86_64", "arm64"],
       "architectures": ["any"],
+      "target": "macos-worker",
+      "coverageTargets": ["macos-x86_64", "macos-aarch64"],
+      "rustTargets": ["x86_64-apple-darwin", "aarch64-apple-darwin"],
+      "kitTargets": ["macos-x86_64", "macos-aarch64"],
       "operation": "launchagent-package",
-      "commandPatterns": ["(?i)(launchctl|LaunchAgents)", "(?i)(bootstrap|kickstart|print|bootout|install|package)"],
-      "selectorPatterns": ["(?i)macosLaunchAgentPackage", "(?i)(launchctl|LaunchAgents)"]
+      "commandId": "cyc.issue3.macos.launchagent-package.v1",
+      "selectorId": "issue3.macosLaunchAgentPackage",
+      "commandPatterns": ["(?i)^(?:\\./)?packaging/worker-kits/macos/install-worker\\.sh install --scope user\\b.*(?:launchctl (?:bootstrap|kickstart|print|bootout)|Library/LaunchAgents).*$"],
+      "selectorPatterns": ["^issue3\\.macosLaunchAgentPackage$"]
     },
     "linuxX64ReleaseArtifact": {
       "platform": "linux",
       "platforms": ["linux"],
+      "hostArchitectures": ["x86_64"],
       "architectures": ["x86_64"],
+      "target": "linux-x86_64",
+      "coverageTargets": ["linux-x86_64"],
+      "rustTargets": ["x86_64-unknown-linux-gnu"],
+      "kitTargets": ["linux-x86_64"],
       "operation": "release-artifact",
-      "commandPatterns": ["(?i)(artifact|release|bundle)", "(?i)(linux|gnu/linux)", "(?i)(x86[_-]?64|amd64|x64)"],
-      "selectorPatterns": ["(?i)linuxX64ReleaseArtifact", "(?i)(x86[_-]?64|amd64|x64)"]
+      "commandId": "cyc.issue3.linux.release-artifact.x86_64.v1",
+      "selectorId": "issue3.linuxX64ReleaseArtifact",
+      "commandPatterns": ["^cyc-release-artifact linux x86_64 linux-x86_64$"],
+      "selectorPatterns": ["^issue3\\.linuxX64ReleaseArtifact$"]
     },
     "macosX64ReleaseArtifact": {
       "platform": "macos",
       "platforms": ["macos"],
+      "hostArchitectures": ["x86_64"],
       "architectures": ["x86_64"],
+      "target": "macos-x86_64",
+      "coverageTargets": ["macos-x86_64"],
+      "rustTargets": ["x86_64-apple-darwin"],
+      "kitTargets": ["macos-x86_64"],
       "operation": "release-artifact",
-      "commandPatterns": ["(?i)(artifact|release|bundle)", "(?i)(macos|darwin|osx)", "(?i)(x86[_-]?64|amd64|x64)"],
-      "selectorPatterns": ["(?i)macosX64ReleaseArtifact", "(?i)(x86[_-]?64|amd64|x64)"]
+      "commandId": "cyc.issue3.macos.release-artifact.x86_64.v1",
+      "selectorId": "issue3.macosX64ReleaseArtifact",
+      "commandPatterns": ["^cyc-release-artifact macos x86_64 macos-x86_64$"],
+      "selectorPatterns": ["^issue3\\.macosX64ReleaseArtifact$"]
     },
     "macosArm64ReleaseArtifact": {
       "platform": "macos",
       "platforms": ["macos"],
-      "architectures": ["arm64"],
+      "hostArchitectures": ["arm64"],
+      "architectures": ["aarch64"],
+      "target": "macos-aarch64",
+      "coverageTargets": ["macos-aarch64"],
+      "rustTargets": ["aarch64-apple-darwin"],
+      "kitTargets": ["macos-aarch64"],
       "operation": "release-artifact",
-      "commandPatterns": ["(?i)(artifact|release|bundle)", "(?i)(macos|darwin|osx)", "(?i)(arm64|aarch64)"],
-      "selectorPatterns": ["(?i)macosArm64ReleaseArtifact", "(?i)(arm64|aarch64)"]
+      "commandId": "cyc.issue3.macos.release-artifact.aarch64.v1",
+      "selectorId": "issue3.macosArm64ReleaseArtifact",
+      "commandPatterns": ["^cyc-release-artifact macos aarch64 macos-aarch64$"],
+      "selectorPatterns": ["^issue3\\.macosArm64ReleaseArtifact$"]
     },
     "platformNativeShells": {
       "platform": "multi",
       "platforms": ["linux", "macos", "windows"],
+      "hostArchitectures": ["multi"],
       "architectures": ["multi"],
+      "target": "cross-platform-matrix",
+      "coverageTargets": ["linux-x86_64", "macos-x86_64", "macos-aarch64", "windows-x86_64"],
+      "rustTargets": ["multi"],
+      "kitTargets": ["multi"],
       "operation": "native-shells",
-      "commandPatterns": ["(?i)(bash|zsh|pwsh|powershell|shell)", "(?i)(linux|macos|darwin|windows)"],
-      "selectorPatterns": ["(?i)platformNativeShells", "(?i)(shell|command)"]
+      "commandId": "cyc.issue3.platform.native-shells.v1",
+      "selectorId": "issue3.platformNativeShells",
+      "commandPatterns": ["^cyc-platform-native-shells cross-platform-matrix$"],
+      "selectorPatterns": ["^issue3\\.platformNativeShells$"]
     },
     "platformNativeProcessGroups": {
       "platform": "multi",
       "platforms": ["linux", "macos", "windows"],
+      "hostArchitectures": ["multi"],
       "architectures": ["multi"],
+      "target": "cross-platform-matrix",
+      "coverageTargets": ["linux-x86_64", "macos-x86_64", "macos-aarch64", "windows-x86_64"],
+      "rustTargets": ["multi"],
+      "kitTargets": ["multi"],
       "operation": "native-process-groups",
-      "commandPatterns": ["(?i)(process[ -]?group|setsid|job[ -]?object|kill|terminate)", "(?i)(linux|macos|darwin|windows)"],
-      "selectorPatterns": ["(?i)platformNativeProcessGroups", "(?i)(process|group|job)"]
+      "commandId": "cyc.issue3.platform.native-process-groups.v1",
+      "selectorId": "issue3.platformNativeProcessGroups",
+      "commandPatterns": ["^cyc-platform-native-process-groups cross-platform-matrix$"],
+      "selectorPatterns": ["^issue3\\.platformNativeProcessGroups$"]
     },
     "crossPlatformPathAclTests": {
       "platform": "multi",
       "platforms": ["linux", "macos", "windows"],
+      "hostArchitectures": ["multi"],
       "architectures": ["multi"],
+      "target": "cross-platform-matrix",
+      "coverageTargets": ["linux-x86_64", "macos-x86_64", "macos-aarch64", "windows-x86_64"],
+      "rustTargets": ["multi"],
+      "kitTargets": ["multi"],
       "operation": "path-acl",
-      "commandPatterns": ["(?i)(acl|chmod|icacls|permissions|path)", "(?i)(linux|macos|darwin|windows)"],
-      "selectorPatterns": ["(?i)crossPlatformPathAclTests", "(?i)(acl|path|permission)"]
+      "commandId": "cyc.issue3.platform.path-acl.v1",
+      "selectorId": "issue3.crossPlatformPathAclTests",
+      "commandPatterns": ["^cyc-platform-path-acl cross-platform-matrix$"],
+      "selectorPatterns": ["^issue3\\.crossPlatformPathAclTests$"]
     },
     "liveMacosRun": {
       "platform": "macos",
       "platforms": ["macos"],
-      "architectures": ["x86_64", "arm64"],
+      "hostArchitectures": ["x86_64", "arm64"],
+      "architectures": ["x86_64", "aarch64"],
+      "target": "macos-live",
+      "coverageTargets": ["macos-x86_64", "macos-aarch64"],
+      "rustTargets": ["x86_64-apple-darwin", "aarch64-apple-darwin"],
+      "kitTargets": ["macos-x86_64", "macos-aarch64"],
       "operation": "live-controller-worker-roundtrip",
-      "commandPatterns": ["(?i)launchctl", "(?i)(bootstrap|kickstart|print|bootout)", "(?i)(controller[ -]?worker|round[ -]?trip)"],
-      "selectorPatterns": ["(?i)liveMacosRun", "(?i)(launchctl|controller|worker|round[ -]?trip)"]
+      "commandId": "cyc.issue3.macos.live-roundtrip.v1",
+      "selectorId": "issue3.liveMacosRun",
+      "commandPatterns": ["(?i)^launchctl (?:bootstrap|kickstart|print|bootout) .*controller-worker round-trip$"],
+      "selectorPatterns": ["^issue3\\.liveMacosRun$"]
     },
     "liveLinuxControllerWorkerRoundTrip": {
       "platform": "linux",
       "platforms": ["linux"],
-      "architectures": ["x86_64", "arm64"],
+      "hostArchitectures": ["x86_64", "aarch64"],
+      "architectures": ["x86_64", "aarch64"],
+      "target": "linux-live",
+      "coverageTargets": ["linux-x86_64"],
+      "rustTargets": ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"],
+      "kitTargets": ["linux-x86_64", "linux-aarch64"],
       "operation": "live-controller-worker-roundtrip",
-      "commandPatterns": ["(?i)scripts/test-linux-controller-worker-roundtrip[.]sh", "(?i)(controller[ -]?worker|round[ -]?trip)"],
-      "selectorPatterns": ["(?i)liveLinuxControllerWorkerRoundTrip", "(?i)test-linux-controller-worker-roundtrip[.]sh"]
+      "commandId": "cyc.issue3.linux.live-roundtrip.v1",
+      "selectorId": "issue3.liveLinuxControllerWorkerRoundTrip",
+      "commandPatterns": ["^bash scripts/test-linux-controller-worker-roundtrip\\.sh --repo \\S+ --work-root \\S+ --timeout [0-9]+ --keep-evidence(?: controller-worker round-trip)?$"],
+      "selectorPatterns": ["^issue3\\.liveLinuxControllerWorkerRoundTrip$"]
     },
     "macosDeveloperIdSigningNotarization": {
       "platform": "macos",
       "platforms": ["macos"],
-      "architectures": ["x86_64", "arm64", "universal2"],
+      "hostArchitectures": ["x86_64", "arm64"],
+      "architectures": ["universal2"],
+      "target": "macos-universal2",
+      "coverageTargets": ["macos-x86_64", "macos-aarch64"],
+      "rustTargets": ["universal2"],
+      "kitTargets": ["macos-universal2"],
       "operation": "developer-id-signing-notarization",
-      "commandPatterns": ["(?i)codesign", "(?i)(notarytool|notariz)"],
-      "selectorPatterns": ["(?i)macosDeveloperIdSigningNotarization", "(?i)(codesign|notar)"]
+      "commandId": "cyc.issue3.macos.signing-notarization.v1",
+      "selectorId": "issue3.macosDeveloperIdSigningNotarization",
+      "commandPatterns": ["^codesign --verify --deep --strict --verbose=2 \\S+ && xcrun notarytool submit \\S+ --wait$"],
+      "selectorPatterns": ["^issue3\\.macosDeveloperIdSigningNotarization$"]
     }
   }
 }

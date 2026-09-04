@@ -44,7 +44,7 @@ try {
     throw "GA readiness assertion failed: Issue #3 semantic gate contract is not valid JSON: $($_.Exception.Message)"
 }
 if ($null -eq $GaIssue3GateContract -or
-    [string]$GaIssue3GateContract.schemaVersion -cne 'cyc.dev/ga-issue3-gate-contract/v1' -or
+    [string]$GaIssue3GateContract.schemaVersion -cne 'cyc.dev/ga-issue3-gate-contract/v2' -or
     $null -eq $GaIssue3GateContract.gates -or
     $GaIssue3GateContract.gates -is [System.Array]) {
     throw 'GA readiness assertion failed: Issue #3 semantic gate contract has an invalid schema.'
@@ -1605,7 +1605,7 @@ function Get-GaIssue3GateContract {
     Assert-GaCondition ($null -ne $property) "$Description has a reviewed Issue #3 semantic contract"
     $contract = $property.Value
     Assert-GaCondition (($contract -is [pscustomobject]) -and -not ($contract -is [System.Array])) "$Description semantic contract is a JSON object"
-    foreach ($field in @('platform', 'platforms', 'architectures', 'operation', 'commandPatterns', 'selectorPatterns')) {
+    foreach ($field in @('platform', 'platforms', 'hostArchitectures', 'architectures', 'target', 'coverageTargets', 'rustTargets', 'kitTargets', 'operation', 'commandId', 'selectorId', 'commandPatterns', 'selectorPatterns')) {
         Assert-GaCondition ($null -ne $contract.PSObject.Properties[$field]) "$Description semantic contract is missing '$field'"
     }
     return $contract
@@ -1615,13 +1615,21 @@ function Get-GaIssue3SemanticMarker {
     param(
         [Parameter(Mandatory = $true)][string]$Gate,
         [Parameter(Mandatory = $true)][string]$Platform,
+        [Parameter(Mandatory = $true)][string]$HostArchitecture,
         [Parameter(Mandatory = $true)][string]$Architecture,
+        [Parameter(Mandatory = $true)][string]$Target,
+        [Parameter(Mandatory = $true)][string[]]$CoverageTargets,
+        [Parameter(Mandatory = $true)][string]$RustTarget,
+        [Parameter(Mandatory = $true)][string]$KitTarget,
         [Parameter(Mandatory = $true)][string]$Operation,
-        [Parameter(Mandatory = $true)][string[]]$Platforms
+        [Parameter(Mandatory = $true)][string]$Command,
+        [Parameter(Mandatory = $true)][string]$Selector
     )
 
-    $platformToken = @($Platforms | ForEach-Object { ([string]$_).ToLowerInvariant() } | Sort-Object) -join ','
-    return "CYC-GA-ISSUE3|gate=$Gate|platform=$Platform|architecture=$Architecture|operation=$Operation|platforms=$platformToken|status=passed"
+    $coverageToken = @($CoverageTargets | ForEach-Object { ([string]$_).ToLowerInvariant() } | Sort-Object) -join ','
+    $commandDigest = Get-GaIssue5CommandSha256 -Command $Command
+    $selectorDigest = Get-GaIssue5CommandSha256 -Command $Selector
+    return "CYC-GA-ISSUE3|v=2|gate=$Gate|target=$Target|platform=$Platform|hostArchitecture=$HostArchitecture|architecture=$Architecture|coverageTargets=$coverageToken|rustTarget=$RustTarget|kitTarget=$KitTarget|operation=$Operation|selectorSha256=$selectorDigest|commandSha256=$commandDigest|status=passed"
 }
 
 function Assert-GaIssue3GateSemantics {
@@ -1636,17 +1644,35 @@ function Assert-GaIssue3GateSemantics {
 
     $contract = Get-GaIssue3GateContract -Gate $Gate -Description $Description
     $platform = Get-GaProperty -Object $GateEvidence -Path 'platform' -Description $Description
+    $hostArchitecture = Get-GaProperty -Object $GateEvidence -Path 'hostArchitecture' -Description $Description
     $architecture = Get-GaProperty -Object $GateEvidence -Path 'architecture' -Description $Description
+    $target = Get-GaProperty -Object $GateEvidence -Path 'target' -Description $Description
+    $coverageTargetsProperty = $GateEvidence.PSObject.Properties['coverageTargets']
+    Assert-GaCondition ($null -ne $coverageTargetsProperty) "$Description.coverageTargets is required"
+    $coverageTargetsValue = $coverageTargetsProperty.Value
+    $rustTarget = Get-GaProperty -Object $GateEvidence -Path 'rustTarget' -Description $Description
+    $kitTarget = Get-GaProperty -Object $GateEvidence -Path 'kitTarget' -Description $Description
     $operation = Get-GaProperty -Object $GateEvidence -Path 'operation' -Description $Description
     $platformsProperty = $GateEvidence.PSObject.Properties['platforms']
     Assert-GaCondition ($null -ne $platformsProperty) "$Description.platforms is required"
     $platformsValue = $platformsProperty.Value
     Assert-GaCondition ($platform -is [string] -and [string]$platform -ceq ([string]$platform).ToLowerInvariant()) "$Description.platform must be a lower-case string"
+    Assert-GaCondition ($hostArchitecture -is [string] -and [string]$hostArchitecture -ceq ([string]$hostArchitecture).ToLowerInvariant()) "$Description.hostArchitecture must be a lower-case string"
     Assert-GaCondition ($architecture -is [string] -and [string]$architecture -ceq ([string]$architecture).ToLowerInvariant()) "$Description.architecture must be a lower-case string"
+    Assert-GaCondition ($target -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$target)) "$Description.target must be a non-empty string"
+    Assert-GaCondition ($rustTarget -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$rustTarget)) "$Description.rustTarget must be a non-empty string"
+    Assert-GaCondition ($kitTarget -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$kitTarget)) "$Description.kitTarget must be a non-empty string"
     Assert-GaCondition ($operation -is [string] -and [string]$operation -ceq ([string]$operation).ToLowerInvariant()) "$Description.operation must be a lower-case string"
     Assert-GaCondition ($platform -ceq [string]$contract.platform) "$Description.platform must equal the reviewed semantic platform '$($contract.platform)'"
+    $allowedHostArchitectures = @($contract.hostArchitectures | ForEach-Object { [string]$_ })
+    Assert-GaCondition ($allowedHostArchitectures.Count -gt 0 -and @($allowedHostArchitectures | Where-Object { $_ -ceq [string]$hostArchitecture }).Count -eq 1) "$Description.hostArchitecture is not allowed for Issue #3.$Gate"
     $allowedArchitectures = @($contract.architectures | ForEach-Object { [string]$_ })
     Assert-GaCondition ($allowedArchitectures.Count -gt 0 -and @($allowedArchitectures | Where-Object { $_ -ceq [string]$architecture }).Count -eq 1) "$Description.architecture is not allowed for Issue #3.$Gate"
+    Assert-GaCondition ([string]$target -ceq [string]$contract.target) "$Description.target must equal the reviewed semantic target '$($contract.target)'"
+    $allowedRustTargets = @($contract.rustTargets | ForEach-Object { [string]$_ })
+    Assert-GaCondition ($allowedRustTargets.Count -gt 0 -and @($allowedRustTargets | Where-Object { $_ -ceq [string]$rustTarget }).Count -eq 1) "$Description.rustTarget is not allowed for Issue #3.$Gate"
+    $allowedKitTargets = @($contract.kitTargets | ForEach-Object { [string]$_ })
+    Assert-GaCondition ($allowedKitTargets.Count -gt 0 -and @($allowedKitTargets | Where-Object { $_ -ceq [string]$kitTarget }).Count -eq 1) "$Description.kitTarget is not allowed for Issue #3.$Gate"
     Assert-GaCondition ($operation -ceq [string]$contract.operation) "$Description.operation must equal the reviewed semantic operation '$($contract.operation)'"
     Assert-GaCondition (($platformsValue -is [System.Array]) -and $platformsValue.Count -gt 0) "$Description.platforms must be a non-empty JSON array"
     $actualPlatforms = @($platformsValue | ForEach-Object { Assert-GaCondition ($_ -is [string]) "$Description.platforms entries must be strings"; [string]$_ })
@@ -1658,6 +1684,22 @@ function Assert-GaIssue3GateSemantics {
     $expectedPlatforms = @($contract.platforms | ForEach-Object { [string]$_ } | Sort-Object)
     $normalizedActualPlatforms = @($actualPlatforms | Sort-Object)
     Assert-GaCondition (($normalizedActualPlatforms -join ',') -ceq ($expectedPlatforms -join ',')) "$Description.platforms must equal the reviewed platform set '$($expectedPlatforms -join ',')'"
+
+    Assert-GaCondition (($coverageTargetsValue -is [System.Array]) -and $coverageTargetsValue.Count -gt 0) "$Description.coverageTargets must be a non-empty JSON array"
+    $actualCoverageTargets = @($coverageTargetsValue | ForEach-Object {
+            Assert-GaCondition ($_ -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$_)) "$Description.coverageTargets entries must be non-empty strings"
+            Assert-GaCondition ([string]$_ -ceq ([string]$_).ToLowerInvariant()) "$Description.coverageTargets entries must be lower-case"
+            [string]$_
+        })
+    $coverageSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($item in $actualCoverageTargets) { Assert-GaCondition ($coverageSet.Add($item)) "$Description.coverageTargets must not contain duplicates" }
+    $expectedCoverageTargets = @($contract.coverageTargets | ForEach-Object { [string]$_ } | Sort-Object)
+    Assert-GaCondition ((@($actualCoverageTargets | Sort-Object) -join ',') -ceq ($expectedCoverageTargets -join ',')) "$Description.coverageTargets must equal the reviewed target set '$($expectedCoverageTargets -join ',')'"
+
+    $commandIdProperty = $GateEvidence.PSObject.Properties['commandId']
+    $selectorIdProperty = $GateEvidence.PSObject.Properties['selectorId']
+    Assert-GaCondition ($null -ne $commandIdProperty -and $commandIdProperty.Value -is [string] -and [string]$commandIdProperty.Value -ceq [string]$contract.commandId) "$Description.commandId must equal the reviewed command ID '$($contract.commandId)'"
+    Assert-GaCondition ($null -ne $selectorIdProperty -and $selectorIdProperty.Value -is [string] -and [string]$selectorIdProperty.Value -ceq [string]$contract.selectorId) "$Description.selectorId must equal the reviewed selector ID '$($contract.selectorId)'"
 
     foreach ($pattern in @($contract.commandPatterns)) {
         Assert-GaCondition ($pattern -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$pattern)) "$Description semantic command pattern must be non-empty"
@@ -1680,14 +1722,27 @@ function Assert-GaIssue3GateSemantics {
     $semanticMarker = Get-GaIssue3SemanticMarker `
         -Gate $Gate `
         -Platform ([string]$platform) `
+        -HostArchitecture ([string]$hostArchitecture) `
         -Architecture ([string]$architecture) `
+        -Target ([string]$target) `
+        -CoverageTargets $actualCoverageTargets `
+        -RustTarget ([string]$rustTarget) `
+        -KitTarget ([string]$kitTarget) `
         -Operation ([string]$operation) `
-        -Platforms $actualPlatforms
+        -Command $Command `
+        -Selector $Selector
     Assert-GaCondition (@($Markers | Where-Object { [string]$_ -ceq $semanticMarker }).Count -eq 1) "$Description.rawLogMarkers must contain the semantic Issue #3 marker"
     return [pscustomobject]@{
         platform = [string]$platform
+        hostArchitecture = [string]$hostArchitecture
         architecture = [string]$architecture
+        target = [string]$target
+        coverageTargets = $actualCoverageTargets
+        rustTarget = [string]$rustTarget
+        kitTarget = [string]$kitTarget
         operation = [string]$operation
+        commandId = [string]$commandIdProperty.Value
+        selectorId = [string]$selectorIdProperty.Value
         platforms = $actualPlatforms
         semanticMarker = $semanticMarker
     }
@@ -1705,7 +1760,7 @@ function Assert-GaIssue23GateEvidence {
 
     Assert-GaExactObjectPropertySet -Object $GateEvidence `
         -Required @('status', 'gateId', 'sourceCommit', 'provider', 'hostType', 'evidenceId', 'runId', 'node', 'exitCode', 'tests', 'startedAt', 'endedAt', 'command') `
-        -Optional @('gate', 'testSelector', 'selector', 'rawLogMarkers', 'markers', 'blockerInventory', 'platform', 'architecture', 'operation', 'platforms') `
+        -Optional @('gate', 'testSelector', 'selector', 'rawLogMarkers', 'markers', 'blockerInventory', 'platform', 'hostArchitecture', 'architecture', 'target', 'coverageTargets', 'rustTarget', 'kitTarget', 'operation', 'platforms', 'commandId', 'selectorId') `
         -Description $Description
     $status = Get-GaProperty -Object $GateEvidence -Path 'status' -Description $Description
     Assert-GaCondition (($status -is [bool]) -and $status) "$Description.status must be boolean true"
@@ -1781,7 +1836,7 @@ function Assert-GaIssue23GateEvidence {
         $result | Add-Member -MemberType NoteProperty -Name blockerInventory -Value $GateEvidence.blockerInventory
     }
     if ($IssueName -ceq 'issue3') {
-        foreach ($propertyName in @('platform', 'architecture', 'operation', 'platforms')) {
+        foreach ($propertyName in @('platform', 'hostArchitecture', 'architecture', 'target', 'coverageTargets', 'rustTarget', 'kitTarget', 'operation', 'platforms', 'commandId', 'selectorId')) {
             $result | Add-Member -MemberType NoteProperty -Name $propertyName -Value $semanticContract.$propertyName
         }
     }
@@ -2020,12 +2075,15 @@ function Assert-GaIssue23RawLogContent {
         $contentCommand = Normalize-GaRawLogCommand -Command ([string]$contentGateContract.command)
         Assert-GaCondition ($contentCommand.Equals($manifestCommand, [System.StringComparison]::Ordinal)) "$Description.gates.$gateName.command must match the manifest"
         if ($IssueName -ceq 'issue3') {
-            foreach ($field in @('platform', 'architecture', 'operation')) {
+            foreach ($field in @('platform', 'hostArchitecture', 'architecture', 'target', 'rustTarget', 'kitTarget', 'operation', 'commandId', 'selectorId')) {
                 Assert-GaCondition ([string]$contentGateContract.$field -ceq [string]$manifestGate.$field) "$Description.gates.$gateName.$field must match the manifest"
             }
             $manifestPlatforms = @($manifestGate.platforms | ForEach-Object { [string]$_ })
             $contentPlatforms = @($contentGateContract.platforms | ForEach-Object { [string]$_ })
             Assert-GaCondition (($contentPlatforms -join ',') -ceq ($manifestPlatforms -join ',')) "$Description.gates.$gateName.platforms must match the manifest"
+            $manifestCoverage = @($manifestGate.coverageTargets | ForEach-Object { [string]$_ })
+            $contentCoverage = @($contentGateContract.coverageTargets | ForEach-Object { [string]$_ })
+            Assert-GaCondition (($contentCoverage -join ',') -ceq ($manifestCoverage -join ',')) "$Description.gates.$gateName.coverageTargets must match the manifest"
         }
 
         # Match exit code, test counts, and timestamps as well as identity. A
@@ -2039,6 +2097,7 @@ function Assert-GaIssue23RawLogContent {
         foreach ($marker in @($manifestGate.markers)) {
             Assert-GaCondition (@($contentGateContract.markers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.gates.$gateName.rawLogMarkers must retain the manifest marker '$marker'"
         }
+        Assert-GaCondition ((@($contentGateContract.markers | Sort-Object) -join "`n") -ceq (@($manifestGate.markers | Sort-Object) -join "`n")) "$Description.gates.$gateName.rawLogMarkers must match the manifest marker set exactly"
 
         if ($IssueName -ceq 'issue2' -and $gateName -ceq 'noOpenUnwaivedP0P1Blocker') {
             $manifestInventory = Get-GaProperty -Object $manifestGate -Path 'blockerInventory' -Description $Description
@@ -2066,6 +2125,7 @@ function Assert-GaIssue23RawLogContent {
     foreach ($marker in @($manifestMarkersProperty.Value)) {
         Assert-GaCondition (@($contentMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.markers must retain the manifest marker '$marker'"
     }
+    Assert-GaCondition ((@($contentMarkers | Sort-Object) -join "`n") -ceq (@($manifestMarkersProperty.Value | Sort-Object) -join "`n")) "$Description.markers must match the manifest marker set exactly"
     return $Content
 }
 
@@ -2242,6 +2302,11 @@ function Get-GaRawLogContentBinding {
                 testSelector = (Get-GaIssue5RunSelector -Run $gate -Description $Description)
                 command = Normalize-GaRawLogCommand -Command ([string](Get-GaProperty -Object $gate -Path 'command' -Description $Description))
                 markers = @((Get-GaIssue5GateMarkers -GateEvidence $gate -Description $Description) | Sort-Object)
+            }
+            if ($IssueName -ceq 'issue3') {
+                foreach ($field in @('platform', 'hostArchitecture', 'architecture', 'target', 'coverageTargets', 'rustTarget', 'kitTarget', 'operation', 'commandId', 'selectorId')) {
+                    $gateBinding[[string]$property.Name][$field] = Get-GaProperty -Object $gate -Path $field -Description "$Description.gates.$($property.Name)"
+                }
             }
             $inventoryProperty = $gate.PSObject.Properties['blockerInventory']
             if ($null -ne $inventoryProperty) {

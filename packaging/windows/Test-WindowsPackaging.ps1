@@ -954,6 +954,123 @@ try {
     $installCoreEnd = $source.IndexOf('function Invoke-InstallOrRepair', $installCoreStart + 1)
     $installCoreBody = $source.Substring($installCoreStart, $installCoreEnd - $installCoreStart)
     Assert-True ($installCoreBody -notmatch 'Set-CycFirewallRule|New-NetFirewallRule|Remove-CycFirewallRule') 'unelevated install/repair core has no firewall mutation call'
+    $installDataPreflightIndex = $installCoreBody.IndexOf('Assert-CycExistingPrivateDirectory -Path $Plan.dataRoot', [StringComparison]::Ordinal)
+    $installWorkerConfigProbeIndex = $installCoreBody.IndexOf('Test-Path -LiteralPath $Plan.workerConfig', [StringComparison]::Ordinal)
+    Assert-True ($installDataPreflightIndex -ge 0 -and
+        $installWorkerConfigProbeIndex -gt $installDataPreflightIndex) 'install/repair checks the worker config only after both private roots pass the reparse/ACL preflight'
+    $installTryIndex = $installCoreBody.IndexOf('try {', [StringComparison]::Ordinal)
+    $installRuntimeStopIndex = $installCoreBody.IndexOf('Stop-CycRuntime', [StringComparison]::Ordinal)
+    $installPortPreflightIndex = $installCoreBody.IndexOf('Assert-CycListenPortsAvailable -Ports $requiredPorts', [StringComparison]::Ordinal)
+    $installRollbackSnapshotIndex = $installCoreBody.IndexOf('$rollback = New-FileRollbackSnapshot', [StringComparison]::Ordinal)
+    Assert-True ($installTryIndex -ge 0 -and
+        $installRuntimeStopIndex -gt $installTryIndex -and
+        $installPortPreflightIndex -gt $installRuntimeStopIndex -and
+        $installRollbackSnapshotIndex -gt $installPortPreflightIndex) 'install/repair stops its owned runtime before probing ports and keeps the probe inside the rollback boundary'
+
+    # Model the preview lifecycle failure without binding real machine ports or
+    # touching Scheduled Tasks. A repair starts with its own controller on
+    # 47831; Stop-CycRuntime must clear that listener before the port probe. A
+    # forced failure immediately afterward proves the captured running task is
+    # restored. A fresh install with a foreign listener must still fail closed.
+    & {
+        $Action = 'Repair'
+        $PlanOnly = $false
+        $DeferFirewall = $false
+        $ownedSnapshot = [PSCustomObject]@{
+            name = 'ClusterYourCodex Controller'
+            wasRunning = $true
+        }
+        $state = [PSCustomObject]@{
+            events = (New-Object System.Collections.Generic.List[string])
+            ownedListenerRunning = $true
+            foreignListenerRunning = $false
+            taskSnapshot = $ownedSnapshot
+            restoredSnapshotCount = -1
+        }
+
+        function Assert-CycExistingPrivateDirectory {
+            param([string]$Path, [switch]$AllowAdministratorsReadAndExecute)
+            return $Path
+        }
+        function Read-InstallManifest {
+            param([string]$ManifestPath)
+            return $null
+        }
+        function Get-CycTaskSnapshots {
+            param([string]$ExpectedInstallRoot, [string]$ExpectedSid)
+            [void]$state.events.Add('snapshot')
+            if ($null -ne $state.taskSnapshot) { return $state.taskSnapshot }
+        }
+        function Stop-CycRuntime {
+            param([string]$InstallRoot, [string]$ExpectedSid)
+            [void]$state.events.Add('stop')
+            $state.ownedListenerRunning = $false
+        }
+        function Assert-CycListenPortsAvailable {
+            param([int[]]$Ports)
+            [void]$state.events.Add('ports')
+            if ($state.ownedListenerRunning) {
+                throw 'CYC_TEST_OWNED_LISTENER_WAS_PROBED_BEFORE_STOP'
+            }
+            if ($state.foreignListenerRunning) {
+                throw 'TCP port 47831 is already listening (PID 4242).'
+            }
+        }
+        function New-FileRollbackSnapshot {
+            param($Plan, $OldManifest)
+            [void]$state.events.Add('file-snapshot')
+            throw 'CYC_TEST_FAILURE_AFTER_PORT_PREFLIGHT'
+        }
+        function Remove-NewCycTlsIdentity {
+            param($Plan, $IdentityResult)
+        }
+        function Restore-CycTaskSnapshots {
+            param($Snapshots, [string]$ExpectedInstallRoot, [string]$ExpectedSid)
+            [void]$state.events.Add('restore')
+            $state.restoredSnapshotCount = @($Snapshots).Count
+            if ($state.restoredSnapshotCount -gt 0 -and [bool]$Snapshots[0].wasRunning) {
+                $state.ownedListenerRunning = $true
+            }
+        }
+
+        $fixturePlan = [PSCustomObject]@{
+            installRoot = (Join-Path $testRoot 'runtime-port-order-install')
+            dataRoot = (Join-Path $testRoot 'runtime-port-order-data')
+            workerConfig = (Join-Path $testRoot 'runtime-port-order-worker.json')
+            manifestPath = (Join-Path $testRoot 'runtime-port-order-manifest.json')
+            initiator = [PSCustomObject]@{ sid = 'S-1-5-21-1-2-3-1001' }
+            tasks = @(
+                [PSCustomObject]@{ enabled = $true },
+                [PSCustomObject]@{ enabled = $false }
+            )
+            managedWorker = [PSCustomObject]@{
+                enabled = $false
+                listenPort = 47832
+                firewall = [PSCustomObject]@{ enabled = $false }
+            }
+        }
+
+        $repairFailure = ''
+        try { [void](Invoke-InstallOrRepairCore -Plan $fixturePlan -Confirm:$false) } catch {
+            $repairFailure = $_.Exception.Message
+        }
+        Assert-True ($repairFailure -eq 'CYC_TEST_FAILURE_AFTER_PORT_PREFLIGHT') 'repair does not reject its own controller listener before runtime teardown'
+        Assert-True (($state.events -join ',') -eq 'snapshot,stop,ports,file-snapshot,stop,restore') 'repair port preflight executes after owned runtime stop and rollback restores captured tasks'
+        Assert-True ($state.restoredSnapshotCount -eq 1 -and $state.ownedListenerRunning) 'repair rollback restores the previously running controller task after a post-stop failure'
+
+        $state.events.Clear()
+        $state.ownedListenerRunning = $false
+        $state.foreignListenerRunning = $true
+        $state.taskSnapshot = $null
+        $state.restoredSnapshotCount = -1
+        $freshFailure = ''
+        try { [void](Invoke-InstallOrRepairCore -Plan $fixturePlan -Confirm:$false) } catch {
+            $freshFailure = $_.Exception.Message
+        }
+        Assert-True ($freshFailure -match '^TCP port 47831 is already listening') 'fresh install still rejects a foreign listener after the no-op owned-runtime stop'
+        Assert-True (($state.events -join ',') -eq 'snapshot,stop,ports,stop,restore') 'foreign port conflict fails before file snapshot or install mutation and still enters rollback cleanup'
+        Assert-True ($state.restoredSnapshotCount -eq 0 -and $state.foreignListenerRunning) 'fresh-install rollback leaves the foreign listener untouched'
+    }
     $uninstallCoreStart = $source.IndexOf('function Invoke-UninstallCore')
     $uninstallCoreEnd = $source.IndexOf('function Invoke-Uninstall', $uninstallCoreStart + 1)
     $uninstallCoreBody = $source.Substring($uninstallCoreStart, $uninstallCoreEnd - $uninstallCoreStart)

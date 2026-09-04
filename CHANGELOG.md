@@ -19,11 +19,21 @@ are versioned independently from the product.
   repeated pre-publish verification.
 - Harden Windows atomic writers and rollback paths to reject directories and
   reparse-point leaves at both the initial check and replacement boundary.
+- Bind Issue #3 heterogeneous-platform evidence to the reviewed v2 target,
+  host-architecture, coverage, Rust/kit target, command, selector, and
+  command/selector digest contract; anchored selectors now reject substring
+  or echo-only evidence.
+- Fix Windows Repair and upgrade ordering so the ownership-checked controller
+  and worker runtime stop before port availability probing, while foreign
+  listeners still fail closed and rollback restores the prior running task.
 
 ### Tests
 
 - Add PowerShell 5.1/Pester 3.4 coverage for live blocker snapshots and
   exact-source CI pagination/provenance; all local GA contract suites pass.
+- Add v2 Issue #3 semantic-marker regression coverage and Windows
+  Install/Repair port-order fixtures, including foreign-listener preservation
+  and rollback of a previously running task.
 - Main CI run 33923073540 passed all ten Linux, macOS, Windows, MSRV, native
   worker-kit, desktop, and controller/worker bridge jobs on the source commit.
 

@@ -6482,9 +6482,6 @@ function Invoke-InstallOrRepairCore {
          [string]$Plan.managedWorker.firewall.requestSha256 -cnotmatch '^[0-9a-f]{64}$')) {
         throw 'Per-user core install requires a valid deferred firewall-only transaction.'
     }
-    if ($Plan.tasks[1].enabled -and -not (Test-Path -LiteralPath $Plan.workerConfig -PathType Leaf)) {
-        throw 'Worker task requested but the paired worker config does not exist.'
-    }
     if (-not $PSCmdlet.ShouldProcess($Plan.installRoot, "$Action ClusterYourCodex")) { return }
 
     # Core may be invoked directly by the lifecycle coordinator as well as
@@ -6495,6 +6492,9 @@ function Invoke-InstallOrRepairCore {
         -Path $Plan.installRoot `
         -AllowAdministratorsReadAndExecute)
     [void](Assert-CycExistingPrivateDirectory -Path $Plan.dataRoot)
+    if ($Plan.tasks[1].enabled -and -not (Test-Path -LiteralPath $Plan.workerConfig -PathType Leaf)) {
+        throw 'Worker task requested but the paired worker config does not exist.'
+    }
     $oldManifest = Read-InstallManifest -ManifestPath $Plan.manifestPath
     # Validate existing product tasks before touching ACLs or any other
     # lifecycle resource. A same-name task from another SID/root is a hard stop
@@ -6504,7 +6504,6 @@ function Invoke-InstallOrRepairCore {
         -ExpectedSid $Plan.initiator.sid)
     $requiredPorts = @(47831)
     if ($Plan.managedWorker.enabled) { $requiredPorts += [int]$Plan.managedWorker.listenPort }
-    Assert-CycListenPortsAvailable -Ports $requiredPorts
     $rollback = $null
     $agentsTransaction = $null
     $agentsResult = $null
@@ -6517,6 +6516,13 @@ function Invoke-InstallOrRepairCore {
         Stop-CycRuntime `
             -InstallRoot $Plan.installRoot `
             -ExpectedSid $Plan.initiator.sid
+        # Repair/upgrade starts with the installer-owned controller (and
+        # optionally the worker listener) already bound to these ports. Stop
+        # that verified runtime before distinguishing a real foreign listener.
+        # Keep the check inside the rollback boundary so a port conflict after
+        # teardown restores the captured task state instead of stranding the
+        # previous installation stopped.
+        Assert-CycListenPortsAvailable -Ports $requiredPorts
         $rollback = New-FileRollbackSnapshot -Plan $Plan -OldManifest $oldManifest
         # The elevated firewall-only helper may run as a different administrator
         # during over-the-shoulder UAC. It needs read/execute access to hash the

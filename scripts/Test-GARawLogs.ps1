@@ -26,7 +26,7 @@ try {
     throw "GA raw-log assertion failed: Issue #3 semantic gate contract is not valid JSON: $($_.Exception.Message)"
 }
 if ($null -eq $GaIssue3GateContract -or
-    [string]$GaIssue3GateContract.schemaVersion -cne 'cyc.dev/ga-issue3-gate-contract/v1' -or
+    [string]$GaIssue3GateContract.schemaVersion -cne 'cyc.dev/ga-issue3-gate-contract/v2' -or
     $null -eq $GaIssue3GateContract.gates -or
     $GaIssue3GateContract.gates -is [System.Array]) {
     throw 'GA raw-log assertion failed: Issue #3 semantic gate contract has an invalid schema.'
@@ -660,7 +660,7 @@ function Get-RawLogIssue3GateContract {
     Assert-RawLogCondition ($null -ne $property) "$Description has a reviewed Issue #3 semantic contract"
     $contract = $property.Value
     Assert-RawLogCondition (($contract -is [pscustomobject]) -and -not ($contract -is [System.Array])) "$Description semantic contract is a JSON object"
-    foreach ($field in @('platform', 'platforms', 'architectures', 'operation', 'commandPatterns', 'selectorPatterns')) {
+    foreach ($field in @('platform', 'platforms', 'hostArchitectures', 'architectures', 'target', 'coverageTargets', 'rustTargets', 'kitTargets', 'operation', 'commandId', 'selectorId', 'commandPatterns', 'selectorPatterns')) {
         Assert-RawLogCondition ($null -ne $contract.PSObject.Properties[$field]) "$Description semantic contract is missing '$field'"
     }
     return $contract
@@ -670,13 +670,21 @@ function Get-RawLogIssue3SemanticMarker {
     param(
         [Parameter(Mandatory = $true)][string]$Gate,
         [Parameter(Mandatory = $true)][string]$Platform,
+        [Parameter(Mandatory = $true)][string]$HostArchitecture,
         [Parameter(Mandatory = $true)][string]$Architecture,
+        [Parameter(Mandatory = $true)][string]$Target,
+        [Parameter(Mandatory = $true)][string[]]$CoverageTargets,
+        [Parameter(Mandatory = $true)][string]$RustTarget,
+        [Parameter(Mandatory = $true)][string]$KitTarget,
         [Parameter(Mandatory = $true)][string]$Operation,
-        [Parameter(Mandatory = $true)][string[]]$Platforms
+        [Parameter(Mandatory = $true)][string]$Command,
+        [Parameter(Mandatory = $true)][string]$Selector
     )
 
-    $platformToken = @($Platforms | ForEach-Object { ([string]$_).ToLowerInvariant() } | Sort-Object) -join ','
-    return "CYC-GA-ISSUE3|gate=$Gate|platform=$Platform|architecture=$Architecture|operation=$Operation|platforms=$platformToken|status=passed"
+    $coverageToken = @($CoverageTargets | ForEach-Object { ([string]$_).ToLowerInvariant() } | Sort-Object) -join ','
+    $commandDigest = Get-RawLogIssue5CommandSha256 -Command $Command
+    $selectorDigest = Get-RawLogIssue5CommandSha256 -Command $Selector
+    return "CYC-GA-ISSUE3|v=2|gate=$Gate|target=$Target|platform=$Platform|hostArchitecture=$HostArchitecture|architecture=$Architecture|coverageTargets=$coverageToken|rustTarget=$RustTarget|kitTarget=$KitTarget|operation=$Operation|selectorSha256=$selectorDigest|commandSha256=$commandDigest|status=passed"
 }
 
 function Assert-RawLogIssue3GateSemantics {
@@ -691,17 +699,35 @@ function Assert-RawLogIssue3GateSemantics {
 
     $contract = Get-RawLogIssue3GateContract -Gate $Gate -Description $Description
     $platform = Get-RawLogProperty -Object $GateEvidence -Path 'platform' -Description $Description
+    $hostArchitecture = Get-RawLogProperty -Object $GateEvidence -Path 'hostArchitecture' -Description $Description
     $architecture = Get-RawLogProperty -Object $GateEvidence -Path 'architecture' -Description $Description
+    $target = Get-RawLogProperty -Object $GateEvidence -Path 'target' -Description $Description
+    $coverageTargetsProperty = $GateEvidence.PSObject.Properties['coverageTargets']
+    Assert-RawLogCondition ($null -ne $coverageTargetsProperty) "$Description.coverageTargets is required"
+    $coverageTargetsValue = $coverageTargetsProperty.Value
+    $rustTarget = Get-RawLogProperty -Object $GateEvidence -Path 'rustTarget' -Description $Description
+    $kitTarget = Get-RawLogProperty -Object $GateEvidence -Path 'kitTarget' -Description $Description
     $operation = Get-RawLogProperty -Object $GateEvidence -Path 'operation' -Description $Description
     $platformsProperty = $GateEvidence.PSObject.Properties['platforms']
     Assert-RawLogCondition ($null -ne $platformsProperty) "$Description.platforms is required"
     $platformsValue = $platformsProperty.Value
     Assert-RawLogCondition ($platform -is [string] -and [string]$platform -ceq ([string]$platform).ToLowerInvariant()) "$Description.platform must be a lower-case string"
+    Assert-RawLogCondition ($hostArchitecture -is [string] -and [string]$hostArchitecture -ceq ([string]$hostArchitecture).ToLowerInvariant()) "$Description.hostArchitecture must be a lower-case string"
     Assert-RawLogCondition ($architecture -is [string] -and [string]$architecture -ceq ([string]$architecture).ToLowerInvariant()) "$Description.architecture must be a lower-case string"
+    Assert-RawLogCondition ($target -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$target)) "$Description.target must be a non-empty string"
+    Assert-RawLogCondition ($rustTarget -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$rustTarget)) "$Description.rustTarget must be a non-empty string"
+    Assert-RawLogCondition ($kitTarget -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$kitTarget)) "$Description.kitTarget must be a non-empty string"
     Assert-RawLogCondition ($operation -is [string] -and [string]$operation -ceq ([string]$operation).ToLowerInvariant()) "$Description.operation must be a lower-case string"
     Assert-RawLogCondition ($platform -ceq [string]$contract.platform) "$Description.platform must equal the reviewed semantic platform '$($contract.platform)'"
+    $allowedHostArchitectures = @($contract.hostArchitectures | ForEach-Object { [string]$_ })
+    Assert-RawLogCondition ($allowedHostArchitectures.Count -gt 0 -and @($allowedHostArchitectures | Where-Object { $_ -ceq [string]$hostArchitecture }).Count -eq 1) "$Description.hostArchitecture is not allowed for Issue #3.$Gate"
     $allowedArchitectures = @($contract.architectures | ForEach-Object { [string]$_ })
     Assert-RawLogCondition ($allowedArchitectures.Count -gt 0 -and @($allowedArchitectures | Where-Object { $_ -ceq [string]$architecture }).Count -eq 1) "$Description.architecture is not allowed for Issue #3.$Gate"
+    Assert-RawLogCondition ([string]$target -ceq [string]$contract.target) "$Description.target must equal the reviewed semantic target '$($contract.target)'"
+    $allowedRustTargets = @($contract.rustTargets | ForEach-Object { [string]$_ })
+    Assert-RawLogCondition ($allowedRustTargets.Count -gt 0 -and @($allowedRustTargets | Where-Object { $_ -ceq [string]$rustTarget }).Count -eq 1) "$Description.rustTarget is not allowed for Issue #3.$Gate"
+    $allowedKitTargets = @($contract.kitTargets | ForEach-Object { [string]$_ })
+    Assert-RawLogCondition ($allowedKitTargets.Count -gt 0 -and @($allowedKitTargets | Where-Object { $_ -ceq [string]$kitTarget }).Count -eq 1) "$Description.kitTarget is not allowed for Issue #3.$Gate"
     Assert-RawLogCondition ($operation -ceq [string]$contract.operation) "$Description.operation must equal the reviewed semantic operation '$($contract.operation)'"
     Assert-RawLogCondition (($platformsValue -is [System.Array]) -and $platformsValue.Count -gt 0) "$Description.platforms must be a non-empty JSON array"
     $actualPlatforms = @($platformsValue | ForEach-Object { Assert-RawLogCondition ($_ -is [string]) "$Description.platforms entries must be strings"; [string]$_ })
@@ -713,6 +739,22 @@ function Assert-RawLogIssue3GateSemantics {
     $expectedPlatforms = @($contract.platforms | ForEach-Object { [string]$_ } | Sort-Object)
     $normalizedActualPlatforms = @($actualPlatforms | Sort-Object)
     Assert-RawLogCondition (($normalizedActualPlatforms -join ',') -ceq ($expectedPlatforms -join ',')) "$Description.platforms must equal the reviewed platform set '$($expectedPlatforms -join ',')'"
+
+    Assert-RawLogCondition (($coverageTargetsValue -is [System.Array]) -and $coverageTargetsValue.Count -gt 0) "$Description.coverageTargets must be a non-empty JSON array"
+    $actualCoverageTargets = @($coverageTargetsValue | ForEach-Object {
+            Assert-RawLogCondition ($_ -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$_)) "$Description.coverageTargets entries must be non-empty strings"
+            Assert-RawLogCondition ([string]$_ -ceq ([string]$_).ToLowerInvariant()) "$Description.coverageTargets entries must be lower-case"
+            [string]$_
+        })
+    $coverageSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($item in $actualCoverageTargets) { Assert-RawLogCondition ($coverageSet.Add($item)) "$Description.coverageTargets must not contain duplicates" }
+    $expectedCoverageTargets = @($contract.coverageTargets | ForEach-Object { [string]$_ } | Sort-Object)
+    Assert-RawLogCondition ((@($actualCoverageTargets | Sort-Object) -join ',') -ceq ($expectedCoverageTargets -join ',')) "$Description.coverageTargets must equal the reviewed target set '$($expectedCoverageTargets -join ',')'"
+
+    $commandIdProperty = $GateEvidence.PSObject.Properties['commandId']
+    $selectorIdProperty = $GateEvidence.PSObject.Properties['selectorId']
+    Assert-RawLogCondition ($null -ne $commandIdProperty -and $commandIdProperty.Value -is [string] -and [string]$commandIdProperty.Value -ceq [string]$contract.commandId) "$Description.commandId must equal the reviewed command ID '$($contract.commandId)'"
+    Assert-RawLogCondition ($null -ne $selectorIdProperty -and $selectorIdProperty.Value -is [string] -and [string]$selectorIdProperty.Value -ceq [string]$contract.selectorId) "$Description.selectorId must equal the reviewed selector ID '$($contract.selectorId)'"
 
     foreach ($pattern in @($contract.commandPatterns)) {
         Assert-RawLogCondition ($pattern -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$pattern)) "$Description semantic command pattern must be non-empty"
@@ -735,14 +777,27 @@ function Assert-RawLogIssue3GateSemantics {
     $semanticMarker = Get-RawLogIssue3SemanticMarker `
         -Gate $Gate `
         -Platform ([string]$platform) `
+        -HostArchitecture ([string]$hostArchitecture) `
         -Architecture ([string]$architecture) `
+        -Target ([string]$target) `
+        -CoverageTargets $actualCoverageTargets `
+        -RustTarget ([string]$rustTarget) `
+        -KitTarget ([string]$kitTarget) `
         -Operation ([string]$operation) `
-        -Platforms $actualPlatforms
+        -Command $Command `
+        -Selector $Selector
     Assert-RawLogCondition (@($Markers | Where-Object { [string]$_ -ceq $semanticMarker }).Count -eq 1) "$Description.rawLogMarkers must contain the semantic Issue #3 marker"
     return [pscustomobject]@{
         platform = [string]$platform
+        hostArchitecture = [string]$hostArchitecture
         architecture = [string]$architecture
+        target = [string]$target
+        coverageTargets = $actualCoverageTargets
+        rustTarget = [string]$rustTarget
+        kitTarget = [string]$kitTarget
         operation = [string]$operation
+        commandId = [string]$commandIdProperty.Value
+        selectorId = [string]$selectorIdProperty.Value
         platforms = $actualPlatforms
         semanticMarker = $semanticMarker
     }
@@ -760,7 +815,7 @@ function Assert-RawLogIssue23GateEvidence {
 
     Assert-RawLogExactObjectPropertySet -Object $GateEvidence `
         -Required @('status', 'gateId', 'sourceCommit', 'provider', 'hostType', 'evidenceId', 'runId', 'node', 'exitCode', 'tests', 'startedAt', 'endedAt', 'command') `
-        -Optional @('testSelector', 'selector', 'rawLogMarkers', 'markers', 'blockerInventory', 'platform', 'architecture', 'operation', 'platforms') `
+        -Optional @('testSelector', 'selector', 'rawLogMarkers', 'markers', 'blockerInventory', 'platform', 'hostArchitecture', 'architecture', 'target', 'coverageTargets', 'rustTarget', 'kitTarget', 'operation', 'platforms', 'commandId', 'selectorId') `
         -Description $Description
     $status = Get-RawLogProperty -Object $GateEvidence -Path 'status' -Description $Description
     Assert-RawLogCondition (($status -is [bool]) -and $status) "$Description.status must be boolean true"
@@ -838,7 +893,7 @@ function Assert-RawLogIssue23GateEvidence {
         $result | Add-Member -MemberType NoteProperty -Name blockerInventory -Value $GateEvidence.blockerInventory
     }
     if ($IssueName -ceq 'issue3') {
-        foreach ($propertyName in @('platform', 'architecture', 'operation', 'platforms')) {
+        foreach ($propertyName in @('platform', 'hostArchitecture', 'architecture', 'target', 'coverageTargets', 'rustTarget', 'kitTarget', 'operation', 'platforms', 'commandId', 'selectorId')) {
             $result | Add-Member -MemberType NoteProperty -Name $propertyName -Value $semanticContract.$propertyName
         }
     }
@@ -884,6 +939,7 @@ function Assert-RawLogIssue23Evidence {
     foreach ($marker in $markers.ToArray()) {
         Assert-RawLogCondition (@($rawMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.rawLog.markers must retain '$marker'"
     }
+    Assert-RawLogCondition ((@($rawMarkers | Sort-Object) -join "`n") -ceq (@($markers.ToArray() | Sort-Object) -join "`n")) "$Description.rawLog.markers must match the gate marker set exactly"
     return [pscustomobject]@{ gates = $records.ToArray(); markers = $markers.ToArray() }
 }
 
@@ -920,12 +976,15 @@ function Assert-RawLogIssue23Content {
             Assert-RawLogCondition ([string]$contentGateContract.$field -ceq [string]$manifestGate.$field) "$Description.gates.$gateName.$field must match the manifest"
         }
         if ($IssueName -ceq 'issue3') {
-            foreach ($field in @('platform', 'architecture', 'operation')) {
+            foreach ($field in @('platform', 'hostArchitecture', 'architecture', 'target', 'rustTarget', 'kitTarget', 'operation', 'commandId', 'selectorId')) {
                 Assert-RawLogCondition ([string]$contentGateContract.$field -ceq [string]$manifestGate.$field) "$Description.gates.$gateName.$field must match the manifest"
             }
             $manifestPlatforms = @($manifestGate.platforms | ForEach-Object { [string]$_ })
             $contentPlatforms = @($contentGateContract.platforms | ForEach-Object { [string]$_ })
             Assert-RawLogCondition (($contentPlatforms -join ',') -ceq ($manifestPlatforms -join ',')) "$Description.gates.$gateName.platforms must match the manifest"
+            $manifestCoverage = @($manifestGate.coverageTargets | ForEach-Object { [string]$_ })
+            $contentCoverage = @($contentGateContract.coverageTargets | ForEach-Object { [string]$_ })
+            Assert-RawLogCondition (($contentCoverage -join ',') -ceq ($manifestCoverage -join ',')) "$Description.gates.$gateName.coverageTargets must match the manifest"
         }
         $contentCommand = [string]$contentGateContract.command
         Assert-RawLogCondition ((Normalize-RawLogCommand -Command $contentCommand).Equals((Normalize-RawLogCommand -Command ([string]$manifestGate.command)), [StringComparison]::Ordinal)) "$Description.gates.$gateName.command must match the manifest"
@@ -933,6 +992,8 @@ function Assert-RawLogIssue23Content {
         foreach ($marker in @($manifestGate.markers)) {
             Assert-RawLogCondition (@($contentMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.gates.$gateName.rawLogMarkers must retain '$marker'"
         }
+        Assert-RawLogCondition ((@($contentMarkers | Sort-Object) -join "`n") -ceq (@($manifestGate.markers | Sort-Object) -join "`n")) "$Description.gates.$gateName.rawLogMarkers must match the manifest marker set exactly"
+        Assert-RawLogCondition ((@($contentMarkers | Sort-Object) -join "`n") -ceq (@($manifestGate.markers | Sort-Object) -join "`n")) "$Description.gates.$gateName.rawLogMarkers must match the manifest marker set exactly"
     }
     $contentMarkers = Get-RawLogProperty -Object $Content -Path 'markers' -Description $Description
     Assert-RawLogCondition (($contentMarkers -is [System.Array]) -and $contentMarkers.Count -gt 0) "$Description.markers is a non-empty JSON array"
@@ -944,6 +1005,7 @@ function Assert-RawLogIssue23Content {
     foreach ($marker in @($manifestContract.markers)) {
         Assert-RawLogCondition (@($contentMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.markers must retain '$marker'"
     }
+    Assert-RawLogCondition ((@($contentMarkers | Sort-Object) -join "`n") -ceq (@($manifestContract.markers | Sort-Object) -join "`n")) "$Description.markers must match the manifest marker set exactly"
 }
 
 function Get-RawLogContentJson {
