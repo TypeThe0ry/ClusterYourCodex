@@ -133,9 +133,11 @@ Options:
   --self-test       Run shell-only helper checks; never starts Linux services
   -h, --help        Show this help
 
-Live mode requires Linux, cargo, python3, bash, the standard proc/network
-utilities, and a private assigned IPv4 address for the worker TLS
-listener.  The controller API is always bound to loopback.  On success the
+Live mode requires Linux, python3, bash, the standard proc/network utilities,
+and a private assigned IPv4 address for the worker TLS listener. Cargo is
+required only when matching binaries are not supplied through CYC_BIN,
+CYC_CONTROLLER_BIN, and CYC_WORKER_BIN. The controller API is always bound
+to loopback. On success the
 temporary root is removed unless --keep-evidence is supplied; on failure a
 sanitized evidence root is retained for diagnosis.
 EOF
