@@ -211,9 +211,26 @@ Linux accepts its cgroup/identity residual markers, Windows requires
 `residualJobObjectVerified=1`, and macOS requires
 `residualExternalReconciliationVerified=1`.
 
-Issue #2 and Issue #3 retain their boolean `gates` maps, and every required
-entry must be `true`; the map is a closed set, so unknown or missing gate keys
-fail validation. Issue #5 uses the structured gate matrix described above.
+Issue #2 and Issue #3 use the same source-bound per-gate evidence shape as the
+Issue #5 rows; they are not boolean checklists. Their closed `gates` maps must
+contain one object for every reviewed key. Each object carries boolean
+`status: true`, `gateId: issue2.<gate>` or `issue3.<gate>`, the exact reviewed
+`sourceCommit`, external `provider`/`hostType`/`node`, the issue `evidenceId`,
+an attributable `runId`, canonical `testSelector` (with the compatibility
+`selector` alias allowed only when identical), the exact command, and a unique
+`rawLogMarkers` array (with `markers` accepted only as an identical alias).
+Run provenance also includes integer `exitCode: 0`, bounded
+`tests.passed`/`tests.failed`/`tests.ignored` counts, and source-bound
+chronological `startedAt`/`endedAt` timestamps.
+Every gate marker is command-bound as
+`CYC-GA-ISSUE2|gate=<gate>|commandSha256=<digest>|status=passed` or the
+corresponding `ISSUE3` form, and the aggregate `rawLog.markers` plus downloaded
+envelope must retain every marker exactly once. The
+`noOpenUnwaivedP0P1Blocker` gate additionally contains a complete, source-bound
+GitHub open-issue inventory with API pagination/error state, reviewer, stable
+scope, and non-expired waivers for every open P0/P1 issue. Unknown keys, bare
+booleans, alias conflicts, or missing marker/evidence fields fail closed.
+Issue #5 uses the structured gate matrix described above.
 Issue #2 covers the Tauri desktop host/tray, native renderer proxy,
 per-user tasks, SID-scoped data ACL, bundled MCP/marketplace payload,
 transactional install/repair/upgrade/rollback/uninstall, clean Windows 11 VM,

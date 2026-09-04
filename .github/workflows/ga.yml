@@ -570,6 +570,21 @@ jobs:
                   raise SystemExit(f"{description} does not carry an explicit timezone")
               return instant.astimezone(timezone.utc)
 
+          def resolve_alias(run, canonical, alias, description):
+              has_canonical = canonical in run
+              has_alias = alias in run
+              if has_canonical and has_alias:
+                  if type(run[canonical]) is not type(run[alias]) or run[canonical] != run[alias]:
+                      raise SystemExit(
+                          f"{description}.{canonical} and {alias} aliases must match exactly"
+                      )
+                  return run[canonical]
+              if has_canonical:
+                  return run[canonical]
+              if has_alias:
+                  return run[alias]
+              raise SystemExit(f"{description} is missing canonical {canonical} (or compatibility alias {alias})")
+
           def validate_run_provenance(run, description):
               if not isinstance(run, dict):
                   raise SystemExit(f"{description} is not an object")
@@ -636,9 +651,9 @@ jobs:
                       raise SystemExit(f"Issue #5 gate {gate_name} run is not an object")
                   run_id = validate_run_provenance(run, f"Issue #5 gate {gate_name} run")
                   platform = run.get("platform")
-                  selector = run.get("selector")
+                  selector = resolve_alias(run, "testSelector", "selector", f"Issue #5 gate {gate_name} run")
                   command = run.get("command")
-                  markers = run.get("markers")
+                  markers = resolve_alias(run, "rawLogMarkers", "markers", f"Issue #5 gate {gate_name} run")
                   description = f"Issue #5 gate {gate_name}"
                   if not isinstance(platform, str) or not platform:
                       raise SystemExit(f"{description}.platform is not a non-empty string")
@@ -753,6 +768,104 @@ jobs:
               (try ($started | iso_epoch) catch null) as $startedEpoch
               | (try ($ended | iso_epoch) catch null) as $endedEpoch
               | ($startedEpoch != null and $endedEpoch != null and $endedEpoch >= $startedEpoch);
+            def blocker_priority_labels($labels):
+              [ $labels[] | select((type == "object") and (.name | type) == "string")
+                | .name | ascii_downcase
+                | select(test("^(?:(priority|severity)[:/_\\-[:space:]]+)?p[01]$"))
+                | sub(".*(p[01])$"; "\\1") | ascii_upcase ];
+            def blocker_labels_valid($labels):
+              (($labels | type) == "array")
+              and ([ $labels[] | select((type != "object") or (.name | type) != "string" or (.name | test("^[^[:space:]]+$") | not)) ] | length == 0)
+              and (([ $labels[] | .name | ascii_downcase ] | unique | length) == ($labels | length))
+              and ((blocker_priority_labels($labels) | unique | length) <= 1);
+            def blocker_inventory_time_valid($inventory):
+              (try ($inventory.reviewedAt | iso_epoch) catch null) as $reviewed
+              | (try ($inventory.expiresAt | iso_epoch) catch null) as $expires
+              | ($reviewed != null and $expires != null and $reviewed <= now and $expires > now and $expires > $reviewed);
+            def blocker_issue_valid($issue):
+              (($issue | type) == "object")
+              and (($issue | keys_unsorted | sort) == (["number", "state", "title", "html_url", "labels"] | sort))
+              and integer_count($issue.number; true)
+              and ($issue.state == "open")
+              and nonempty_string($issue.title)
+              and ($issue.html_url == ("https://github.com/TypeThe0ry/ClusterYourCodex/issues/" + ($issue.number | tostring)))
+              and blocker_labels_valid($issue.labels);
+            def blocker_waiver_valid($waiver; $inventory; $reviewer):
+              (($waiver | type) == "object")
+              and (($waiver | keys_unsorted | sort) == (["issueNumber", "scope", "sourceCommit", "expiresAt", "reviewer", "status", "reason"] | sort))
+              and integer_count($waiver.issueNumber; true)
+              and (($waiver.scope | type) == "object")
+              and (($waiver.scope | keys_unsorted | sort) == (["repository", "channel", "issueNumber"] | sort))
+              and ($waiver.scope.repository == "TypeThe0ry/ClusterYourCodex")
+              and ($waiver.scope.channel == "stable")
+              and integer_count($waiver.scope.issueNumber; true)
+              and ($waiver.scope.issueNumber == $waiver.issueNumber)
+              and ((string_value($waiver.sourceCommit) | ascii_downcase) == ($commit | ascii_downcase))
+              and (string_value($waiver.sourceCommit) | test("^[0-9a-fA-F]{40}$"))
+              and valid_iso_instant($waiver.expiresAt)
+              and ((try ($waiver.expiresAt | iso_epoch) catch null) as $waiverExpiry
+                   | ($waiverExpiry != null
+                      and $waiverExpiry > now
+                      and $waiverExpiry <= ($inventory.expiresAt | iso_epoch)))
+              and (($waiver.reviewer | type) == "object")
+              and (($waiver.reviewer | keys_unsorted | sort) == (["id", "login"] | sort))
+              and integer_count($waiver.reviewer.id; true)
+              and nonempty_string($waiver.reviewer.login)
+              and ($waiver.reviewer.id == $reviewer.id)
+              and ($waiver.reviewer.login == $reviewer.login)
+              and ($waiver.status == "active")
+              and nonempty_string($waiver.reason);
+            def blocker_inventory_valid($inventory):
+              (($inventory | type) == "object")
+              and (($inventory | keys_unsorted | sort) == (["schemaVersion", "status", "sourceCommit", "evidenceId", "repository", "reviewer", "reviewedAt", "expiresAt", "api", "issues", "waivers"] | sort))
+              and ($inventory.schemaVersion == "cyc.dev/ga-blocker-inventory/v1")
+              and ($inventory.status == "passed")
+              and (string_value($inventory.sourceCommit) | test("^[0-9a-fA-F]{40}$"))
+              and ((string_value($inventory.sourceCommit) | ascii_downcase) == ($commit | ascii_downcase))
+              and ($inventory.evidenceId | type) == "string"
+              and ($inventory.evidenceId | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))
+              and ($inventory.repository == "TypeThe0ry/ClusterYourCodex")
+              and (($inventory.reviewer | type) == "object")
+              and (($inventory.reviewer | keys_unsorted | sort) == (["id", "login"] | sort))
+              and integer_count($inventory.reviewer.id; true)
+              and nonempty_string($inventory.reviewer.login)
+              and (($inventory.reviewer.login | test("[\\r\\n]") | not))
+              and valid_iso_instant($inventory.reviewedAt)
+              and valid_iso_instant($inventory.expiresAt)
+              and blocker_inventory_time_valid($inventory)
+              and (($inventory.api | type) == "object")
+              and (($inventory.api | keys_unsorted | sort) == (["provider", "endpoint", "requestedState", "complete", "incomplete", "hasNextPage", "pageCount", "totalCount", "returnedCount", "capturedAt", "sourceCommit", "error"] | sort))
+              and ($inventory.api.provider == "github-rest-api")
+              and ($inventory.api.endpoint == "https://api.github.com/repos/TypeThe0ry/ClusterYourCodex/issues")
+              and ($inventory.api.requestedState == "open")
+              and ($inventory.api.complete == true)
+              and ($inventory.api.incomplete == false)
+              and ($inventory.api.hasNextPage == false)
+              and integer_count($inventory.api.pageCount; true)
+              and integer_count($inventory.api.totalCount; false)
+              and integer_count($inventory.api.returnedCount; false)
+              and ($inventory.api.totalCount == ($inventory.issues | length))
+              and ($inventory.api.returnedCount == ($inventory.issues | length))
+              and valid_iso_instant($inventory.api.capturedAt)
+              and ((try ($inventory.api.capturedAt | iso_epoch) catch null) as $capturedAt
+                   | ($capturedAt != null and $capturedAt <= now))
+              and ((string_value($inventory.api.sourceCommit) | ascii_downcase) == ($commit | ascii_downcase))
+              and (string_value($inventory.api.sourceCommit) | test("^[0-9a-fA-F]{40}$"))
+              and (($inventory.api.error == null) or (($inventory.api.error | type) == "string" and ($inventory.api.error | test("^[[:space:]]*$"))))
+              and (($inventory.issues | type) == "array")
+              and ([ $inventory.issues[] | select(blocker_issue_valid(.) | not) ] | length == 0)
+              and (($inventory.issues | map(.number) | unique | length) == ($inventory.issues | length))
+              and (($inventory.waivers | type) == "array")
+              and blocker_inventory_time_valid($inventory)
+              and ([ $inventory.waivers[] | select(blocker_waiver_valid(.; $inventory; $inventory.reviewer) | not) ] | length == 0)
+              and (([$inventory.waivers[] | .issueNumber] | unique | length) == ($inventory.waivers | length))
+              and (([ $inventory.issues[] | select((blocker_priority_labels(.labels) | length) == 1) | .number ] | unique) as $blockers
+                   | ([ $inventory.waivers[] | .issueNumber ] | unique) as $waiverNumbers
+                   | (([ $waiverNumbers[] as $n | select(($blockers | index($n)) == null) ] | length) == 0)
+                   and (([ $blockers[] as $n
+                            | select([ $inventory.waivers[] | select(.issueNumber == $n) ] | length == 1)
+                          ] | length) == ($blockers | length))
+                   and (($waiverNumbers | length) == ($blockers | length)));
             def content_host:
               if (has("node") and (.node | type) == "string" and nonempty_string(.node)) then .node
               elif (has("host") and (.host | type) == "string" and nonempty_string(.host)) then .host
@@ -767,6 +880,124 @@ jobs:
                        select([ $content.markers[] | select(. == $marker) ] | length == 1)
                      ] | length == ($manifestIssue.rawLog.markers | length))
               end;
+            def issue23_gate_names($issue):
+              if $issue == "issue2" then
+                ["tauriDesktopHostTray", "rendererNativeControllerProxy", "perUserScheduledTasks", "sidScopedDataDirAcl", "bundledMcpInstallerMarketplace", "installRepairUpgradeRollbackUninstall", "cleanWindows11Vm", "liveWindowsControllerWorkerRoundTrip", "productionAuthenticodeSetupHelper", "signedNMinus1ToNUpgrade", "interruptedUpgradeRollback", "downgradePolicy", "noOpenUnwaivedP0P1Blocker"]
+              elif $issue == "issue3" then
+                ["linuxSystemdUserServicePackage", "macosLaunchAgentPackage", "linuxX64ReleaseArtifact", "macosX64ReleaseArtifact", "macosArm64ReleaseArtifact", "platformNativeShells", "platformNativeProcessGroups", "crossPlatformPathAclTests", "liveMacosRun", "liveLinuxControllerWorkerRoundTrip", "macosDeveloperIdSigningNotarization"]
+              else [] end;
+            def issue23_selector_value($entry):
+              if (($entry | has("testSelector")) and ($entry | has("selector"))) then
+                if (($entry.testSelector | type) == "string"
+                    and ($entry.selector | type) == "string"
+                    and $entry.testSelector == $entry.selector) then $entry.testSelector
+                else "" end
+              elif (($entry | has("testSelector")) and (($entry.testSelector | type) == "string")) then
+                $entry.testSelector
+              elif (($entry | has("selector")) and (($entry.selector | type) == "string")) then
+                $entry.selector
+              else "" end;
+            def issue23_marker_array($entry):
+              if (($entry | has("rawLogMarkers")) and ($entry | has("markers"))) then
+                if (($entry.rawLogMarkers | type) == "array"
+                    and ($entry.markers | type) == "array"
+                    and $entry.rawLogMarkers == $entry.markers) then $entry.rawLogMarkers
+                else [] end
+              elif (($entry | has("rawLogMarkers")) and (($entry.rawLogMarkers | type) == "array")) then
+                $entry.rawLogMarkers
+              elif (($entry | has("markers")) and (($entry.markers | type) == "array")) then
+                $entry.markers
+              else [] end;
+            def issue23_gate_matches_manifest($entry; $manifestGate):
+              (issue23_selector_value($entry)) as $entrySelector
+              | (issue23_selector_value($manifestGate)) as $manifestSelector
+              | (issue23_marker_array($entry)) as $entryMarkers
+              | (issue23_marker_array($manifestGate)) as $manifestMarkers
+              | ($entry.gateId == $manifestGate.gateId)
+                and ((string_value($entry.sourceCommit) | ascii_downcase) == (string_value($manifestGate.sourceCommit) | ascii_downcase))
+                and ($entry.provider == $manifestGate.provider)
+                and ($entry.hostType == $manifestGate.hostType)
+                and ($entry.evidenceId == $manifestGate.evidenceId)
+                and ($entry.runId == $manifestGate.runId)
+                and ($entry.node == $manifestGate.node)
+                and ($entry.exitCode == $manifestGate.exitCode)
+                and (($entry.tests.passed == $manifestGate.tests.passed)
+                     and ($entry.tests.failed == $manifestGate.tests.failed)
+                     and ($entry.tests.ignored == $manifestGate.tests.ignored))
+                and same_instant($entry.startedAt; $manifestGate.startedAt)
+                and same_instant($entry.endedAt; $manifestGate.endedAt)
+                and ($entrySelector == $manifestSelector)
+                and (($entry.command | normalized_command) == ($manifestGate.command | normalized_command))
+                and ($entryMarkers == $manifestMarkers)
+                and (if ($manifestGate | has("blockerInventory"))
+                     then (($entry | has("blockerInventory")) and ($entry.blockerInventory == $manifestGate.blockerInventory))
+                     else true end);
+            def issue23_markers_valid($markers):
+              (($markers | type) == "array")
+              and (($markers | length) > 0)
+              and ([ $markers[] | select(type != "string" or (length == 0) or (test("^[[:space:]]*$"))) ] | length == 0)
+              and (($markers | unique | length) == ($markers | length));
+            def issue23_gate_valid($entry; $issue; $gate; $manifestIssue):
+              (($entry | type) == "object")
+              and ($entry.status == true)
+              and ($entry.gateId == ($issue + "." + $gate))
+              and ((string_value($entry.sourceCommit) | test("^[0-9a-fA-F]{40}$")))
+              and ((string_value($entry.sourceCommit) | ascii_downcase) == ($commit | ascii_downcase))
+              and nonempty_string($entry.provider)
+              and ((string_value($entry.provider) | test("github|actions|hosted|runner"; "i")) | not)
+              and nonempty_string($entry.hostType)
+              and ((string_value($entry.hostType) | test("github|actions|hosted|runner"; "i")) | not)
+              and nonempty_string($entry.evidenceId)
+              and ($entry.evidenceId == $manifestIssue.evidenceId)
+              and nonempty_string($entry.runId)
+              and nonempty_string($entry.node)
+              and ((string_value($entry.node) | test("github|actions|hosted|runner"; "i")) | not)
+              and integer_count($entry.exitCode; false)
+              and ($entry.exitCode == 0)
+              and (($entry.tests | type) == "object")
+              and integer_count($entry.tests.passed; true)
+              and integer_count($entry.tests.failed; false)
+              and integer_count($entry.tests.ignored; false)
+              and ($entry.tests.failed == 0)
+              and valid_iso_instant($entry.startedAt)
+              and valid_iso_instant($entry.endedAt)
+              and valid_iso_order($entry.startedAt; $entry.endedAt)
+              and (issue23_selector_value($entry) | nonempty_string(.))
+              and nonempty_string($entry.command)
+              and issue23_markers_valid(issue23_marker_array($entry))
+              and ([ issue23_marker_array($entry)[] |
+                     select(test("^CYC-GA-" + ($issue | ascii_upcase) + "\\|gate=" + $gate + "\\|commandSha256=[0-9a-fA-F]{64}\\|status=passed$"))
+                   ] | length == 1)
+              and (if ($issue == "issue2" and $gate == "noOpenUnwaivedP0P1Blocker") then
+                     (($entry | has("blockerInventory")) and blocker_inventory_valid($entry.blockerInventory))
+                   elif ($entry | has("blockerInventory")) then false
+                   else true end);
+            def issue23_gate_set_valid($record; $issue; $gates; $manifestIssue):
+              (($record.gates | type) == "object")
+              and (($record.gates | keys_unsorted | sort) == ($gates | sort))
+              and ([ $gates[] as $gate |
+                     select(issue23_gate_valid($record.gates[$gate]; $issue; $gate; $manifestIssue)
+                            and issue23_gate_matches_manifest($record.gates[$gate]; $manifestIssue.gates[$gate]))
+                   ] | length == ($gates | length));
+            def issue23_gate_evidence_valid($record; $issue; $gates; $manifestIssue):
+              (($record.gateEvidence | type) == "array")
+              and (($record.gateEvidence | length) == ($gates | length))
+              and ([ $gates[] as $gate |
+                     select([ $record.gateEvidence[] |
+                              select((.gate == $gate)
+                                     and issue23_gate_valid(.; $issue; $gate; $manifestIssue)
+                                     and issue23_gate_matches_manifest(.; $manifestIssue.gates[$gate]))
+                            ] | length == 1)
+                   ] | length == ($gates | length));
+            def issue23_raw_markers_valid($record; $manifestIssue):
+              (issue23_marker_array($record.rawLog)) as $rawMarkers
+              | (issue23_markers_valid($rawMarkers)
+                 and ([ $manifestIssue.rawLog.markers[] as $marker |
+                        select([ $rawMarkers[] | select(. == $marker) ] | length == 1)
+                      ] | length == ($manifestIssue.rawLog.markers | length)));
+            def issue23_content_valid($content; $issue; $manifestIssue; $gates):
+              (issue23_gate_set_valid($content; $issue; $gates; $manifestIssue))
+              and issue23_raw_markers_valid({rawLog: $content}; $manifestIssue);
             def valid_raw_content($record; $issue; $manifest):
               if (($record.content | type) != "object") then false
               else
@@ -817,7 +1048,10 @@ jobs:
                 and ($content.cleanup == true)
                 and (($manifestIssue.rawLog.cleanup | type) == "boolean")
                 and ($content.cleanup == $manifestIssue.rawLog.cleanup)
-                and (if $issue == "issue5" then content_markers_valid($content; $manifestIssue) else true end)
+                and (if $issue == "issue5" then content_markers_valid($content; $manifestIssue)
+                     elif $issue == "issue2" or $issue == "issue3" then
+                       issue23_content_valid($content; $issue; $manifestIssue; issue23_gate_names($issue))
+                     else true end)
               end;
             def valid_record($record; $issue; $manifest):
               (($record | type) == "object")
@@ -829,6 +1063,17 @@ jobs:
               and ((string_value($record.actualSha256) | ascii_downcase) == (string_value($manifest[$issue].rawLog.sha256) | ascii_downcase))
               and (($record.contentVerified | type) == "boolean")
               and ($record.contentVerified == true)
+              and (if $issue == "issue2" or $issue == "issue3" then
+                     ($record.markersVerified == true)
+                     and issue23_gate_evidence_valid($record; $issue; issue23_gate_names($issue); $manifest[$issue])
+                     # The raw verification record keeps its marker array at
+                     # the record root (the downloaded content envelope keeps
+                     # it at content.markers).  Wrap it in the helper's
+                     # rawLog-shaped input so the same marker contract is
+                     # applied without treating an absent record.rawLog as a
+                     # valid/empty alias.
+                     and issue23_raw_markers_valid({rawLog: $record}; $manifest[$issue])
+                   else true end)
               and valid_raw_content($record; $issue; $manifest);
             ($manifest[0]) as $m
             | .schemaVersion == "cyc.dev/ga-raw-log-verification/v1"
@@ -874,7 +1119,11 @@ jobs:
                 and ($value <= 1000000000)
                 and (if $positive then $value > 0 else true end);
               def valid_https_url($value):
-                (string_value($value) | test("^https://[^@/?#[:space:]]+([/?#]|$)"));
+                # The downloader performs DNS/global-address validation.  The
+                # independent stable contract must still reject credentials,
+                # fragments, and ambiguous path spellings instead of accepting
+                # a syntactically HTTPS-but-different URL.
+                (string_value($value) | test("^https://[^@/?#[:space:]]+(/[^#[:space:]]*|\\?[^#[:space:]]*)?$"));
               def valid_iso_instant($value):
                 (string_value($value) | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^[:space:]]+(Z|[+-][0-9]{2}:[0-9]{2})$"));
               def iso_epoch:
@@ -884,13 +1133,115 @@ jobs:
                 | (if $parts.zone == "Z" then 0
                    else ($parts.zone | capture("^(?<sign>[+-])(?<hours>[0-9]{2}):(?<minutes>[0-9]{2})$")) as $offset
                      | (($offset.hours | tonumber) * 3600 + ($offset.minutes | tonumber) * 60)
-                       * (if $offset.sign == "+" then 1 else -1 end)
-                   end) as $offsetSeconds
+                      * (if $offset.sign == "+" then 1 else -1 end)
+                    end) as $offsetSeconds
                 | $base + $fraction - $offsetSeconds;
+              def same_instant($left; $right):
+                (try ($left | iso_epoch) catch null) as $leftEpoch
+                | (try ($right | iso_epoch) catch null) as $rightEpoch
+                | ($leftEpoch != null and $rightEpoch != null and $leftEpoch == $rightEpoch);
               def valid_iso_order($started; $ended):
                 (try ($started | iso_epoch) catch null) as $startedEpoch
                 | (try ($ended | iso_epoch) catch null) as $endedEpoch
                 | ($startedEpoch != null and $endedEpoch != null and $endedEpoch >= $startedEpoch);
+              def blocker_priority_labels($labels):
+                [ $labels[] | select((type == "object") and (.name | type) == "string")
+                  | .name | ascii_downcase
+                  | select(test("^(?:(priority|severity)[:/_\\-[:space:]]+)?p[01]$"))
+                  | sub(".*(p[01])$"; "\\1") | ascii_upcase ];
+              def blocker_labels_valid($labels):
+                (($labels | type) == "array")
+                and ([ $labels[] | select((type != "object") or (.name | type) != "string" or (.name | test("^[^[:space:]]+$") | not)) ] | length == 0)
+                and (([ $labels[] | .name | ascii_downcase ] | unique | length) == ($labels | length))
+                and ((blocker_priority_labels($labels) | unique | length) <= 1);
+              def blocker_inventory_time_valid($inventory):
+                (try ($inventory.reviewedAt | iso_epoch) catch null) as $reviewed
+                | (try ($inventory.expiresAt | iso_epoch) catch null) as $expires
+                | ($reviewed != null and $expires != null and $reviewed <= now and $expires > now and $expires > $reviewed);
+              def blocker_issue_valid($issue):
+                (($issue | type) == "object")
+                and (($issue | keys_unsorted | sort) == (["number", "state", "title", "html_url", "labels"] | sort))
+                and integer_count($issue.number; true)
+                and ($issue.state == "open")
+                and nonempty_string($issue.title)
+                and ($issue.html_url == ("https://github.com/TypeThe0ry/ClusterYourCodex/issues/" + ($issue.number | tostring)))
+                and blocker_labels_valid($issue.labels);
+              def blocker_waiver_valid($waiver; $inventory; $reviewer):
+                (($waiver | type) == "object")
+                and (($waiver | keys_unsorted | sort) == (["issueNumber", "scope", "sourceCommit", "expiresAt", "reviewer", "status", "reason"] | sort))
+                and integer_count($waiver.issueNumber; true)
+                and (($waiver.scope | type) == "object")
+                and (($waiver.scope | keys_unsorted | sort) == (["repository", "channel", "issueNumber"] | sort))
+                and ($waiver.scope.repository == "TypeThe0ry/ClusterYourCodex")
+                and ($waiver.scope.channel == "stable")
+                and integer_count($waiver.scope.issueNumber; true)
+                and ($waiver.scope.issueNumber == $waiver.issueNumber)
+                and ((string_value($waiver.sourceCommit) | ascii_downcase) == ($commit | ascii_downcase))
+                and (string_value($waiver.sourceCommit) | test("^[0-9a-fA-F]{40}$"))
+                and valid_iso_instant($waiver.expiresAt)
+                and ((try ($waiver.expiresAt | iso_epoch) catch null) as $waiverExpiry
+                     | ($waiverExpiry != null
+                        and $waiverExpiry > now
+                        and $waiverExpiry <= ($inventory.expiresAt | iso_epoch)))
+                and (($waiver.reviewer | type) == "object")
+                and (($waiver.reviewer | keys_unsorted | sort) == (["id", "login"] | sort))
+                and integer_count($waiver.reviewer.id; true)
+                and nonempty_string($waiver.reviewer.login)
+                and ($waiver.reviewer.id == $reviewer.id)
+                and ($waiver.reviewer.login == $reviewer.login)
+                and ($waiver.status == "active")
+                and nonempty_string($waiver.reason);
+              def blocker_inventory_valid($inventory):
+                (($inventory | type) == "object")
+                and (($inventory | keys_unsorted | sort) == (["schemaVersion", "status", "sourceCommit", "evidenceId", "repository", "reviewer", "reviewedAt", "expiresAt", "api", "issues", "waivers"] | sort))
+                and ($inventory.schemaVersion == "cyc.dev/ga-blocker-inventory/v1")
+                and ($inventory.status == "passed")
+                and (string_value($inventory.sourceCommit) | test("^[0-9a-fA-F]{40}$"))
+                and ((string_value($inventory.sourceCommit) | ascii_downcase) == ($commit | ascii_downcase))
+                and ($inventory.evidenceId | type) == "string"
+                and ($inventory.evidenceId | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))
+                and ($inventory.repository == "TypeThe0ry/ClusterYourCodex")
+                and (($inventory.reviewer | type) == "object")
+                and (($inventory.reviewer | keys_unsorted | sort) == (["id", "login"] | sort))
+                and integer_count($inventory.reviewer.id; true)
+                and nonempty_string($inventory.reviewer.login)
+                and (($inventory.reviewer.login | test("[\\r\\n]") | not))
+                and valid_iso_instant($inventory.reviewedAt)
+                and valid_iso_instant($inventory.expiresAt)
+                and blocker_inventory_time_valid($inventory)
+                and (($inventory.api | type) == "object")
+                and (($inventory.api | keys_unsorted | sort) == (["provider", "endpoint", "requestedState", "complete", "incomplete", "hasNextPage", "pageCount", "totalCount", "returnedCount", "capturedAt", "sourceCommit", "error"] | sort))
+                and ($inventory.api.provider == "github-rest-api")
+                and ($inventory.api.endpoint == "https://api.github.com/repos/TypeThe0ry/ClusterYourCodex/issues")
+                and ($inventory.api.requestedState == "open")
+                and ($inventory.api.complete == true)
+                and ($inventory.api.incomplete == false)
+                and ($inventory.api.hasNextPage == false)
+                and integer_count($inventory.api.pageCount; true)
+                and integer_count($inventory.api.totalCount; false)
+                and integer_count($inventory.api.returnedCount; false)
+                and ($inventory.api.totalCount == ($inventory.issues | length))
+                and ($inventory.api.returnedCount == ($inventory.issues | length))
+                and valid_iso_instant($inventory.api.capturedAt)
+                and ((try ($inventory.api.capturedAt | iso_epoch) catch null) as $capturedAt
+                     | ($capturedAt != null and $capturedAt <= now))
+                and ((string_value($inventory.api.sourceCommit) | ascii_downcase) == ($commit | ascii_downcase))
+                and (string_value($inventory.api.sourceCommit) | test("^[0-9a-fA-F]{40}$"))
+                and (($inventory.api.error == null) or (($inventory.api.error | type) == "string" and ($inventory.api.error | test("^[[:space:]]*$"))))
+                and (($inventory.issues | type) == "array")
+                and ([ $inventory.issues[] | select(blocker_issue_valid(.) | not) ] | length == 0)
+                and (($inventory.issues | map(.number) | unique | length) == ($inventory.issues | length))
+                and (($inventory.waivers | type) == "array")
+                and blocker_inventory_time_valid($inventory)
+                and ([ $inventory.waivers[] | select(blocker_waiver_valid(.; $inventory; $inventory.reviewer) | not) ] | length == 0)
+                and (([$inventory.waivers[] | .issueNumber] | unique | length) == ($inventory.waivers | length))
+                and (([ $inventory.issues[] | select((blocker_priority_labels(.labels) | length) == 1) | .number ] | unique) as $blockers
+                     | ([ $inventory.waivers[] | .issueNumber ] | unique) as $waiverNumbers
+                     | (([ $waiverNumbers[] as $n | select(($blockers | index($n)) == null) ] | length) == 0)
+                     and (([ $blockers[] as $n
+                              | select([ $inventory.waivers[] | select(.issueNumber == $n) ] | length == 1)
+                            ] | length) == ($blockers | length))
+                     and (($waiverNumbers | length) == ($blockers | length)));
               def valid_raw_log($record):
                 (($record.rawLog | type) == "object")
                 and nonempty_string($record.rawLog.url)
@@ -1190,7 +1541,125 @@ jobs:
                 and (($record.gates | keys_unsorted | sort) == ($gates | sort));
               def all_gates($record; $gates):
                 ([$gates[] as $gate | ($record.gates[$gate] // false) == true] | all);
-              def valid_issue_evidence($record; $gates):
+              def issue23_gate_names($issue):
+                if $issue == "issue2" then
+                  ["tauriDesktopHostTray", "rendererNativeControllerProxy", "perUserScheduledTasks", "sidScopedDataDirAcl", "bundledMcpInstallerMarketplace", "installRepairUpgradeRollbackUninstall", "cleanWindows11Vm", "liveWindowsControllerWorkerRoundTrip", "productionAuthenticodeSetupHelper", "signedNMinus1ToNUpgrade", "interruptedUpgradeRollback", "downgradePolicy", "noOpenUnwaivedP0P1Blocker"]
+                elif $issue == "issue3" then
+                  ["linuxSystemdUserServicePackage", "macosLaunchAgentPackage", "linuxX64ReleaseArtifact", "macosX64ReleaseArtifact", "macosArm64ReleaseArtifact", "platformNativeShells", "platformNativeProcessGroups", "crossPlatformPathAclTests", "liveMacosRun", "liveLinuxControllerWorkerRoundTrip", "macosDeveloperIdSigningNotarization"]
+                else [] end;
+              def issue23_selector_value($entry):
+                if (($entry | has("testSelector")) and ($entry | has("selector"))) then
+                  if (($entry.testSelector | type) == "string"
+                      and ($entry.selector | type) == "string"
+                      and $entry.testSelector == $entry.selector) then $entry.testSelector
+                  else "" end
+                elif (($entry | has("testSelector")) and (($entry.testSelector | type) == "string")) then
+                  $entry.testSelector
+                elif (($entry | has("selector")) and (($entry.selector | type) == "string")) then
+                  $entry.selector
+                else "" end;
+            def issue23_marker_array($entry):
+              if (($entry | has("rawLogMarkers")) and ($entry | has("markers"))) then
+                if (($entry.rawLogMarkers | type) == "array"
+                    and ($entry.markers | type) == "array"
+                    and $entry.rawLogMarkers == $entry.markers) then $entry.rawLogMarkers
+                  else [] end
+                elif (($entry | has("rawLogMarkers")) and (($entry.rawLogMarkers | type) == "array")) then
+                  $entry.rawLogMarkers
+              elif (($entry | has("markers")) and (($entry.markers | type) == "array")) then
+                $entry.markers
+              else [] end;
+            def issue23_gate_matches_manifest($entry; $manifestGate):
+              (issue23_selector_value($entry)) as $entrySelector
+              | (issue23_selector_value($manifestGate)) as $manifestSelector
+              | (issue23_marker_array($entry)) as $entryMarkers
+              | (issue23_marker_array($manifestGate)) as $manifestMarkers
+              | ($entry.gateId == $manifestGate.gateId)
+                and ((string_value($entry.sourceCommit) | ascii_downcase) == (string_value($manifestGate.sourceCommit) | ascii_downcase))
+                and ($entry.provider == $manifestGate.provider)
+                and ($entry.hostType == $manifestGate.hostType)
+                and ($entry.evidenceId == $manifestGate.evidenceId)
+                and ($entry.runId == $manifestGate.runId)
+                and ($entry.node == $manifestGate.node)
+                and ($entry.exitCode == $manifestGate.exitCode)
+                and (($entry.tests.passed == $manifestGate.tests.passed)
+                     and ($entry.tests.failed == $manifestGate.tests.failed)
+                     and ($entry.tests.ignored == $manifestGate.tests.ignored))
+                and same_instant($entry.startedAt; $manifestGate.startedAt)
+                and same_instant($entry.endedAt; $manifestGate.endedAt)
+                and ($entrySelector == $manifestSelector)
+                and (($entry.command | normalized_command) == ($manifestGate.command | normalized_command))
+                and ($entryMarkers == $manifestMarkers)
+                and (if ($manifestGate | has("blockerInventory"))
+                     then (($entry | has("blockerInventory")) and ($entry.blockerInventory == $manifestGate.blockerInventory))
+                     else true end);
+            def issue23_markers_valid($markers):
+              (($markers | type) == "array")
+              and (($markers | length) > 0)
+                and ([ $markers[] | select(type != "string" or (length == 0) or (test("^[[:space:]]*$"))) ] | length == 0)
+                and (($markers | unique | length) == ($markers | length));
+              def issue23_gate_valid($entry; $issue; $gate; $manifestIssue):
+                (($entry | type) == "object")
+                and ($entry.status == true)
+                and ($entry.gateId == ($issue + "." + $gate))
+                and ((string_value($entry.sourceCommit) | test("^[0-9a-fA-F]{40}$")))
+                and ((string_value($entry.sourceCommit) | ascii_downcase) == ($commit | ascii_downcase))
+                and nonempty_string($entry.provider)
+                and ((string_value($entry.provider) | test("github|actions|hosted|runner"; "i")) | not)
+                and nonempty_string($entry.hostType)
+                and ((string_value($entry.hostType) | test("github|actions|hosted|runner"; "i")) | not)
+                and nonempty_string($entry.evidenceId)
+                and ($entry.evidenceId == $manifestIssue.evidenceId)
+                and nonempty_string($entry.runId)
+                and nonempty_string($entry.node)
+                and ((string_value($entry.node) | test("github|actions|hosted|runner"; "i")) | not)
+                and integer_count($entry.exitCode; false)
+                and ($entry.exitCode == 0)
+                and (($entry.tests | type) == "object")
+                and integer_count($entry.tests.passed; true)
+                and integer_count($entry.tests.failed; false)
+                and integer_count($entry.tests.ignored; false)
+                and ($entry.tests.failed == 0)
+                and valid_iso_instant($entry.startedAt)
+                and valid_iso_instant($entry.endedAt)
+                and valid_iso_order($entry.startedAt; $entry.endedAt)
+                and (issue23_selector_value($entry) | nonempty_string(.))
+                and nonempty_string($entry.command)
+                and issue23_markers_valid(issue23_marker_array($entry))
+                and ([ issue23_marker_array($entry)[] |
+                       select(test("^CYC-GA-" + ($issue | ascii_upcase) + "\\|gate=" + $gate + "\\|commandSha256=[0-9a-fA-F]{64}\\|status=passed$"))
+                     ] | length == 1)
+                and (if ($issue == "issue2" and $gate == "noOpenUnwaivedP0P1Blocker") then
+                       (($entry | has("blockerInventory")) and blocker_inventory_valid($entry.blockerInventory))
+                     elif ($entry | has("blockerInventory")) then false
+                     else true end);
+            def issue23_gate_set_valid($record; $issue; $gates; $manifestIssue):
+              (($record.gates | type) == "object")
+              and (($record.gates | keys_unsorted | sort) == ($gates | sort))
+              and ([ $gates[] as $gate |
+                     select(issue23_gate_valid($record.gates[$gate]; $issue; $gate; $manifestIssue)
+                            and issue23_gate_matches_manifest($record.gates[$gate]; $manifestIssue.gates[$gate]))
+                   ] | length == ($gates | length));
+            def issue23_gate_evidence_valid($record; $issue; $gates; $manifestIssue):
+              (($record.gateEvidence | type) == "array")
+              and (($record.gateEvidence | length) == ($gates | length))
+              and ([ $gates[] as $gate |
+                     select([ $record.gateEvidence[] |
+                              select((.gate == $gate)
+                                     and issue23_gate_valid(.; $issue; $gate; $manifestIssue)
+                                     and issue23_gate_matches_manifest(.; $manifestIssue.gates[$gate]))
+                            ] | length == 1)
+                   ] | length == ($gates | length));
+              def issue23_raw_markers_valid($record; $manifestIssue):
+                (issue23_marker_array($record.rawLog)) as $rawMarkers
+                | (issue23_markers_valid($rawMarkers)
+                   and ([ $manifestIssue.rawLog.markers[] as $marker |
+                          select([ $rawMarkers[] | select(. == $marker) ] | length == 1)
+                        ] | length == ($manifestIssue.rawLog.markers | length)));
+              def issue23_content_valid($content; $issue; $manifestIssue; $gates):
+                (issue23_gate_set_valid($content; $issue; $gates; $manifestIssue))
+                and issue23_raw_markers_valid({rawLog: $content}; $manifestIssue);
+              def valid_issue_evidence($record; $issue; $gates):
                 (($record | type) == "object")
                 and ($record.status == "passed")
                 and (string_value($record.sourceCommit) | test("^[0-9a-fA-F]{40}$"))
@@ -1202,12 +1671,15 @@ jobs:
                 and (string_value($record.evidenceId) | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))
                 and valid_raw_log($record)
                 and gate_keys_exact($record; $gates)
-                and all_gates($record; $gates);
+                and (if $issue == "issue2" or $issue == "issue3" then
+                       issue23_gate_set_valid($record; $issue; $gates; $record)
+                       and issue23_raw_markers_valid($record; $record)
+                     else all_gates($record; $gates) end);
               .schemaVersion == "cyc.dev/ga-evidence/v1"
               and .status == "passed"
               and .sourceTag == $tag
               and (string_value(.sourceCommit) | ascii_downcase) == ($commit | ascii_downcase)
-              and valid_issue_evidence(.issue2; [
+              and valid_issue_evidence(.issue2; "issue2"; [
                 "tauriDesktopHostTray",
                 "rendererNativeControllerProxy",
                 "perUserScheduledTasks",
@@ -1222,7 +1694,7 @@ jobs:
                 "downgradePolicy",
                 "noOpenUnwaivedP0P1Blocker"
               ])
-              and valid_issue_evidence(.issue3; [
+              and valid_issue_evidence(.issue3; "issue3"; [
                 "linuxSystemdUserServicePackage",
                 "macosLaunchAgentPackage",
                 "linuxX64ReleaseArtifact",
@@ -1509,6 +1981,51 @@ jobs:
             echo 'stable asset bundle contains no publishable files' >&2
             exit 1
           fi
+          # Re-resolve the remote annotated tag immediately before the
+          # side-effecting release create.  The ga-readiness job verified the
+          # tag earlier, but a mutable tag could otherwise be moved between
+          # jobs (TOCTOU) while --verify-tag only proves that the name exists.
+          resolve_remote_tag_identity() {
+            local tag="$1"
+            local encoded_tag ref_json object_type object_sha tag_json depth tag_object_sha
+            encoded_tag="$(jq -rn --arg tag "$tag" '$tag | @uri')"
+            if ! ref_json="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$encoded_tag")"; then
+              return 1
+            fi
+            object_type="$(jq -r '.object.type // empty' <<< "$ref_json")"
+            object_sha="$(jq -r '.object.sha // empty' <<< "$ref_json")"
+            [[ "$object_type" == 'tag' ]] || return 1
+            [[ "$object_sha" =~ ^[0-9a-fA-F]{40}$ ]] || return 1
+            tag_object_sha="$object_sha"
+            for depth in 1 2 3 4; do
+              case "$object_type" in
+                commit)
+                  [[ "$object_sha" =~ ^[0-9a-fA-F]{40}$ ]] || return 1
+                  printf '%s %s\n' "$tag_object_sha" "$object_sha"
+                  return 0
+                  ;;
+                tag)
+                  [[ "$object_sha" =~ ^[0-9a-fA-F]{40}$ ]] || return 1
+                  if ! tag_json="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha")"; then
+                    return 1
+                  fi
+                  object_type="$(jq -r '.object.type // empty' <<< "$tag_json")"
+                  object_sha="$(jq -r '.object.sha // empty' <<< "$tag_json")"
+                  ;;
+                *)
+                  return 1
+                  ;;
+              esac
+            done
+            return 1
+          }
+          if ! pre_publish_tag_identity="$(resolve_remote_tag_identity "$CYC_GA_SOURCE_TAG")"; then
+            echo 'unable to resolve the stable annotated tag immediately before publish' >&2
+            exit 1
+          fi
+          read -r pre_publish_tag_object pre_publish_tag_commit <<< "$pre_publish_tag_identity"
+          test "$(printf '%s' "$pre_publish_tag_object" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$CYC_GA_SOURCE_TAG_OBJECT" | tr '[:upper:]' '[:lower:]')"
+          test "$(printf '%s' "$pre_publish_tag_commit" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$CYC_GA_SOURCE_COMMIT" | tr '[:upper:]' '[:lower:]')"
           # No --prerelease flag is supplied: this job is the only path that
           # creates a stable release, and it runs behind the production gate.
           gh release create "$CYC_GA_SOURCE_TAG" "${assets[@]}" \

@@ -569,25 +569,50 @@ verify_worker_kit() {
 launch_domain="gui/$(id -u)"
 launch_target="${launch_domain}/${LAUNCH_AGENT_LABEL}"
 
+launch_agent_state() {
+  # A non-zero target print means "not loaded" only after the GUI domain has
+  # been proven reachable. Without that domain preflight, the same exit code
+  # also covers an unavailable launchd manager, so treating it as unloaded
+  # would make plist deletion unsafe.
+  if ! command -v launchctl >/dev/null 2>&1; then
+    printf '%s' unknown
+    return 0
+  fi
+  if ! launchctl print "$launch_domain" >/dev/null 2>&1; then
+    printf '%s' unknown
+    return 0
+  fi
+  if launchctl print "$launch_target" >/dev/null 2>&1; then
+    printf '%s' loaded
+  else
+    printf '%s' unloaded
+  fi
+}
+
 launch_agent_loaded() {
-  launchctl print "$launch_target" >/dev/null 2>&1
+  [[ "$(launch_agent_state)" == loaded ]]
 }
 
 remove_launch_agent() {
-  local was_loaded=0 bootout_succeeded=0
+  local was_loaded=0 bootout_succeeded=0 agent_state=''
   verify_private_launch_agent_path_existing || return 1
   if ! command -v launchctl >/dev/null 2>&1; then
-    # A plist that may still be registered cannot be removed without launchctl
-    # proving that the user launchd service is unloaded. A missing plist needs
-    # no lifecycle action and remains idempotent on stripped-down hosts.
-    if [[ -e "$launch_agent_path" || -L "$launch_agent_path" ]]; then
-      printf 'launchctl is required to remove an existing LaunchAgent safely.\n' >&2
-      return 1
-    fi
-    return 0
+    # Even when the plist bytes are absent, a registered/transient job cannot
+    # be ruled out without the launchd manager. Keep the ownership marker and
+    # data intact for a later retry with launchctl available.
+    printf 'launchctl is required to verify the LaunchAgent is unloaded safely.\n' >&2
+    return 1
   fi
 
-  if launch_agent_loaded; then was_loaded=1; fi
+  agent_state="$(launch_agent_state)"
+  case "$agent_state" in
+    loaded) was_loaded=1 ;;
+    unloaded) ;;
+    *)
+      printf 'LaunchAgent state is unknown; refusing to remove plist.\n' >&2
+      return 1
+      ;;
+  esac
 
   # The domain/path form is the canonical bootout. Older launchctl versions
   # and already-registered jobs may only accept the label form, so try it only
@@ -596,12 +621,20 @@ remove_launch_agent() {
   if launchctl bootout "$launch_domain" "$launch_agent_path" >/dev/null 2>&1; then
     bootout_succeeded=1
   fi
-  if launch_agent_loaded; then
+  agent_state="$(launch_agent_state)"
+  case "$agent_state" in
+    loaded)
     if launchctl bootout "$launch_target" >/dev/null 2>&1; then
       bootout_succeeded=1
     fi
-  fi
-  if launch_agent_loaded; then
+    ;;
+    unloaded) ;;
+    *)
+      printf 'LaunchAgent state is unknown after bootout; refusing to remove plist.\n' >&2
+      return 1
+      ;;
+  esac
+  if [[ "$agent_state" == loaded ]]; then
     printf 'LaunchAgent remained loaded after bootout; refusing to remove plist.\n' >&2
     return 1
   fi
@@ -972,7 +1005,7 @@ validate_owned_manifest() {
 }
 
 begin_transaction() {
-  local staging candidate
+  local staging candidate agent_state=''
   [[ ! -e "$transaction_root" && ! -L "$transaction_root" ]] || {
     printf 'A worker repair transaction is already present.\n' >&2
     return 1
@@ -1027,10 +1060,18 @@ begin_transaction() {
       chmod 0600 "$staging/launch-agent.plist"
       : >"$staging/launchagent-existed"
       chmod 0600 "$staging/launchagent-existed"
-      if launch_agent_loaded; then
-        : >"$staging/launchagent-loaded"
-        chmod 0600 "$staging/launchagent-loaded"
-      fi
+      agent_state="$(launch_agent_state)"
+      case "$agent_state" in
+        loaded)
+          : >"$staging/launchagent-loaded"
+          chmod 0600 "$staging/launchagent-loaded"
+          ;;
+        unloaded) ;;
+        *)
+          printf 'LaunchAgent state is unknown; refusing repair.\n' >&2
+          exit 1
+          ;;
+      esac
     elif [[ -e "$launch_agent_path" || -L "$launch_agent_path" ]]; then
       printf 'Existing LaunchAgent is unsafe.\n' >&2
       exit 1
@@ -1049,7 +1090,7 @@ begin_transaction() {
 restore_transaction() {
   local candidate marker_existed
   verify_private_launch_agent_path_existing || return 1
-  assert_transaction_tree_safe "$transaction_root"
+  assert_transaction_tree_safe "$transaction_root" || return 1
   [[ -f "$transaction_root/schema" && ! -L "$transaction_root/schema" &&
      "$(cat "$transaction_root/schema")" == "$TRANSACTION_SCHEMA" ]] || {
     printf 'Unsupported worker repair transaction state.\n' >&2
@@ -1086,10 +1127,10 @@ restore_transaction() {
     marker_existed=0
   fi
 
-  remove_launch_agent
+  remove_launch_agent || return 1
   for candidate in "$data_root"/config.* "$data_root"/*.credential; do
     [[ -e "$candidate" || -L "$candidate" ]] || continue
-    rm -f "$candidate"
+    rm -f "$candidate" || return 1
   done
   for candidate in "$transaction_root"/identity/*; do
     [[ -e "$candidate" || -L "$candidate" ]] || continue
@@ -1097,29 +1138,29 @@ restore_transaction() {
       printf 'Worker repair identity snapshot is unsafe.\n' >&2
       return 1
     }
-    install -m 0600 "$candidate" "$data_root/$(basename "$candidate")"
+    install -m 0600 "$candidate" "$data_root/$(basename "$candidate")" || return 1
   done
 
-  rm -f "$install_manifest"
+  rm -f "$install_manifest" || return 1
   if [[ -f "$transaction_root/manifest-existed" ]]; then
-    install -m 0600 "$transaction_root/install-manifest.json" "$install_manifest"
+    install -m 0600 "$transaction_root/install-manifest.json" "$install_manifest" || return 1
   fi
-  rm -f "$worker_path"
+  rm -f "$worker_path" || return 1
   if [[ -f "$transaction_root/binary-existed" ]]; then
-    install -m 0700 "$transaction_root/cyc-worker" "$worker_path"
+    install -m 0700 "$transaction_root/cyc-worker" "$worker_path" || return 1
   fi
   if [[ -f "$transaction_root/launchagent-existed" ]]; then
     verify_private_launch_agent_path_existing || return 1
     private_dir "$(dirname "$launch_agent_path")"
-    install -m 0600 "$transaction_root/launch-agent.plist" "$launch_agent_path"
+    install -m 0600 "$transaction_root/launch-agent.plist" "$launch_agent_path" || return 1
     if [[ -f "$transaction_root/launchagent-loaded" ]]; then
       # This branch is unreachable for packages emitted while the gate is 0.
       # Keep the state transition implementation ready for the future live-
       # macOS containment gate without allowing this preview to start a worker.
       require_worker_containment
-      launchctl bootstrap "$launch_domain" "$launch_agent_path"
-      launchctl kickstart -k "$launch_target"
-      launchctl print "$launch_target" >/dev/null
+      launchctl bootstrap "$launch_domain" "$launch_agent_path" || return 1
+      launchctl kickstart -k "$launch_target" || return 1
+      launchctl print "$launch_target" >/dev/null || return 1
     fi
   fi
   if [[ "$marker_existed" == 0 ]]; then

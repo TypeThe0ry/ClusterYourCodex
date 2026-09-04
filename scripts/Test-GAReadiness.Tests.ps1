@@ -71,6 +71,63 @@ $contractResult = ($contractOutput -join "`n") | ConvertFrom-Json
     -OutputDirectory (Join-Path $testRepositoryRoot 'missing-ga-raw-logs') `
     -ExpectedCommit $expectedCommitForTest -ContractOnly | Out-Null
 
+function New-TestBlockerInventory {
+    param(
+        [switch]$IncludeWaivedOpenP1,
+        [switch]$Expired,
+        [switch]$ApiIncomplete
+    )
+
+    $issues = @()
+    $waivers = @()
+    $inventoryExpiry = if ($Expired) { '2020-01-01T00:00:00Z' } else { '2099-12-31T23:59:59Z' }
+    if ($IncludeWaivedOpenP1) {
+        $issues = @([ordered]@{
+                number = 42
+                state = 'open'
+                title = 'tracked P1 test blocker'
+                html_url = 'https://github.com/TypeThe0ry/ClusterYourCodex/issues/42'
+                labels = @([ordered]@{ name = 'priority:P1' })
+            })
+        $waivers = @([ordered]@{
+                issueNumber = 42
+                scope = [ordered]@{ repository = 'TypeThe0ry/ClusterYourCodex'; channel = 'stable'; issueNumber = 42 }
+                sourceCommit = $expectedCommitForTest
+                expiresAt = $inventoryExpiry
+                reviewer = [ordered]@{ id = 123; login = 'release-reviewer' }
+                status = 'active'
+                reason = 'temporary migration waiver with explicit review expiry'
+            })
+    }
+    $inventory = [ordered]@{
+        schemaVersion = 'cyc.dev/ga-blocker-inventory/v1'
+        status = 'passed'
+        sourceCommit = $expectedCommitForTest
+        evidenceId = 'ga-blocker-inventory-20260830'
+        repository = 'TypeThe0ry/ClusterYourCodex'
+        reviewer = [ordered]@{ id = 123; login = 'release-reviewer' }
+        reviewedAt = '2026-08-30T14:00:00Z'
+        expiresAt = $inventoryExpiry
+        api = [ordered]@{
+            provider = 'github-rest-api'
+            endpoint = 'https://api.github.com/repos/TypeThe0ry/ClusterYourCodex/issues'
+            requestedState = 'open'
+            complete = (-not $ApiIncomplete)
+            incomplete = [bool]$ApiIncomplete
+            hasNextPage = [bool]$ApiIncomplete
+            pageCount = 1
+            totalCount = $issues.Count
+            returnedCount = $issues.Count
+            capturedAt = '2026-08-30T13:59:00Z'
+            sourceCommit = $expectedCommitForTest
+            error = $null
+        }
+        issues = $issues
+        waivers = $waivers
+    }
+    return (($inventory | ConvertTo-Json -Depth 20) | ConvertFrom-Json)
+}
+
 function New-TestIssueEvidence {
     param(
         [string]$Provider = 'external-lab',
@@ -81,20 +138,61 @@ function New-TestIssueEvidence {
     if ($null -eq $GateNames) {
         $GateNames = $issue3GateNamesForTest
     }
+
+    # Issue #2/#3 use a structured per-gate contract.  Keep the fixture
+    # source-bound in the same way as production evidence so tests exercise
+    # the complete provenance/marker path instead of accidentally accepting
+    # the legacy ``gate: true`` shape.
+    $issueName = if (@($GateNames | Where-Object { [string]$_ -ceq 'tauriDesktopHostTray' }).Count -gt 0) {
+        'issue2'
+    } elseif (@($GateNames | Where-Object { [string]$_ -ceq 'linuxSystemdUserServicePackage' }).Count -gt 0) {
+        'issue3'
+    } else {
+        $null
+    }
+    $evidenceId = if ($issueName) { "ga-$issueName-live-20260830" } else { 'ga-issue5-matrix-20260830' }
     $gates = [ordered]@{}
+    $allMarkers = New-Object System.Collections.Generic.List[string]
     foreach ($gate in $GateNames) {
-        $gates[$gate] = $true
+        if ($issueName) {
+            $command = "native-$issueName-$gate"
+            $marker = Get-GaIssue23GateMarker -IssueName $issueName -Gate ([string]$gate) -Command $command
+            $gateEvidence = [ordered]@{
+                status = $true
+                gateId = "$issueName.$gate"
+                sourceCommit = $expectedCommitForTest
+                provider = $Provider
+                hostType = $HostType
+                evidenceId = $evidenceId
+                runId = "$issueName-$gate-20260830"
+                node = if ($issueName -ceq 'issue2') { 'windows-native-lab' } else { 'macos-native-lab' }
+                exitCode = 0
+                tests = [ordered]@{ passed = 1; failed = 0; ignored = 0 }
+                startedAt = '2026-08-30T14:00:00Z'
+                endedAt = '2026-08-30T14:01:00Z'
+                testSelector = "$issueName::$gate"
+                command = $command
+                rawLogMarkers = @($marker)
+            }
+            if ($issueName -ceq 'issue2' -and [string]$gate -ceq 'noOpenUnwaivedP0P1Blocker') {
+                $gateEvidence.blockerInventory = New-TestBlockerInventory -IncludeWaivedOpenP1
+            }
+            $gates[$gate] = $gateEvidence
+            [void]$allMarkers.Add($marker)
+        } else {
+            $gates[$gate] = $true
+        }
     }
     $record = [ordered]@{
         status = 'passed'
         sourceCommit = $expectedCommitForTest
         provider = $Provider
         hostType = $HostType
-        evidenceId = 'ga-issue2-live-20260830'
+        evidenceId = $evidenceId
         rawLog = [ordered]@{
-            url = 'https://evidence.example.invalid/ga/issue3.log'
+            url = "https://evidence.example.invalid/ga/$issueName.log"
             sha256 = $rawLogShaForTest
-            command = 'cargo test --workspace --locked'
+            command = if ($issueName) { "$issueName-evidence-matrix" } else { 'cargo test --workspace --locked' }
             node = 'p1-linux-native'
             startedAt = '2026-08-30T14:00:00Z'
             endedAt = '2026-08-30T14:01:00Z'
@@ -103,6 +201,9 @@ function New-TestIssueEvidence {
             cleanup = $true
         }
         gates = $gates
+    }
+    if ($issueName) {
+        $record.rawLog.markers = $allMarkers.ToArray()
     }
     return (($record | ConvertTo-Json -Depth 10) | ConvertFrom-Json)
 }
@@ -280,6 +381,12 @@ function New-TestRawLogContent {
     }
     if ($IssueName -ceq 'issue5') {
         $content.markers = @($rawLog.markers)
+    } elseif ($IssueName -ceq 'issue2' -or $IssueName -ceq 'issue3') {
+        $content.markers = @($rawLog.markers)
+        $content.gates = [ordered]@{}
+        foreach ($property in @($Record.gates.PSObject.Properties)) {
+            $content.gates[[string]$property.Name] = $property.Value
+        }
     }
     return (($content | ConvertTo-Json -Depth 20) | ConvertFrom-Json)
 }
@@ -386,7 +493,7 @@ Describe 'GA evidence issue acceptance contract' {
         $rawLogSource | Should Match 'rawLogMarkers entries are unique'
         $workflowSource | Should Not Match 'valid_issue_evidence\(\.issue5'
         $workflowSource | Should Match 'valid_https_url'
-        ($workflowSource.IndexOf('test("^https://[^@/?#[:space:]]+([/?#]|$)")') -ge 0) | Should Be $true
+        ($workflowSource.IndexOf('test("^https://[^@/?#[:space:]]+(/[^#[:space:]]*|\\?[^#[:space:]]*)?$")') -ge 0) | Should Be $true
         foreach ($field in @('attestation_signer_repo:', 'attestation_signer_workflow:', 'attestation_cert_identity:', 'attestation_signer_digest:', 'CYC_GA_ATTESTATION_SIGNER_REPO: ${{ inputs.attestation_signer_repo }}', 'CYC_GA_ATTESTATION_SIGNER_WORKFLOW: ${{ inputs.attestation_signer_workflow }}', 'CYC_GA_ATTESTATION_CERT_IDENTITY: ${{ inputs.attestation_cert_identity }}', 'CYC_GA_ATTESTATION_SIGNER_DIGEST: ${{ inputs.attestation_signer_digest }}')) {
             $workflowSource | Should Match ([regex]::Escape($field))
         }
@@ -448,6 +555,57 @@ Describe 'GA evidence issue acceptance contract' {
         $readinessSource | Should Match 'rawVerificationRootPrefix'
         $readinessSource | Should Match 'downloaded raw-log URL matches'
         $readinessSource | Should Match 'downloaded GA raw-log file hash matches'
+    }
+
+    It 'emits invariant ISO timestamps when PowerShell materializes gate times as DateTime' {
+        $manifestIssue = [pscustomobject]@{
+            evidenceId = 'issue3-evidence-20260830'
+        }
+        $command = 'cargo test --locked --workspace'
+        $startedAt = [DateTime]::Parse(
+            '2026-08-30T14:00:00Z',
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind)
+        $endedAt = [DateTime]::Parse(
+            '2026-08-30T14:01:00Z',
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind)
+        $gate = [pscustomobject]@{
+            status = $true
+            gateId = 'issue3.linuxSystemdUserServicePackage'
+            sourceCommit = $expectedCommitForTest
+            provider = 'ssh-external'
+            hostType = 'linux-native'
+            evidenceId = $manifestIssue.evidenceId
+            runId = 'p1-run-20260830-01'
+            node = 'p1'
+            exitCode = 0
+            tests = [pscustomobject]@{ passed = 1; failed = 0; ignored = 0 }
+            startedAt = $startedAt
+            endedAt = $endedAt
+            testSelector = 'cargo test --locked --workspace'
+            command = $command
+            rawLogMarkers = @(
+                (Get-RawLogIssue23GateMarker -IssueName 'issue3' -Gate 'linuxSystemdUserServicePackage' -Command $command)
+            )
+        }
+
+        $oldCulture = [Globalization.CultureInfo]::CurrentCulture
+        try {
+            [Globalization.CultureInfo]::CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo('fr-FR')
+            $result = Assert-RawLogIssue23GateEvidence `
+                -ManifestIssue $manifestIssue `
+                -IssueName 'issue3' `
+                -Gate 'linuxSystemdUserServicePackage' `
+                -GateEvidence $gate `
+                -ExpectedCommit $expectedCommitForTest `
+                -Description 'issue3.date-time-regression'
+        } finally {
+            [Globalization.CultureInfo]::CurrentCulture = $oldCulture
+        }
+
+        $result.startedAt | Should Match '^2026-08-30T14:00:00\.\d{7}Z$'
+        $result.endedAt | Should Match '^2026-08-30T14:01:00\.\d{7}Z$'
     }
 
     It 'allows raw-log contract-only checks without runtime parameters' {
@@ -548,7 +706,89 @@ Describe 'GA evidence issue acceptance contract' {
             -Path 'issue2' -Description 'Issue #2 test evidence' -ExpectedCommit $expectedCommitForTest `
             -RequiredGates $issue2GateNamesForTest
         $result.status | Should Be 'passed'
-        $result.gates.cleanWindows11Vm | Should Be $true
+        $result.gates.cleanWindows11Vm.status | Should Be $true
+        $result.gates.noOpenUnwaivedP0P1Blocker.status | Should Be $true
+        @($result.gates.noOpenUnwaivedP0P1Blocker.blockerInventory.issues).Count | Should Be 1
+    }
+
+    It 'requires a structured source-bound blocker inventory instead of a bare gate boolean' {
+        $record = New-TestIssueEvidence -Provider 'windows-lab' -HostType 'windows-clean-vm' -GateNames $issue2GateNamesForTest
+        { Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue2 = $record }) `
+                -Path 'issue2' -Description 'Issue #2 blocker inventory positive' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue2GateNamesForTest } | Should Not Throw
+
+        $bareBoolean = New-TestIssueEvidence -Provider 'windows-lab' -HostType 'windows-clean-vm' -GateNames $issue2GateNamesForTest
+        $bareBoolean.gates.noOpenUnwaivedP0P1Blocker = $true
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue2 = $bareBoolean }) `
+                -Path 'issue2' -Description 'Issue #2 bare blocker gate' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue2GateNamesForTest
+        }
+
+        $missingInventory = New-TestIssueEvidence -Provider 'windows-lab' -HostType 'windows-clean-vm' -GateNames $issue2GateNamesForTest
+        [void]$missingInventory.gates.noOpenUnwaivedP0P1Blocker.PSObject.Properties.Remove('blockerInventory')
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue2 = $missingInventory }) `
+                -Path 'issue2' -Description 'Issue #2 missing blocker inventory' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue2GateNamesForTest
+        }
+    }
+
+    It 'parses P0/P1 labels and binds every waiver to stable scope, source, expiry, and reviewer' {
+        $record = New-TestIssueEvidence -Provider 'windows-lab' -HostType 'windows-clean-vm' -GateNames $issue2GateNamesForTest
+        $inventory = $record.gates.noOpenUnwaivedP0P1Blocker.blockerInventory
+        $inventory.issues[0].labels[0].name = 'severity:P0'
+        { Assert-GaBlockerInventory -Inventory $inventory -ExpectedCommit $expectedCommitForTest -Description 'Issue #2 P0 inventory' } | Should Not Throw
+
+        $wrongScope = New-TestIssueEvidence -Provider 'windows-lab' -HostType 'windows-clean-vm' -GateNames $issue2GateNamesForTest
+        $wrongScope.gates.noOpenUnwaivedP0P1Blocker.blockerInventory.waivers[0].scope.channel = 'preview'
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue2 = $wrongScope }) `
+                -Path 'issue2' -Description 'Issue #2 preview waiver scope' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue2GateNamesForTest
+        }
+
+        $wrongReviewer = New-TestIssueEvidence -Provider 'windows-lab' -HostType 'windows-clean-vm' -GateNames $issue2GateNamesForTest
+        $wrongReviewer.gates.noOpenUnwaivedP0P1Blocker.blockerInventory.waivers[0].reviewer.login = 'other-reviewer'
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue2 = $wrongReviewer }) `
+                -Path 'issue2' -Description 'Issue #2 reviewer mismatch' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue2GateNamesForTest
+        }
+
+        $expiredWaiver = New-TestIssueEvidence -Provider 'windows-lab' -HostType 'windows-clean-vm' -GateNames $issue2GateNamesForTest
+        $expiredWaiver.gates.noOpenUnwaivedP0P1Blocker.blockerInventory.waivers[0].expiresAt = '2020-01-01T00:00:00Z'
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue2 = $expiredWaiver }) `
+                -Path 'issue2' -Description 'Issue #2 expired waiver' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue2GateNamesForTest
+        }
+    }
+
+    It 'fails closed for incomplete or errored blocker API snapshots' {
+        $incomplete = New-TestIssueEvidence -Provider 'windows-lab' -HostType 'windows-clean-vm' -GateNames $issue2GateNamesForTest
+        $incomplete.gates.noOpenUnwaivedP0P1Blocker.blockerInventory.api.complete = $false
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue2 = $incomplete }) `
+                -Path 'issue2' -Description 'Issue #2 incomplete blocker API' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue2GateNamesForTest
+        }
+
+        $nextPage = New-TestIssueEvidence -Provider 'windows-lab' -HostType 'windows-clean-vm' -GateNames $issue2GateNamesForTest
+        $nextPage.gates.noOpenUnwaivedP0P1Blocker.blockerInventory.api.hasNextPage = $true
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue2 = $nextPage }) `
+                -Path 'issue2' -Description 'Issue #2 paginated blocker API' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue2GateNamesForTest
+        }
+
+        $apiError = New-TestIssueEvidence -Provider 'windows-lab' -HostType 'windows-clean-vm' -GateNames $issue2GateNamesForTest
+        $apiError.gates.noOpenUnwaivedP0P1Blocker.blockerInventory.api.error = 'rate limit'
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue2 = $apiError }) `
+                -Path 'issue2' -Description 'Issue #2 errored blocker API' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue2GateNamesForTest
+        }
     }
 
     It 'requires positive bounded integer raw-log counts for Issue #2 and Issue #3' {
@@ -587,6 +827,78 @@ Describe 'GA evidence issue acceptance contract' {
         $binding = Get-GaRawLogContentBinding -Content $content -IssueName 'issue3' -Description 'Issue #3 parsed raw-log content'
         $binding.node | Should Be 'p1-linux-native'
         { Assert-GaRawLogContentMatch -Expected $content -Actual $content -IssueName 'issue3' -Description 'Issue #3 content binding' } | Should Not Throw
+    }
+
+    It 'cross-binds Issue #2 raw-log content gates and blocker inventory' {
+        $record = New-TestIssueEvidence -Provider 'windows-lab' -HostType 'windows-clean-vm' -GateNames $issue2GateNamesForTest
+        $content = New-TestRawLogContent -IssueName 'issue2' -Record $record
+        { Assert-GaRawLogContent -Content $content -ManifestIssue $record -IssueName 'issue2' `
+                -ExpectedCommit $expectedCommitForTest -EvidenceId $record.evidenceId `
+                -Description 'Issue #2 parsed raw-log content' } | Should Not Throw
+        { Assert-GaRawLogContentMatch -Expected $content -Actual $content -IssueName 'issue2' `
+                -Description 'Issue #2 content binding' } | Should Not Throw
+
+        $wrongProvider = New-TestRawLogContent -IssueName 'issue2' -Record $record
+        $wrongProvider.gates.tauriDesktopHostTray.provider = 'different-external-provider'
+        Assert-TestThrows {
+            Assert-GaRawLogContent -Content $wrongProvider -ManifestIssue $record -IssueName 'issue2' `
+                -ExpectedCommit $expectedCommitForTest -EvidenceId $record.evidenceId `
+                -Description 'Issue #2 raw content provider mismatch'
+        }
+
+        $wrongInventory = New-TestRawLogContent -IssueName 'issue2' -Record $record
+        $wrongInventory.gates.noOpenUnwaivedP0P1Blocker.blockerInventory.api.complete = $false
+        Assert-TestThrows {
+            Assert-GaRawLogContent -Content $wrongInventory -ManifestIssue $record -IssueName 'issue2' `
+                -ExpectedCommit $expectedCommitForTest -EvidenceId $record.evidenceId `
+                -Description 'Issue #2 raw content incomplete blocker inventory'
+        }
+
+        $missingGate = New-TestRawLogContent -IssueName 'issue2' -Record $record
+        [void]$missingGate.gates.PSObject.Properties.Remove('noOpenUnwaivedP0P1Blocker')
+        Assert-TestThrows {
+            Assert-GaRawLogContent -Content $missingGate -ManifestIssue $record -IssueName 'issue2' `
+                -ExpectedCommit $expectedCommitForTest -EvidenceId $record.evidenceId `
+                -Description 'Issue #2 raw content missing blocker gate'
+        }
+
+        $misplacedInventory = New-TestRawLogContent -IssueName 'issue2' -Record $record
+        $misplacedInventory.gates.tauriDesktopHostTray | Add-Member -MemberType NoteProperty -Name blockerInventory -Value $record.gates.noOpenUnwaivedP0P1Blocker.blockerInventory
+        Assert-TestThrows {
+            Assert-GaRawLogContent -Content $misplacedInventory -ManifestIssue $record -IssueName 'issue2' `
+                -ExpectedCommit $expectedCommitForTest -EvidenceId $record.evidenceId `
+                -Description 'Issue #2 raw content misplaced blocker inventory'
+        }
+    }
+
+    It 'cross-binds Issue #2 and Issue #3 raw-log verification summaries to every gate' {
+        foreach ($case in @(
+                @{ issue = 'issue2'; gates = $issue2GateNamesForTest; provider = 'windows-lab'; hostType = 'windows-clean-vm' },
+                @{ issue = 'issue3'; gates = $issue3GateNamesForTest; provider = 'macos-lab'; hostType = 'macos-clean-host' }
+            )) {
+            $record = New-TestIssueEvidence -Provider $case.provider -HostType $case.hostType -GateNames $case.gates
+            $manifestContract = Assert-GaIssue23Evidence -Node $record -IssueName $case.issue -ExpectedCommit $expectedCommitForTest -Description "$($case.issue) raw-summary manifest"
+            $rawSummary = [pscustomobject]@{
+                markersVerified = $true
+                markers = $manifestContract.markers
+                gateEvidence = $manifestContract.gates
+            }
+            { Assert-GaIssue23RawVerification -ManifestIssue $record -RawRecord $rawSummary -IssueName $case.issue -ExpectedCommit $expectedCommitForTest -Description "$($case.issue) raw-summary positive" } | Should Not Throw
+
+            $badSummary = (($rawSummary | ConvertTo-Json -Depth 30) | ConvertFrom-Json)
+            $badSummary.gateEvidence[0].command = 'tampered-command'
+            Assert-TestThrows {
+                Assert-GaIssue23RawVerification -ManifestIssue $record -RawRecord $badSummary -IssueName $case.issue -ExpectedCommit $expectedCommitForTest -Description "$($case.issue) raw-summary command mismatch"
+            }
+            if ($case.issue -ceq 'issue2') {
+                $missingInventory = (($rawSummary | ConvertTo-Json -Depth 30) | ConvertFrom-Json)
+                $blockerRecord = @($missingInventory.gateEvidence | Where-Object { [string]$_.gate -ceq 'noOpenUnwaivedP0P1Blocker' })[0]
+                [void]$blockerRecord.PSObject.Properties.Remove('blockerInventory')
+                Assert-TestThrows {
+                    Assert-GaIssue23RawVerification -ManifestIssue $record -RawRecord $missingInventory -IssueName $case.issue -ExpectedCommit $expectedCommitForTest -Description "$($case.issue) raw-summary missing blocker inventory"
+                }
+            }
+        }
     }
 
     It 'keeps the downloader raw-log content validator positive and fail-closed' {

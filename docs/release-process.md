@@ -231,11 +231,26 @@ requires every source-bound marker in the manifest, requires the downloaded
 setting all nine Issue #5 structured gates to `true`, relabelling a single Linux log, or omitting
 a semantic native marker cannot satisfy the Windows, macOS, or restart gates.
 
-The Issue #2 and Issue #3 `gates` objects remain fail-closed legacy maps: every
-required gate is a JSON boolean with value `true`; a missing, unknown,
-non-boolean, or false gate fails the manifest. The gate objects are closed sets
-and are rechecked by both the PowerShell readiness verifier and the stable
-publisher's JQ contract. Issue #5 uses the structured gate matrix above.
+Issue #2 and Issue #3 use source-bound structured gate records rather than
+legacy boolean maps. Their closed `gates` objects must contain exactly the
+reviewed keys, and every gate record carries boolean `status: true`, a matching
+`gateId` (`issue2.<gate>`/`issue3.<gate>`), the reviewed `sourceCommit`, external
+`provider`, `hostType`, and `node`, the issue `evidenceId`, a bounded `runId`,
+canonical `testSelector` (the `selector` alias is accepted only when identical),
+the exact command, and unique `rawLogMarkers` (the `markers` alias is accepted
+only when identical). Run provenance also includes integer `exitCode: 0`,
+bounded `tests.passed`/`tests.failed`/`tests.ignored` counts, and source-bound
+chronological `startedAt`/`endedAt` timestamps. Each marker is bound to its normalized command using
+`CYC-GA-ISSUE2|gate=<gate>|commandSha256=<digest>|status=passed` or the
+corresponding `ISSUE3` form; the aggregate raw-log marker list and downloaded
+envelope must retain every marker exactly once. The
+`noOpenUnwaivedP0P1Blocker` record additionally embeds a complete source-bound
+GitHub open-issue inventory, pagination/error status, reviewer, stable scope,
+and a non-expired active waiver for each open P0/P1 issue. Bare booleans,
+unknown keys, alias conflicts, missing provenance, or missing markers fail
+closed. The PowerShell readiness verifier, raw-log downloader, and stable
+publisher JQ contract recheck the same fields independently. Issue #5 uses the
+structured gate matrix above.
 Issue #2 requires `tauriDesktopHostTray`, `rendererNativeControllerProxy`,
 `perUserScheduledTasks`, `sidScopedDataDirAcl`,
 `bundledMcpInstallerMarketplace`, `installRepairUpgradeRollbackUninstall`,

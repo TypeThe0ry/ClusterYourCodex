@@ -7,6 +7,27 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.78] - 2026-09-04
+
+### Fixed
+
+- Bind Issue #2 and Issue #3 raw-log gate records to their manifest provenance,
+  including source commit, execution host, run identity, command, timestamps,
+  test counts, and command-derived markers; require the structured blocker
+  inventory on the only gate that can consume it.
+- Emit invariant UTC timestamps from the PowerShell 5.1 raw-log verifier so
+  `DateTime` materialization cannot turn valid ISO-8601 evidence into
+  culture-local strings.
+- Make Linux and macOS worker-kit interrupted-rollback fixtures reach the
+  `after-marker-removal` tombstone path with a pairing worker that writes its
+  protected config before returning the injected failure; retain the bad-kit
+  repair regression separately.
+
+### Tests
+
+- Add a PowerShell 5.1/7 regression for invariant raw-log timestamp output and
+  complete the Linux/macOS worker-kit lifecycle matrix with watchdog evidence.
+
 ## [0.1.0-preview.77] - 2026-09-04
 
 ### Fixed
@@ -989,7 +1010,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.77...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.78...HEAD
+[0.1.0-preview.78]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.77...v0.1.0-preview.78
 [0.1.0-preview.77]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.76...v0.1.0-preview.77
 [0.1.0-preview.76]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.75...v0.1.0-preview.76
 [0.1.0-preview.75]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.74...v0.1.0-preview.75

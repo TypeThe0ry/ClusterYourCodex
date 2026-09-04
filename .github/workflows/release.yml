@@ -24,6 +24,36 @@ jobs:
       source_tag: ${{ steps.identity.outputs.source_tag }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Verify annotated prerelease tag and checked-out source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$CYC_SOURCE_TAG" ]]; then
+            echo 'source_tag is required for a tagged prerelease' >&2
+            exit 1
+          fi
+          if [[ "$(git cat-file -t "refs/tags/$CYC_SOURCE_TAG")" != 'tag' ]]; then
+            echo 'source_tag must resolve to an annotated tag' >&2
+            exit 1
+          fi
+          head_commit="$(git rev-parse HEAD)"
+          tag_object="$(git rev-parse "refs/tags/$CYC_SOURCE_TAG")"
+          tag_commit="$(git rev-parse "refs/tags/$CYC_SOURCE_TAG^{commit}")"
+          if [[ "$tag_commit" != "$head_commit" ]]; then
+            echo 'source tag does not resolve to the checked-out commit' >&2
+            exit 1
+          fi
+          printf 'CYC_SOURCE_COMMIT=%s\n' "$head_commit" >> "$GITHUB_ENV"
+          printf 'CYC_SOURCE_TAG_OBJECT=%s\n' "$tag_object" >> "$GITHUB_ENV"
+          {
+            echo '## Preview source'
+            echo
+            echo "- tag: \`$CYC_SOURCE_TAG\`"
+            echo "- annotated tag object: \`$tag_object\`"
+            echo "- peeled commit: \`$tag_commit\`"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Verify every remote GitHub Action is commit-pinned
         shell: pwsh
         run: ./scripts/Test-GitHubActionPins.ps1

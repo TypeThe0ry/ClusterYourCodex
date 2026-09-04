@@ -51,6 +51,38 @@ $GaIssue5AllGateNames = @(
     'jobsCannotReadWorkerCredentials',
     'restartResidualProcessReconciliation'
 )
+$GaIssue2GateNames = @(
+    'tauriDesktopHostTray',
+    'rendererNativeControllerProxy',
+    'perUserScheduledTasks',
+    'sidScopedDataDirAcl',
+    'bundledMcpInstallerMarketplace',
+    'installRepairUpgradeRollbackUninstall',
+    'cleanWindows11Vm',
+    'liveWindowsControllerWorkerRoundTrip',
+    'productionAuthenticodeSetupHelper',
+    'signedNMinus1ToNUpgrade',
+    'interruptedUpgradeRollback',
+    'downgradePolicy',
+    'noOpenUnwaivedP0P1Blocker'
+)
+$GaIssue3GateNames = @(
+    'linuxSystemdUserServicePackage',
+    'macosLaunchAgentPackage',
+    'linuxX64ReleaseArtifact',
+    'macosX64ReleaseArtifact',
+    'macosArm64ReleaseArtifact',
+    'platformNativeShells',
+    'platformNativeProcessGroups',
+    'crossPlatformPathAclTests',
+    'liveMacosRun',
+    'liveLinuxControllerWorkerRoundTrip',
+    'macosDeveloperIdSigningNotarization'
+)
+$GaIssue23GateNames = [ordered]@{
+    issue2 = $GaIssue2GateNames
+    issue3 = $GaIssue3GateNames
+}
 $GaIssue5ExpectedSelectors = [ordered]@{
     linux = 'isolation::tests::linux_live_dedicated_identity_credential_and_residual_reconciliation'
     windows = 'isolation::tests::windows_native_containment_job_object_and_guard'
@@ -101,6 +133,10 @@ $GaIssue5ResidualMarkerPrefixes = [ordered]@{
 }
 $GaIssue5RunIdentifierPattern = '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
 $GaIssue5IsoInstantPattern = '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\s]+(Z|[+-][0-9]{2}:[0-9]{2})$'
+$GaBlockerInventorySchema = 'cyc.dev/ga-blocker-inventory/v1'
+$GaBlockerRepository = 'TypeThe0ry/ClusterYourCodex'
+$GaBlockerEvidenceIdPattern = '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+$GaBlockerPriorityLabelPattern = '^(?:(?:priority|severity)(?:[:/_\-\s]+))?p([01])$'
 
 function Assert-RawLogCondition {
     param(
@@ -304,6 +340,410 @@ function Assert-RawLogDescriptor {
     return $RawLog
 }
 
+function Assert-RawLogExactObjectPropertySet {
+    param(
+        [Parameter(Mandatory = $true)][object]$Object,
+        [Parameter(Mandatory = $true)][string[]]$Required,
+        [Parameter(Mandatory = $false)][string[]]$Optional = @(),
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-RawLogCondition (($Object -is [pscustomobject]) -and -not ($Object -is [System.Array])) "$Description must be a JSON object"
+    $allowed = @($Required + $Optional | Select-Object -Unique)
+    foreach ($requiredName in $Required) {
+        Assert-RawLogCondition ($null -ne $Object.PSObject.Properties[$requiredName]) "$Description is missing required property '$requiredName'"
+    }
+    foreach ($property in @($Object.PSObject.Properties)) {
+        Assert-RawLogCondition (@($allowed | Where-Object { $_ -ceq [string]$property.Name }).Count -eq 1) "$Description contains unknown property '$($property.Name)'"
+    }
+}
+
+function Get-RawLogBlockerPriorityLabels {
+    param(
+        [Parameter(Mandatory = $true)][object]$Labels,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-RawLogCondition ($Labels -is [System.Array]) "$Description.labels must be a JSON array"
+    $seenNames = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $priorities = New-Object System.Collections.Generic.List[string]
+    foreach ($label in @($Labels)) {
+        Assert-RawLogCondition (($label -is [pscustomobject]) -and -not ($label -is [System.Array])) "$Description.labels entries must be JSON objects"
+        $nameProperty = $label.PSObject.Properties['name']
+        Assert-RawLogCondition ($null -ne $nameProperty) "$Description.labels entries must contain name"
+        Assert-RawLogCondition ($nameProperty.Value -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$nameProperty.Value)) "$Description.labels.name must be a non-empty string"
+        $name = ([string]$nameProperty.Value).Trim()
+        Assert-RawLogCondition ($seenNames.Add($name)) "$Description.labels must not contain duplicate label names"
+        $match = [regex]::Match($name, $GaBlockerPriorityLabelPattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($match.Success) {
+            $priority = 'P' + $match.Groups[1].Value
+            Assert-RawLogCondition (-not (@($priorities | Where-Object { $_ -ceq $priority }).Count -gt 0)) "$Description.labels must not declare the same P0/P1 priority more than once"
+            [void]$priorities.Add($priority)
+        }
+    }
+    return $priorities.ToArray()
+}
+
+function Assert-RawLogBlockerReviewer {
+    param(
+        [Parameter(Mandatory = $true)][object]$Reviewer,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-RawLogExactObjectPropertySet -Object $Reviewer -Required @('id', 'login') -Description $Description
+    $id = Get-RawLogProperty -Object $Reviewer -Path 'id' -Description $Description
+    Assert-RawLogCondition ((Test-RawLogInteger -Value $id) -and [decimal]$id -gt 0) "$Description.id must be a positive integer"
+    $login = Get-RawLogProperty -Object $Reviewer -Path 'login' -Description $Description
+    Assert-RawLogCondition ($login -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$login)) "$Description.login must be a non-empty string"
+    Assert-RawLogCondition ([string]$login -notmatch '[\r\n]') "$Description.login must not contain newlines"
+    return [pscustomobject]@{ id = [long]$id; login = [string]$login }
+}
+
+function Assert-RawLogBlockerInventory {
+    param(
+        [Parameter(Mandatory = $true)][object]$Inventory,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-RawLogExactObjectPropertySet -Object $Inventory `
+        -Required @('schemaVersion', 'status', 'sourceCommit', 'evidenceId', 'repository', 'reviewer', 'reviewedAt', 'expiresAt', 'api', 'issues', 'waivers') `
+        -Description $Description
+    Assert-RawLogCondition ([string]$Inventory.schemaVersion -ceq $GaBlockerInventorySchema) "$Description.schemaVersion must be $GaBlockerInventorySchema"
+    Assert-RawLogCondition ([string]$Inventory.status -ceq 'passed') "$Description.status must be passed"
+    $sourceCommit = Get-RawLogProperty -Object $Inventory -Path 'sourceCommit' -Description $Description
+    Assert-RawLogCondition ($sourceCommit -is [string] -and [string]$sourceCommit -match '^[0-9a-fA-F]{40}$') "$Description.sourceCommit must be a full commit SHA"
+    Assert-RawLogCondition ([string]$sourceCommit -ieq $ExpectedCommit) "$Description.sourceCommit must match ExpectedCommit"
+    Assert-RawLogCondition ([string]$Inventory.repository -ceq $GaBlockerRepository) "$Description.repository must be $GaBlockerRepository"
+    $evidenceId = Get-RawLogProperty -Object $Inventory -Path 'evidenceId' -Description $Description
+    Assert-RawLogCondition ($evidenceId -is [string] -and [string]$evidenceId -match $GaBlockerEvidenceIdPattern) "$Description.evidenceId must be a bounded portable identifier"
+
+    $reviewer = Assert-RawLogBlockerReviewer -Reviewer (Get-RawLogProperty -Object $Inventory -Path 'reviewer' -Description $Description) -Description "$Description.reviewer"
+    $reviewedAt = Convert-RawLogInstant -Value (Get-RawLogProperty -Object $Inventory -Path 'reviewedAt' -Description $Description) -Description "$Description.reviewedAt"
+    $expiresAt = Convert-RawLogInstant -Value (Get-RawLogProperty -Object $Inventory -Path 'expiresAt' -Description $Description) -Description "$Description.expiresAt"
+    $now = [DateTimeOffset]::UtcNow
+    Assert-RawLogCondition ($reviewedAt -le $now) "$Description.reviewedAt must not be in the future"
+    Assert-RawLogCondition ($expiresAt -gt $now) "$Description.expiresAt must be in the future"
+    Assert-RawLogCondition ($expiresAt -gt $reviewedAt) "$Description.expiresAt must be later than reviewedAt"
+
+    $api = Get-RawLogProperty -Object $Inventory -Path 'api' -Description $Description
+    Assert-RawLogExactObjectPropertySet -Object $api `
+        -Required @('provider', 'endpoint', 'requestedState', 'complete', 'incomplete', 'hasNextPage', 'pageCount', 'totalCount', 'returnedCount', 'capturedAt', 'sourceCommit', 'error') `
+        -Description "$Description.api"
+    Assert-RawLogCondition ([string]$api.provider -ceq 'github-rest-api') "$Description.api.provider must be github-rest-api"
+    Assert-RawLogCondition ([string]$api.requestedState -ceq 'open') "$Description.api.requestedState must be open"
+    $endpoint = Get-RawLogProperty -Object $api -Path 'endpoint' -Description "$Description.api"
+    $endpointUri = $null
+    Assert-RawLogCondition ($endpoint -is [string] -and [Uri]::TryCreate([string]$endpoint, [UriKind]::Absolute, [ref]$endpointUri)) "$Description.api.endpoint must be an absolute URL"
+    Assert-RawLogCondition ($endpointUri.Scheme.Equals('https', [StringComparison]::OrdinalIgnoreCase) -and $endpointUri.Host.Equals('api.github.com', [StringComparison]::OrdinalIgnoreCase)) "$Description.api.endpoint must use api.github.com over HTTPS"
+    Assert-RawLogCondition ([string]::IsNullOrWhiteSpace($endpointUri.UserInfo) -and [string]::IsNullOrWhiteSpace($endpointUri.Query) -and [string]::IsNullOrWhiteSpace($endpointUri.Fragment)) "$Description.api.endpoint must not contain credentials, query parameters, or fragments"
+    Assert-RawLogCondition ($endpointUri.AbsolutePath.TrimEnd('/') -ceq '/repos/TypeThe0ry/ClusterYourCodex/issues') "$Description.api.endpoint must target the canonical repository issues endpoint"
+    foreach ($booleanField in @('complete', 'incomplete', 'hasNextPage')) {
+        $booleanValue = Get-RawLogProperty -Object $api -Path $booleanField -Description "$Description.api"
+        Assert-RawLogCondition ($booleanValue -is [bool]) "$Description.api.$booleanField must be boolean"
+    }
+    Assert-RawLogCondition ([bool]$api.complete -and -not [bool]$api.incomplete -and -not [bool]$api.hasNextPage) "$Description.api must be complete without a next page"
+    [void](Assert-RawLogCount -Value (Get-RawLogProperty -Object $api -Path 'pageCount' -Description "$Description.api") -Description "$Description.api.pageCount" -RequirePositive $true)
+    $totalCount = Assert-RawLogCount -Value (Get-RawLogProperty -Object $api -Path 'totalCount' -Description "$Description.api") -Description "$Description.api.totalCount"
+    $returnedCount = Assert-RawLogCount -Value (Get-RawLogProperty -Object $api -Path 'returnedCount' -Description "$Description.api") -Description "$Description.api.returnedCount"
+    $capturedAt = Convert-RawLogInstant -Value (Get-RawLogProperty -Object $api -Path 'capturedAt' -Description "$Description.api") -Description "$Description.api.capturedAt"
+    Assert-RawLogCondition ($capturedAt -le $now) "$Description.api.capturedAt must not be in the future"
+    $apiCommit = Get-RawLogProperty -Object $api -Path 'sourceCommit' -Description "$Description.api"
+    Assert-RawLogCondition ($apiCommit -is [string] -and [string]$apiCommit -match '^[0-9a-fA-F]{40}$' -and [string]$apiCommit -ieq $ExpectedCommit) "$Description.api.sourceCommit must match ExpectedCommit"
+    $apiError = Get-RawLogProperty -Object $api -Path 'error' -Description "$Description.api"
+    Assert-RawLogCondition ($null -eq $apiError -or ($apiError -is [string] -and [string]::IsNullOrWhiteSpace([string]$apiError))) "$Description.api.error must be null or empty"
+
+    $issues = $Inventory.PSObject.Properties['issues'].Value
+    Assert-RawLogCondition ($issues -is [System.Array]) "$Description.issues must be a JSON array"
+    Assert-RawLogCondition ([long]$returnedCount -eq [long]$issues.Count -and [long]$totalCount -eq [long]$issues.Count) "$Description.api issue counts must match the snapshot"
+    $seenIssueNumbers = New-Object 'System.Collections.Generic.HashSet[long]'
+    $blockers = New-Object System.Collections.Generic.List[object]
+    foreach ($issue in @($issues)) {
+        Assert-RawLogExactObjectPropertySet -Object $issue -Required @('number', 'state', 'title', 'html_url', 'labels') -Description "$Description.issues entry"
+        $number = Get-RawLogProperty -Object $issue -Path 'number' -Description "$Description.issues entry"
+        Assert-RawLogCondition ((Test-RawLogInteger -Value $number) -and [decimal]$number -gt 0 -and $seenIssueNumbers.Add([long]$number)) "$Description.issues.number must be a unique positive integer"
+        Assert-RawLogCondition ([string]$issue.state -ceq 'open') "$Description.issues #$number.state must be open"
+        Assert-RawLogCondition ($issue.title -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$issue.title)) "$Description.issues #$number.title must be non-empty"
+        Assert-RawLogCondition ([string]$issue.html_url -ceq "https://github.com/$GaBlockerRepository/issues/$number") "$Description.issues #$number.html_url must be canonical"
+        $priorityLabels = @(Get-RawLogBlockerPriorityLabels -Labels $issue.PSObject.Properties['labels'].Value -Description "$Description.issues #$number")
+        Assert-RawLogCondition ($priorityLabels.Count -le 1) "$Description.issues #$number must have at most one P0/P1 label"
+        if ($priorityLabels.Count -eq 1) { [void]$blockers.Add([pscustomobject]@{ number = [long]$number; priority = [string]$priorityLabels[0] }) }
+    }
+
+    $waivers = $Inventory.PSObject.Properties['waivers'].Value
+    Assert-RawLogCondition ($waivers -is [System.Array]) "$Description.waivers must be a JSON array"
+    $seenWaiverNumbers = New-Object 'System.Collections.Generic.HashSet[long]'
+    $blockerNumberSet = New-Object 'System.Collections.Generic.HashSet[long]'
+    foreach ($blocker in $blockers.ToArray()) { [void]$blockerNumberSet.Add([long]$blocker.number) }
+    foreach ($waiver in @($waivers)) {
+        Assert-RawLogExactObjectPropertySet -Object $waiver -Required @('issueNumber', 'scope', 'sourceCommit', 'expiresAt', 'reviewer', 'status', 'reason') -Description "$Description.waivers entry"
+        $waiverNumber = Get-RawLogProperty -Object $waiver -Path 'issueNumber' -Description "$Description.waivers entry"
+        Assert-RawLogCondition ((Test-RawLogInteger -Value $waiverNumber) -and [decimal]$waiverNumber -gt 0 -and $seenWaiverNumbers.Add([long]$waiverNumber)) "$Description.waivers.issueNumber must be a unique positive integer"
+        Assert-RawLogCondition ($blockerNumberSet.Contains([long]$waiverNumber)) "$Description.waivers may only reference an open P0/P1 issue"
+        $scope = Get-RawLogProperty -Object $waiver -Path 'scope' -Description "$Description.waivers #$waiverNumber"
+        Assert-RawLogExactObjectPropertySet -Object $scope -Required @('repository', 'channel', 'issueNumber') -Description "$Description.waivers #$waiverNumber.scope"
+        Assert-RawLogCondition ([string]$scope.repository -ceq $GaBlockerRepository -and [string]$scope.channel -ceq 'stable') "$Description.waivers #$waiverNumber.scope must bind stable repository scope"
+        $scopeNumber = Get-RawLogProperty -Object $scope -Path 'issueNumber' -Description "$Description.waivers #$waiverNumber.scope"
+        Assert-RawLogCondition ((Test-RawLogInteger -Value $scopeNumber) -and [long]$scopeNumber -eq [long]$waiverNumber) "$Description.waivers #$waiverNumber.scope.issueNumber must match issueNumber"
+        $waiverCommit = Get-RawLogProperty -Object $waiver -Path 'sourceCommit' -Description "$Description.waivers #$waiverNumber"
+        Assert-RawLogCondition ($waiverCommit -is [string] -and [string]$waiverCommit -match '^[0-9a-fA-F]{40}$' -and [string]$waiverCommit -ieq $ExpectedCommit) "$Description.waivers #$waiverNumber.sourceCommit must match ExpectedCommit"
+        $waiverExpiresAt = Convert-RawLogInstant -Value (Get-RawLogProperty -Object $waiver -Path 'expiresAt' -Description "$Description.waivers #$waiverNumber") -Description "$Description.waivers #$waiverNumber.expiresAt"
+        Assert-RawLogCondition ($waiverExpiresAt -gt $now -and $waiverExpiresAt -le $expiresAt) "$Description.waivers #$waiverNumber.expiresAt must be valid and within inventory expiry"
+        $waiverReviewer = Assert-RawLogBlockerReviewer -Reviewer (Get-RawLogProperty -Object $waiver -Path 'reviewer' -Description "$Description.waivers #$waiverNumber") -Description "$Description.waivers #$waiverNumber.reviewer"
+        Assert-RawLogCondition ($waiverReviewer.id -eq $reviewer.id -and $waiverReviewer.login -ceq $reviewer.login) "$Description.waivers #$waiverNumber.reviewer must match inventory reviewer"
+        Assert-RawLogCondition ([string]$waiver.status -ceq 'active') "$Description.waivers #$waiverNumber.status must be active"
+        Assert-RawLogCondition ($waiver.reason -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$waiver.reason)) "$Description.waivers #$waiverNumber.reason must be non-empty"
+    }
+    foreach ($blocker in $blockers.ToArray()) {
+        $matches = @($waivers | Where-Object { [long]$_.issueNumber -eq [long]$blocker.number })
+        Assert-RawLogCondition ($matches.Count -eq 1) "$Description must contain one active waiver for open $($blocker.priority) issue #$($blocker.number)"
+    }
+    Assert-RawLogCondition ($seenWaiverNumbers.Count -eq $blockers.Count) "$Description.waivers must cover exactly the P0/P1 blockers"
+}
+
+function Get-RawLogIssue23GateMarkers {
+    param(
+        [Parameter(Mandatory = $true)][object]$GateEvidence,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-RawLogCondition (($GateEvidence -is [pscustomobject]) -and -not ($GateEvidence -is [System.Array])) "$Description is a JSON object"
+    $canonicalProperty = $GateEvidence.PSObject.Properties['rawLogMarkers']
+    $aliasProperty = $GateEvidence.PSObject.Properties['markers']
+    Assert-RawLogCondition ($null -ne $canonicalProperty -or $null -ne $aliasProperty) "$Description.rawLogMarkers is required"
+    if ($null -ne $canonicalProperty) {
+        Assert-RawLogCondition ($canonicalProperty.Value -is [System.Array]) "$Description.rawLogMarkers is a JSON array"
+    }
+    if ($null -ne $aliasProperty) {
+        Assert-RawLogCondition ($aliasProperty.Value -is [System.Array]) "$Description.markers is a JSON array"
+    }
+    if ($null -ne $canonicalProperty -and $null -ne $aliasProperty) {
+        $canonical = @($canonicalProperty.Value)
+        $alias = @($aliasProperty.Value)
+        Assert-RawLogCondition ($canonical.Count -eq $alias.Count) "$Description.rawLogMarkers and markers aliases have the same length"
+        for ($index = 0; $index -lt $canonical.Count; $index++) {
+            Assert-RawLogCondition (($canonical[$index] -is [string]) -and ($alias[$index] -is [string])) "$Description.rawLogMarkers and markers aliases entries are both strings"
+            Assert-RawLogCondition ([string]$canonical[$index] -ceq [string]$alias[$index]) "$Description.rawLogMarkers and markers aliases must match exactly"
+        }
+    }
+    if ($null -ne $canonicalProperty) {
+        $markers = [object[]]@($canonicalProperty.Value)
+    } else {
+        $markers = [object[]]@($aliasProperty.Value)
+    }
+    Assert-RawLogCondition ($markers.Count -gt 0) "$Description.rawLogMarkers is non-empty"
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($marker in $markers) {
+        Assert-RawLogCondition ($marker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$marker)) "$Description.rawLogMarkers entries are non-empty strings"
+        Assert-RawLogCondition ($seen.Add([string]$marker)) "$Description.rawLogMarkers entries are unique"
+    }
+    return $markers
+}
+
+function Get-RawLogIssue23GateSelector {
+    param(
+        [Parameter(Mandatory = $true)][object]$GateEvidence,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $canonicalProperty = $GateEvidence.PSObject.Properties['testSelector']
+    $aliasProperty = $GateEvidence.PSObject.Properties['selector']
+    Assert-RawLogCondition ($null -ne $canonicalProperty -or $null -ne $aliasProperty) "$Description.testSelector is required"
+    if ($null -ne $canonicalProperty -and $null -ne $aliasProperty) {
+        Assert-RawLogCondition (($canonicalProperty.Value -is [string]) -and ($aliasProperty.Value -is [string])) "$Description.testSelector and selector aliases are strings"
+        Assert-RawLogCondition ([string]$canonicalProperty.Value -ceq [string]$aliasProperty.Value) "$Description.testSelector and selector aliases must match exactly"
+    }
+    $selector = if ($null -ne $canonicalProperty) { $canonicalProperty.Value } else { $aliasProperty.Value }
+    Assert-RawLogCondition ($selector -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$selector)) "$Description.testSelector is a non-empty string"
+    return [string]$selector
+}
+
+function Get-RawLogIssue23GateMarker {
+    param(
+        [Parameter(Mandatory = $true)][string]$IssueName,
+        [Parameter(Mandatory = $true)][string]$Gate,
+        [Parameter(Mandatory = $true)][string]$Command
+    )
+
+    $commandDigest = Get-RawLogIssue5CommandSha256 -Command $Command
+    return "CYC-GA-$($IssueName.ToUpperInvariant())|gate=$Gate|commandSha256=$commandDigest|status=passed"
+}
+
+function Assert-RawLogIssue23GateEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object]$ManifestIssue,
+        [Parameter(Mandatory = $true)][string]$IssueName,
+        [Parameter(Mandatory = $true)][string]$Gate,
+        [Parameter(Mandatory = $true)][object]$GateEvidence,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-RawLogExactObjectPropertySet -Object $GateEvidence `
+        -Required @('status', 'gateId', 'sourceCommit', 'provider', 'hostType', 'evidenceId', 'runId', 'node', 'exitCode', 'tests', 'startedAt', 'endedAt', 'command') `
+        -Optional @('testSelector', 'selector', 'rawLogMarkers', 'markers', 'blockerInventory') `
+        -Description $Description
+    $status = Get-RawLogProperty -Object $GateEvidence -Path 'status' -Description $Description
+    Assert-RawLogCondition (($status -is [bool]) -and $status) "$Description.status must be boolean true"
+    $gateId = Get-RawLogProperty -Object $GateEvidence -Path 'gateId' -Description $Description
+    Assert-RawLogCondition ($gateId -is [string] -and [string]$gateId -ceq "$IssueName.$Gate") "$Description.gateId must equal '$IssueName.$Gate'"
+    $sourceCommit = Get-RawLogProperty -Object $GateEvidence -Path 'sourceCommit' -Description $Description
+    Assert-RawLogCondition ($sourceCommit -is [string] -and [string]$sourceCommit -match '^[0-9a-fA-F]{40}$') "$Description.sourceCommit must be a full commit SHA"
+    Assert-RawLogCondition ([string]$sourceCommit -ieq $ExpectedCommit) "$Description.sourceCommit must match ExpectedCommit"
+    $manifestEvidenceId = [string](Get-RawLogProperty -Object $ManifestIssue -Path 'evidenceId' -Description $Description)
+    foreach ($field in @('provider', 'hostType', 'evidenceId', 'runId', 'node', 'command')) {
+        $value = Get-RawLogProperty -Object $GateEvidence -Path $field -Description $Description
+        Assert-RawLogCondition ($value -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$value)) "$Description.$field must be a non-empty string"
+    }
+    $provider = [string](Get-RawLogProperty -Object $GateEvidence -Path 'provider' -Description $Description)
+    $hostType = [string](Get-RawLogProperty -Object $GateEvidence -Path 'hostType' -Description $Description)
+    $node = [string](Get-RawLogProperty -Object $GateEvidence -Path 'node' -Description $Description)
+    foreach ($fieldValue in @(@('provider', $provider), @('hostType', $hostType), @('node', $node))) {
+        Assert-RawLogCondition ($fieldValue[1] -notmatch '(?i)github|actions|hosted|runner') "$Description.$($fieldValue[0]) must identify an external execution surface"
+    }
+    $gateEvidenceId = [string](Get-RawLogProperty -Object $GateEvidence -Path 'evidenceId' -Description $Description)
+    Assert-RawLogCondition ($gateEvidenceId -ceq $manifestEvidenceId) "$Description.evidenceId must match the issue evidenceId"
+    $selector = Get-RawLogIssue23GateSelector -GateEvidence $GateEvidence -Description $Description
+    $command = [string](Get-RawLogProperty -Object $GateEvidence -Path 'command' -Description $Description)
+    # ConvertFrom-Json in Windows PowerShell 5.1 materializes ISO-8601 values
+    # as DateTime instances.  Never cast those directly to [string]: that uses
+    # the current culture and drops the timezone, producing e.g. `08/30/2026
+    # 14:00:00`, which cannot be consumed by the workflow's ISO contract.  Parse
+    # through the same strict instant validator used by the descriptor and
+    # emit one invariant, explicit-offset representation for every gate record.
+    $startedAt = Convert-RawLogInstant `
+        -Value (Get-RawLogProperty -Object $GateEvidence -Path 'startedAt' -Description $Description) `
+        -Description "$Description.startedAt"
+    $endedAt = Convert-RawLogInstant `
+        -Value (Get-RawLogProperty -Object $GateEvidence -Path 'endedAt' -Description $Description) `
+        -Description "$Description.endedAt"
+    Assert-RawLogCondition ($endedAt -ge $startedAt) "$Description.endedAt must not precede startedAt"
+    $markers = Get-RawLogIssue23GateMarkers -GateEvidence $GateEvidence -Description $Description
+    $expectedMarker = Get-RawLogIssue23GateMarker -IssueName $IssueName -Gate $Gate -Command $command
+    Assert-RawLogCondition (@($markers | Where-Object { [string]$_ -ceq $expectedMarker }).Count -eq 1) "$Description.rawLogMarkers must contain the command-bound gate marker"
+    [void](Assert-RawLogIssue5RunProvenance -Run $GateEvidence -Description $Description)
+    if ($IssueName -ceq 'issue2' -and $Gate -ceq 'noOpenUnwaivedP0P1Blocker') {
+        $inventoryProperty = $GateEvidence.PSObject.Properties['blockerInventory']
+        Assert-RawLogCondition ($null -ne $inventoryProperty) "$Description.blockerInventory is required for noOpenUnwaivedP0P1Blocker"
+        Assert-RawLogBlockerInventory -Inventory $inventoryProperty.Value -ExpectedCommit $ExpectedCommit -Description "$Description.blockerInventory"
+    }
+    $result = [pscustomobject]@{
+        gate = $Gate
+        status = $true
+        gateId = "$IssueName.$Gate"
+        sourceCommit = [string]$sourceCommit
+        provider = $provider
+        hostType = $hostType
+        evidenceId = $gateEvidenceId
+        runId = [string](Get-RawLogProperty -Object $GateEvidence -Path 'runId' -Description $Description)
+        node = $node
+        exitCode = [int64](Get-RawLogProperty -Object $GateEvidence -Path 'exitCode' -Description $Description)
+        tests = (Get-RawLogProperty -Object $GateEvidence -Path 'tests' -Description $Description)
+        startedAt = $startedAt.ToUniversalTime().ToString('yyyy-MM-dd''T''HH:mm:ss.fffffff''Z''', [Globalization.CultureInfo]::InvariantCulture)
+        endedAt = $endedAt.ToUniversalTime().ToString('yyyy-MM-dd''T''HH:mm:ss.fffffff''Z''', [Globalization.CultureInfo]::InvariantCulture)
+        testSelector = $selector
+        command = $command
+        markers = @($markers)
+    }
+    if ($IssueName -ceq 'issue2' -and $Gate -ceq 'noOpenUnwaivedP0P1Blocker') {
+        $result | Add-Member -MemberType NoteProperty -Name blockerInventory -Value $GateEvidence.blockerInventory
+    }
+    return $result
+}
+
+function Assert-RawLogIssue23Evidence {
+    param(
+        [Parameter(Mandatory = $true)][object]$Issue,
+        [Parameter(Mandatory = $true)][string]$IssueName,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-RawLogCondition $GaIssue23GateNames.Contains([string]$IssueName) "$Description has a reviewed Issue #2/#3 name"
+    $gates = Get-RawLogProperty -Object $Issue -Path 'gates' -Description $Description
+    Assert-RawLogCondition (($gates -is [pscustomobject]) -and -not ($gates -is [System.Array])) "$Description.gates is a JSON object"
+    $expectedGates = @($GaIssue23GateNames[[string]$IssueName])
+    Assert-RawLogCondition (@($gates.PSObject.Properties).Count -eq $expectedGates.Count) "$Description.gates contains exactly the reviewed gate keys"
+    foreach ($property in @($gates.PSObject.Properties)) {
+        Assert-RawLogCondition ($expectedGates -contains [string]$property.Name) "$Description.gates contains only reviewed gate names"
+    }
+    $records = New-Object System.Collections.Generic.List[object]
+    $markers = New-Object System.Collections.Generic.List[string]
+    foreach ($gate in $expectedGates) {
+        $gateEvidence = Get-RawLogProperty -Object $gates -Path $gate -Description $Description
+        $record = Assert-RawLogIssue23GateEvidence -ManifestIssue $Issue -IssueName $IssueName -Gate $gate -GateEvidence $gateEvidence -ExpectedCommit $ExpectedCommit -Description "$Description.gates.$gate"
+        [void]$records.Add($record)
+        foreach ($marker in @($record.markers)) {
+            if (-not (@($markers | Where-Object { [string]$_ -ceq [string]$marker }).Count -gt 0)) {
+                [void]$markers.Add([string]$marker)
+            }
+        }
+    }
+    $rawLog = Get-RawLogProperty -Object $Issue -Path 'rawLog' -Description $Description
+    $rawMarkers = Get-RawLogProperty -Object $rawLog -Path 'markers' -Description $Description
+    Assert-RawLogCondition (($rawMarkers -is [System.Array]) -and $rawMarkers.Count -gt 0) "$Description.rawLog.markers is a non-empty JSON array"
+    $seenRawMarkers = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($marker in @($rawMarkers)) {
+        Assert-RawLogCondition ($marker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$marker)) "$Description.rawLog.markers entries are non-empty strings"
+        Assert-RawLogCondition ($seenRawMarkers.Add([string]$marker)) "$Description.rawLog.markers entries are unique"
+    }
+    foreach ($marker in $markers.ToArray()) {
+        Assert-RawLogCondition (@($rawMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.rawLog.markers must retain '$marker'"
+    }
+    return [pscustomobject]@{ gates = $records.ToArray(); markers = $markers.ToArray() }
+}
+
+function Assert-RawLogIssue23Content {
+    param(
+        [Parameter(Mandatory = $true)][object]$Content,
+        [Parameter(Mandatory = $true)][object]$ManifestIssue,
+        [Parameter(Mandatory = $true)][string]$IssueName,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $manifestContract = Assert-RawLogIssue23Evidence -Issue $ManifestIssue -IssueName $IssueName -ExpectedCommit $ExpectedCommit -Description "$Description.manifest"
+    $contentGates = Get-RawLogProperty -Object $Content -Path 'gates' -Description $Description
+    Assert-RawLogCondition (($contentGates -is [pscustomobject]) -and -not ($contentGates -is [System.Array])) "$Description.gates is a JSON object"
+    Assert-RawLogCondition (@($contentGates.PSObject.Properties).Count -eq $manifestContract.gates.Count) "$Description.gates retains every reviewed gate"
+    foreach ($manifestGate in @($manifestContract.gates)) {
+        $gateName = [string]$manifestGate.gate
+        $contentGateProperty = $contentGates.PSObject.Properties[$gateName]
+        Assert-RawLogCondition ($null -ne $contentGateProperty) "$Description.gates.$gateName is present"
+        $contentGate = $contentGateProperty.Value
+        Assert-RawLogCondition (($contentGate -is [pscustomobject]) -and -not ($contentGate -is [System.Array])) "$Description.gates.$gateName is an object"
+        # Re-run the complete gate verifier over the downloaded envelope.  This
+        # keeps provider/host/run/selector provenance and command-bound marker
+        # checks independent from the manifest-side validation above.
+        $contentGateContract = Assert-RawLogIssue23GateEvidence `
+            -ManifestIssue $ManifestIssue `
+            -IssueName $IssueName `
+            -Gate $gateName `
+            -GateEvidence $contentGate `
+            -ExpectedCommit $ExpectedCommit `
+            -Description "$Description.gates.$gateName"
+        foreach ($field in @('provider', 'hostType', 'evidenceId', 'runId', 'node', 'testSelector')) {
+            Assert-RawLogCondition ([string]$contentGateContract.$field -ceq [string]$manifestGate.$field) "$Description.gates.$gateName.$field must match the manifest"
+        }
+        $contentCommand = [string]$contentGateContract.command
+        Assert-RawLogCondition ((Normalize-RawLogCommand -Command $contentCommand).Equals((Normalize-RawLogCommand -Command ([string]$manifestGate.command)), [StringComparison]::Ordinal)) "$Description.gates.$gateName.command must match the manifest"
+        $contentMarkers = @($contentGateContract.markers)
+        foreach ($marker in @($manifestGate.markers)) {
+            Assert-RawLogCondition (@($contentMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.gates.$gateName.rawLogMarkers must retain '$marker'"
+        }
+    }
+    $contentMarkers = Get-RawLogProperty -Object $Content -Path 'markers' -Description $Description
+    Assert-RawLogCondition (($contentMarkers -is [System.Array]) -and $contentMarkers.Count -gt 0) "$Description.markers is a non-empty JSON array"
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($marker in @($contentMarkers)) {
+        Assert-RawLogCondition ($marker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$marker)) "$Description.markers entries are non-empty strings"
+        Assert-RawLogCondition ($seen.Add([string]$marker)) "$Description.markers entries are unique"
+    }
+    foreach ($marker in @($manifestContract.markers)) {
+        Assert-RawLogCondition (@($contentMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.markers must retain '$marker'"
+    }
+}
+
 function Get-RawLogContentJson {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -423,6 +863,13 @@ function Assert-RawLogContent {
         foreach ($marker in @($manifestMarkers)) {
             Assert-RawLogCondition (@($contentMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.markers must retain the manifest marker '$marker'"
         }
+    } elseif ($IssueName -ceq 'issue2' -or $IssueName -ceq 'issue3') {
+        [void](Assert-RawLogIssue23Content `
+            -Content $Content `
+            -ManifestIssue $ManifestIssue `
+            -IssueName $IssueName `
+            -ExpectedCommit $ExpectedCommit `
+            -Description $Description)
     }
     return $Content
 }
@@ -630,7 +1077,9 @@ function Get-RawLogIssue5GateMarkers {
             Assert-RawLogCondition ($canonicalMarkers[$index] -ceq $aliasMarkers[$index]) "$Description.rawLogMarkers and markers aliases must match exactly"
         }
     }
-    $markers = if ($null -ne $canonicalProperty) { $canonicalMarkers } else { $aliasMarkers }
+    # Keep a single marker as an array; PowerShell unwraps one-element arrays
+    # when a conditional expression is assigned directly.
+    $markers = if ($null -ne $canonicalProperty) { @($canonicalMarkers) } else { @($aliasMarkers) }
     Assert-RawLogCondition (($null -ne $markers) -and ($markers -is [System.Array]) -and $markers.Count -gt 0) "$Description.rawLogMarkers is a non-empty array"
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($marker in @($markers)) {
@@ -1116,8 +1565,18 @@ foreach ($issueName in @('issue2', 'issue3', 'issue5')) {
     $expectedHash = [string](Get-RawLogProperty -Object $rawLog -Path 'sha256' -Description $issueName)
     Assert-RawLogCondition ($expectedHash -match '^[0-9a-fA-F]{64}$') "$issueName.rawLog.sha256 is a SHA-256 digest"
 
+    $issue23Contract = $null
     $issue5Contract = $null
-    if ($issueName -ceq 'issue5') {
+    if ($issueName -ceq 'issue2' -or $issueName -ceq 'issue3') {
+        # Issue #2/#3 are structured per-gate evidence records.  Validate the
+        # manifest before downloading so a raw-log URL cannot be used to hide
+        # a missing/ambiguous acceptance gate.
+        $issue23Contract = Assert-RawLogIssue23Evidence `
+            -Issue $issue `
+            -IssueName $issueName `
+            -ExpectedCommit $ExpectedCommit `
+            -Description $issueName
+    } elseif ($issueName -ceq 'issue5') {
         $issue5Contract = Assert-RawLogIssue5Evidence -Issue $issue -Description 'issue5'
     }
 
@@ -1154,6 +1613,10 @@ foreach ($issueName in @('issue2', 'issue3', 'issue5')) {
         $record.platforms = $issue5Contract.platforms
         $record.markers = $issue5Contract.markers
         $record.gateEvidence = $issue5Contract.gates
+    } elseif ($issueName -ceq 'issue2' -or $issueName -ceq 'issue3') {
+        $record.markersVerified = $true
+        $record.markers = $issue23Contract.markers
+        $record.gateEvidence = $issue23Contract.gates
     }
     Write-RawLogAtomicText `
         -Path (Join-Path $outputRoot "$evidenceId.verification.json") `

@@ -32,6 +32,7 @@ data_root="${XDG_DATA_HOME:-${HOME}/.local/share}/clusteryourcodex/worker"
 workspace_root="${XDG_DATA_HOME:-${HOME}/.local/share}/clusteryourcodex/worker/workspace"
 enrollment_file=''
 scope='auto'
+scope_was_explicit=0
 allow_on_battery=0
 pair_only=0
 purge_data=0
@@ -60,7 +61,7 @@ while [[ $# -gt 0 ]]; do
     --data-root) data_root="$2"; shift 2 ;;
     --workspace-root) workspace_root="$2"; shift 2 ;;
     --enrollment) enrollment_file="$2"; shift 2 ;;
-    --scope) scope="$2"; shift 2 ;;
+    --scope) scope="$2"; scope_was_explicit=1; shift 2 ;;
     --allow-on-battery) allow_on_battery=1; shift ;;
     --pair-only) pair_only=1; shift ;;
     --purge-data) purge_data=1; shift ;;
@@ -409,6 +410,55 @@ service_ctl() {
   service_ctl_for_scope "$scope" "$@"
 }
 
+service_activity_state_for_scope() {
+  local requested_scope="$1" raw='' load_state='' active_state=''
+  # `systemctl is-active` conflates an inactive unit with manager failures in
+  # its exit code. Query the explicit LoadState/ActiveState pair so a missing
+  # unit remains distinguishable from an unavailable manager.
+  if ! raw="$(service_ctl_for_scope "$requested_scope" show \
+    --property=LoadState --property=ActiveState --value "$SERVICE_NAME" 2>/dev/null)"; then
+    printf '%s' unknown
+    return 0
+  fi
+  load_state="${raw%%$'\n'*}"
+  if [[ "$raw" == *$'\n'* ]]; then
+    active_state="${raw#*$'\n'}"
+    active_state="${active_state%%$'\n'*}"
+  fi
+  load_state="${load_state//$'\r'/}"
+  active_state="${active_state//$'\r'/}"
+  case "${load_state}:${active_state}" in
+    loaded:active) printf '%s' active ;;
+    loaded:inactive|loaded:failed|loaded:dead) printf '%s' inactive ;;
+    not-found:inactive|not-found:unknown) printf '%s' absent ;;
+    *) printf '%s' unknown ;;
+  esac
+}
+
+service_enabled_state_for_scope() {
+  local requested_scope="$1" raw='' load_state='' unit_file_state=''
+  if ! raw="$(service_ctl_for_scope "$requested_scope" show \
+    --property=LoadState --property=UnitFileState --value "$SERVICE_NAME" 2>/dev/null)"; then
+    printf '%s' unknown
+    return 0
+  fi
+  load_state="${raw%%$'\n'*}"
+  if [[ "$raw" == *$'\n'* ]]; then
+    unit_file_state="${raw#*$'\n'}"
+    unit_file_state="${unit_file_state%%$'\n'*}"
+  fi
+  load_state="${load_state//$'\r'/}"
+  unit_file_state="${unit_file_state//$'\r'/}"
+  case "${load_state}:${unit_file_state}" in
+    loaded:enabled) printf '%s' enabled ;;
+    loaded:disabled|loaded:static|loaded:indirect|loaded:masked|loaded:generated|loaded:transient|loaded:alias)
+      printf '%s' disabled
+      ;;
+    not-found:disabled|not-found:unknown) printf '%s' disabled ;;
+    *) printf '%s' unknown ;;
+  esac
+}
+
 fail_user_systemd_unavailable() {
   printf '%s\n' \
     '[CYC-LINUX-USER-SYSTEMD-UNAVAILABLE] User-scope service activation requires a working systemd user manager and enabled linger. Re-run as root with --scope system.' \
@@ -498,13 +548,54 @@ service_path() {
   service_path_for_scope "$scope"
 }
 
+reject_pending_service_transactions() {
+  local unit="$1" unit_dir pending_unit
+  local -a pending_units=()
+  unit_dir="$(dirname -- "$unit")"
+  if [[ -d "$unit_dir" && ! -L "$unit_dir" ]]; then
+    shopt -s nullglob
+    pending_units=("$unit_dir/${SERVICE_NAME}.cyc-uninstall."*.pending)
+    shopt -u nullglob
+  fi
+  if [[ "${#pending_units[@]}" -gt 0 ]]; then
+    for pending_unit in "${pending_units[@]}"; do
+      [[ -f "$pending_unit" && ! -L "$pending_unit" ]] || {
+        printf 'Pending worker service uninstall path is invalid: %s\n' "$pending_unit" >&2
+        return 1
+      }
+    done
+    printf 'Pending worker service uninstall transaction remains; refusing lifecycle operation.\n' >&2
+    return 1
+  fi
+}
+
 verify_private_service_path_existing() {
   local requested_scope="$1" unit unit_dir mode owner expected_owner
-  [[ "$requested_scope" == user ]] || return 0
-
   unit="$(service_path_for_scope "$requested_scope")"
   unit_dir="$(dirname -- "$unit")"
   reject_link_chain "$unit_dir"
+  reject_pending_service_transactions "$unit"
+
+  if [[ "$requested_scope" == system ]]; then
+    # The system unit path is not private, but it is still an installer-owned
+    # lifecycle target. Never follow a replaced systemd directory or unit
+    # during uninstall/repair, and never operate on a non-root unit as if it
+    # were ours.
+    reject_link_chain "$unit"
+    if [[ -e "$unit" || -L "$unit" ]]; then
+      [[ -f "$unit" && ! -L "$unit" ]] || {
+        printf 'Existing system service unit is invalid: %s\n' "$unit" >&2
+        return 1
+      }
+      owner="$(path_owner "$unit" 2>/dev/null || true)"
+      [[ "$owner" == 0 ]] || {
+        printf 'Existing system service unit is not owned by root: %s\n' "$unit" >&2
+        return 1
+      }
+    fi
+    return 0
+  fi
+
   if [[ -e "$unit_dir" || -L "$unit_dir" ]]; then
     [[ -d "$unit_dir" && ! -L "$unit_dir" ]] || {
       printf 'Existing user service directory is invalid: %s\n' "$unit_dir" >&2
@@ -533,24 +624,22 @@ verify_private_service_path_existing() {
       return 1
     }
   fi
+
 }
 
 remove_service_for_scope() {
-  local requested_scope="$1" unit unit_present=0 was_active=0 disable_succeeded=0
+  local requested_scope="$1" unit unit_present=0 was_active=0 disable_succeeded=0 activity_state
   local pending_unit=''
   verify_private_service_path_existing "$requested_scope" || return 1
   unit="$(service_path_for_scope "$requested_scope")"
   if [[ -f "$unit" && ! -L "$unit" ]]; then unit_present=1; fi
 
   if ! command -v systemctl >/dev/null 2>&1; then
-    # Removing an owned unit without systemctl could leave a running worker
-    # behind. A missing unit remains idempotent, but an existing one fails
-    # closed until the service manager is available to prove it is stopped.
-    if [[ "$unit_present" -eq 1 ]]; then
-      printf 'systemctl is required to remove an existing worker service safely.\n' >&2
-      return 1
-    fi
-    return 0
+    # Without the manager there is no authoritative way to distinguish an
+    # absent unit from a registered/transient worker. Keep the worker and
+    # service bytes for a later retry even when the unit file is absent.
+    printf 'systemctl is required to verify the worker service is stopped safely.\n' >&2
+    return 1
   fi
 
   if [[ "$requested_scope" == user ]]; then
@@ -560,9 +649,15 @@ remove_service_for_scope() {
     }
   fi
 
-  if service_ctl_for_scope "$requested_scope" is-active --quiet "$SERVICE_NAME" >/dev/null 2>&1; then
-    was_active=1
-  fi
+  activity_state="$(service_activity_state_for_scope "$requested_scope")"
+  case "$activity_state" in
+    active) was_active=1 ;;
+    inactive|absent) ;;
+    *)
+      printf 'Worker service state is unknown; refusing to remove unit.\n' >&2
+      return 1
+      ;;
+  esac
 
   # A unit file (or an already-active named service) must be successfully
   # disabled before its bytes are removed. Never turn a failed stop into a
@@ -571,10 +666,18 @@ remove_service_for_scope() {
     if service_ctl_for_scope "$requested_scope" disable --now "$SERVICE_NAME" >/dev/null 2>&1; then
       disable_succeeded=1
     fi
-    if service_ctl_for_scope "$requested_scope" is-active --quiet "$SERVICE_NAME" >/dev/null 2>&1; then
-      printf 'Worker service remained active after disable; refusing to remove unit.\n' >&2
-      return 1
-    fi
+    activity_state="$(service_activity_state_for_scope "$requested_scope")"
+    case "$activity_state" in
+      active)
+        printf 'Worker service remained active after disable; refusing to remove unit.\n' >&2
+        return 1
+        ;;
+      inactive|absent) ;;
+      *)
+        printf 'Worker service state is unknown after disable; refusing to remove unit.\n' >&2
+        return 1
+        ;;
+    esac
     if [[ "$disable_succeeded" -ne 1 ]]; then
       printf 'Worker service disable failed; refusing to remove unit.\n' >&2
       return 1
@@ -605,10 +708,23 @@ remove_service_for_scope() {
       printf 'systemd daemon-reload failed after removing the worker unit.\n' >&2
       return 1
     fi
-    rm -f -- "$pending_unit" || {
+    if ! rm -f -- "$pending_unit"; then
+      # The manager has already accepted the missing canonical unit. Restore
+      # the bytes before returning so a filesystem retirement failure cannot
+      # strand a runnable service definition under a private suffix.
+      if [[ ! -e "$unit" && ! -L "$unit" ]]; then
+        if ! mv -- "$pending_unit" "$unit"; then
+          printf 'Worker service uninstall could not restore its unit after pending-file retirement failure.\n' >&2
+          return 1
+        fi
+        if ! service_ctl_for_scope "$requested_scope" daemon-reload >/dev/null 2>&1; then
+          printf 'Worker service uninstall restored its unit but daemon-reload failed after pending-file retirement failure.\n' >&2
+          return 1
+        fi
+      fi
       printf 'Worker service uninstall could not retire its staged unit transaction.\n' >&2
       return 1
-    }
+    fi
   fi
 }
 
@@ -914,7 +1030,7 @@ validate_owned_manifest() {
 }
 
 begin_transaction() {
-  local transaction_root="$1" staging old_scope old_unit candidate
+  local transaction_root="$1" staging old_scope old_unit candidate activity_state enabled_state
   [[ ! -e "$transaction_root" && ! -L "$transaction_root" ]] || {
     printf 'A worker repair transaction is already present.\n' >&2
     return 1
@@ -965,14 +1081,30 @@ begin_transaction() {
       chmod 0600 -- "$staging/service.unit"
       : >"$staging/unit-existed"
       chmod 0600 -- "$staging/unit-existed"
-      if service_ctl_for_scope "$old_scope" is-enabled --quiet "$SERVICE_NAME" >/dev/null 2>&1; then
-        : >"$staging/service-enabled"
-        chmod 0600 -- "$staging/service-enabled"
-      fi
-      if service_ctl_for_scope "$old_scope" is-active --quiet "$SERVICE_NAME" >/dev/null 2>&1; then
-        : >"$staging/service-active"
-        chmod 0600 -- "$staging/service-active"
-      fi
+      enabled_state="$(service_enabled_state_for_scope "$old_scope")"
+      case "$enabled_state" in
+        enabled)
+          : >"$staging/service-enabled"
+          chmod 0600 -- "$staging/service-enabled"
+          ;;
+        disabled) ;;
+        *)
+          printf 'Worker service enabled state is unknown; refusing repair.\n' >&2
+          exit 1
+          ;;
+      esac
+      activity_state="$(service_activity_state_for_scope "$old_scope")"
+      case "$activity_state" in
+        active)
+          : >"$staging/service-active"
+          chmod 0600 -- "$staging/service-active"
+          ;;
+        inactive|absent) ;;
+        *)
+          printf 'Worker service activity state is unknown; refusing repair.\n' >&2
+          exit 1
+          ;;
+      esac
     elif [[ -e "$old_unit" || -L "$old_unit" ]]; then
       printf 'Existing service unit is unsafe.\n' >&2
       exit 1
@@ -990,7 +1122,7 @@ begin_transaction() {
 
 restore_transaction() {
   local transaction_root="$1" old_scope old_unit candidate marker_existed
-  assert_transaction_tree_safe "$transaction_root"
+  assert_transaction_tree_safe "$transaction_root" || return 1
   [[ -f "$transaction_root/schema" && ! -L "$transaction_root/schema" &&
      "$(cat "$transaction_root/schema")" == "$TRANSACTION_SCHEMA" ]] || {
     printf 'Unsupported worker repair transaction state.\n' >&2
@@ -1030,27 +1162,27 @@ restore_transaction() {
     marker_existed=0
   fi
 
-  remove_service_for_scope "$scope"
-  if [[ "$old_scope" != "$scope" ]]; then remove_service_for_scope "$old_scope"; fi
+  remove_service_for_scope "$scope" || return 1
+  if [[ "$old_scope" != "$scope" ]]; then remove_service_for_scope "$old_scope" || return 1; fi
 
   for candidate in "$data_root"/config.* "$data_root"/*.credential; do
     [[ -e "$candidate" || -L "$candidate" ]] || continue
-    rm -f -- "$candidate"
+    rm -f -- "$candidate" || return 1
   done
   for candidate in "$transaction_root"/identity/*; do
     [[ -e "$candidate" || -L "$candidate" ]] || continue
     [[ -f "$candidate" && ! -L "$candidate" ]] || { printf 'Worker repair identity snapshot is unsafe.\n' >&2; return 1; }
-    install -m 0600 -- "$candidate" "$data_root/$(basename -- "$candidate")"
+    install -m 0600 -- "$candidate" "$data_root/$(basename -- "$candidate")" || return 1
   done
 
-  rm -f -- "$install_manifest"
+  rm -f -- "$install_manifest" || return 1
   if [[ -f "$transaction_root/manifest-existed" ]]; then
-    install -m 0600 -- "$transaction_root/install-manifest.json" "$install_manifest"
+    install -m 0600 -- "$transaction_root/install-manifest.json" "$install_manifest" || return 1
   fi
 
-  rm -f -- "$worker_path"
+  rm -f -- "$worker_path" || return 1
   if [[ -f "$transaction_root/binary-existed" ]]; then
-    install -m 0700 -- "$transaction_root/cyc-worker" "$worker_path"
+    install -m 0700 -- "$transaction_root/cyc-worker" "$worker_path" || return 1
   fi
 
   old_unit="$(service_path_for_scope "$old_scope")"
@@ -1062,14 +1194,14 @@ restore_transaction() {
     elif [[ ! -d "$(dirname -- "$old_unit")" ]]; then
       install -d -m 0755 -- "$(dirname -- "$old_unit")"
     fi
-    install -m 0600 -- "$transaction_root/service.unit" "$old_unit"
-    service_ctl_for_scope "$old_scope" daemon-reload
+    install -m 0600 -- "$transaction_root/service.unit" "$old_unit" || return 1
+    service_ctl_for_scope "$old_scope" daemon-reload || return 1
     if [[ -f "$transaction_root/service-enabled" ]]; then
-      service_ctl_for_scope "$old_scope" enable "$SERVICE_NAME" >/dev/null
+      service_ctl_for_scope "$old_scope" enable "$SERVICE_NAME" >/dev/null || return 1
     fi
     if [[ -f "$transaction_root/service-active" ]]; then
-      service_ctl_for_scope "$old_scope" start "$SERVICE_NAME"
-      service_ctl_for_scope "$old_scope" is-active --quiet "$SERVICE_NAME"
+      service_ctl_for_scope "$old_scope" start "$SERVICE_NAME" || return 1
+      service_ctl_for_scope "$old_scope" is-active --quiet "$SERVICE_NAME" || return 1
     fi
   fi
   if [[ "$marker_existed" == 0 ]]; then
@@ -1100,6 +1232,7 @@ config_path="${data_root}/config.json"
 marker_path="${data_root}/${MARKER_NAME}"
 transaction_root="${data_root}/${TRANSACTION_NAME}"
 installation_owned_before=0
+recorded_scope=''
 
 for path in "$bundle_root" "$install_root" "$data_root" "$workspace_root"; do
   reject_link_chain "$path"
@@ -1155,6 +1288,24 @@ if [[ "$installation_owned_before" -eq 1 ]]; then
     # A committed journal has no rollback work left to perform. It must not
     # be used to authorize cleanup after the authoritative manifest vanished.
     printf 'Owned worker install manifest is missing or unsafe.\n' >&2
+    exit 1
+  fi
+fi
+
+# The manifest is the authoritative scope binding for an owned installation.
+# An explicit scope is a safety assertion, not a way to redirect cleanup to a
+# different manager. With auto scope, adopt the recorded scope before any
+# service-path preflight; an unprivileged caller cannot silently fall back to
+# a user unit for a previously system-scoped installation.
+if [[ "$installation_owned_before" -eq 1 && -f "$install_manifest" && ! -L "$install_manifest" ]]; then
+  recorded_scope="$(manifest_scope_or_current)"
+  if [[ "$scope_was_explicit" -eq 1 && "$scope" != "$recorded_scope" ]]; then
+    printf 'Installer scope does not match the existing owned installation.\n' >&2
+    exit 1
+  fi
+  scope="$recorded_scope"
+  if [[ "$scope" == system && "$(id -u)" -ne 0 ]]; then
+    printf 'Recorded system scope requires root.\n' >&2
     exit 1
   fi
 fi

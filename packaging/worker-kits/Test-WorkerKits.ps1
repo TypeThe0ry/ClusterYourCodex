@@ -85,11 +85,341 @@ if ($bashPath) {
     if ($LASTEXITCODE -ne 0) { throw 'macOS worker installer failed bash -n.' }
 }
 
+function Get-CycWorkerKitProcessTreeIds {
+    param([Parameter(Mandatory = $true)][int]$RootProcessId)
+
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    if (-not ($processes | Where-Object { [int]$_.ProcessId -eq $RootProcessId })) {
+        return @()
+    }
+    $known = New-Object 'System.Collections.Generic.HashSet[int]'
+    [void]$known.Add($RootProcessId)
+    do {
+        $changed = $false
+        foreach ($process in $processes) {
+            $processId = [int]$process.ProcessId
+            $parentProcessId = [int]$process.ParentProcessId
+            if ($known.Contains($parentProcessId) -and $known.Add($processId)) {
+                $changed = $true
+            }
+        }
+    } while ($changed)
+    return @($known | ForEach-Object { [int]$_ })
+}
+
+function Write-CycWorkerKitWatchdogEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Fields
+    )
+
+    $lines = foreach ($entry in $Fields.GetEnumerator()) {
+        $value = if ($null -eq $entry.Value) { '<null>' } elseif ($entry.Value -is [Array]) { $entry.Value -join ',' } else { [string]$entry.Value }
+        '{0}={1}' -f $entry.Key, $value
+    }
+    [System.IO.File]::WriteAllText($Path, (($lines -join [Environment]::NewLine) + [Environment]::NewLine), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Invoke-CycWorkerKitBashSmoke {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptPath,
+        [Parameter(Mandatory = $true)][string]$ArgumentPath,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [int]$TimeoutSeconds = 600
+    )
+
+    $stdoutPath = Join-Path $ArgumentPath ("{0}.stdout.log" -f $Label)
+    $stderrPath = Join-Path $ArgumentPath ("{0}.stderr.log" -f $Label)
+    $watchdogPath = Join-Path $ArgumentPath ("{0}.watchdog.txt" -f $Label)
+    $cmdPath = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $escapedBashPath = $bashPath.Replace('"', '\"')
+    $escapedScriptPath = $ScriptPath.Replace('"', '\"')
+    $escapedArgumentPath = $ArgumentPath.Replace('"', '\"')
+    $escapedStdoutPath = $stdoutPath.Replace('"', '\"')
+    $escapedStderrPath = $stderrPath.Replace('"', '\"')
+    # Windows PowerShell's redirected Start-Process handle can expose a null
+    # ExitCode for Git Bash. Keep the PassThru process object on cmd.exe and
+    # let cmd propagate Bash's status while owning the stdout/stderr handles.
+    $argumentList = '/d /s /c ""{0}" "{1}" "{2}" > "{3}" 2> "{4}""' -f `
+        $escapedBashPath, $escapedScriptPath, $escapedArgumentPath, $escapedStdoutPath, $escapedStderrPath
+    $smokeProcess = $null
+    $processId = $null
+    $waitCompleted = $false
+    $timedOut = $false
+    $exitCode = $null
+    $terminationResult = 'not-required'
+    $terminationExitCode = $null
+    $terminationOutput = ''
+    $remainingProcessIds = @()
+    try {
+        $startParameters = @{
+            FilePath = $cmdPath
+            ArgumentList = $argumentList
+            WorkingDirectory = $PSScriptRoot
+            WindowStyle = 'Hidden'
+            PassThru = $true
+        }
+        $smokeProcess = Start-Process @startParameters
+        $processId = [int]$smokeProcess.Id
+        if (-not $smokeProcess.WaitForExit($TimeoutSeconds * 1000)) {
+            $timedOut = $true
+            $treeBeforeKill = @(Get-CycWorkerKitProcessTreeIds -RootProcessId $processId)
+            try {
+                $terminationOutput = (& taskkill.exe /PID $processId /T /F 2>&1 | Out-String).Trim()
+                $terminationExitCode = $LASTEXITCODE
+                $terminationResult = 'taskkill-invoked'
+            } catch {
+                $terminationResult = 'taskkill-invocation-failed'
+                $terminationOutput = $_.Exception.Message
+                try {
+                    $smokeProcess.Kill()
+                    $terminationResult = 'process-kill-fallback'
+                } catch {
+                    $terminationOutput = ($terminationOutput + ' ; ' + $_.Exception.Message).Trim(' ;')
+                }
+            }
+            try { [void]$smokeProcess.WaitForExit(5000) } catch { }
+            try { $smokeProcess.Refresh() } catch { }
+            $remainingProcessIds = @(Get-CycWorkerKitProcessTreeIds -RootProcessId $processId)
+            Write-CycWorkerKitWatchdogEvidence -Path $watchdogPath -Fields ([ordered]@{
+                label = $Label
+                script = $ScriptPath
+                stdout = $stdoutPath
+                stderr = $stderrPath
+                pid = $processId
+                wait_completed = $waitCompleted
+                timeout_marker = 'TIMEOUT'
+                exit_code = '<not-read-after-timeout>'
+                termination_result = $terminationResult
+                termination_exit_code = $terminationExitCode
+                termination_output = $terminationOutput
+                tree_before_kill = $treeBeforeKill
+                remaining_process_ids = $remainingProcessIds
+            })
+            $script:cycWorkerKitPreserveEvidence = $true
+            throw "$Label watchdog timeout after $TimeoutSeconds seconds. Evidence: $ArgumentPath ; stdout: $stdoutPath ; stderr: $stderrPath ; watchdog: $watchdogPath ; termination: $terminationResult ; remaining PIDs: $($remainingProcessIds -join ',')"
+        }
+
+        $waitCompleted = $true
+        [void]$smokeProcess.WaitForExit()
+        $smokeProcess.Refresh()
+        if (-not $smokeProcess.HasExited) {
+            Write-CycWorkerKitWatchdogEvidence -Path $watchdogPath -Fields ([ordered]@{
+                label = $Label
+                script = $ScriptPath
+                stdout = $stdoutPath
+                stderr = $stderrPath
+                pid = $processId
+                wait_completed = $waitCompleted
+                timeout_marker = 'HELPER_INTERNAL_ERROR'
+                exit_code = '<not-readable-before-cleanup>'
+                termination_result = 'not-required'
+            })
+            $script:cycWorkerKitPreserveEvidence = $true
+            throw "$Label watchdog internal error: process $processId did not report HasExited after WaitForExit(). Evidence: $ArgumentPath"
+        }
+        $exitCode = $smokeProcess.ExitCode
+        if ($null -eq $exitCode) {
+            Write-CycWorkerKitWatchdogEvidence -Path $watchdogPath -Fields ([ordered]@{
+                label = $Label
+                script = $ScriptPath
+                stdout = $stdoutPath
+                stderr = $stderrPath
+                pid = $processId
+                wait_completed = $waitCompleted
+                timeout_marker = 'HELPER_INTERNAL_ERROR'
+                exit_code = '<null>'
+                termination_result = 'not-required'
+            })
+            $script:cycWorkerKitPreserveEvidence = $true
+            throw "$Label watchdog internal error: ExitCode was null after WaitForExit()/Refresh()/HasExited. Evidence: $ArgumentPath"
+        }
+        if (-not ($exitCode -is [int])) {
+            Write-CycWorkerKitWatchdogEvidence -Path $watchdogPath -Fields ([ordered]@{
+                label = $Label
+                script = $ScriptPath
+                stdout = $stdoutPath
+                stderr = $stderrPath
+                pid = $processId
+                wait_completed = $waitCompleted
+                timeout_marker = 'HELPER_INTERNAL_ERROR'
+                exit_code = [string]$exitCode
+                exit_code_type = $exitCode.GetType().FullName
+                termination_result = 'not-required'
+            })
+            $script:cycWorkerKitPreserveEvidence = $true
+            throw "$Label watchdog internal error: ExitCode had unexpected type $($exitCode.GetType().FullName). Evidence: $ArgumentPath"
+        }
+
+        if ([int]$exitCode -ne 0) {
+            $stdoutTail = if (Test-Path -LiteralPath $stdoutPath) {
+                (Get-Content -LiteralPath $stdoutPath -Tail 80 -ErrorAction SilentlyContinue) -join ([Environment]::NewLine)
+            } else { '' }
+            $stderrTail = if (Test-Path -LiteralPath $stderrPath) {
+                (Get-Content -LiteralPath $stderrPath -Tail 80 -ErrorAction SilentlyContinue) -join ([Environment]::NewLine)
+            } else { '' }
+            $newline = [Environment]::NewLine
+            Write-CycWorkerKitWatchdogEvidence -Path $watchdogPath -Fields ([ordered]@{
+                label = $Label
+                script = $ScriptPath
+                stdout = $stdoutPath
+                stderr = $stderrPath
+                pid = $processId
+                wait_completed = $waitCompleted
+                timeout_marker = 'NOT_TRIGGERED'
+                exit_code = [int]$exitCode
+                termination_result = 'not-required'
+            })
+            $script:cycWorkerKitPreserveEvidence = $true
+            throw "$Label failed with exit code $([int]$exitCode). Evidence: $ArgumentPath ; watchdog: $watchdogPath.$newline" +
+                "stdout:$newline$stdoutTail$newline" +
+                "stderr:$newline$stderrTail"
+        }
+        Write-CycWorkerKitWatchdogEvidence -Path $watchdogPath -Fields ([ordered]@{
+            label = $Label
+            script = $ScriptPath
+            stdout = $stdoutPath
+            stderr = $stderrPath
+            pid = $processId
+            wait_completed = $waitCompleted
+            timeout_marker = 'NOT_TRIGGERED'
+            exit_code = [int]$exitCode
+            termination_result = 'not-required'
+            remaining_process_ids = @()
+        })
+    } catch {
+        if (-not $script:cycWorkerKitPreserveEvidence) {
+            $script:cycWorkerKitPreserveEvidence = $true
+            try {
+                Write-CycWorkerKitWatchdogEvidence -Path $watchdogPath -Fields ([ordered]@{
+                    label = $Label
+                    script = $ScriptPath
+                    stdout = $stdoutPath
+                    stderr = $stderrPath
+                    pid = $processId
+                    wait_completed = $waitCompleted
+                    timeout_marker = 'HELPER_INTERNAL_ERROR'
+                    exit_code = if ($null -eq $exitCode) { '<null>' } else { [string]$exitCode }
+                    termination_result = $terminationResult
+                    error = $_.Exception.Message
+                })
+            } catch { }
+        }
+        throw
+    } finally {
+        if ($smokeProcess) {
+            try {
+                $smokeProcess.Refresh()
+                if (-not $smokeProcess.HasExited) {
+                    $cleanupOutput = (& taskkill.exe /PID $processId /T /F 2>&1 | Out-String).Trim()
+                    $cleanupExitCode = $LASTEXITCODE
+                    if ($terminationResult -eq 'not-required') {
+                        $terminationResult = 'finally-taskkill-invoked'
+                        $terminationExitCode = $cleanupExitCode
+                        $terminationOutput = $cleanupOutput
+                    }
+                }
+            } catch {
+                if ($terminationResult -eq 'not-required') {
+                    $terminationResult = 'finally-taskkill-failed'
+                    $terminationOutput = $_.Exception.Message
+                }
+                try { $smokeProcess.Kill() } catch { }
+            }
+            try { $smokeProcess.Refresh() } catch { }
+            if ($processId) {
+                $remainingProcessIds = @(Get-CycWorkerKitProcessTreeIds -RootProcessId $processId)
+            }
+            if ($timedOut -or $script:cycWorkerKitPreserveEvidence) {
+                try {
+                    Write-CycWorkerKitWatchdogEvidence -Path $watchdogPath -Fields ([ordered]@{
+                        label = $Label
+                        script = $ScriptPath
+                        stdout = $stdoutPath
+                        stderr = $stderrPath
+                        pid = $processId
+                        wait_completed = $waitCompleted
+                        timeout_marker = if ($timedOut) { 'TIMEOUT' } else { 'NOT_TRIGGERED' }
+                        exit_code = if ($null -eq $exitCode) { '<null>' } else { [int]$exitCode }
+                        termination_result = $terminationResult
+                        termination_exit_code = $terminationExitCode
+                        termination_output = $terminationOutput
+                        remaining_process_ids = $remainingProcessIds
+                    })
+                } catch { }
+            }
+            try { $smokeProcess.Dispose() } catch { }
+        }
+    }
+}
+
+$script:cycWorkerKitPreserveEvidence = $false
+$script:cycWorkerKitCompletedSuccessfully = $false
 $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ('cyc-worker-kit-test-' + [Guid]::NewGuid().ToString('N'))
 $previousSigningKeyPath = [string]$env:CYC_WORKER_KIT_SIGNING_KEY_PATH
 $previousSigningKeyId = [string]$env:CYC_WORKER_KIT_SIGNING_KEY_ID
 $previousTrustedPublicKeyPath = [string]$env:CYC_WORKER_KIT_TRUSTED_PUBLIC_KEY_PATH
 $previousTestPrivateKey = [string]$env:CYC_WORKER_KIT_TEST_PRIVATE_KEY
+
+if ([string]$env:CYC_WORKER_KIT_BASH_SMOKE_SELF_TEST -eq '1') {
+    if (-not $bashPath) {
+        throw 'Bash watchdog helper self-test requires Git Bash or another supported bash executable.'
+    }
+    $helperSelfTestRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('cyc-worker-kit-bash-helper-' + [Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $helperSelfTestRoot)
+    $selfTestEncoding = New-Object System.Text.UTF8Encoding($false)
+    $successScript = Join-Path $helperSelfTestRoot 'success.sh'
+    $failureScript = Join-Path $helperSelfTestRoot 'failure.sh'
+    $timeoutScript = Join-Path $helperSelfTestRoot 'timeout.sh'
+    [System.IO.File]::WriteAllText($successScript, "#!/usr/bin/env bash`nexit 0`n", $selfTestEncoding)
+    [System.IO.File]::WriteAllText($failureScript, "#!/usr/bin/env bash`nexit 23`n", $selfTestEncoding)
+    [System.IO.File]::WriteAllText($timeoutScript, "#!/usr/bin/env bash`nset -euo pipefail`nsleep 30`n", $selfTestEncoding)
+    try {
+        Invoke-CycWorkerKitBashSmoke -ScriptPath $successScript -ArgumentPath $helperSelfTestRoot -Label 'helper-success' -TimeoutSeconds 30
+        $successEvidence = Get-Content -LiteralPath (Join-Path $helperSelfTestRoot 'helper-success.watchdog.txt') -Raw
+        if ($successEvidence -notmatch '(?m)^timeout_marker=NOT_TRIGGERED\r?$' -or $successEvidence -notmatch '(?m)^exit_code=0\r?$') {
+            throw 'Bash watchdog helper success metadata is incomplete.'
+        }
+
+        $nonZeroMessage = ''
+        try {
+            Invoke-CycWorkerKitBashSmoke -ScriptPath $failureScript -ArgumentPath $helperSelfTestRoot -Label 'helper-nonzero' -TimeoutSeconds 30
+        } catch {
+            $nonZeroMessage = $_.Exception.Message
+        }
+        if ($nonZeroMessage -notmatch 'helper-nonzero failed with exit code 23' -or
+            $nonZeroMessage -notmatch 'Evidence:') {
+            throw 'Bash watchdog helper did not preserve the fixed nonzero exit code diagnostic.'
+        }
+        $nonZeroEvidence = Get-Content -LiteralPath (Join-Path $helperSelfTestRoot 'helper-nonzero.watchdog.txt') -Raw
+        if ($nonZeroEvidence -notmatch '(?m)^timeout_marker=NOT_TRIGGERED\r?$' -or $nonZeroEvidence -notmatch '(?m)^exit_code=23\r?$') {
+            throw 'Bash watchdog helper nonzero metadata is incomplete.'
+        }
+
+        $timeoutMessage = ''
+        try {
+            Invoke-CycWorkerKitBashSmoke -ScriptPath $timeoutScript -ArgumentPath $helperSelfTestRoot -Label 'helper-timeout' -TimeoutSeconds 1
+        } catch {
+            $timeoutMessage = $_.Exception.Message
+        }
+        if ($timeoutMessage -notmatch 'helper-timeout watchdog timeout after 1 seconds' -or
+            $timeoutMessage -notmatch 'Evidence:') {
+            throw 'Bash watchdog helper did not produce the bounded timeout diagnostic.'
+        }
+        $timeoutEvidence = Get-Content -LiteralPath (Join-Path $helperSelfTestRoot 'helper-timeout.watchdog.txt') -Raw
+        if ($timeoutEvidence -notmatch '(?m)^timeout_marker=TIMEOUT\r?$' -or
+            $timeoutEvidence -notmatch '(?m)^termination_result=(taskkill-invoked|process-kill-fallback|finally-taskkill-invoked)\r?$') {
+            throw 'Bash watchdog helper timeout metadata is incomplete.'
+        }
+        Write-Output "Bash watchdog helper self-test passed; evidence retained at $helperSelfTestRoot"
+        exit 0
+    } catch {
+        [Console]::Error.WriteLine("Bash watchdog helper self-test failed; evidence retained at $helperSelfTestRoot")
+        [Console]::Error.WriteLine($_.Exception.Message)
+        exit 1
+    }
+}
+
 try {
     [void](New-Item -ItemType Directory -Path $temporary)
     $opensslCommand = Get-Command openssl -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -1019,6 +1349,7 @@ case "$command_name" in
     chmod 0600 "$credential"
     printf '{"paired":true,"worker":"good","workspaceRoot":"%s","repair":%s,"credentialFile":"%s"}\n' "$workspace" "$([[ "$repair" -eq 1 ]] && printf true || printf false)" "$credential" >"$config"
     if [[ -n "$old_credential" && "$old_credential" != "$credential" ]]; then rm -f -- "$old_credential"; fi
+    if [[ "${CYC_FAKE_WORKER_FAIL_AFTER_PAIR:-0}" == 1 ]]; then exit 42; fi
     ;;
   status|run) exit 0 ;;
   *) exit 2 ;;
@@ -1064,8 +1395,38 @@ case "$command_name" in
   show-environment)
     [[ "${CYC_FAKE_USER_SYSTEMD_MODE:-ready}" != no-bus ]]
     ;;
+  show)
+    if [[ "${CYC_FAKE_SYSTEMCTL_SHOW_FAIL:-0}" == 1 ]]; then exit 1; fi
+    if [[ "${CYC_FAKE_SYSTEMCTL_SHOW_UNKNOWN:-0}" == 1 ]]; then
+      printf 'unavailable\nunavailable\n'
+      exit 0
+    fi
+    service_unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/clusteryourcodex-worker.service"
+    if [[ -f "$service_unit" || -f "$CYC_FAKE_SYSTEMD_ROOT/service-known" ]]; then
+      load_state=loaded
+    else
+      load_state=not-found
+    fi
+    if [[ "$*" == *UnitFileState* ]]; then
+      if [[ -f "$CYC_FAKE_SYSTEMD_ROOT/service-enabled" ]]; then
+        unit_file_state=enabled
+      else
+        unit_file_state=disabled
+      fi
+      printf '%s\n%s\n' "$load_state" "$unit_file_state"
+    else
+      if [[ -f "$CYC_FAKE_SYSTEMD_ROOT/service-active" ]]; then
+        active_state=active
+      else
+        active_state=inactive
+      fi
+      printf '%s\n%s\n' "$load_state" "$active_state"
+    fi
+    ;;
   daemon-reload)
     if [[ "${CYC_FAKE_SYSTEMCTL_DAEMON_RELOAD_FAIL:-0}" == 1 ]]; then exit 1; fi
+    service_unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/clusteryourcodex-worker.service"
+    if [[ -f "$service_unit" ]]; then : >"$CYC_FAKE_SYSTEMD_ROOT/service-known"; else rm -f -- "$CYC_FAKE_SYSTEMD_ROOT/service-known"; fi
     ;;
   is-enabled) test -f "$CYC_FAKE_SYSTEMD_ROOT/service-enabled" ;;
   is-active) test -f "$CYC_FAKE_SYSTEMD_ROOT/service-active" ;;
@@ -1373,7 +1734,7 @@ interrupted_fake_systemd="$root/fake-systemd-interrupted"
 mkdir -p "$interrupted_fake_systemd"
 printf '%s\n' 'LINUX_INTERRUPTED_ENROLLMENT_SECRET_DO_NOT_LOG' >"$interrupted_enrollment"
 set +e
-CYC_FAKE_SYSTEMD_ROOT="$interrupted_fake_systemd" "$bad/install-worker.sh" install \
+CYC_FAKE_WORKER_FAIL_AFTER_PAIR=1 CYC_FAKE_SYSTEMD_ROOT="$interrupted_fake_systemd" "$good/install-worker.sh" install \
   --bundle-root "$bad" \
   --install-root "$interrupted_install" \
   --data-root "$interrupted_data" \
@@ -1743,6 +2104,72 @@ test "$(sha256sum "$worker" | awk '{print $1}')" != "$baseline_worker"
 test -f "$CYC_FAKE_SYSTEMD_ROOT/service-enabled"
 test -f "$CYC_FAKE_SYSTEMD_ROOT/service-active"
 
+# An explicit system-scope request must not redirect cleanup for a manifest
+# that was recorded as user scope. The fake root identity lets this fixture
+# reach the manifest binding check without touching /etc or systemd.
+scope_binding_systemctl_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')"
+scope_binding_worker_hash="$(sha256sum "$worker" | awk '{print $1}')"
+scope_binding_unit_hash="$(sha256sum "$unit" | awk '{print $1}')"
+set +e
+CYC_WORKER_KIT_TEST_ROOT_MODE=1 PATH="$root/fake-root-bin:$PATH" "$good/install-worker.sh" uninstall --bundle-root "$good" \
+  --scope system \
+  >"$root/linux-scope-binding.stdout" 2>"$root/linux-scope-binding.stderr"
+scope_binding_exit=$?
+set -e
+test "$scope_binding_exit" -ne 0
+test ! -s "$root/linux-scope-binding.stdout"
+grep -q 'Installer scope does not match the existing owned installation' "$root/linux-scope-binding.stderr"
+test "$(sha256sum "$worker" | awk '{print $1}')" = "$scope_binding_worker_hash"
+test "$(sha256sum "$unit" | awk '{print $1}')" = "$scope_binding_unit_hash"
+test "$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')" = "$scope_binding_systemctl_lines_before"
+test -f "$CYC_FAKE_SYSTEMD_ROOT/service-enabled"
+test -f "$CYC_FAKE_SYSTEMD_ROOT/service-active"
+
+# A manager query that cannot produce a recognized LoadState/ActiveState pair
+# is not equivalent to an inactive service. The installer must leave every
+# owned byte and manager marker in place for a later retry.
+unknown_state_worker_hash="$(sha256sum "$worker" | awk '{print $1}')"
+unknown_state_unit_hash="$(sha256sum "$unit" | awk '{print $1}')"
+unknown_state_systemctl_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')"
+export CYC_FAKE_SYSTEMCTL_SHOW_UNKNOWN=1
+set +e
+"$good/install-worker.sh" uninstall --bundle-root "$good" \
+  >"$root/linux-unknown-state.stdout" 2>"$root/linux-unknown-state.stderr"
+unknown_state_exit=$?
+set -e
+test "$unknown_state_exit" -ne 0
+grep -q 'Worker service state is unknown; refusing to remove unit' "$root/linux-unknown-state.stderr"
+test "$(sha256sum "$worker" | awk '{print $1}')" = "$unknown_state_worker_hash"
+test "$(sha256sum "$unit" | awk '{print $1}')" = "$unknown_state_unit_hash"
+test "$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')" -gt "$unknown_state_systemctl_lines_before"
+test -f "$CYC_FAKE_SYSTEMD_ROOT/service-enabled"
+test -f "$CYC_FAKE_SYSTEMD_ROOT/service-active"
+unset CYC_FAKE_SYSTEMCTL_SHOW_UNKNOWN
+
+# A stale pending unit from another process ID blocks all lifecycle work before
+# systemd is queried. This catches the old same-PID-only check and ensures the
+# canonical unit remains available for the operator's recovery retry.
+pending_residual="${unit}.cyc-uninstall.424242.pending"
+cp -p -- "$unit" "$pending_residual"
+pending_residual_hash="$(sha256sum "$pending_residual" | awk '{print $1}')"
+pending_residual_worker_hash="$(sha256sum "$worker" | awk '{print $1}')"
+pending_residual_unit_hash="$(sha256sum "$unit" | awk '{print $1}')"
+pending_residual_systemctl_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')"
+set +e
+"$good/install-worker.sh" uninstall --bundle-root "$good" \
+  >"$root/linux-pending-residual.stdout" 2>"$root/linux-pending-residual.stderr"
+pending_residual_exit=$?
+set -e
+test "$pending_residual_exit" -ne 0
+grep -q 'Pending worker service uninstall transaction remains; refusing lifecycle operation' "$root/linux-pending-residual.stderr"
+test "$(sha256sum "$worker" | awk '{print $1}')" = "$pending_residual_worker_hash"
+test "$(sha256sum "$unit" | awk '{print $1}')" = "$pending_residual_unit_hash"
+test "$(sha256sum "$pending_residual" | awk '{print $1}')" = "$pending_residual_hash"
+test "$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')" = "$pending_residual_systemctl_lines_before"
+test -f "$CYC_FAKE_SYSTEMD_ROOT/service-enabled"
+test -f "$CYC_FAKE_SYSTEMD_ROOT/service-active"
+rm -f -- "$pending_residual"
+
 # Uninstall must fail closed when systemd leaves the owned worker active.
 # A failed disable cannot be converted into a successful receipt by deleting
 # the unit file; the worker, unit, and active marker must all remain for retry.
@@ -1780,7 +2207,10 @@ test -x "$worker"
 test -f "$unit"
 test "$(sha256sum "$worker" | awk '{print $1}')" = "$daemon_reload_worker_hash"
 test "$(sha256sum "$unit" | awk '{print $1}')" = "$daemon_reload_unit_hash"
-test ! -e "${unit}.cyc-uninstall.$$.pending"
+if compgen -G "${unit}.cyc-uninstall.*.pending" > /dev/null; then
+  printf 'Unexpected pending worker service uninstall transaction remains.\n' >&2
+  exit 1
+fi
 test ! -f "$CYC_FAKE_SYSTEMD_ROOT/service-active"
 unset CYC_FAKE_SYSTEMCTL_DAEMON_RELOAD_FAIL
 
@@ -1799,8 +2229,7 @@ test -s "$data/config.json"
 "$good/install-worker.sh" uninstall --bundle-root "$good" --purge-data >/dev/null
 test ! -e "$data"
 '@.TrimStart(), $utf8NoBom)
-        & $bashPath $smoke $temporary
-        if ($LASTEXITCODE -ne 0) { throw 'Linux worker lifecycle smoke test failed.' }
+        Invoke-CycWorkerKitBashSmoke -ScriptPath $smoke -ArgumentPath $temporary -Label 'linux-worker-lifecycle'
 
         $macosGoodKit = Join-Path $temporary 'macos-smoke-good'
         $macosUpgradeKit = Join-Path $temporary 'macos-smoke-upgrade'
@@ -1865,6 +2294,18 @@ cat >"$root/fake-macos-bin/stat" <<'STAT_WRAPPER'
 set -euo pipefail
 if [[ "${1:-}" == -c && $# -ge 3 ]]; then
   path="${@: -1}"
+  if [[ "${CYC_FAKE_LAUNCHCTL_PRIVATE_PATHS:-0}" == 1 &&
+        "${2:-}" == '%a' &&
+        "$path" == */Library/LaunchAgents ]]; then
+    printf '700\n'
+    exit 0
+  fi
+  if [[ "${CYC_FAKE_LAUNCHCTL_PRIVATE_PATHS:-0}" == 1 &&
+        "${2:-}" == '%a' &&
+        "$path" == */Library/LaunchAgents/*.plist ]]; then
+    printf '600\n'
+    exit 0
+  fi
   if [[ "${2:-}" == '%a' && "$path" == */.cyc-worker-kit-test-mode-0700 ]]; then
     printf '600\n'
     exit 0
@@ -1898,12 +2339,15 @@ set -euo pipefail
 printf '%s\n' "$*" >>"$CYC_FAKE_LAUNCHCTL_LOG"
 case "${1:-}" in
   print)
-    if [[ -n "${CYC_FAKE_LAUNCHCTL_STATE:-}" &&
-          -f "$CYC_FAKE_LAUNCHCTL_STATE" &&
-          "$(cat "$CYC_FAKE_LAUNCHCTL_STATE")" == loaded ]]; then
-      exit 0
+    if [[ "${2:-}" == */dev.clusteryourcodex.worker ]]; then
+      if [[ -n "${CYC_FAKE_LAUNCHCTL_STATE:-}" &&
+            -f "$CYC_FAKE_LAUNCHCTL_STATE" &&
+            "$(cat "$CYC_FAKE_LAUNCHCTL_STATE")" == loaded ]]; then
+        exit 0
+      fi
+      exit 1
     fi
-    exit 1
+    [[ "${CYC_FAKE_LAUNCHCTL_DOMAIN_FAIL:-0}" != 1 ]]
     ;;
   bootout)
     if [[ "${CYC_FAKE_LAUNCHCTL_BOOTOUT_FAIL:-0}" == 1 ]]; then exit 1; fi
@@ -2051,7 +2495,7 @@ interrupted_logs="$root/macos-interrupted-logs"
 interrupted_enrollment="$root/macos-interrupted-enrollment.json"
 printf '%s\n' 'MACOS_INTERRUPTED_ENROLLMENT_SECRET_DO_NOT_LOG' >"$interrupted_enrollment"
 set +e
-"$bad/install-worker.sh" install --bundle-root "$bad" \
+CYC_FAKE_WORKER_FAIL_AFTER_PAIR=1 "$good/install-worker.sh" install --bundle-root "$good" \
   --install-root "$interrupted_install" \
   --data-root "$interrupted_data" \
   --workspace-root "$interrupted_workspace" \
@@ -2354,6 +2798,25 @@ printf '%s\n' 'MACOS_LOADED_LAUNCHAGENT_SENTINEL' >"$loaded_plist"
 chmod 0600 "$loaded_plist"
 export CYC_FAKE_LAUNCHCTL_PRIVATE_PATHS=1
 printf '%s\n' loaded >"$CYC_FAKE_LAUNCHCTL_STATE"
+
+# A failed launchd-domain preflight is an unknown state, not an unloaded
+# LaunchAgent. The installer must retain the exact plist and worker for retry.
+loaded_domain_plist_hash="$(shasum -a 256 "$loaded_plist" | awk '{print $1}')"
+loaded_domain_worker_hash="$(shasum -a 256 "$loaded_install/cyc-worker" | awk '{print $1}')"
+export CYC_FAKE_LAUNCHCTL_DOMAIN_FAIL=1
+set +e
+$good/install-worker.sh uninstall --bundle-root "$good" --install-root "$loaded_install" \
+  --data-root "$loaded_data" --workspace-root "$loaded_workspace" --logs-root "$loaded_logs" \
+  >"$root/macos-domain-unknown.stdout" 2>"$root/macos-domain-unknown.stderr"
+loaded_domain_unknown_exit=$?
+set -e
+test "$loaded_domain_unknown_exit" -ne 0
+grep -q 'LaunchAgent state is unknown; refusing to remove plist' "$root/macos-domain-unknown.stderr"
+test "$(shasum -a 256 "$loaded_plist" | awk '{print $1}')" = "$loaded_domain_plist_hash"
+test "$(shasum -a 256 "$loaded_install/cyc-worker" | awk '{print $1}')" = "$loaded_domain_worker_hash"
+test "$(cat "$CYC_FAKE_LAUNCHCTL_STATE")" = loaded
+unset CYC_FAKE_LAUNCHCTL_DOMAIN_FAIL
+
 export CYC_FAKE_LAUNCHCTL_BOOTOUT_FAIL=1
 set +e
 $good/install-worker.sh uninstall --bundle-root "$good" "${loaded_common[@]}" \
@@ -2391,8 +2854,7 @@ test ! -e "$default_program/cyc-worker"
 test ! -e "$default_data"
 test ! -e "$default_logs"
 '@.TrimStart(), $utf8NoBom)
-        & $bashPath $macosSmoke $temporary
-        if ($LASTEXITCODE -ne 0) { throw 'macOS worker gated lifecycle fixture failed.' }
+        Invoke-CycWorkerKitBashSmoke -ScriptPath $macosSmoke -ArgumentPath $temporary -Label 'macos-worker-lifecycle'
     }
 
     foreach ($content in @(
@@ -2411,7 +2873,7 @@ test ! -e "$default_logs"
         }
     }
     $linuxSource = Get-Content -LiteralPath $linuxInstaller -Raw
-    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'private_dir', 'verify_private_dir_existing', 'verify_private_file_existing', 'verify_private_state_tree', 'path_mode', 'path_owner', 'verify_private_config', 'verify_private_service_path_existing', 'Existing private directory is weak or owned by another identity', 'Existing user service directory is weak or owned by another identity', 'Existing user service unit is weak or owned by another identity', 'Existing worker config is weak or owned by another identity', 'Private transaction state root is not a normal directory', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'TRANSACTION_TOMBSTONE_SCHEMA', 'TRANSACTION_TOMBSTONE_RETIRED', 'TRANSACTION_RETIRE_NAME', 'assert_transaction_retirement_tree_safe', 'rollback_tombstone_valid_for_transaction', 'validate_retired_transaction', 'after-pair', 'after-service-registration', 'before-manifest-write', 'after-marker-removal', 'remove_service', 'systemctl is required to remove an existing worker service safely', 'Worker service remained active after disable; refusing to remove unit', 'Worker service disable failed; refusing to remove unit', 'Worker service uninstall transaction path already exists', 'Worker service uninstall could not stage its unit transaction', 'Worker service uninstall could not restore its unit after daemon-reload failure', 'Worker service uninstall could not retire its staged unit transaction', 'cyc-uninstall', 'systemd daemon-reload failed after removing the worker unit', 'service_path_for_scope', 'servicePath', 'Installer service path does not match the existing owned installation.', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot', 'KillMode=control-group', 'marker-existed', 'marker-existed=0', 'Owned worker install manifest is missing or unsafe.')) {
+    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'private_dir', 'verify_private_dir_existing', 'verify_private_file_existing', 'verify_private_state_tree', 'path_mode', 'path_owner', 'verify_private_config', 'verify_private_service_path_existing', 'reject_pending_service_transactions', 'service_activity_state_for_scope', 'service_enabled_state_for_scope', 'Existing private directory is weak or owned by another identity', 'Existing user service directory is weak or owned by another identity', 'Existing user service unit is weak or owned by another identity', 'Existing system service unit is invalid', 'Existing system service unit is not owned by root', 'Existing worker config is weak or owned by another identity', 'Private transaction state root is not a normal directory', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'TRANSACTION_TOMBSTONE_SCHEMA', 'TRANSACTION_TOMBSTONE_RETIRED', 'TRANSACTION_RETIRE_NAME', 'assert_transaction_retirement_tree_safe', 'rollback_tombstone_valid_for_transaction', 'validate_retired_transaction', 'after-pair', 'after-service-registration', 'before-manifest-write', 'after-marker-removal', 'remove_service', 'systemctl is required to verify the worker service is stopped safely', 'Worker service state is unknown; refusing to remove unit', 'Worker service remained active after disable; refusing to remove unit', 'Worker service state is unknown after disable; refusing to remove unit', 'Worker service disable failed; refusing to remove unit', 'Worker service uninstall transaction path already exists', 'Worker service uninstall could not stage its unit transaction', 'Worker service uninstall could not restore its unit after daemon-reload failure', 'Worker service uninstall restored its unit but daemon-reload failed after pending-file retirement failure', 'Worker service uninstall could not retire its staged unit transaction', 'cyc-uninstall', 'systemd daemon-reload failed after removing the worker unit', 'service_path_for_scope', 'servicePath', 'Installer service path does not match the existing owned installation.', 'Installer scope does not match the existing owned installation.', 'Recorded system scope requires root.', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot', 'KillMode=control-group', 'marker-existed', 'marker-existed=0', 'Owned worker install manifest is missing or unsafe.')) {
         if ($linuxSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "Linux worker installer is missing rollback/integrity guard: $requiredPattern"
         }
@@ -2449,13 +2911,16 @@ test ! -e "$default_logs"
          'Existing LaunchAgent is weak or owned by another identity',
          'Existing worker config is weak or owned by another identity',
          'Private transaction state root is not a normal directory',
-        'dev.clusteryourcodex.worker',
-        'launchctl bootstrap',
+         'dev.clusteryourcodex.worker',
+         'launch_agent_state',
+         'launchctl bootstrap',
         'launchctl bootout',
         'launchctl kickstart',
-        'launchctl print',
-        'LaunchAgent remained loaded after bootout; refusing to remove plist',
-        'launchctl is required to remove an existing LaunchAgent safely',
+         'launchctl print',
+         'LaunchAgent state is unknown; refusing to remove plist',
+         'LaunchAgent state is unknown after bootout; refusing to remove plist',
+         'LaunchAgent remained loaded after bootout; refusing to remove plist',
+         'launchctl is required to verify the LaunchAgent is unloaded safely',
         'ProgramArguments',
         'StandardOutPath',
         'StandardErrorPath',
@@ -2497,18 +2962,21 @@ test ! -e "$default_logs"
         $macosSource -match 'CYC_MACOS.*CONTAINMENT.*(?:override|enable)') {
         throw 'macOS worker containment gate is externally overrideable.'
     }
+    $script:cycWorkerKitCompletedSuccessfully = $true
     Write-Output 'worker-kit packaging tests passed'
 } finally {
     $env:CYC_WORKER_KIT_SIGNING_KEY_PATH = $previousSigningKeyPath
     $env:CYC_WORKER_KIT_SIGNING_KEY_ID = $previousSigningKeyId
     $env:CYC_WORKER_KIT_TRUSTED_PUBLIC_KEY_PATH = $previousTrustedPublicKeyPath
     $env:CYC_WORKER_KIT_TEST_PRIVATE_KEY = $previousTestPrivateKey
-    if (Test-Path -LiteralPath $temporary) {
+    if ((Test-Path -LiteralPath $temporary) -and $script:cycWorkerKitCompletedSuccessfully) {
         $resolved = [System.IO.Path]::GetFullPath($temporary)
         $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
         if (-not $resolved.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw 'Refusing to clean a worker-kit test path outside the temp root.'
         }
         Remove-Item -LiteralPath $resolved -Recurse -Force
+    } elseif (Test-Path -LiteralPath $temporary) {
+        [Console]::Error.WriteLine("worker-kit packaging test evidence retained at $temporary")
     }
 }

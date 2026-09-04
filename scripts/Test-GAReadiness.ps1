@@ -275,6 +275,10 @@ $GaIssue3GateNames = @(
     'liveLinuxControllerWorkerRoundTrip',
     'macosDeveloperIdSigningNotarization'
 )
+$GaIssue23GateNames = [ordered]@{
+    issue2 = $GaIssue2GateNames
+    issue3 = $GaIssue3GateNames
+}
 
 $GaIssue5GateNames = @(
     'linuxDedicatedExecutionIdentity',
@@ -366,6 +370,10 @@ $GaIssue5ResidualMarkerPrefixes = [ordered]@{
 }
 $GaIssue5RunIdentifierPattern = '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
 $GaIssue5IsoInstantPattern = '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\s]+(Z|[+-][0-9]{2}:[0-9]{2})$'
+$GaBlockerInventorySchema = 'cyc.dev/ga-blocker-inventory/v1'
+$GaBlockerRepository = 'TypeThe0ry/ClusterYourCodex'
+$GaBlockerEvidenceIdPattern = '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+$GaBlockerPriorityLabelPattern = '^(?:(?:priority|severity)(?:[:/_\-\s]+))?p([01])$'
 
 function Assert-GaIssue5RunProvenance {
     param(
@@ -553,7 +561,15 @@ function Get-GaIssue5GateMarkers {
             Assert-GaCondition ($canonicalMarkers[$index] -ceq $aliasMarkers[$index]) "$Description.rawLogMarkers and markers aliases must match exactly"
         }
     }
-    $markers = if ($null -ne $canonicalProperty) { $canonicalMarkers } else { $aliasMarkers }
+    # A PowerShell conditional expression unwraps a single-element array when
+    # assigned directly. Select the aliases with ordinary assignments and an
+    # explicit object-array cast so the type-sensitive contract distinguishes
+    # an array from a scalar marker.
+    if ($null -ne $canonicalProperty) {
+        $markers = [object[]]$canonicalMarkers
+    } else {
+        $markers = [object[]]$aliasMarkers
+    }
     Assert-GaCondition (($null -ne $markers) -and ($markers -is [System.Array]) -and $markers.Count -gt 0) "$Description.rawLogMarkers must be a non-empty array"
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($marker in @($markers)) {
@@ -991,6 +1007,78 @@ function Assert-GaIssue5RawVerification {
     }
 }
 
+function Assert-GaIssue23RawVerification {
+    param(
+        [Parameter(Mandatory = $true)][object]$ManifestIssue,
+        [Parameter(Mandatory = $true)][object]$RawRecord,
+        [Parameter(Mandatory = $true)][string]$IssueName,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    # Rebuild the expected per-gate contract from the already validated
+    # manifest. The downloader's summary is accepted only when it retains the
+    # same gate identity, provenance, command, and marker set.
+    $manifestContract = Assert-GaIssue23Evidence `
+        -Node $ManifestIssue `
+        -IssueName $IssueName `
+        -ExpectedCommit $ExpectedCommit `
+        -Description $Description
+
+    $markersVerified = Get-GaProperty -Object $RawRecord -Path 'markersVerified' -Description $Description
+    Assert-GaCondition (($markersVerified -is [bool]) -and $markersVerified) "$Description.markersVerified must be boolean true"
+
+    $verifiedMarkers = Get-GaProperty -Object $RawRecord -Path 'markers' -Description $Description
+    Assert-GaCondition (($verifiedMarkers -is [System.Array]) -and $verifiedMarkers.Count -gt 0) "$Description.markers must be a non-empty array"
+    $seenVerifiedMarkers = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($marker in @($verifiedMarkers)) {
+        Assert-GaCondition ($marker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$marker)) "$Description.markers entries must be non-empty strings"
+        Assert-GaCondition ($seenVerifiedMarkers.Add([string]$marker)) "$Description.markers entries must be unique"
+    }
+    foreach ($marker in @($manifestContract.markers)) {
+        Assert-GaCondition (@($verifiedMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.markers must retain the source-bound marker '$marker'"
+    }
+
+    $verifiedGates = Get-GaProperty -Object $RawRecord -Path 'gateEvidence' -Description $Description
+    $expectedGateCount = @($GaIssue23GateNames[$IssueName]).Count
+    Assert-GaCondition (($verifiedGates -is [System.Array]) -and $verifiedGates.Count -eq $expectedGateCount) "$Description.gateEvidence must retain one verified record per $IssueName gate"
+    foreach ($manifestGate in @($manifestContract.gates)) {
+        $gateName = [string](Get-GaProperty -Object $manifestGate -Path 'gate' -Description $Description)
+        $gateMatches = @($verifiedGates | Where-Object {
+                $gateProperty = $_.PSObject.Properties['gate']
+                $null -ne $gateProperty -and [string]$gateProperty.Value -ceq $gateName
+            })
+        Assert-GaCondition ($gateMatches.Count -eq 1) "$Description.gateEvidence must retain exactly one '$gateName' record"
+        $verifiedGate = $gateMatches[0]
+        # Validate the retained record as a complete gate object, not just a
+        # status bit. This also verifies the command-bound marker digest.
+        $verifiedGateContract = Assert-GaIssue23GateEvidence `
+            -ManifestIssue $ManifestIssue `
+            -IssueName $IssueName `
+            -Gate $gateName `
+            -GateEvidence $verifiedGate `
+            -ExpectedCommit $ExpectedCommit `
+            -Description "$Description.gateEvidence.$gateName"
+        foreach ($field in @('gateId', 'sourceCommit', 'provider', 'hostType', 'evidenceId', 'runId', 'node', 'testSelector')) {
+            Assert-GaCondition ([string]$verifiedGateContract.$field -ceq [string]$manifestGate.$field) "$Description.gateEvidence.$gateName.$field must match the manifest"
+        }
+        Assert-GaCondition ((Normalize-GaRawLogCommand -Command ([string]$verifiedGateContract.command)).Equals(
+                (Normalize-GaRawLogCommand -Command ([string]$manifestGate.command)), [StringComparison]::Ordinal)) "$Description.gateEvidence.$gateName.command must match the manifest"
+        foreach ($marker in @($manifestGate.markers)) {
+            Assert-GaCondition (@($verifiedGateContract.markers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.gateEvidence.$gateName.markers must retain the manifest marker '$marker'"
+        }
+        if ($IssueName -ceq 'issue2' -and $gateName -ceq 'noOpenUnwaivedP0P1Blocker') {
+            $manifestInventory = Get-GaProperty -Object $manifestGate -Path 'blockerInventory' -Description $Description
+            $verifiedInventory = Get-GaProperty -Object $verifiedGateContract -Path 'blockerInventory' -Description $Description
+            $manifestInventoryBinding = Get-GaBlockerInventoryBinding -Inventory $manifestInventory -Description "$Description.gateEvidence.$gateName.manifest.blockerInventory"
+            $verifiedInventoryBinding = Get-GaBlockerInventoryBinding -Inventory $verifiedInventory -Description "$Description.gateEvidence.$gateName.verified.blockerInventory"
+            Assert-GaCondition ($verifiedInventoryBinding -ceq $manifestInventoryBinding) "$Description.gateEvidence.$gateName.blockerInventory must match the manifest"
+        }
+        [void](Assert-GaIssue5RunProvenanceMatch -ManifestRun $manifestGate -VerifiedRun $verifiedGate -Description "$Description.gateEvidence.$gateName")
+    }
+    return $RawRecord
+}
+
 function Assert-GaExactGateSet {
     param(
         [Parameter(Mandatory = $true)][object]$Gates,
@@ -1017,6 +1105,461 @@ function Assert-GaExactGateSet {
     }
     foreach ($gate in $expected) {
         Assert-GaCondition (@($actual | Where-Object { $_ -ceq $gate }).Count -eq 1) "$Description.gates is missing required gate '$gate'"
+    }
+}
+
+function Assert-GaExactObjectPropertySet {
+    param(
+        [Parameter(Mandatory = $true)][object]$Object,
+        [Parameter(Mandatory = $true)][string[]]$Required,
+        [Parameter(Mandatory = $false)][string[]]$Optional = @(),
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-GaCondition (($Object -is [pscustomobject]) -and -not ($Object -is [System.Array])) "$Description must be a JSON object"
+    $allowed = @($Required + $Optional | Select-Object -Unique)
+    foreach ($requiredName in $Required) {
+        Assert-GaCondition ($null -ne $Object.PSObject.Properties[$requiredName]) "$Description is missing required property '$requiredName'"
+    }
+    foreach ($property in @($Object.PSObject.Properties)) {
+        Assert-GaCondition (@($allowed | Where-Object { $_ -ceq [string]$property.Name }).Count -eq 1) "$Description contains unknown property '$($property.Name)'"
+    }
+}
+
+function Get-GaBlockerPriorityLabels {
+    param(
+        [Parameter(Mandatory = $true)][object]$Labels,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-GaCondition ($Labels -is [System.Array]) "$Description.labels must be a JSON array"
+    $seenNames = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $priorities = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($label in @($Labels)) {
+        Assert-GaCondition (($label -is [pscustomobject]) -and -not ($label -is [System.Array])) "$Description.labels entries must be JSON objects"
+        $nameProperty = $label.PSObject.Properties['name']
+        Assert-GaCondition ($null -ne $nameProperty) "$Description.labels entries must contain name"
+        Assert-GaCondition ($nameProperty.Value -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$nameProperty.Value)) "$Description.labels.name must be a non-empty string"
+        $name = ([string]$nameProperty.Value).Trim()
+        Assert-GaCondition ($seenNames.Add($name)) "$Description.labels must not contain duplicate label names"
+
+        $match = [regex]::Match($name, $GaBlockerPriorityLabelPattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($match.Success) {
+            $priority = 'P' + $match.Groups[1].Value
+            Assert-GaCondition (-not (@($priorities | Where-Object { $_ -ceq $priority }).Count -gt 0)) "$Description.labels must not declare the same P0/P1 priority more than once"
+            [void]$priorities.Add($priority)
+        }
+    }
+    return $priorities.ToArray()
+}
+
+function Assert-GaBlockerReviewer {
+    param(
+        [Parameter(Mandatory = $true)][object]$Reviewer,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-GaExactObjectPropertySet -Object $Reviewer -Required @('id', 'login') -Description $Description
+    $id = Get-GaProperty -Object $Reviewer -Path 'id' -Description $Description
+    Assert-GaCondition ((Test-GaInteger -Value $id) -and [decimal]$id -gt 0) "$Description.id must be a positive integer"
+    $login = Get-GaProperty -Object $Reviewer -Path 'login' -Description $Description
+    Assert-GaCondition ($login -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$login)) "$Description.login must be a non-empty string"
+    Assert-GaCondition ([string]$login -notmatch '[\r\n]') "$Description.login must not contain newlines"
+    return [pscustomobject]@{
+        id = [long]$id
+        login = [string]$login
+    }
+}
+
+function Assert-GaBlockerInventory {
+    param(
+        [Parameter(Mandatory = $true)][object]$Inventory,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-GaExactObjectPropertySet -Object $Inventory `
+        -Required @('schemaVersion', 'status', 'sourceCommit', 'evidenceId', 'repository', 'reviewer', 'reviewedAt', 'expiresAt', 'api', 'issues', 'waivers') `
+        -Description $Description
+    [void](Assert-GaString -Object $Inventory -Path 'schemaVersion' -Expected $GaBlockerInventorySchema -Description $Description)
+    [void](Assert-GaString -Object $Inventory -Path 'status' -Expected 'passed' -Description $Description)
+
+    $sourceCommit = Get-GaProperty -Object $Inventory -Path 'sourceCommit' -Description $Description
+    Assert-GaCondition ($sourceCommit -is [string] -and [string]$sourceCommit -match '^[0-9a-fA-F]{40}$') "$Description.sourceCommit must be a full 40-character commit SHA"
+    Assert-GaCondition ([string]$sourceCommit -ieq $ExpectedCommit) "$Description.sourceCommit must match the reviewed stable source commit"
+    [void](Assert-GaString -Object $Inventory -Path 'repository' -Expected $GaBlockerRepository -Description $Description)
+
+    $evidenceId = Get-GaProperty -Object $Inventory -Path 'evidenceId' -Description $Description
+    Assert-GaCondition ($evidenceId -is [string] -and [string]$evidenceId -match $GaBlockerEvidenceIdPattern) "$Description.evidenceId must be a bounded portable retained-inventory identifier"
+
+    $reviewer = Assert-GaBlockerReviewer -Reviewer (Get-GaProperty -Object $Inventory -Path 'reviewer' -Description $Description) -Description "$Description.reviewer"
+    $reviewedAt = Convert-GaRawLogInstant -Value (Get-GaProperty -Object $Inventory -Path 'reviewedAt' -Description $Description) -Description "$Description.reviewedAt"
+    $expiresAt = Convert-GaRawLogInstant -Value (Get-GaProperty -Object $Inventory -Path 'expiresAt' -Description $Description) -Description "$Description.expiresAt"
+    $now = [DateTimeOffset]::UtcNow
+    Assert-GaCondition ($reviewedAt -le $now) "$Description.reviewedAt must not be in the future"
+    Assert-GaCondition ($expiresAt -gt $now) "$Description.expiresAt must be in the future"
+    Assert-GaCondition ($expiresAt -gt $reviewedAt) "$Description.expiresAt must be later than reviewedAt"
+
+    $api = Get-GaProperty -Object $Inventory -Path 'api' -Description $Description
+    Assert-GaExactObjectPropertySet -Object $api `
+        -Required @('provider', 'endpoint', 'requestedState', 'complete', 'incomplete', 'hasNextPage', 'pageCount', 'totalCount', 'returnedCount', 'capturedAt', 'sourceCommit', 'error') `
+        -Description "$Description.api"
+    [void](Assert-GaString -Object $api -Path 'provider' -Expected 'github-rest-api' -Description "$Description.api")
+    [void](Assert-GaString -Object $api -Path 'requestedState' -Expected 'open' -Description "$Description.api")
+    $endpointValue = Get-GaProperty -Object $api -Path 'endpoint' -Description "$Description.api"
+    Assert-GaCondition ($endpointValue -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$endpointValue)) "$Description.api.endpoint must be a non-empty string"
+    $endpointUri = $null
+    Assert-GaCondition ([Uri]::TryCreate([string]$endpointValue, [UriKind]::Absolute, [ref]$endpointUri)) "$Description.api.endpoint must be an absolute URL"
+    Assert-GaCondition ($endpointUri.Scheme.Equals('https', [StringComparison]::OrdinalIgnoreCase)) "$Description.api.endpoint must use HTTPS"
+    Assert-GaCondition ($endpointUri.Host.Equals('api.github.com', [StringComparison]::OrdinalIgnoreCase)) "$Description.api.endpoint must use api.github.com"
+    Assert-GaCondition ([string]::IsNullOrWhiteSpace($endpointUri.UserInfo) -and [string]::IsNullOrWhiteSpace($endpointUri.Query) -and [string]::IsNullOrWhiteSpace($endpointUri.Fragment)) "$Description.api.endpoint must not contain credentials, query parameters, or fragments"
+    Assert-GaCondition ($endpointUri.AbsolutePath.TrimEnd('/') -ceq '/repos/TypeThe0ry/ClusterYourCodex/issues') "$Description.api.endpoint must target the canonical repository issues endpoint"
+
+    foreach ($booleanField in @('complete', 'incomplete', 'hasNextPage')) {
+        $booleanValue = Get-GaProperty -Object $api -Path $booleanField -Description "$Description.api"
+        Assert-GaCondition ($booleanValue -is [bool]) "$Description.api.$booleanField must be boolean"
+    }
+    Assert-GaCondition ([bool]$api.complete) "$Description.api.complete must be true"
+    Assert-GaCondition (-not [bool]$api.incomplete) "$Description.api.incomplete must be false"
+    Assert-GaCondition (-not [bool]$api.hasNextPage) "$Description.api.hasNextPage must be false"
+    [void](Assert-GaRawLogCount -Value (Get-GaProperty -Object $api -Path 'pageCount' -Description "$Description.api") -Description "$Description.api.pageCount" -RequirePositive $true)
+    $totalCount = Assert-GaRawLogCount -Value (Get-GaProperty -Object $api -Path 'totalCount' -Description "$Description.api") -Description "$Description.api.totalCount"
+    $returnedCount = Assert-GaRawLogCount -Value (Get-GaProperty -Object $api -Path 'returnedCount' -Description "$Description.api") -Description "$Description.api.returnedCount"
+    $capturedAt = Convert-GaRawLogInstant -Value (Get-GaProperty -Object $api -Path 'capturedAt' -Description "$Description.api") -Description "$Description.api.capturedAt"
+    Assert-GaCondition ($capturedAt -le $now) "$Description.api.capturedAt must not be in the future"
+    $apiCommit = Get-GaProperty -Object $api -Path 'sourceCommit' -Description "$Description.api"
+    Assert-GaCondition ($apiCommit -is [string] -and [string]$apiCommit -match '^[0-9a-fA-F]{40}$') "$Description.api.sourceCommit must be a full 40-character commit SHA"
+    Assert-GaCondition ([string]$apiCommit -ieq $ExpectedCommit) "$Description.api.sourceCommit must match the reviewed stable source commit"
+    $apiError = Get-GaProperty -Object $api -Path 'error' -Description "$Description.api"
+    Assert-GaCondition ($null -eq $apiError -or ($apiError -is [string] -and [string]::IsNullOrWhiteSpace([string]$apiError))) "$Description.api.error must be null or an empty string"
+
+    # Read array-valued properties through PSObject.Properties.Value.  A
+    # command-substitution call to Get-GaProperty enumerates a one-item array
+    # in Windows PowerShell, which would turn a valid one-issue snapshot into
+    # a scalar before the type check below.
+    $issues = $Inventory.PSObject.Properties['issues'].Value
+    Assert-GaCondition ($issues -is [System.Array]) "$Description.issues must be a JSON array containing the complete open-issue snapshot"
+    Assert-GaCondition ([long]$returnedCount -eq [long]$issues.Count) "$Description.api.returnedCount must equal the issue snapshot length"
+    Assert-GaCondition ([long]$totalCount -eq [long]$issues.Count) "$Description.api.totalCount must equal the issue snapshot length"
+
+    $seenIssueNumbers = New-Object 'System.Collections.Generic.HashSet[long]'
+    $blockers = New-Object System.Collections.Generic.List[object]
+    foreach ($issue in @($issues)) {
+        Assert-GaExactObjectPropertySet -Object $issue -Required @('number', 'state', 'title', 'html_url', 'labels') -Description "$Description.issues entry"
+        $number = Get-GaProperty -Object $issue -Path 'number' -Description "$Description.issues entry"
+        Assert-GaCondition ((Test-GaInteger -Value $number) -and [decimal]$number -gt 0) "$Description.issues.number must be a positive integer"
+        Assert-GaCondition ($seenIssueNumbers.Add([long]$number)) "$Description.issues must not contain duplicate issue numbers"
+        [void](Assert-GaString -Object $issue -Path 'state' -Expected 'open' -Description "$Description.issues #$number")
+        $title = Get-GaProperty -Object $issue -Path 'title' -Description "$Description.issues #$number"
+        Assert-GaCondition ($title -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$title)) "$Description.issues #$number.title must be a non-empty string"
+        $htmlUrl = Get-GaProperty -Object $issue -Path 'html_url' -Description "$Description.issues #$number"
+        $expectedIssueUrl = "https://github.com/$GaBlockerRepository/issues/$number"
+        Assert-GaCondition ($htmlUrl -is [string] -and [string]$htmlUrl -ceq $expectedIssueUrl) "$Description.issues #$number.html_url must be the canonical issue URL"
+        $labelArray = $issue.PSObject.Properties['labels'].Value
+        $priorityLabels = @(Get-GaBlockerPriorityLabels -Labels $labelArray -Description "$Description.issues #$number")
+        Assert-GaCondition ($priorityLabels.Count -le 1) "$Description.issues #$number must not carry multiple P0/P1 priority labels"
+        if ($priorityLabels.Count -eq 1) {
+            [void]$blockers.Add([pscustomobject]@{
+                    number = [long]$number
+                    priority = [string]$priorityLabels[0]
+                })
+        }
+    }
+
+    $waivers = $Inventory.PSObject.Properties['waivers'].Value
+    Assert-GaCondition ($waivers -is [System.Array]) "$Description.waivers must be a JSON array"
+    $seenWaiverNumbers = New-Object 'System.Collections.Generic.HashSet[long]'
+    $blockerNumberSet = New-Object 'System.Collections.Generic.HashSet[long]'
+    foreach ($blocker in $blockers.ToArray()) { [void]$blockerNumberSet.Add([long]$blocker.number) }
+    foreach ($waiver in @($waivers)) {
+        Assert-GaExactObjectPropertySet -Object $waiver -Required @('issueNumber', 'scope', 'sourceCommit', 'expiresAt', 'reviewer', 'status', 'reason') -Description "$Description.waivers entry"
+        $waiverNumber = Get-GaProperty -Object $waiver -Path 'issueNumber' -Description "$Description.waivers entry"
+        Assert-GaCondition ((Test-GaInteger -Value $waiverNumber) -and [decimal]$waiverNumber -gt 0) "$Description.waivers.issueNumber must be a positive integer"
+        Assert-GaCondition ($seenWaiverNumbers.Add([long]$waiverNumber)) "$Description.waivers must contain at most one active waiver per issue"
+        Assert-GaCondition ($blockerNumberSet.Contains([long]$waiverNumber)) "$Description.waivers may only reference an open P0/P1 issue in the snapshot"
+        $scope = Get-GaProperty -Object $waiver -Path 'scope' -Description "$Description.waivers #$waiverNumber"
+        Assert-GaExactObjectPropertySet -Object $scope -Required @('repository', 'channel', 'issueNumber') -Description "$Description.waivers #$waiverNumber.scope"
+        [void](Assert-GaString -Object $scope -Path 'repository' -Expected $GaBlockerRepository -Description "$Description.waivers #$waiverNumber.scope")
+        [void](Assert-GaString -Object $scope -Path 'channel' -Expected 'stable' -Description "$Description.waivers #$waiverNumber.scope")
+        $scopeNumber = Get-GaProperty -Object $scope -Path 'issueNumber' -Description "$Description.waivers #$waiverNumber.scope"
+        Assert-GaCondition ((Test-GaInteger -Value $scopeNumber) -and [long]$scopeNumber -eq [long]$waiverNumber) "$Description.waivers #$waiverNumber.scope.issueNumber must match the waiver issueNumber"
+        $waiverCommit = Get-GaProperty -Object $waiver -Path 'sourceCommit' -Description "$Description.waivers #$waiverNumber"
+        Assert-GaCondition ($waiverCommit -is [string] -and [string]$waiverCommit -match '^[0-9a-fA-F]{40}$') "$Description.waivers #$waiverNumber.sourceCommit must be a full 40-character commit SHA"
+        Assert-GaCondition ([string]$waiverCommit -ieq $ExpectedCommit) "$Description.waivers #$waiverNumber.sourceCommit must match the reviewed stable source commit"
+        $waiverExpiresAt = Convert-GaRawLogInstant -Value (Get-GaProperty -Object $waiver -Path 'expiresAt' -Description "$Description.waivers #$waiverNumber") -Description "$Description.waivers #$waiverNumber.expiresAt"
+        Assert-GaCondition ($waiverExpiresAt -gt $now) "$Description.waivers #$waiverNumber.expiresAt must be in the future"
+        Assert-GaCondition ($waiverExpiresAt -le $expiresAt) "$Description.waivers #$waiverNumber.expiresAt must not outlive the inventory expiry"
+        $waiverReviewer = Assert-GaBlockerReviewer -Reviewer (Get-GaProperty -Object $waiver -Path 'reviewer' -Description "$Description.waivers #$waiverNumber") -Description "$Description.waivers #$waiverNumber.reviewer"
+        Assert-GaCondition ($waiverReviewer.id -eq $reviewer.id -and $waiverReviewer.login -ceq $reviewer.login) "$Description.waivers #$waiverNumber.reviewer must match the inventory reviewer"
+        [void](Assert-GaString -Object $waiver -Path 'status' -Expected 'active' -Description "$Description.waivers #$waiverNumber")
+        $reason = Get-GaProperty -Object $waiver -Path 'reason' -Description "$Description.waivers #$waiverNumber"
+        Assert-GaCondition ($reason -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$reason)) "$Description.waivers #$waiverNumber.reason must be non-empty"
+    }
+    foreach ($blocker in $blockers.ToArray()) {
+        $matches = @($waivers | Where-Object { [long]$_.issueNumber -eq [long]$blocker.number })
+        Assert-GaCondition ($matches.Count -eq 1) "$Description must contain one valid active waiver for open $($blocker.priority) issue #$($blocker.number)"
+    }
+    Assert-GaCondition ($seenWaiverNumbers.Count -eq $blockers.Count) "$Description.waivers must cover exactly the P0/P1 blockers in the complete open-issue snapshot"
+
+    return [pscustomobject]@{
+        schemaVersion = $GaBlockerInventorySchema
+        sourceCommit = [string]$sourceCommit
+        evidenceId = [string]$evidenceId
+        issueCount = [int64]@($issues).Count
+        blockerCount = [int64]$blockers.Count
+        waiverCount = [int64]$waivers.Count
+        reviewer = $reviewer
+        expiresAt = $expiresAt
+    }
+}
+
+function Get-GaBlockerInventoryBinding {
+    param(
+        [Parameter(Mandatory = $true)][object]$Inventory,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    # JSON object property order is not semantic.  Build a compact canonical
+    # projection before cross-binding the same inventory through the manifest,
+    # downloaded envelope, and raw-verification summary.  The caller has
+    # already run Assert-GaBlockerInventory, so this projection contains every
+    # contract field while ignoring harmless serialization order differences.
+    $reviewer = Get-GaProperty -Object $Inventory -Path 'reviewer' -Description $Description
+    $api = Get-GaProperty -Object $Inventory -Path 'api' -Description $Description
+    $issues = $Inventory.PSObject.Properties['issues'].Value
+    $issueBindings = New-Object System.Collections.Generic.List[object]
+    foreach ($issue in @($issues | Sort-Object { [long](Get-GaProperty -Object $_ -Path 'number' -Description $Description) })) {
+        $labels = $issue.PSObject.Properties['labels'].Value
+        $labelBindings = New-Object System.Collections.Generic.List[string]
+        foreach ($label in @($labels | Sort-Object { [string](Get-GaProperty -Object $_ -Path 'name' -Description $Description) })) {
+            [void]$labelBindings.Add([string](Get-GaProperty -Object $label -Path 'name' -Description $Description))
+        }
+        [void]$issueBindings.Add([ordered]@{
+                number = [long](Get-GaProperty -Object $issue -Path 'number' -Description $Description)
+                state = [string](Get-GaProperty -Object $issue -Path 'state' -Description $Description)
+                title = [string](Get-GaProperty -Object $issue -Path 'title' -Description $Description)
+                html_url = [string](Get-GaProperty -Object $issue -Path 'html_url' -Description $Description)
+                labels = $labelBindings.ToArray()
+            })
+    }
+
+    $waivers = $Inventory.PSObject.Properties['waivers'].Value
+    $waiverBindings = New-Object System.Collections.Generic.List[object]
+    foreach ($waiver in @($waivers | Sort-Object { [long](Get-GaProperty -Object $_ -Path 'issueNumber' -Description $Description) })) {
+        $scope = Get-GaProperty -Object $waiver -Path 'scope' -Description $Description
+        $waiverReviewer = Get-GaProperty -Object $waiver -Path 'reviewer' -Description $Description
+        $waiverExpiresAt = Convert-GaRawLogInstant -Value (Get-GaProperty -Object $waiver -Path 'expiresAt' -Description $Description) -Description "$Description.waivers.expiresAt"
+        [void]$waiverBindings.Add([ordered]@{
+                issueNumber = [long](Get-GaProperty -Object $waiver -Path 'issueNumber' -Description $Description)
+                scope = [ordered]@{
+                    repository = [string](Get-GaProperty -Object $scope -Path 'repository' -Description $Description)
+                    channel = [string](Get-GaProperty -Object $scope -Path 'channel' -Description $Description)
+                    issueNumber = [long](Get-GaProperty -Object $scope -Path 'issueNumber' -Description $Description)
+                }
+                sourceCommit = [string](Get-GaProperty -Object $waiver -Path 'sourceCommit' -Description $Description)
+                expiresAtTicks = $waiverExpiresAt.UtcDateTime.Ticks
+                reviewer = [ordered]@{
+                    id = [long](Get-GaProperty -Object $waiverReviewer -Path 'id' -Description $Description)
+                    login = [string](Get-GaProperty -Object $waiverReviewer -Path 'login' -Description $Description)
+                }
+                status = [string](Get-GaProperty -Object $waiver -Path 'status' -Description $Description)
+                reason = [string](Get-GaProperty -Object $waiver -Path 'reason' -Description $Description)
+            })
+    }
+
+    $reviewedAt = Convert-GaRawLogInstant -Value (Get-GaProperty -Object $Inventory -Path 'reviewedAt' -Description $Description) -Description "$Description.reviewedAt"
+    $expiresAt = Convert-GaRawLogInstant -Value (Get-GaProperty -Object $Inventory -Path 'expiresAt' -Description $Description) -Description "$Description.expiresAt"
+    $apiErrorProperty = $api.PSObject.Properties['error']
+    $apiError = if ($null -eq $apiErrorProperty -or $null -eq $apiErrorProperty.Value) { $null } else { [string]$apiErrorProperty.Value }
+    $canonical = [ordered]@{
+        schemaVersion = [string](Get-GaProperty -Object $Inventory -Path 'schemaVersion' -Description $Description)
+        status = [string](Get-GaProperty -Object $Inventory -Path 'status' -Description $Description)
+        sourceCommit = [string](Get-GaProperty -Object $Inventory -Path 'sourceCommit' -Description $Description)
+        evidenceId = [string](Get-GaProperty -Object $Inventory -Path 'evidenceId' -Description $Description)
+        repository = [string](Get-GaProperty -Object $Inventory -Path 'repository' -Description $Description)
+        reviewer = [ordered]@{
+            id = [long](Get-GaProperty -Object $reviewer -Path 'id' -Description $Description)
+            login = [string](Get-GaProperty -Object $reviewer -Path 'login' -Description $Description)
+        }
+        reviewedAtTicks = $reviewedAt.UtcDateTime.Ticks
+        expiresAtTicks = $expiresAt.UtcDateTime.Ticks
+        api = [ordered]@{
+            provider = [string](Get-GaProperty -Object $api -Path 'provider' -Description $Description)
+            endpoint = [string](Get-GaProperty -Object $api -Path 'endpoint' -Description $Description)
+            requestedState = [string](Get-GaProperty -Object $api -Path 'requestedState' -Description $Description)
+            complete = [bool](Get-GaProperty -Object $api -Path 'complete' -Description $Description)
+            incomplete = [bool](Get-GaProperty -Object $api -Path 'incomplete' -Description $Description)
+            hasNextPage = [bool](Get-GaProperty -Object $api -Path 'hasNextPage' -Description $Description)
+            pageCount = [long](Get-GaProperty -Object $api -Path 'pageCount' -Description $Description)
+            totalCount = [long](Get-GaProperty -Object $api -Path 'totalCount' -Description $Description)
+            returnedCount = [long](Get-GaProperty -Object $api -Path 'returnedCount' -Description $Description)
+            capturedAtTicks = (Convert-GaRawLogInstant -Value (Get-GaProperty -Object $api -Path 'capturedAt' -Description $Description) -Description "$Description.api.capturedAt").UtcDateTime.Ticks
+            sourceCommit = [string](Get-GaProperty -Object $api -Path 'sourceCommit' -Description $Description)
+            error = $apiError
+        }
+        issues = $issueBindings.ToArray()
+        waivers = $waiverBindings.ToArray()
+    }
+    return ($canonical | ConvertTo-Json -Depth 30 -Compress)
+}
+
+function Assert-GaBlockerGateEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object]$GateEvidence,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-GaExactObjectPropertySet -Object $GateEvidence `
+        -Required @('status', 'sourceCommit', 'evidenceId', 'blockerInventory') `
+        -Description $Description
+    $status = Get-GaProperty -Object $GateEvidence -Path 'status' -Description $Description
+    Assert-GaCondition (($status -is [bool]) -and $status) "$Description.status must be boolean true"
+    $sourceCommit = Get-GaProperty -Object $GateEvidence -Path 'sourceCommit' -Description $Description
+    Assert-GaCondition ($sourceCommit -is [string] -and [string]$sourceCommit -match '^[0-9a-fA-F]{40}$') "$Description.sourceCommit must be a full 40-character commit SHA"
+    Assert-GaCondition ([string]$sourceCommit -ieq $ExpectedCommit) "$Description.sourceCommit must match the reviewed stable source commit"
+    $evidenceId = Get-GaProperty -Object $GateEvidence -Path 'evidenceId' -Description $Description
+    Assert-GaCondition ($evidenceId -is [string] -and [string]$evidenceId -match $GaBlockerEvidenceIdPattern) "$Description.evidenceId must be a bounded portable retained-inventory identifier"
+    [void](Assert-GaBlockerInventory -Inventory (Get-GaProperty -Object $GateEvidence -Path 'blockerInventory' -Description $Description) -ExpectedCommit $ExpectedCommit -Description "$Description.blockerInventory")
+    return (Get-GaProperty -Object $GateEvidence -Path 'blockerInventory' -Description $Description)
+}
+
+function Get-GaIssue23GateMarker {
+    param(
+        [Parameter(Mandatory = $true)][string]$IssueName,
+        [Parameter(Mandatory = $true)][string]$Gate,
+        [Parameter(Mandatory = $true)][string]$Command
+    )
+
+    $commandDigest = Get-GaIssue5CommandSha256 -Command $Command
+    return "CYC-GA-$($IssueName.ToUpperInvariant())|gate=$Gate|commandSha256=$commandDigest|status=passed"
+}
+
+function Assert-GaIssue23GateEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object]$ManifestIssue,
+        [Parameter(Mandatory = $true)][string]$IssueName,
+        [Parameter(Mandatory = $true)][string]$Gate,
+        [Parameter(Mandatory = $true)][object]$GateEvidence,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-GaExactObjectPropertySet -Object $GateEvidence `
+        -Required @('status', 'gateId', 'sourceCommit', 'provider', 'hostType', 'evidenceId', 'runId', 'node', 'exitCode', 'tests', 'startedAt', 'endedAt', 'command') `
+        -Optional @('gate', 'testSelector', 'selector', 'rawLogMarkers', 'markers', 'blockerInventory') `
+        -Description $Description
+    $status = Get-GaProperty -Object $GateEvidence -Path 'status' -Description $Description
+    Assert-GaCondition (($status -is [bool]) -and $status) "$Description.status must be boolean true"
+    $gateId = Get-GaProperty -Object $GateEvidence -Path 'gateId' -Description $Description
+    Assert-GaCondition ($gateId -is [string] -and [string]$gateId -ceq "$IssueName.$Gate") "$Description.gateId must equal '$IssueName.$Gate'"
+    $gateProperty = $GateEvidence.PSObject.Properties['gate']
+    if ($null -ne $gateProperty) {
+        Assert-GaCondition ($gateProperty.Value -is [string] -and [string]$gateProperty.Value -ceq $Gate) "$Description.gate must equal '$Gate'"
+    }
+    $sourceCommit = Get-GaProperty -Object $GateEvidence -Path 'sourceCommit' -Description $Description
+    Assert-GaCondition ($sourceCommit -is [string] -and [string]$sourceCommit -match '^[0-9a-fA-F]{40}$') "$Description.sourceCommit must be a full commit SHA"
+    Assert-GaCondition ([string]$sourceCommit -ieq $ExpectedCommit) "$Description.sourceCommit must match the reviewed stable source commit"
+    $manifestEvidenceId = [string](Get-GaProperty -Object $ManifestIssue -Path 'evidenceId' -Description $Description)
+    foreach ($field in @('provider', 'hostType', 'evidenceId', 'runId', 'node', 'command')) {
+        $value = Get-GaProperty -Object $GateEvidence -Path $field -Description $Description
+        Assert-GaCondition ($value -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$value)) "$Description.$field must be a non-empty string"
+    }
+    foreach ($field in @('provider', 'hostType', 'node')) {
+        $value = [string](Get-GaProperty -Object $GateEvidence -Path $field -Description $Description)
+        Assert-GaCondition ($value -notmatch '(?i)github|actions|hosted|runner') "$Description.$field must identify an external execution surface"
+    }
+    $gateEvidenceId = [string](Get-GaProperty -Object $GateEvidence -Path 'evidenceId' -Description $Description)
+    Assert-GaCondition ($gateEvidenceId -match $GaBlockerEvidenceIdPattern) "$Description.evidenceId must be a bounded portable retained-evidence identifier"
+    Assert-GaCondition ($gateEvidenceId -ceq $manifestEvidenceId) "$Description.evidenceId must match the issue evidenceId"
+    $runId = [string](Get-GaProperty -Object $GateEvidence -Path 'runId' -Description $Description)
+    $node = [string](Get-GaProperty -Object $GateEvidence -Path 'node' -Description $Description)
+    Assert-GaCondition ($runId -match $GaIssue5RunIdentifierPattern) "$Description.runId must be a bounded portable run identifier"
+    Assert-GaCondition ($node -match $GaIssue5RunIdentifierPattern) "$Description.node must be a bounded portable node identifier"
+    $command = [string](Get-GaProperty -Object $GateEvidence -Path 'command' -Description $Description)
+    $selector = Get-GaIssue5RunSelector -Run $GateEvidence -Description $Description
+    $markers = @(Get-GaIssue5GateMarkers -GateEvidence $GateEvidence -Description $Description)
+    $expectedMarker = Get-GaIssue23GateMarker -IssueName $IssueName -Gate $Gate -Command $command
+    Assert-GaCondition (@($markers | Where-Object { [string]$_ -ceq $expectedMarker }).Count -eq 1) "$Description.rawLogMarkers must contain the command-bound gate marker"
+    $provenance = Assert-GaIssue5RunProvenance -Run $GateEvidence -Description $Description
+
+    if ($IssueName -ceq 'issue2' -and $Gate -ceq 'noOpenUnwaivedP0P1Blocker') {
+        $inventoryProperty = $GateEvidence.PSObject.Properties['blockerInventory']
+        Assert-GaCondition ($null -ne $inventoryProperty) "$Description.blockerInventory is required for noOpenUnwaivedP0P1Blocker"
+        [void](Assert-GaBlockerInventory -Inventory $inventoryProperty.Value -ExpectedCommit $ExpectedCommit -Description "$Description.blockerInventory")
+    } elseif ($null -ne $GateEvidence.PSObject.Properties['blockerInventory']) {
+        Assert-GaCondition $false "$Description.blockerInventory is only permitted on issue2.noOpenUnwaivedP0P1Blocker"
+    }
+
+    $result = [pscustomobject]@{
+        gate = $Gate
+        status = $true
+        gateId = "$IssueName.$Gate"
+        sourceCommit = [string]$sourceCommit
+        provider = [string](Get-GaProperty -Object $GateEvidence -Path 'provider' -Description $Description)
+        hostType = [string](Get-GaProperty -Object $GateEvidence -Path 'hostType' -Description $Description)
+        evidenceId = $gateEvidenceId
+        runId = $runId
+        node = $node
+         exitCode = [int64]$provenance.exitCode
+         tests = $provenance.tests
+         startedAt = [string]$provenance.startedAt
+         endedAt = [string]$provenance.endedAt
+        testSelector = $selector
+        command = $command
+        markers = $markers
+    }
+    if ($IssueName -ceq 'issue2' -and $Gate -ceq 'noOpenUnwaivedP0P1Blocker') {
+        $result | Add-Member -MemberType NoteProperty -Name blockerInventory -Value $GateEvidence.blockerInventory
+    }
+    return $result
+}
+
+function Assert-GaIssue23Evidence {
+    param(
+        [Parameter(Mandatory = $true)][object]$Node,
+        [Parameter(Mandatory = $true)][string]$IssueName,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-GaCondition ($GaIssue23GateNames.Contains($IssueName)) "$Description has a reviewed Issue #2/#3 name"
+    $expectedGates = @($GaIssue23GateNames[$IssueName])
+    $gates = Get-GaProperty -Object $Node -Path 'gates' -Description $Description
+    Assert-GaExactGateSet -Gates $gates -RequiredGates $expectedGates -Description $Description
+    $gateRecords = New-Object System.Collections.Generic.List[object]
+    $allMarkers = New-Object System.Collections.Generic.List[string]
+    foreach ($gate in $expectedGates) {
+        $gateEvidence = $gates.PSObject.Properties[$gate].Value
+        $gateRecord = Assert-GaIssue23GateEvidence `
+            -ManifestIssue $Node `
+            -IssueName $IssueName `
+            -Gate $gate `
+            -GateEvidence $gateEvidence `
+            -ExpectedCommit $ExpectedCommit `
+            -Description "$Description.gates.$gate"
+        [void]$gateRecords.Add($gateRecord)
+        foreach ($marker in @($gateRecord.markers)) {
+            Assert-GaCondition (-not (@($allMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -gt 0)) "$Description gate markers must be unique across gates"
+            [void]$allMarkers.Add([string]$marker)
+        }
+    }
+
+    $rawLog = Get-GaProperty -Object $Node -Path 'rawLog' -Description $Description
+    $rawMarkersProperty = $rawLog.PSObject.Properties['markers']
+    Assert-GaCondition ($null -ne $rawMarkersProperty -and $rawMarkersProperty.Value -is [System.Array] -and $rawMarkersProperty.Value.Count -gt 0) "$Description.rawLog.markers must be a non-empty JSON array"
+    $rawMarkers = @($rawMarkersProperty.Value)
+    $seenRawMarkers = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($marker in $rawMarkers) {
+        Assert-GaCondition ($marker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$marker)) "$Description.rawLog.markers entries must be non-empty strings"
+        Assert-GaCondition ($seenRawMarkers.Add([string]$marker)) "$Description.rawLog.markers entries must be unique"
+    }
+    foreach ($marker in $allMarkers.ToArray()) {
+        Assert-GaCondition (@($rawMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.rawLog.markers must retain '$marker'"
+    }
+    return [pscustomobject]@{
+        gates = $gateRecords.ToArray()
+        markers = $allMarkers.ToArray()
     }
 }
 
@@ -1122,6 +1665,8 @@ function Assert-GaIssueEvidence {
     Assert-GaCondition (($gates -is [pscustomobject]) -and -not ($gates -is [System.Array])) "$Description.gates must be a JSON object"
     if ($Path -ceq 'issue5') {
         [void](Assert-GaIssue5Evidence -Node $node -Description $Description -RequiredGates $RequiredGates)
+    } elseif ($Path -ceq 'issue2' -or $Path -ceq 'issue3') {
+        [void](Assert-GaIssue23Evidence -Node $node -IssueName $Path -ExpectedCommit $ExpectedCommit -Description $Description)
     } else {
         Assert-GaExactGateSet -Gates $gates -RequiredGates $RequiredGates -Description $Description
         foreach ($gate in $RequiredGates) {
@@ -1155,6 +1700,92 @@ function Get-GaRawLogContentJson {
     }
     Assert-GaCondition ($null -ne $content -and ($content -is [pscustomobject]) -and -not ($content -is [System.Array])) "$Description must be one JSON object"
     return $content
+}
+
+function Assert-GaIssue23RawLogContent {
+    param(
+        [Parameter(Mandatory = $true)][object]$Content,
+        [Parameter(Mandatory = $true)][object]$ManifestIssue,
+        [Parameter(Mandatory = $true)][string]$IssueName,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    # Validate the manifest and derive the expected gate set from the closed
+    # issue contract. A downloaded envelope is not trusted merely because it
+    # repeats the same gate names: every nested record is checked independently
+    # and then compared to the source-bound manifest record.
+    $manifestContract = Assert-GaIssue23Evidence `
+        -Node $ManifestIssue `
+        -IssueName $IssueName `
+        -ExpectedCommit $ExpectedCommit `
+        -Description "$Description.manifest"
+
+    $contentGates = Get-GaProperty -Object $Content -Path 'gates' -Description $Description
+    Assert-GaExactGateSet `
+        -Gates $contentGates `
+        -RequiredGates @($GaIssue23GateNames[$IssueName]) `
+        -Description $Description
+
+    foreach ($manifestGate in @($manifestContract.gates)) {
+        $gateName = [string](Get-GaProperty -Object $manifestGate -Path 'gate' -Description $Description)
+        $contentGateProperty = $contentGates.PSObject.Properties[$gateName]
+        Assert-GaCondition ($null -ne $contentGateProperty) "$Description.gates.$gateName is required"
+        $contentGate = $contentGateProperty.Value
+        $contentGateContract = Assert-GaIssue23GateEvidence `
+            -ManifestIssue $ManifestIssue `
+            -IssueName $IssueName `
+            -Gate $gateName `
+            -GateEvidence $contentGate `
+            -ExpectedCommit $ExpectedCommit `
+            -Description "$Description.gates.$gateName"
+
+        foreach ($field in @('gateId', 'sourceCommit', 'provider', 'hostType', 'evidenceId', 'runId', 'node', 'testSelector')) {
+            Assert-GaCondition ([string]$contentGateContract.$field -ceq [string]$manifestGate.$field) "$Description.gates.$gateName.$field must match the manifest"
+        }
+        $manifestCommand = Normalize-GaRawLogCommand -Command ([string](Get-GaProperty -Object $manifestGate -Path 'command' -Description $Description))
+        $contentCommand = Normalize-GaRawLogCommand -Command ([string]$contentGateContract.command)
+        Assert-GaCondition ($contentCommand.Equals($manifestCommand, [System.StringComparison]::Ordinal)) "$Description.gates.$gateName.command must match the manifest"
+
+        # Match exit code, test counts, and timestamps as well as identity. A
+        # content envelope with a different run result must not pass merely
+        # because its command and marker strings look correct.
+        [void](Assert-GaIssue5RunProvenanceMatch `
+            -ManifestRun $manifestGate `
+            -VerifiedRun $contentGate `
+            -Description "$Description.gates.$gateName.provenance")
+
+        foreach ($marker in @($manifestGate.markers)) {
+            Assert-GaCondition (@($contentGateContract.markers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.gates.$gateName.rawLogMarkers must retain the manifest marker '$marker'"
+        }
+
+        if ($IssueName -ceq 'issue2' -and $gateName -ceq 'noOpenUnwaivedP0P1Blocker') {
+            $manifestInventory = Get-GaProperty -Object $manifestGate -Path 'blockerInventory' -Description $Description
+            $contentInventory = Get-GaProperty -Object $contentGateContract -Path 'blockerInventory' -Description $Description
+            $manifestInventoryBinding = Get-GaBlockerInventoryBinding -Inventory $manifestInventory -Description "$Description.gates.$gateName.manifest.blockerInventory"
+            $contentInventoryBinding = Get-GaBlockerInventoryBinding -Inventory $contentInventory -Description "$Description.gates.$gateName.content.blockerInventory"
+            Assert-GaCondition ($contentInventoryBinding -ceq $manifestInventoryBinding) "$Description.gates.$gateName.blockerInventory must match the manifest"
+        }
+    }
+
+    # Read array-valued markers from the property itself. Using command
+    # substitution here would unwrap a one-marker array under Windows
+    # PowerShell 5.1 and weaken the type-sensitive contract.
+    $manifestRawLog = Get-GaProperty -Object $ManifestIssue -Path 'rawLog' -Description $Description
+    $manifestMarkersProperty = $manifestRawLog.PSObject.Properties['markers']
+    Assert-GaCondition ($null -ne $manifestMarkersProperty -and $manifestMarkersProperty.Value -is [System.Array] -and $manifestMarkersProperty.Value.Count -gt 0) "$Description.manifest.rawLog.markers must be a non-empty JSON array"
+    $contentMarkersProperty = $Content.PSObject.Properties['markers']
+    Assert-GaCondition ($null -ne $contentMarkersProperty -and $contentMarkersProperty.Value -is [System.Array] -and $contentMarkersProperty.Value.Count -gt 0) "$Description.markers must be a non-empty JSON array"
+    $contentMarkers = @($contentMarkersProperty.Value)
+    $seenContentMarkers = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($marker in $contentMarkers) {
+        Assert-GaCondition ($marker -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$marker)) "$Description.markers entries must be non-empty strings"
+        Assert-GaCondition ($seenContentMarkers.Add([string]$marker)) "$Description.markers entries must be unique"
+    }
+    foreach ($marker in @($manifestMarkersProperty.Value)) {
+        Assert-GaCondition (@($contentMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.markers must retain the manifest marker '$marker'"
+    }
+    return $Content
 }
 
 function Assert-GaRawLogContent {
@@ -1255,6 +1886,15 @@ function Assert-GaRawLogContent {
         foreach ($marker in @($manifestMarkers)) {
             Assert-GaCondition (@($contentMarkers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.markers must retain the manifest marker '$marker'"
         }
+    } elseif ($IssueName -ceq 'issue2' -or $IssueName -ceq 'issue3') {
+        [void](Assert-GaIssue23RawLogContent `
+            -Content $Content `
+            -ManifestIssue $ManifestIssue `
+            -IssueName $IssueName `
+            -ExpectedCommit $ExpectedCommit `
+            -Description $Description)
+    } else {
+        throw "GA readiness assertion failed: $Description.issue '$IssueName' is not a supported issue raw-log contract."
     }
     return $Content
 }
@@ -1293,6 +1933,43 @@ function Get-GaRawLogContentBinding {
     if ($IssueName -ceq 'issue5') {
         $markers = Get-GaProperty -Object $Content -Path 'markers' -Description $Description
         $binding.markers = @($markers | Sort-Object)
+    } elseif ($IssueName -ceq 'issue2' -or $IssueName -ceq 'issue3') {
+        $markers = Get-GaProperty -Object $Content -Path 'markers' -Description $Description
+        $binding.markers = @($markers | Sort-Object)
+        $gates = Get-GaProperty -Object $Content -Path 'gates' -Description $Description
+        $gateBinding = [ordered]@{}
+        foreach ($property in @($gates.PSObject.Properties | Sort-Object Name)) {
+            $gate = $property.Value
+            $gateTests = Get-GaProperty -Object $gate -Path 'tests' -Description "$Description.gates.$($property.Name)"
+            $gateBinding[[string]$property.Name] = [ordered]@{
+                status = [bool](Get-GaProperty -Object $gate -Path 'status' -Description $Description)
+                gateId = [string](Get-GaProperty -Object $gate -Path 'gateId' -Description $Description)
+                sourceCommit = ([string](Get-GaProperty -Object $gate -Path 'sourceCommit' -Description $Description)).ToLowerInvariant()
+                provider = [string](Get-GaProperty -Object $gate -Path 'provider' -Description $Description)
+                hostType = [string](Get-GaProperty -Object $gate -Path 'hostType' -Description $Description)
+                evidenceId = [string](Get-GaProperty -Object $gate -Path 'evidenceId' -Description $Description)
+                runId = [string](Get-GaProperty -Object $gate -Path 'runId' -Description $Description)
+                node = [string](Get-GaProperty -Object $gate -Path 'node' -Description $Description)
+                exitCode = [long](Get-GaProperty -Object $gate -Path 'exitCode' -Description $Description)
+                tests = [ordered]@{
+                    passed = [long](Get-GaProperty -Object $gateTests -Path 'passed' -Description $Description)
+                    failed = [long](Get-GaProperty -Object $gateTests -Path 'failed' -Description $Description)
+                    ignored = [long](Get-GaProperty -Object $gateTests -Path 'ignored' -Description $Description)
+                }
+                startedAt = (Convert-GaRawLogInstant -Value (Get-GaProperty -Object $gate -Path 'startedAt' -Description $Description) -Description $Description).UtcDateTime.Ticks
+                endedAt = (Convert-GaRawLogInstant -Value (Get-GaProperty -Object $gate -Path 'endedAt' -Description $Description) -Description $Description).UtcDateTime.Ticks
+                testSelector = (Get-GaIssue5RunSelector -Run $gate -Description $Description)
+                command = Normalize-GaRawLogCommand -Command ([string](Get-GaProperty -Object $gate -Path 'command' -Description $Description))
+                markers = @((Get-GaIssue5GateMarkers -GateEvidence $gate -Description $Description) | Sort-Object)
+            }
+            $inventoryProperty = $gate.PSObject.Properties['blockerInventory']
+            if ($null -ne $inventoryProperty) {
+                $gateBinding[[string]$property.Name].blockerInventory = Get-GaBlockerInventoryBinding `
+                    -Inventory $inventoryProperty.Value `
+                    -Description "$Description.gates.$($property.Name).blockerInventory"
+            }
+        }
+        $binding.gates = $gateBinding
     }
     return [pscustomobject]$binding
 }
@@ -1825,6 +2502,13 @@ if ($ContractOnly) {
             -Description "$issueName raw-log content binding"
         if ($issueName -ceq 'issue5') {
             Assert-GaIssue5RawVerification -ManifestIssue $manifestIssue -RawRecord $rawRecord -Description 'downloaded GA raw-log verification issue5'
+        } elseif ($issueName -ceq 'issue2' -or $issueName -ceq 'issue3') {
+            [void](Assert-GaIssue23RawVerification `
+                -ManifestIssue $manifestIssue `
+                -RawRecord $rawRecord `
+                -IssueName $issueName `
+                -ExpectedCommit $ExpectedCommit `
+                -Description "downloaded GA raw-log verification $issueName")
         }
     }
     Assert-GaCondition ($seenRawIssues.Count -eq 3) 'downloaded GA raw-log verification covers issue2, issue3, and issue5'
