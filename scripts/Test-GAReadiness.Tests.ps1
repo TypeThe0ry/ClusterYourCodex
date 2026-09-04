@@ -409,6 +409,13 @@ Describe 'GA evidence issue acceptance contract' {
         ([string]$contractResult.checks[0].name) | Should Be 'workflow-contract'
     }
 
+    It 'preserves annotated stable tags through checkout ref rewriting' {
+        ([regex]::Matches($workflowSource, 'verification_ref="refs/verify/tags/\$CYC_GA_SOURCE_TAG"')).Count | Should Be 2
+        ([regex]::Matches($workflowSource, 'git fetch --no-tags --force origin "refs/tags/\$CYC_GA_SOURCE_TAG:\$verification_ref"')).Count | Should Be 2
+        ([regex]::Matches($workflowSource, 'git cat-file -t "refs/tags/\$CYC_GA_SOURCE_TAG"')).Count | Should Be 0
+        ([regex]::Matches($workflowSource, 'source_tag must be a stable vX\.Y\.Z tag')).Count | Should Be 2
+    }
+
     It 'requires the native Issue #5 selector guard before accepting a run' {
         $selectorGuardSource | Should Match 'issue5_selector_guard'
         $selectorGuardModuleSource | Should Match 'EXPECTED_SELECTORS'

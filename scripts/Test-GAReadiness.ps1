@@ -2187,6 +2187,8 @@ function Assert-GaWorkflowContract {
         'enforce_admins',
         'prevent_self_review',
         'git cat-file -t',
+        'refs/verify/tags/$CYC_GA_SOURCE_TAG',
+        'git fetch --no-tags --force origin',
         'source_tag must resolve to an annotated tag',
         'CYC_GA_SOURCE_TAG_OBJECT',
         'resolve_remote_tag_identity',

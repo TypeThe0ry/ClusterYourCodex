@@ -75,13 +75,20 @@ jobs:
             echo "source_tag must be a stable vX.Y.Z tag" >&2
             exit 1
           fi
-          if [[ "$(git cat-file -t "refs/tags/$CYC_GA_SOURCE_TAG")" != 'tag' ]]; then
+          # actions/checkout first fetches the annotated tag, then force-updates
+          # refs/tags/<tag> to the checked-out commit for detached HEAD. Verify
+          # the immutable remote tag through a separate local namespace instead
+          # of inspecting that temporary checkout ref.
+          verification_ref="refs/verify/tags/$CYC_GA_SOURCE_TAG"
+          git update-ref -d "$verification_ref" || true
+          git fetch --no-tags --force origin "refs/tags/$CYC_GA_SOURCE_TAG:$verification_ref"
+          if [[ "$(git cat-file -t "$verification_ref")" != 'tag' ]]; then
             echo "source_tag must resolve to an annotated tag" >&2
             exit 1
           fi
           head_commit="$(git rev-parse HEAD)"
-          tag_object="$(git rev-parse "refs/tags/$CYC_GA_SOURCE_TAG")"
-          tag_commit="$(git rev-parse "refs/tags/$CYC_GA_SOURCE_TAG^{commit}")"
+          tag_object="$(git rev-parse "$verification_ref")"
+          tag_commit="$(git rev-parse "$verification_ref^{commit}")"
           if [[ "$tag_commit" != "$head_commit" ]]; then
             echo "source tag does not resolve to the checked-out commit" >&2
             exit 1
@@ -318,13 +325,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$(git cat-file -t "refs/tags/$CYC_GA_SOURCE_TAG")" != 'tag' ]]; then
+          if [[ ! "$CYC_GA_SOURCE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "source_tag must be a stable vX.Y.Z tag" >&2
+            exit 1
+          fi
+          # actions/checkout may rewrite refs/tags/<tag> to the detached
+          # commit. Resolve the remote annotated tag through an isolated ref.
+          verification_ref="refs/verify/tags/$CYC_GA_SOURCE_TAG"
+          git update-ref -d "$verification_ref" || true
+          git fetch --no-tags --force origin "refs/tags/$CYC_GA_SOURCE_TAG:$verification_ref"
+          if [[ "$(git cat-file -t "$verification_ref")" != 'tag' ]]; then
             echo "source_tag must resolve to an annotated tag" >&2
             exit 1
           fi
           head_commit="$(git rev-parse HEAD)"
-          tag_object="$(git rev-parse "refs/tags/$CYC_GA_SOURCE_TAG")"
-          tag_commit="$(git rev-parse "refs/tags/$CYC_GA_SOURCE_TAG^{commit}")"
+          tag_object="$(git rev-parse "$verification_ref")"
+          tag_commit="$(git rev-parse "$verification_ref^{commit}")"
           test "$head_commit" = "$tag_commit"
           printf 'CYC_GA_SOURCE_COMMIT=%s\n' "$head_commit" >> "$GITHUB_ENV"
           printf 'CYC_GA_SOURCE_TAG_OBJECT=%s\n' "$tag_object" >> "$GITHUB_ENV"

@@ -13,6 +13,9 @@ are versioned independently from the product.
 
 - Verify annotated prerelease tags through an isolated fetched ref because the
   GitHub checkout action rewrites the normal tag ref to the detached commit.
+- Verify stable GA source tags through the same isolated fetched ref in both
+  protected GA jobs, so a future manual stable dispatch cannot be blocked by
+  checkout ref rewriting.
 - Wait for truthful scheduler CPU headroom before submitting the Windows live
   controller/worker round-trip job, avoiding transient capacity conflicts while
   preserving fail-closed resource accounting.
