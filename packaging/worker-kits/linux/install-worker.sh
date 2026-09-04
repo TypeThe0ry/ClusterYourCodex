@@ -579,19 +579,47 @@ verify_private_service_path_existing() {
   if [[ "$requested_scope" == system ]]; then
     # The system unit path is not private, but it is still an installer-owned
     # lifecycle target. Never follow a replaced systemd directory or unit
-    # during uninstall/repair, and never operate on a non-root unit as if it
-    # were ours.
+    # during uninstall/repair, and never operate on a writable systemd path as
+    # if it were ours. A root installer must not publish a unit through a
+    # group/world-writable directory or an existing group/world-writable unit.
+    local current current_mode current_owner
+    # service_path_for_scope already normalizes this path, but normalize the
+    # derived directory again before walking ancestors.  Besides making the
+    # boundary explicit, this keeps the acceptance fixture's redirected
+    # systemd root bound to the same canonical path used for the unit itself.
+    current="$(normalize_path "$unit_dir")"
+    while [[ "$current" != / ]]; do
+      if [[ -e "$current" || -L "$current" ]]; then
+        [[ -d "$current" && ! -L "$current" ]] || {
+          printf 'Existing system service directory is invalid: %s\n' "$current" >&2
+          return 1
+        }
+        current_mode="$(path_mode "$current" 2>/dev/null || true)"
+        current_owner="$(path_owner "$current" 2>/dev/null || true)"
+        if [[ "$current_owner" != 0 || ! "$current_mode" =~ ^[0-7]{3,4}$ ]] || (( 8#$current_mode & 022 )); then
+          printf 'Existing system service directory is weak or owned by another identity: %s\n' "$current" >&2
+          return 1
+        fi
+      fi
+      current="$(dirname -- "$current")"
+    done
+
     reject_link_chain "$unit"
     if [[ -e "$unit" || -L "$unit" ]]; then
       [[ -f "$unit" && ! -L "$unit" ]] || {
         printf 'Existing system service unit is invalid: %s\n' "$unit" >&2
         return 1
       }
+      mode="$(path_mode "$unit" 2>/dev/null || true)"
       owner="$(path_owner "$unit" 2>/dev/null || true)"
-      [[ "$owner" == 0 ]] || {
+      if [[ "$owner" != 0 ]]; then
         printf 'Existing system service unit is not owned by root: %s\n' "$unit" >&2
         return 1
-      }
+      fi
+      if [[ ! "$mode" =~ ^[0-7]{3,4}$ ]] || (( 8#$mode & 022 )); then
+        printf 'Existing system service unit is weak or group/world-writable: %s\n' "$unit" >&2
+        return 1
+      fi
     fi
     return 0
   fi

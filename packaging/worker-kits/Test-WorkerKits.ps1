@@ -1462,6 +1462,17 @@ case "${1:-}" in
   *) exit 2 ;;
 esac
 EOF
+cat >"$root/fake-bin/realpath" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+path="${@: -1}"
+if [[ -n "${CYC_FAKE_SYSTEMD_SERVICE_DIR:-}" &&
+      ( "$path" == /etc/systemd/system || "$path" == /etc/systemd/system/* ) ]]; then
+  printf '%s\n' "${CYC_FAKE_SYSTEMD_SERVICE_DIR}${path#/etc/systemd/system}"
+else
+  exec /usr/bin/realpath "$@"
+fi
+EOF
 cat >"$root/fake-root-bin/id" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1506,6 +1517,7 @@ fi
 EOF
 chmod +x "$root/fake-bin/systemctl"
 chmod +x "$root/fake-bin/loginctl"
+chmod +x "$root/fake-bin/realpath"
 chmod +x "$root/fake-bin/install"
 chmod +x "$root/fake-root-bin/id"
 cat >"$root/fake-bin/stat" <<'EOF'
@@ -1513,6 +1525,48 @@ cat >"$root/fake-bin/stat" <<'EOF'
 set -euo pipefail
 if [[ "${1:-}" == -c && $# -ge 3 ]]; then
   path="${@: -1}"
+  if [[ -n "${CYC_FAKE_SYSTEMD_SERVICE_DIR:-}" &&
+        "$path" == "$CYC_FAKE_SYSTEMD_SERVICE_DIR" &&
+        "${2:-}" == '%a' && -n "${CYC_FAKE_SYSTEMD_SERVICE_DIR_MODE:-}" ]]; then
+    printf '%s\n' "$CYC_FAKE_SYSTEMD_SERVICE_DIR_MODE"
+    exit 0
+  fi
+  if [[ -n "${CYC_FAKE_SYSTEMD_SERVICE_DIR:-}" &&
+        "$path" == "$CYC_FAKE_SYSTEMD_SERVICE_DIR" &&
+        "${2:-}" == '%u' && -n "${CYC_FAKE_SYSTEMD_SERVICE_DIR_OWNER:-}" ]]; then
+    printf '%s\n' "$CYC_FAKE_SYSTEMD_SERVICE_DIR_OWNER"
+    exit 0
+  fi
+  if [[ -n "${CYC_FAKE_SYSTEMD_SERVICE_DIR:-}" &&
+        "$CYC_FAKE_SYSTEMD_SERVICE_DIR" == /tmp/* && "$path" == /tmp &&
+        "${2:-}" == '%a' ]]; then
+    printf '0755\n'
+    exit 0
+  fi
+  if [[ -n "${CYC_FAKE_SYSTEMD_SERVICE_DIR:-}" &&
+        "$CYC_FAKE_SYSTEMD_SERVICE_DIR" == /tmp/* && "$path" == /tmp &&
+        "${2:-}" == '%u' ]]; then
+    printf '0\n'
+    exit 0
+  fi
+  if [[ -n "${CYC_FAKE_SYSTEMD_SERVICE_DIR:-}" &&
+        "$path" == "${CYC_FAKE_SYSTEMD_SERVICE_DIR%/*}" &&
+        ( "${2:-}" == '%a' || "${2:-}" == '%u' ) ]]; then
+    if [[ "${2:-}" == '%a' ]]; then printf '0755\n'; else printf '0\n'; fi
+    exit 0
+  fi
+  if [[ -n "${CYC_FAKE_SYSTEMD_SERVICE_DIR:-}" &&
+        "$path" == "$CYC_FAKE_SYSTEMD_SERVICE_DIR/clusteryourcodex-worker.service" &&
+        "${2:-}" == '%a' && -n "${CYC_FAKE_SYSTEMD_SERVICE_UNIT_MODE:-}" ]]; then
+    printf '%s\n' "$CYC_FAKE_SYSTEMD_SERVICE_UNIT_MODE"
+    exit 0
+  fi
+  if [[ -n "${CYC_FAKE_SYSTEMD_SERVICE_DIR:-}" &&
+        "$path" == "$CYC_FAKE_SYSTEMD_SERVICE_DIR/clusteryourcodex-worker.service" &&
+        "${2:-}" == '%u' && -n "${CYC_FAKE_SYSTEMD_SERVICE_UNIT_OWNER:-}" ]]; then
+    printf '%s\n' "$CYC_FAKE_SYSTEMD_SERVICE_UNIT_OWNER"
+    exit 0
+  fi
   if [[ "${CYC_FAKE_LAUNCHCTL_PRIVATE_PATHS:-0}" == 1 &&
         "${2:-}" == '%a' &&
         "$path" == */Library/LaunchAgents ]]; then
@@ -1770,7 +1824,14 @@ test ! -e "$interrupted_data/.repair-transaction.removing"
 test ! -e "$CYC_FAKE_SYSTEMD_ROOT/linger-enabled"
 
 # Root + auto resolves to system scope without probing or modifying a user
-# manager. This is an unpaired preinstall, so it must not touch systemd.
+# manager. This is an unpaired preinstall, so it must not touch systemd. Bind
+# the fake canonical systemd path before this first system-scope preflight so
+# the fixture never inspects or mutates the host's /etc tree.
+system_service_dir="$root/fake-system-service"
+mkdir -p "$system_service_dir"
+export CYC_FAKE_SYSTEMD_SERVICE_DIR="$system_service_dir"
+export CYC_FAKE_SYSTEMD_SERVICE_DIR_OWNER=0
+export CYC_FAKE_SYSTEMD_SERVICE_DIR_MODE=0755
 root_login_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log")"
 root_systemctl_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log")"
 root_receipt="$(CYC_WORKER_KIT_TEST_ROOT_MODE=1 PATH="$root/fake-root-bin:$PATH" "$good/install-worker.sh" install \
@@ -1784,6 +1845,76 @@ root_login_lines_after="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/loginctl.log")"
 root_systemctl_lines_after="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log")"
 test "$root_login_lines_before" = "$root_login_lines_after"
 test "$root_systemctl_lines_before" = "$root_systemctl_lines_after"
+
+# A root/system install must only use a root-owned systemd path with no
+# group/world write bit. Redirect the canonical /etc path through the fake
+# realpath shim so this regression does not touch the host's /etc tree.
+export CYC_FAKE_SYSTEMD_SERVICE_DIR_OWNER=0
+export CYC_FAKE_SYSTEMD_SERVICE_DIR_MODE=0777
+set +e
+CYC_WORKER_KIT_TEST_ROOT_MODE=1 PATH="$root/fake-root-bin:$PATH" "$good/install-worker.sh" install --scope system \
+  --bundle-root "$good" \
+  --install-root "$root/linux-system-weak-install" \
+  --data-root "$root/linux-system-weak-data" \
+  --workspace-root "$root/linux-system-weak-workspace" \
+  >"$root/linux-system-weak.stdout" 2>"$root/linux-system-weak.stderr"
+weak_system_service_exit=$?
+set -e
+test "$weak_system_service_exit" -ne 0
+grep -q 'Existing system service directory is weak or owned by another identity' "$root/linux-system-weak.stderr"
+test ! -e "$root/linux-system-weak-install"
+test ! -e "$root/linux-system-weak-data"
+test ! -e "$root/linux-system-weak-workspace"
+
+export CYC_FAKE_SYSTEMD_SERVICE_DIR_MODE=0755
+system_receipt="$(CYC_WORKER_KIT_TEST_ROOT_MODE=1 PATH="$root/fake-root-bin:$PATH" "$good/install-worker.sh" install --scope system \
+  --bundle-root "$good" \
+  --install-root "$root/linux-system-install" \
+  --data-root "$root/linux-system-data" \
+  --workspace-root "$root/linux-system-workspace")"
+printf '%s' "$system_receipt" | grep -q '"scope":"system"'
+printf '%s' "$system_receipt" | grep -q '"serviceEnabled":false'
+
+# A root-owned but group/world-writable existing unit is rejected, while a
+# normal 0644 unit passes the path preflight and then reaches the ordinary
+# unowned-overwrite guard. Both cases stay before any state mutation.
+system_unit="$system_service_dir/clusteryourcodex-worker.service"
+printf '%s\n' 'FOREIGN_SYSTEM_UNIT' >"$system_unit"
+export CYC_FAKE_SYSTEMD_SERVICE_UNIT_OWNER=0
+export CYC_FAKE_SYSTEMD_SERVICE_UNIT_MODE=0666
+set +e
+CYC_WORKER_KIT_TEST_ROOT_MODE=1 PATH="$root/fake-root-bin:$PATH" "$good/install-worker.sh" install --scope system \
+  --bundle-root "$good" \
+  --install-root "$root/linux-system-weak-unit-install" \
+  --data-root "$root/linux-system-weak-unit-data" \
+  --workspace-root "$root/linux-system-weak-unit-workspace" \
+  >"$root/linux-system-weak-unit.stdout" 2>"$root/linux-system-weak-unit.stderr"
+weak_system_unit_exit=$?
+set -e
+test "$weak_system_unit_exit" -ne 0
+grep -q 'Existing system service unit is weak or group/world-writable' "$root/linux-system-weak-unit.stderr"
+test ! -e "$root/linux-system-weak-unit-install"
+test ! -e "$root/linux-system-weak-unit-data"
+test ! -e "$root/linux-system-weak-unit-workspace"
+
+export CYC_FAKE_SYSTEMD_SERVICE_UNIT_MODE=0644
+set +e
+CYC_WORKER_KIT_TEST_ROOT_MODE=1 PATH="$root/fake-root-bin:$PATH" "$good/install-worker.sh" install --scope system \
+  --bundle-root "$good" \
+  --install-root "$root/linux-system-normal-unit-install" \
+  --data-root "$root/linux-system-normal-unit-data" \
+  --workspace-root "$root/linux-system-normal-unit-workspace" \
+  >"$root/linux-system-normal-unit.stdout" 2>"$root/linux-system-normal-unit.stderr"
+normal_system_unit_exit=$?
+set -e
+test "$normal_system_unit_exit" -ne 0
+grep -q 'Refusing to overwrite a worker or service not owned by this installer' "$root/linux-system-normal-unit.stderr"
+test ! -e "$root/linux-system-normal-unit-install"
+test ! -e "$root/linux-system-normal-unit-data"
+test ! -e "$root/linux-system-normal-unit-workspace"
+rm -f -- "$system_unit"
+unset CYC_FAKE_SYSTEMD_SERVICE_DIR CYC_FAKE_SYSTEMD_SERVICE_DIR_OWNER CYC_FAKE_SYSTEMD_SERVICE_DIR_MODE
+unset CYC_FAKE_SYSTEMD_SERVICE_UNIT_OWNER CYC_FAKE_SYSTEMD_SERVICE_UNIT_MODE
 
 preinstall="$(/bin/sh "$good/install-worker.sh" -- install --bundle-root "$good")"
 printf '%s' "$preinstall" | grep -q '"paired":false'
@@ -2873,7 +3004,7 @@ test ! -e "$default_logs"
         }
     }
     $linuxSource = Get-Content -LiteralPath $linuxInstaller -Raw
-    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'private_dir', 'verify_private_dir_existing', 'verify_private_file_existing', 'verify_private_state_tree', 'path_mode', 'path_owner', 'verify_private_config', 'verify_private_service_path_existing', 'reject_pending_service_transactions', 'service_activity_state_for_scope', 'service_enabled_state_for_scope', 'Existing private directory is weak or owned by another identity', 'Existing user service directory is weak or owned by another identity', 'Existing user service unit is weak or owned by another identity', 'Existing system service unit is invalid', 'Existing system service unit is not owned by root', 'Existing worker config is weak or owned by another identity', 'Private transaction state root is not a normal directory', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'TRANSACTION_TOMBSTONE_SCHEMA', 'TRANSACTION_TOMBSTONE_RETIRED', 'TRANSACTION_RETIRE_NAME', 'assert_transaction_retirement_tree_safe', 'rollback_tombstone_valid_for_transaction', 'validate_retired_transaction', 'after-pair', 'after-service-registration', 'before-manifest-write', 'after-marker-removal', 'remove_service', 'systemctl is required to verify the worker service is stopped safely', 'Worker service state is unknown; refusing to remove unit', 'Worker service remained active after disable; refusing to remove unit', 'Worker service state is unknown after disable; refusing to remove unit', 'Worker service disable failed; refusing to remove unit', 'Worker service uninstall transaction path already exists', 'Worker service uninstall could not stage its unit transaction', 'Worker service uninstall could not restore its unit after daemon-reload failure', 'Worker service uninstall restored its unit but daemon-reload failed after pending-file retirement failure', 'Worker service uninstall could not retire its staged unit transaction', 'cyc-uninstall', 'systemd daemon-reload failed after removing the worker unit', 'service_path_for_scope', 'servicePath', 'Installer service path does not match the existing owned installation.', 'Installer scope does not match the existing owned installation.', 'Recorded system scope requires root.', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot', 'KillMode=control-group', 'marker-existed', 'marker-existed=0', 'Owned worker install manifest is missing or unsafe.')) {
+    foreach ($requiredPattern in @('exec /bin/bash "$0" "$@"', '== --', 'sha256sum --check --strict', 'reject_link_chain', 'private_dir', 'verify_private_dir_existing', 'verify_private_file_existing', 'verify_private_state_tree', 'path_mode', 'path_owner', 'verify_private_config', 'verify_private_service_path_existing', 'reject_pending_service_transactions', 'service_activity_state_for_scope', 'service_enabled_state_for_scope', 'Existing private directory is weak or owned by another identity', 'Existing user service directory is weak or owned by another identity', 'Existing user service unit is weak or owned by another identity', 'Existing system service directory is weak or owned by another identity', 'Existing system service unit is invalid', 'Existing system service unit is not owned by root', 'Existing system service unit is weak or group/world-writable', 'current="$(normalize_path "$unit_dir")"', 'Existing worker config is weak or owned by another identity', 'Private transaction state root is not a normal directory', 'committed=0', 'begin_transaction', 'restore_transaction', 'TRANSACTION_SCHEMA', 'TRANSACTION_TOMBSTONE_SCHEMA', 'TRANSACTION_TOMBSTONE_RETIRED', 'TRANSACTION_RETIRE_NAME', 'assert_transaction_retirement_tree_safe', 'rollback_tombstone_valid_for_transaction', 'validate_retired_transaction', 'after-pair', 'after-service-registration', 'before-manifest-write', 'after-marker-removal', 'remove_service', 'systemctl is required to verify the worker service is stopped safely', 'Worker service state is unknown; refusing to remove unit', 'Worker service remained active after disable; refusing to remove unit', 'Worker service state is unknown after disable; refusing to remove unit', 'Worker service disable failed; refusing to remove unit', 'Worker service uninstall transaction path already exists', 'Worker service uninstall could not stage its unit transaction', 'Worker service uninstall could not restore its unit after daemon-reload failure', 'Worker service uninstall restored its unit but daemon-reload failed after pending-file retirement failure', 'Worker service uninstall could not retire its staged unit transaction', 'cyc-uninstall', 'systemd daemon-reload failed after removing the worker unit', 'service_path_for_scope', 'servicePath', 'Installer service path does not match the existing owned installation.', 'Installer scope does not match the existing owned installation.', 'Recorded system scope requires root.', 'loginctl enable-linger', 'require_user_systemd_ready', 'systemctl --user show-environment', 'CYC-LINUX-USER-SYSTEMD-UNAVAILABLE', 'EXIT_USER_SYSTEMD_UNAVAILABLE=78', '--pair-only', '--allow-on-battery', '--workspace-root', '--repair', 'config_existed_before_pair', 'expected_names', 'worker-kit file set', 'manifest target', 'expected_files', 'manifest payload digest', 'validate_owned_manifest', 'Installer paths do not match the existing owned installation.', 'installRoot', 'dataRoot', 'workspaceRoot', 'KillMode=control-group', 'marker-existed', 'marker-existed=0', 'Owned worker install manifest is missing or unsafe.')) {
         if ($linuxSource -notmatch [regex]::Escape($requiredPattern)) {
             throw "Linux worker installer is missing rollback/integrity guard: $requiredPattern"
         }

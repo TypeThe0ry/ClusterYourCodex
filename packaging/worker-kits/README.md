@@ -251,7 +251,10 @@ rollback, `.repair-transaction.tombstone` and the private
 cleanup; malformed, symlinked, mismatched, or foreign state remains fail
 closed. Linux systemd units also set `KillMode=control-group` explicitly so
 stopping or removing the unit terminates every process still in that unit's
-cgroup. The gated macOS
+cgroup. For `--scope system`, existing systemd service-path components and an
+existing worker unit must be root-owned and free of group/world write bits;
+the installer fails closed before service mutation otherwise. Normal `0755`
+directories and `0644` unit files satisfy this preflight. The gated macOS
 LaunchAgent plist carries the corresponding explicit
 `AbandonProcessGroup=false` contract; live LaunchAgent teardown remains an
 external acceptance gate.

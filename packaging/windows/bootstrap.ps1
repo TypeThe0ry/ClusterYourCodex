@@ -339,6 +339,45 @@ function Get-PayloadFiles {
     }
 }
 
+function Get-CycRegularDirectories {
+    <#
+    Enumerate an existing tree without using Get-ChildItem -Recurse.  Windows
+    PowerShell can return a junction from a recursive enumeration and then
+    follow it when the returned path is inspected.  Install/uninstall cleanup
+    must fail closed on any reparse point instead of reading or deleting
+    through a foreign tree.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $resolved = Resolve-NormalizedPath $Root
+    $rootItem = $null
+    try {
+        $rootItem = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        return
+    }
+    if (-not $rootItem.PSIsContainer -or (Test-ReparsePoint $rootItem)) {
+        throw "Owned directory tree root is not a normal directory: $resolved"
+    }
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $pending.Push($resolved)
+    while ($pending.Count -gt 0) {
+        $current = $pending.Pop()
+        $currentItem = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+        if (-not $currentItem.PSIsContainer -or (Test-ReparsePoint $currentItem)) {
+            throw "Owned directory tree contains a reparse point: $current"
+        }
+        Write-Output $currentItem
+        foreach ($child in @(Get-ChildItem -LiteralPath $current -Force -ErrorAction Stop)) {
+            if (Test-ReparsePoint $child) {
+                throw "Owned directory tree contains a reparse point: $($child.FullName)"
+            }
+            if ($child.PSIsContainer) {
+                $pending.Push($child.FullName)
+            }
+        }
+    }
+}
+
 function Get-CycSha256Hex {
     param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes)
     if ($null -eq $Bytes) { $Bytes = [byte[]]@() }
@@ -3919,6 +3958,10 @@ function Remove-OwnedFiles {
     if (-not [string]::Equals((Resolve-NormalizedPath $Manifest.installRoot), $root, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw 'Manifest install root does not match the requested install root.'
     }
+    # Preflight the complete existing tree before removing even one manifest
+    # file.  This keeps a hostile reparse point from being discovered only
+    # after cleanup has already partially mutated the installation.
+    $directories = @(Get-CycRegularDirectories -Root $root | Sort-Object FullName -Descending)
     foreach ($file in @($Manifest.files)) {
         $relative = [string]$file.relativePath
         if ($KeepRelativePaths -contains $relative) { continue }
@@ -3927,15 +3970,19 @@ function Remove-OwnedFiles {
             Remove-Item -LiteralPath $target -Force
         }
     }
-    if (Test-Path -LiteralPath $root -PathType Container) {
-        $directories = @(Get-ChildItem -LiteralPath $root -Directory -Recurse -Force | Sort-Object FullName -Descending)
-        foreach ($directory in $directories) {
-            if (-not (Get-ChildItem -LiteralPath $directory.FullName -Force | Select-Object -First 1)) {
-                Remove-Item -LiteralPath $directory.FullName -Force
+    foreach ($directory in $directories) {
+        $directoryItem = Get-Item -LiteralPath $directory.FullName -Force -ErrorAction Stop
+        if (Test-ReparsePoint $directoryItem) {
+            throw "Owned directory tree contains a reparse point: $($directory.FullName)"
+        }
+        $children = @(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction Stop)
+        foreach ($child in $children) {
+            if (Test-ReparsePoint $child) {
+                throw "Owned directory tree contains a reparse point: $($child.FullName)"
             }
         }
-        if (-not (Get-ChildItem -LiteralPath $root -Force | Select-Object -First 1)) {
-            Remove-Item -LiteralPath $root -Force
+        if ($children.Count -eq 0) {
+            Remove-Item -LiteralPath $directory.FullName -Force
         }
     }
 }
@@ -4756,6 +4803,10 @@ function New-FileRollbackSnapshot {
     $transactionRoot = Join-Path $transactionsRoot ([Guid]::NewGuid().ToString('N'))
     [void](Assert-ChildPath -Root $transactionsRoot -Candidate $transactionRoot)
     Assert-CycCreationPathNoReparse -Path $transactionsRoot
+    # Snapshotting happens before uninstall removes owned files.  Validate the
+    # existing install tree first so Copy-Item cannot follow a hostile file or
+    # directory reparse point into a path outside the product root.
+    $null = @(Get-CycRegularDirectories -Root $Plan.installRoot)
     Set-PrivateDirectoryAcl -Path $transactionsRoot
     Assert-CycCreationPathNoReparse -Path $transactionRoot
     [void](New-Item -ItemType Directory -Path $transactionRoot -Force)
@@ -4766,8 +4817,19 @@ function New-FileRollbackSnapshot {
     foreach ($relative in $relativePaths) {
         $target = Assert-ChildPath -Root $Plan.installRoot -Candidate (Join-Path $Plan.installRoot $relative)
         $backup = Assert-ChildPath -Root $transactionRoot -Candidate (Join-Path $transactionRoot (Join-Path 'files' $relative))
-        $existed = Test-Path -LiteralPath $target -PathType Leaf
-        if ((Test-Path -LiteralPath $target) -and -not $existed) {
+        Assert-CycCreationPathNoReparse -Path $target
+        $targetItem = $null
+        try {
+            $targetItem = Get-Item -LiteralPath $target -Force -ErrorAction Stop
+        } catch [System.Management.Automation.ItemNotFoundException] {
+            # A missing owned file is a valid snapshot record for a fresh
+            # install or a partially-created previous attempt.
+        }
+        if ($null -ne $targetItem -and (Test-ReparsePoint $targetItem)) {
+            throw "Owned file path must not be a reparse point: $target"
+        }
+        $existed = $null -ne $targetItem -and -not $targetItem.PSIsContainer
+        if ($null -ne $targetItem -and -not $existed) {
             throw "Owned file path is not a regular file: $target"
         }
         if ($existed) {

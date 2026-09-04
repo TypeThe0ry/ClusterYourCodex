@@ -2855,6 +2855,16 @@ mod tests {
     use tempfile::tempdir;
     use uuid::Uuid;
 
+    // The first transport callback follows several protected-file operations.
+    // On Windows each ACL apply/verify launches PowerShell, and cold hosted
+    // runners can spend more than a minute before the callback is reached.
+    // Keep a finite bound for deadlock detection while giving that setup
+    // enough headroom; Unix keeps the shorter fail-fast bound.
+    #[cfg(windows)]
+    const PAIRING_TEST_ENTRY_TIMEOUT: Duration = Duration::from_secs(180);
+    #[cfg(not(windows))]
+    const PAIRING_TEST_ENTRY_TIMEOUT: Duration = Duration::from_secs(60);
+
     fn worker_config(directory: &tempfile::TempDir) -> WorkerConfig {
         let workspace = directory.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
@@ -3946,7 +3956,7 @@ mod tests {
             )
             .await
         });
-        tokio::time::timeout(Duration::from_secs(60), entered)
+        tokio::time::timeout(PAIRING_TEST_ENTRY_TIMEOUT, entered)
             .await
             .unwrap();
 
@@ -4012,7 +4022,7 @@ mod tests {
             )
             .await
         });
-        tokio::time::timeout(Duration::from_secs(60), entered)
+        tokio::time::timeout(PAIRING_TEST_ENTRY_TIMEOUT, entered)
             .await
             .unwrap();
         let second_transport = transport.clone();
@@ -4093,7 +4103,7 @@ mod tests {
             )
             .await
         });
-        tokio::time::timeout(Duration::from_secs(60), entered)
+        tokio::time::timeout(PAIRING_TEST_ENTRY_TIMEOUT, entered)
             .await
             .unwrap();
 

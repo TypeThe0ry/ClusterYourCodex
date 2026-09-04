@@ -263,6 +263,46 @@ try {
     Assert-True ($plan.agentsIntegration.agentsPath -eq (Join-Path $codexHome 'AGENTS.md')) 'global AGENTS.md is scoped to the selected Codex home'
     Assert-True ($plan.agentsIntegration.templateRelativePath -eq 'integrations/codex/cluster-agents-block.md') 'managed block template is an owned payload file'
 
+    # The uninstall/snapshot path must reject an install-root reparse point
+    # before it enumerates or copies any owned file.  In Windows PowerShell
+    # 5.1, Get-ChildItem -Recurse returns the junction and a later literal-path
+    # inspection follows it into the foreign tree.
+    $reparseInstallRoot = Join-Path $testRoot 'reparse-install-root'
+    $reparseForeignRoot = Join-Path $testRoot 'reparse-foreign-root'
+    $reparseJunction = Join-Path $reparseInstallRoot 'foreign-link'
+    [void](New-Item -ItemType Directory -Path $reparseInstallRoot,$reparseForeignRoot -Force)
+    [System.IO.File]::WriteAllText((Join-Path $reparseForeignRoot 'outside.txt'), 'outside')
+    [void](New-Item -ItemType Junction -Path $reparseJunction -Target $reparseForeignRoot -Force)
+    try {
+        Assert-ThrowsLike `
+            -Action { @(Get-CycRegularDirectories -Root $reparseInstallRoot) } `
+            -Pattern 'reparse' `
+            -Message 'owned directory walker rejects install-root junctions before traversal'
+        $reparseManifest = [PSCustomObject]@{
+            installRoot = $reparseInstallRoot
+            files = @()
+        }
+        Assert-ThrowsLike `
+            -Action {
+                Remove-OwnedFiles `
+                    -Manifest $reparseManifest `
+                    -ExpectedInstallRoot $reparseInstallRoot
+            } `
+            -Pattern 'reparse' `
+            -Message 'owned-file cleanup fails closed before touching an install-root junction'
+        Assert-True (Test-Path -LiteralPath $reparseJunction) 'reparse-point cleanup rejection leaves the foreign junction untouched'
+    } finally {
+        if (Test-Path -LiteralPath $reparseJunction) {
+            Remove-Item -LiteralPath $reparseJunction -Force
+        }
+        if (Test-Path -LiteralPath $reparseInstallRoot) {
+            Remove-Item -LiteralPath $reparseInstallRoot -Recurse -Force
+        }
+        if (Test-Path -LiteralPath $reparseForeignRoot) {
+            Remove-Item -LiteralPath $reparseForeignRoot -Recurse -Force
+        }
+    }
+
     $networkConfigurations = @(
         [PSCustomObject]@{
             InterfaceIndex = 3
@@ -4363,6 +4403,20 @@ exit 91
     Assert-True ($payloadEnumerator.Success -and $payloadEnumerator.Value -match 'Stack\[string\]' -and
         $payloadEnumerator.Value -match 'Get-ChildItem -LiteralPath \$current' -and
         $payloadEnumerator.Value -notmatch 'Get-ChildItem -LiteralPath \$bundle -Recurse') 'bootstrap walks payload directories without recursively following reparse points'
+    $ownedTreeEnumerator = [regex]::Match($bootstrapSource, 'function Get-CycRegularDirectories[\s\S]+?function Get-CycSha256Hex')
+    Assert-True ($ownedTreeEnumerator.Success -and
+        $ownedTreeEnumerator.Value -match 'Stack\[string\]' -and
+        $ownedTreeEnumerator.Value -match 'Test-ReparsePoint' -and
+        $ownedTreeEnumerator.Value -match 'Get-ChildItem -LiteralPath \$current' -and
+        $ownedTreeEnumerator.Value -notmatch 'Get-ChildItem -LiteralPath \$resolved -Recurse') 'owned install-tree cleanup walks regular directories without recursively following reparse points'
+    $ownedCleanup = [regex]::Match($bootstrapSource, 'function Remove-OwnedFiles[\s\S]+?function Install-PlannedFiles')
+    Assert-True ($ownedCleanup.Success -and
+        $ownedCleanup.Value -match 'Get-CycRegularDirectories\s+-Root\s+\$root' -and
+        $ownedCleanup.Value -notmatch 'Get-ChildItem -LiteralPath \$root -Directory -Recurse') 'owned-file cleanup preflights and removes only a reparse-free install tree'
+    $rollbackSnapshot = [regex]::Match($bootstrapSource, 'function New-FileRollbackSnapshot[\s\S]+?function Restore-FileRollbackSnapshot')
+    Assert-True ($rollbackSnapshot.Success -and
+        $rollbackSnapshot.Value -match 'Get-CycRegularDirectories\s+-Root\s+\$Plan\.installRoot' -and
+        $rollbackSnapshot.Value -match 'Owned file path must not be a reparse point') 'rollback snapshot rejects install-tree reparse points before Copy-Item'
     $fileHashFunction = [regex]::Match($bootstrapSource, 'function Get-CycFileHash[\s\S]+?function ConvertTo-CycStrictRelativePath')
     Assert-True ($fileHashFunction.Success -and
         $fileHashFunction.Value -match 'SHA256\]::Create' -and
