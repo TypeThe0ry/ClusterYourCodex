@@ -934,6 +934,9 @@ Describe 'GA evidence issue acceptance contract' {
         $rawLogSource | Should Match 'ga-issue3-gate-contract\.json'
         $workflowSource | Should Match 'slurpfile issue3contract'
         $workflowSource | Should Match 'issue3_gate_semantics_valid'
+        $rawContractMatch = [regex]::Match($workflowSource, '(?s)cat > "\$raw_verification_contract" <<''JQ''\r?\n(?<body>.*?)\r?\n\s*JQ')
+        $rawContractMatch.Success | Should Be $true
+        $rawContractMatch.Groups['body'].Value | Should Match 'then issue3_gate_semantics_valid\(\$entry; \$gate\)'
     }
 
     It 'rejects Issue #3 evidence with a self-consistent but wrong platform' {
@@ -1221,6 +1224,19 @@ Describe 'GA evidence issue acceptance contract' {
                 [void]$blockerRecord.PSObject.Properties.Remove('blockerInventory')
                 Assert-TestThrows {
                     Assert-GaIssue23RawVerification -ManifestIssue $record -RawRecord $missingInventory -IssueName $case.issue -ExpectedCommit $expectedCommitForTest -Description "$($case.issue) raw-summary missing blocker inventory"
+                }
+            } else {
+                $semanticDrift = (($rawSummary | ConvertTo-Json -Depth 30) | ConvertFrom-Json)
+                $driftGate = @($semanticDrift.gateEvidence | Where-Object { [string]$_.gate -ceq 'linuxSystemdUserServicePackage' })[0]
+                $driftGate.hostArchitecture = 'aarch64'
+                $driftGate.rustTarget = 'aarch64-unknown-linux-gnu'
+                $driftGate.kitTarget = 'linux-aarch64'
+                $driftGate.markers = @(
+                    (Get-GaIssue23GateMarker -IssueName 'issue3' -Gate 'linuxSystemdUserServicePackage' -Command ([string]$driftGate.command)),
+                    (Get-GaIssue3SemanticMarker -Gate 'linuxSystemdUserServicePackage' -Platform ([string]$driftGate.platform) -HostArchitecture ([string]$driftGate.hostArchitecture) -Architecture ([string]$driftGate.architecture) -Target ([string]$driftGate.target) -CoverageTargets @($driftGate.coverageTargets) -RustTarget ([string]$driftGate.rustTarget) -KitTarget ([string]$driftGate.kitTarget) -Operation ([string]$driftGate.operation) -Command ([string]$driftGate.command) -Selector ([string]$driftGate.testSelector))
+                )
+                Assert-TestThrows {
+                    Assert-GaIssue23RawVerification -ManifestIssue $record -RawRecord $semanticDrift -IssueName $case.issue -ExpectedCommit $expectedCommitForTest -Description "$($case.issue) raw-summary semantic drift"
                 }
             }
         }

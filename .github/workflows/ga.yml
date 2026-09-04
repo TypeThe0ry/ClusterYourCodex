@@ -1266,10 +1266,13 @@ jobs:
               and (issue23_selector_value($entry) | nonempty_string(.))
               and nonempty_string($entry.command)
               and issue23_markers_valid(issue23_marker_array($entry))
-              and ([ issue23_marker_array($entry)[] |
-                     select(test("^CYC-GA-" + ($issue | ascii_upcase) + "\\|gate=" + $gate + "\\|commandSha256=[0-9a-fA-F]{64}\\|status=passed$"))
-                   ] | length == 1)
-              and (if ($issue == "issue2" and $gate == "noOpenUnwaivedP0P1Blocker") then
+               and ([ issue23_marker_array($entry)[] |
+                      select(test("^CYC-GA-" + ($issue | ascii_upcase) + "\\|gate=" + $gate + "\\|commandSha256=[0-9a-fA-F]{64}\\|status=passed$"))
+                    ] | length == 1)
+               and (if ($issue == "issue3")
+                    then issue3_gate_semantics_valid($entry; $gate)
+                    else true end)
+               and (if ($issue == "issue2" and $gate == "noOpenUnwaivedP0P1Blocker") then
                      (($entry | has("blockerInventory")) and blocker_inventory_valid($entry.blockerInventory))
                    elif ($entry | has("blockerInventory")) then false
                    else true end);

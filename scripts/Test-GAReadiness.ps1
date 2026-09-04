@@ -1083,9 +1083,24 @@ function Assert-GaIssue23RawVerification {
         }
         Assert-GaCondition ((Normalize-GaRawLogCommand -Command ([string]$verifiedGateContract.command)).Equals(
                 (Normalize-GaRawLogCommand -Command ([string]$manifestGate.command)), [StringComparison]::Ordinal)) "$Description.gateEvidence.$gateName.command must match the manifest"
+        if ($IssueName -ceq 'issue3') {
+            # The raw summary is an independently materialized object. Rebind
+            # every Issue #3 v2 semantic field to the source-bound manifest so
+            # a self-consistent but semantically different marker cannot pass.
+            foreach ($field in @('platform', 'hostArchitecture', 'architecture', 'target', 'rustTarget', 'kitTarget', 'operation', 'commandId', 'selectorId')) {
+                Assert-GaCondition ([string]$verifiedGateContract.$field -ceq [string]$manifestGate.$field) "$Description.gateEvidence.$gateName.$field must match the manifest"
+            }
+            $manifestCoverage = @($manifestGate.coverageTargets | ForEach-Object { [string]$_ })
+            $verifiedCoverage = @($verifiedGateContract.coverageTargets | ForEach-Object { [string]$_ })
+            Assert-GaCondition (($verifiedCoverage -join ',') -ceq ($manifestCoverage -join ',')) "$Description.gateEvidence.$gateName.coverageTargets must match the manifest"
+            $manifestPlatforms = @($manifestGate.platforms | ForEach-Object { [string]$_ })
+            $verifiedPlatforms = @($verifiedGateContract.platforms | ForEach-Object { [string]$_ })
+            Assert-GaCondition (($verifiedPlatforms -join ',') -ceq ($manifestPlatforms -join ',')) "$Description.gateEvidence.$gateName.platforms must match the manifest"
+        }
         foreach ($marker in @($manifestGate.markers)) {
             Assert-GaCondition (@($verifiedGateContract.markers | Where-Object { [string]$_ -ceq [string]$marker }).Count -eq 1) "$Description.gateEvidence.$gateName.markers must retain the manifest marker '$marker'"
         }
+        Assert-GaCondition ((@($verifiedGateContract.markers | Sort-Object) -join "`n") -ceq (@($manifestGate.markers | Sort-Object) -join "`n")) "$Description.gateEvidence.$gateName.markers must match the manifest marker set exactly"
         if ($IssueName -ceq 'issue2' -and $gateName -ceq 'noOpenUnwaivedP0P1Blocker') {
             $manifestInventory = Get-GaProperty -Object $manifestGate -Path 'blockerInventory' -Description $Description
             $verifiedInventory = Get-GaProperty -Object $verifiedGateContract -Path 'blockerInventory' -Description $Description
