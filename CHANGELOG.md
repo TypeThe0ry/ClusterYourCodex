@@ -7,6 +7,26 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.82] - 2026-09-05
+
+### Fixed
+
+- Give the Windows controller/worker live acceptance fixture bounded cold-start
+  headroom by raising its disposable JobSpec timeout from 60 to 300 seconds;
+  the production worker and step timeout semantics remain unchanged.
+- Raise the CI and tagged-preview harness deadline to 360 seconds so a slow
+  hosted Windows PowerShell/JIT startup cannot be reported as a false negative
+  after the fixture's own fail-closed timeout has been extended.
+
+### Tests
+
+- Main CI run 33914624727 passed all ten Linux, macOS, Windows, MSRV, native
+  worker-kit, desktop, and live controller/worker jobs.
+- Exact-SHA P1 validation at commit 5f796697794165cd4a282ddcfd9755176c524621
+  passed Rust 1.98 fmt, clippy, workspace tests/build, and the live Linux
+  controller/worker round trip with route, artifact, cleanup, and secret-scan
+  checks enabled.
+
 ## [0.1.0-preview.81] - 2026-09-04
 
 ### Fixed
@@ -1057,7 +1077,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.81...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.82...HEAD
+[0.1.0-preview.82]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.81...v0.1.0-preview.82
 [0.1.0-preview.81]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.80...v0.1.0-preview.81
 [0.1.0-preview.80]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.79...v0.1.0-preview.80
 [0.1.0-preview.79]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.78...v0.1.0-preview.79
