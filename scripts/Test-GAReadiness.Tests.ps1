@@ -615,6 +615,55 @@ Describe 'GA evidence issue acceptance contract' {
         $result.endedAt | Should Match '^2026-08-30T14:01:00\.\d{7}Z$'
     }
 
+    It 'serializes every materialized DateTime at the verification boundary as UTC ISO' {
+        $startedAt = [DateTime]::Parse(
+            '2026-08-30T14:00:00Z',
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind)
+        $endedAt = [DateTime]::Parse(
+            '2026-08-30T14:01:00Z',
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind)
+        $record = [ordered]@{
+            content = [pscustomobject]@{
+                startedAt = $startedAt
+                endedAt = $endedAt
+                gate = [pscustomobject]@{
+                    startedAt = $startedAt
+                    endedAt = $endedAt
+                }
+                runs = @([pscustomobject]@{
+                        startedAt = $startedAt
+                        endedAt = $endedAt
+                    })
+            }
+            blockerInventory = [pscustomobject]@{
+                reviewedAt = $startedAt
+                expiresAt = $endedAt
+            }
+        }
+
+        $oldCulture = [Globalization.CultureInfo]::CurrentCulture
+        try {
+            [Globalization.CultureInfo]::CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo('fr-FR')
+            $normalized = Convert-RawLogJsonValueToInvariantIso -Value $record -Description 'verification.date-time-regression'
+            $json = $normalized | ConvertTo-Json -Depth 10 -Compress
+        } finally {
+            [Globalization.CultureInfo]::CurrentCulture = $oldCulture
+        }
+
+        $json | Should Not Match '/Date\('
+        ([regex]::Matches($json, '2026-08-30T14:00:00\.0000000Z')).Count | Should Be 4
+        ([regex]::Matches($json, '2026-08-30T14:01:00\.0000000Z')).Count | Should Be 4
+
+        $unspecified = [DateTime]::SpecifyKind($startedAt, [DateTimeKind]::Unspecified)
+        Assert-TestThrows {
+            Convert-RawLogJsonValueToInvariantIso `
+                -Value ([pscustomobject]@{ startedAt = $unspecified }) `
+                -Description 'verification.unspecified-date-time'
+        }
+    }
+
     It 'allows raw-log contract-only checks without runtime parameters' {
         $result = Start-Process -FilePath 'pwsh' -ArgumentList @(
             '-NoProfile', '-NonInteractive', '-File', $rawLogScript, '-ContractOnly'

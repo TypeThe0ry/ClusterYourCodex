@@ -301,6 +301,72 @@ function Convert-RawLogInstant {
     }
 }
 
+function Format-RawLogInstantUtc {
+    param(
+        [Parameter(Mandatory = $true)][DateTimeOffset]$Value
+    )
+
+    return $Value.ToUniversalTime().ToString(
+        'yyyy-MM-dd''T''HH:mm:ss.fffffff''Z''',
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+}
+
+function Convert-RawLogJsonValueToInvariantIso {
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()][object]$Value,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    if ($null -eq $Value) { return $null }
+
+    # Windows PowerShell 5.1 materializes ISO JSON timestamps as DateTime.
+    # Formatting at the output boundary prevents ConvertTo-Json from emitting
+    # culture-dependent text or its legacy /Date(...)\/ representation.
+    if ($Value -is [DateTimeOffset]) {
+        return Format-RawLogInstantUtc -Value ([DateTimeOffset]$Value)
+    }
+    if ($Value -is [DateTime]) {
+        Assert-RawLogCondition ($Value.Kind -ne [DateTimeKind]::Unspecified) "$Description must carry an explicit UTC offset"
+        return Format-RawLogInstantUtc -Value ([DateTimeOffset]$Value)
+    }
+
+    if ($Value -is [System.Array]) {
+        $items = New-Object System.Collections.ArrayList
+        for ($index = 0; $index -lt $Value.Count; $index++) {
+            $item = Convert-RawLogJsonValueToInvariantIso `
+                -Value $Value[$index] `
+                -Description "$Description[$index]"
+            [void]$items.Add($item)
+        }
+        return ,$items.ToArray()
+    }
+
+    if ($Value -is [System.Collections.IDictionary]) {
+        $properties = [ordered]@{}
+        foreach ($entry in $Value.GetEnumerator()) {
+            $name = [string]$entry.Key
+            $properties[$name] = Convert-RawLogJsonValueToInvariantIso `
+                -Value $entry.Value `
+                -Description "$Description.$name"
+        }
+        return [pscustomobject]$properties
+    }
+
+    if ($Value -is [pscustomobject]) {
+        $properties = [ordered]@{}
+        foreach ($property in @($Value.PSObject.Properties)) {
+            $name = [string]$property.Name
+            $properties[$name] = Convert-RawLogJsonValueToInvariantIso `
+                -Value $property.Value `
+                -Description "$Description.$name"
+        }
+        return [pscustomobject]$properties
+    }
+
+    return $Value
+}
+
 function Normalize-RawLogCommand {
     param([Parameter(Mandatory = $true)][string]$Command)
 
@@ -639,8 +705,8 @@ function Assert-RawLogIssue23GateEvidence {
         node = $node
         exitCode = [int64](Get-RawLogProperty -Object $GateEvidence -Path 'exitCode' -Description $Description)
         tests = (Get-RawLogProperty -Object $GateEvidence -Path 'tests' -Description $Description)
-        startedAt = $startedAt.ToUniversalTime().ToString('yyyy-MM-dd''T''HH:mm:ss.fffffff''Z''', [Globalization.CultureInfo]::InvariantCulture)
-        endedAt = $endedAt.ToUniversalTime().ToString('yyyy-MM-dd''T''HH:mm:ss.fffffff''Z''', [Globalization.CultureInfo]::InvariantCulture)
+        startedAt = Format-RawLogInstantUtc -Value $startedAt
+        endedAt = Format-RawLogInstantUtc -Value $endedAt
         testSelector = $selector
         command = $command
         markers = @($markers)
@@ -960,8 +1026,8 @@ function Assert-RawLogIssue5RunProvenance {
         status = 'passed'
         exitCode = [int64]$exitCode
         tests = $tests
-        startedAt = $startedAt.ToUniversalTime().ToString('yyyy-MM-dd''T''HH:mm:ss.fffffffzzz', [Globalization.CultureInfo]::InvariantCulture)
-        endedAt = $endedAt.ToUniversalTime().ToString('yyyy-MM-dd''T''HH:mm:ss.fffffffzzz', [Globalization.CultureInfo]::InvariantCulture)
+        startedAt = Format-RawLogInstantUtc -Value $startedAt
+        endedAt = Format-RawLogInstantUtc -Value $endedAt
     }
 }
 
@@ -1618,11 +1684,14 @@ foreach ($issueName in @('issue2', 'issue3', 'issue5')) {
         $record.markers = $issue23Contract.markers
         $record.gateEvidence = $issue23Contract.gates
     }
+    $recordForOutput = Convert-RawLogJsonValueToInvariantIso `
+        -Value $record `
+        -Description "$issueName verification record"
     Write-RawLogAtomicText `
         -Path (Join-Path $outputRoot "$evidenceId.verification.json") `
-        -Text ($record | ConvertTo-Json -Depth 20) `
+        -Text ($recordForOutput | ConvertTo-Json -Depth 20) `
         -Encoding (New-Object System.Text.UTF8Encoding($false))
-    [void]$records.Add($record)
+    [void]$records.Add($recordForOutput)
 }
 
 $result = [ordered]@{
@@ -1631,7 +1700,10 @@ $result = [ordered]@{
     sourceCommit = $ExpectedCommit.ToLowerInvariant()
     records = $records.ToArray()
 }
-$resultJson = $result | ConvertTo-Json -Depth 20 -Compress
+$resultForOutput = Convert-RawLogJsonValueToInvariantIso `
+    -Value $result `
+    -Description 'raw-log verification result'
+$resultJson = $resultForOutput | ConvertTo-Json -Depth 20 -Compress
 Write-RawLogAtomicText `
     -Path (Join-Path $outputRoot 'raw-log-verification.json') `
     -Text $resultJson `

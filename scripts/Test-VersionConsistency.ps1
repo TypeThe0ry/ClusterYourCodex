@@ -199,6 +199,15 @@ function Assert-CycReleaseWorkflowIdentity {
         $workflow -notmatch '(?m)^\s*\$arguments\.SourceTag\s*=\s*\[string\]\$env:CYC_SOURCE_TAG\s*$') {
         throw 'Release workflow is missing its fail-closed prerelease identity gate.'
     }
+    # Keep the shell-side source-tag check in lockstep with
+    # Assert-CycReleaseIdentity.  A preview workflow must accept every
+    # supported prerelease channel (preview/alpha/beta/rc) while rejecting
+    # leading-zero identifiers and stable/dev tags before provenance fetch.
+    $strictPrereleaseTagPattern = '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-(preview|alpha|beta|rc)\.(0|[1-9][0-9]*)$'
+    $strictPrereleaseTagGate = 'if [[ ! "$CYC_SOURCE_TAG" =~ ' + $strictPrereleaseTagPattern + ' ]]; then'
+    if (-not $workflow.Contains($strictPrereleaseTagGate)) {
+        throw 'Release workflow source-tag validation is not aligned with the strict prerelease channel contract.'
+    }
 
     $releaseJob = [System.Text.RegularExpressions.Regex]::Match(
         $workflow,

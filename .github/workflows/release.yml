@@ -34,8 +34,8 @@ jobs:
             echo 'source_tag is required for a tagged prerelease' >&2
             exit 1
           fi
-          if [[ ! "$CYC_SOURCE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$ ]]; then
-            echo 'source_tag must be a strict semantic prerelease tag' >&2
+          if [[ ! "$CYC_SOURCE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-(preview|alpha|beta|rc)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'source_tag must be a strict preview.N, alpha.N, beta.N, or rc.N tag' >&2
             exit 1
           fi
           # actions/checkout first fetches the annotated tag, then force-updates
