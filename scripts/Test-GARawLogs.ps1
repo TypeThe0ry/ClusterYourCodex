@@ -16,6 +16,21 @@ $ErrorActionPreference = 'Stop'
 $MaximumRawLogBytes = 64MB
 $MaximumRawLogTestCount = [long]1000000000
 $GaRawLogContentSchema = 'cyc.dev/ga-raw-log/v1'
+$GaIssue3GateContractPath = Join-Path $PSScriptRoot 'ga-issue3-gate-contract.json'
+if (-not (Test-Path -LiteralPath $GaIssue3GateContractPath -PathType Leaf)) {
+    throw "GA raw-log assertion failed: Issue #3 semantic gate contract is missing: $GaIssue3GateContractPath"
+}
+try {
+    $GaIssue3GateContract = ([System.IO.File]::ReadAllText($GaIssue3GateContractPath) | ConvertFrom-Json)
+} catch {
+    throw "GA raw-log assertion failed: Issue #3 semantic gate contract is not valid JSON: $($_.Exception.Message)"
+}
+if ($null -eq $GaIssue3GateContract -or
+    [string]$GaIssue3GateContract.schemaVersion -cne 'cyc.dev/ga-issue3-gate-contract/v1' -or
+    $null -eq $GaIssue3GateContract.gates -or
+    $GaIssue3GateContract.gates -is [System.Array]) {
+    throw 'GA raw-log assertion failed: Issue #3 semantic gate contract has an invalid schema.'
+}
 
 # Issue #5 evidence is a three-host matrix.  These constants intentionally
 # mirror Test-GAReadiness.ps1: the downloader validates the manifest before it
@@ -635,6 +650,104 @@ function Get-RawLogIssue23GateMarker {
     return "CYC-GA-$($IssueName.ToUpperInvariant())|gate=$Gate|commandSha256=$commandDigest|status=passed"
 }
 
+function Get-RawLogIssue3GateContract {
+    param(
+        [Parameter(Mandatory = $true)][string]$Gate,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $property = $GaIssue3GateContract.gates.PSObject.Properties[$Gate]
+    Assert-RawLogCondition ($null -ne $property) "$Description has a reviewed Issue #3 semantic contract"
+    $contract = $property.Value
+    Assert-RawLogCondition (($contract -is [pscustomobject]) -and -not ($contract -is [System.Array])) "$Description semantic contract is a JSON object"
+    foreach ($field in @('platform', 'platforms', 'architectures', 'operation', 'commandPatterns', 'selectorPatterns')) {
+        Assert-RawLogCondition ($null -ne $contract.PSObject.Properties[$field]) "$Description semantic contract is missing '$field'"
+    }
+    return $contract
+}
+
+function Get-RawLogIssue3SemanticMarker {
+    param(
+        [Parameter(Mandatory = $true)][string]$Gate,
+        [Parameter(Mandatory = $true)][string]$Platform,
+        [Parameter(Mandatory = $true)][string]$Architecture,
+        [Parameter(Mandatory = $true)][string]$Operation,
+        [Parameter(Mandatory = $true)][string[]]$Platforms
+    )
+
+    $platformToken = @($Platforms | ForEach-Object { ([string]$_).ToLowerInvariant() } | Sort-Object) -join ','
+    return "CYC-GA-ISSUE3|gate=$Gate|platform=$Platform|architecture=$Architecture|operation=$Operation|platforms=$platformToken|status=passed"
+}
+
+function Assert-RawLogIssue3GateSemantics {
+    param(
+        [Parameter(Mandatory = $true)][string]$Gate,
+        [Parameter(Mandatory = $true)][object]$GateEvidence,
+        [Parameter(Mandatory = $true)][string]$Command,
+        [Parameter(Mandatory = $true)][string]$Selector,
+        [Parameter(Mandatory = $true)][object[]]$Markers,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $contract = Get-RawLogIssue3GateContract -Gate $Gate -Description $Description
+    $platform = Get-RawLogProperty -Object $GateEvidence -Path 'platform' -Description $Description
+    $architecture = Get-RawLogProperty -Object $GateEvidence -Path 'architecture' -Description $Description
+    $operation = Get-RawLogProperty -Object $GateEvidence -Path 'operation' -Description $Description
+    $platformsProperty = $GateEvidence.PSObject.Properties['platforms']
+    Assert-RawLogCondition ($null -ne $platformsProperty) "$Description.platforms is required"
+    $platformsValue = $platformsProperty.Value
+    Assert-RawLogCondition ($platform -is [string] -and [string]$platform -ceq ([string]$platform).ToLowerInvariant()) "$Description.platform must be a lower-case string"
+    Assert-RawLogCondition ($architecture -is [string] -and [string]$architecture -ceq ([string]$architecture).ToLowerInvariant()) "$Description.architecture must be a lower-case string"
+    Assert-RawLogCondition ($operation -is [string] -and [string]$operation -ceq ([string]$operation).ToLowerInvariant()) "$Description.operation must be a lower-case string"
+    Assert-RawLogCondition ($platform -ceq [string]$contract.platform) "$Description.platform must equal the reviewed semantic platform '$($contract.platform)'"
+    $allowedArchitectures = @($contract.architectures | ForEach-Object { [string]$_ })
+    Assert-RawLogCondition ($allowedArchitectures.Count -gt 0 -and @($allowedArchitectures | Where-Object { $_ -ceq [string]$architecture }).Count -eq 1) "$Description.architecture is not allowed for Issue #3.$Gate"
+    Assert-RawLogCondition ($operation -ceq [string]$contract.operation) "$Description.operation must equal the reviewed semantic operation '$($contract.operation)'"
+    Assert-RawLogCondition (($platformsValue -is [System.Array]) -and $platformsValue.Count -gt 0) "$Description.platforms must be a non-empty JSON array"
+    $actualPlatforms = @($platformsValue | ForEach-Object { Assert-RawLogCondition ($_ -is [string]) "$Description.platforms entries must be strings"; [string]$_ })
+    Assert-RawLogCondition (@($actualPlatforms | Where-Object { $_ -cne $_.ToLowerInvariant() }).Count -eq 0) "$Description.platforms entries must be lower-case"
+    $actualPlatformSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($item in $actualPlatforms) {
+        Assert-RawLogCondition ($actualPlatformSet.Add($item)) "$Description.platforms must not contain duplicates"
+    }
+    $expectedPlatforms = @($contract.platforms | ForEach-Object { [string]$_ } | Sort-Object)
+    $normalizedActualPlatforms = @($actualPlatforms | Sort-Object)
+    Assert-RawLogCondition (($normalizedActualPlatforms -join ',') -ceq ($expectedPlatforms -join ',')) "$Description.platforms must equal the reviewed platform set '$($expectedPlatforms -join ',')'"
+
+    foreach ($pattern in @($contract.commandPatterns)) {
+        Assert-RawLogCondition ($pattern -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$pattern)) "$Description semantic command pattern must be non-empty"
+        try {
+            $matches = [regex]::IsMatch($Command, [string]$pattern)
+        } catch {
+            throw "GA raw-log assertion failed: $Description semantic command pattern is invalid: $($_.Exception.Message)"
+        }
+        Assert-RawLogCondition $matches "$Description.command must satisfy Issue #3.$Gate semantic pattern '$pattern'"
+    }
+    foreach ($pattern in @($contract.selectorPatterns)) {
+        Assert-RawLogCondition ($pattern -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$pattern)) "$Description semantic selector pattern must be non-empty"
+        try {
+            $matches = [regex]::IsMatch($Selector, [string]$pattern)
+        } catch {
+            throw "GA raw-log assertion failed: $Description semantic selector pattern is invalid: $($_.Exception.Message)"
+        }
+        Assert-RawLogCondition $matches "$Description.testSelector must satisfy Issue #3.$Gate semantic pattern '$pattern'"
+    }
+    $semanticMarker = Get-RawLogIssue3SemanticMarker `
+        -Gate $Gate `
+        -Platform ([string]$platform) `
+        -Architecture ([string]$architecture) `
+        -Operation ([string]$operation) `
+        -Platforms $actualPlatforms
+    Assert-RawLogCondition (@($Markers | Where-Object { [string]$_ -ceq $semanticMarker }).Count -eq 1) "$Description.rawLogMarkers must contain the semantic Issue #3 marker"
+    return [pscustomobject]@{
+        platform = [string]$platform
+        architecture = [string]$architecture
+        operation = [string]$operation
+        platforms = $actualPlatforms
+        semanticMarker = $semanticMarker
+    }
+}
+
 function Assert-RawLogIssue23GateEvidence {
     param(
         [Parameter(Mandatory = $true)][object]$ManifestIssue,
@@ -647,7 +760,7 @@ function Assert-RawLogIssue23GateEvidence {
 
     Assert-RawLogExactObjectPropertySet -Object $GateEvidence `
         -Required @('status', 'gateId', 'sourceCommit', 'provider', 'hostType', 'evidenceId', 'runId', 'node', 'exitCode', 'tests', 'startedAt', 'endedAt', 'command') `
-        -Optional @('testSelector', 'selector', 'rawLogMarkers', 'markers', 'blockerInventory') `
+        -Optional @('testSelector', 'selector', 'rawLogMarkers', 'markers', 'blockerInventory', 'platform', 'architecture', 'operation', 'platforms') `
         -Description $Description
     $status = Get-RawLogProperty -Object $GateEvidence -Path 'status' -Description $Description
     Assert-RawLogCondition (($status -is [bool]) -and $status) "$Description.status must be boolean true"
@@ -685,6 +798,16 @@ function Assert-RawLogIssue23GateEvidence {
         -Description "$Description.endedAt"
     Assert-RawLogCondition ($endedAt -ge $startedAt) "$Description.endedAt must not precede startedAt"
     $markers = Get-RawLogIssue23GateMarkers -GateEvidence $GateEvidence -Description $Description
+    $semanticContract = $null
+    if ($IssueName -ceq 'issue3') {
+        $semanticContract = Assert-RawLogIssue3GateSemantics `
+            -Gate $Gate `
+            -GateEvidence $GateEvidence `
+            -Command $command `
+            -Selector $selector `
+            -Markers @($markers) `
+            -Description $Description
+    }
     $expectedMarker = Get-RawLogIssue23GateMarker -IssueName $IssueName -Gate $Gate -Command $command
     Assert-RawLogCondition (@($markers | Where-Object { [string]$_ -ceq $expectedMarker }).Count -eq 1) "$Description.rawLogMarkers must contain the command-bound gate marker"
     [void](Assert-RawLogIssue5RunProvenance -Run $GateEvidence -Description $Description)
@@ -713,6 +836,11 @@ function Assert-RawLogIssue23GateEvidence {
     }
     if ($IssueName -ceq 'issue2' -and $Gate -ceq 'noOpenUnwaivedP0P1Blocker') {
         $result | Add-Member -MemberType NoteProperty -Name blockerInventory -Value $GateEvidence.blockerInventory
+    }
+    if ($IssueName -ceq 'issue3') {
+        foreach ($propertyName in @('platform', 'architecture', 'operation', 'platforms')) {
+            $result | Add-Member -MemberType NoteProperty -Name $propertyName -Value $semanticContract.$propertyName
+        }
     }
     return $result
 }
@@ -790,6 +918,14 @@ function Assert-RawLogIssue23Content {
             -Description "$Description.gates.$gateName"
         foreach ($field in @('provider', 'hostType', 'evidenceId', 'runId', 'node', 'testSelector')) {
             Assert-RawLogCondition ([string]$contentGateContract.$field -ceq [string]$manifestGate.$field) "$Description.gates.$gateName.$field must match the manifest"
+        }
+        if ($IssueName -ceq 'issue3') {
+            foreach ($field in @('platform', 'architecture', 'operation')) {
+                Assert-RawLogCondition ([string]$contentGateContract.$field -ceq [string]$manifestGate.$field) "$Description.gates.$gateName.$field must match the manifest"
+            }
+            $manifestPlatforms = @($manifestGate.platforms | ForEach-Object { [string]$_ })
+            $contentPlatforms = @($contentGateContract.platforms | ForEach-Object { [string]$_ })
+            Assert-RawLogCondition (($contentPlatforms -join ',') -ceq ($manifestPlatforms -join ',')) "$Description.gates.$gateName.platforms must match the manifest"
         }
         $contentCommand = [string]$contentGateContract.command
         Assert-RawLogCondition ((Normalize-RawLogCommand -Command $contentCommand).Equals((Normalize-RawLogCommand -Command ([string]$manifestGate.command)), [StringComparison]::Ordinal)) "$Description.gates.$gateName.command must match the manifest"

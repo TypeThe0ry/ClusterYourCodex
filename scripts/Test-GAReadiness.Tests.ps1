@@ -178,6 +178,126 @@ function New-TestOpenIssueSnapshot {
     return (($snapshot | ConvertTo-Json -Depth 20) | ConvertFrom-Json)
 }
 
+function Get-TestIssue3GateSemantics {
+    param([Parameter(Mandatory = $true)][string]$Gate)
+
+    switch ($Gate) {
+        'linuxSystemdUserServicePackage' {
+            return [ordered]@{
+                platform = 'linux'
+                platforms = @('linux')
+                architecture = 'any'
+                operation = 'systemd-user-package'
+                command = './packaging/worker-kits/linux/install-worker.sh --scope user --systemd-user'
+                selector = 'linuxSystemdUserServicePackage systemd --user'
+            }
+        }
+        'macosLaunchAgentPackage' {
+            return [ordered]@{
+                platform = 'macos'
+                platforms = @('macos')
+                architecture = 'any'
+                operation = 'launchagent-package'
+                command = './packaging/worker-kits/macos/install-worker.sh --scope user --launchctl bootstrap kickstart print bootout'
+                selector = 'macosLaunchAgentPackage launchctl LaunchAgents'
+            }
+        }
+        'linuxX64ReleaseArtifact' {
+            return [ordered]@{
+                platform = 'linux'
+                platforms = @('linux')
+                architecture = 'x86_64'
+                operation = 'release-artifact'
+                command = 'verify release artifact linux x86_64 bundle'
+                selector = 'linuxX64ReleaseArtifact x86_64 artifact'
+            }
+        }
+        'macosX64ReleaseArtifact' {
+            return [ordered]@{
+                platform = 'macos'
+                platforms = @('macos')
+                architecture = 'x86_64'
+                operation = 'release-artifact'
+                command = 'verify release artifact macos x86_64 bundle'
+                selector = 'macosX64ReleaseArtifact x86_64 artifact'
+            }
+        }
+        'macosArm64ReleaseArtifact' {
+            return [ordered]@{
+                platform = 'macos'
+                platforms = @('macos')
+                architecture = 'arm64'
+                operation = 'release-artifact'
+                command = 'verify release artifact macos arm64 bundle'
+                selector = 'macosArm64ReleaseArtifact arm64 artifact'
+            }
+        }
+        'platformNativeShells' {
+            return [ordered]@{
+                platform = 'multi'
+                platforms = @('linux', 'macos', 'windows')
+                architecture = 'multi'
+                operation = 'native-shells'
+                command = 'platform native shells linux bash macos zsh windows pwsh'
+                selector = 'platformNativeShells shell command'
+            }
+        }
+        'platformNativeProcessGroups' {
+            return [ordered]@{
+                platform = 'multi'
+                platforms = @('linux', 'macos', 'windows')
+                architecture = 'multi'
+                operation = 'native-process-groups'
+                command = 'platform native process groups linux setsid macos process-group windows job-object terminate'
+                selector = 'platformNativeProcessGroups process group job'
+            }
+        }
+        'crossPlatformPathAclTests' {
+            return [ordered]@{
+                platform = 'multi'
+                platforms = @('linux', 'macos', 'windows')
+                architecture = 'multi'
+                operation = 'path-acl'
+                command = 'cross-platform path ACL permissions linux chmod macos ACL windows icacls'
+                selector = 'crossPlatformPathAclTests acl path permission'
+            }
+        }
+        'liveMacosRun' {
+            return [ordered]@{
+                platform = 'macos'
+                platforms = @('macos')
+                architecture = 'arm64'
+                operation = 'live-controller-worker-roundtrip'
+                command = 'scripts/test-macos-live-roundtrip.sh launchctl bootstrap kickstart print bootout controller-worker round-trip'
+                selector = 'liveMacosRun launchctl controller worker round-trip'
+            }
+        }
+        'liveLinuxControllerWorkerRoundTrip' {
+            return [ordered]@{
+                platform = 'linux'
+                platforms = @('linux')
+                architecture = 'x86_64'
+                operation = 'live-controller-worker-roundtrip'
+                command = 'scripts/test-linux-controller-worker-roundtrip.sh controller-worker round-trip'
+                selector = 'liveLinuxControllerWorkerRoundTrip test-linux-controller-worker-roundtrip.sh'
+            }
+        }
+        'macosDeveloperIdSigningNotarization' {
+            return [ordered]@{
+                platform = 'macos'
+                platforms = @('macos')
+                architecture = 'universal2'
+                operation = 'developer-id-signing-notarization'
+                command = 'codesign --options runtime && xcrun notarytool submit macos universal2'
+                selector = 'macosDeveloperIdSigningNotarization codesign notarytool'
+            }
+        }
+        default {
+            throw "Unknown Issue #3 test gate: $Gate"
+        }
+    }
+}
+
 function New-TestIssueEvidence {
     param(
         [string]$Provider = 'external-lab',
@@ -205,8 +325,26 @@ function New-TestIssueEvidence {
     $allMarkers = New-Object System.Collections.Generic.List[string]
     foreach ($gate in $GateNames) {
         if ($issueName) {
-            $command = "native-$issueName-$gate"
+            $semantic = $null
+            if ($issueName -ceq 'issue3') {
+                $semantic = Get-TestIssue3GateSemantics -Gate ([string]$gate)
+                $command = [string]$semantic.command
+                $selector = [string]$semantic.selector
+            } else {
+                $command = "native-$issueName-$gate"
+                $selector = "$issueName::$gate"
+            }
             $marker = Get-GaIssue23GateMarker -IssueName $issueName -Gate ([string]$gate) -Command $command
+            $gateMarkers = @($marker)
+            if ($issueName -ceq 'issue3') {
+                $semanticMarker = Get-GaIssue3SemanticMarker `
+                    -Gate ([string]$gate) `
+                    -Platform ([string]$semantic.platform) `
+                    -Architecture ([string]$semantic.architecture) `
+                    -Operation ([string]$semantic.operation) `
+                    -Platforms @($semantic.platforms)
+                $gateMarkers += $semanticMarker
+            }
             $gateEvidence = [ordered]@{
                 status = $true
                 gateId = "$issueName.$gate"
@@ -220,15 +358,23 @@ function New-TestIssueEvidence {
                 tests = [ordered]@{ passed = 1; failed = 0; ignored = 0 }
                 startedAt = '2026-08-30T14:00:00Z'
                 endedAt = '2026-08-30T14:01:00Z'
-                testSelector = "$issueName::$gate"
+                testSelector = $selector
                 command = $command
-                rawLogMarkers = @($marker)
+                rawLogMarkers = $gateMarkers
+            }
+            if ($issueName -ceq 'issue3') {
+                $gateEvidence.platform = $semantic.platform
+                $gateEvidence.architecture = $semantic.architecture
+                $gateEvidence.operation = $semantic.operation
+                $gateEvidence.platforms = @($semantic.platforms)
             }
             if ($issueName -ceq 'issue2' -and [string]$gate -ceq 'noOpenUnwaivedP0P1Blocker') {
                 $gateEvidence.blockerInventory = New-TestBlockerInventory -IncludeWaivedOpenP1
             }
             $gates[$gate] = $gateEvidence
-            [void]$allMarkers.Add($marker)
+            foreach ($gateMarker in $gateMarkers) {
+                [void]$allMarkers.Add([string]$gateMarker)
+            }
         } else {
             $gates[$gate] = $true
         }
@@ -633,7 +779,7 @@ Describe 'GA evidence issue acceptance contract' {
         $manifestIssue = [pscustomobject]@{
             evidenceId = 'issue3-evidence-20260830'
         }
-        $command = 'cargo test --locked --workspace'
+        $command = './packaging/worker-kits/linux/install-worker.sh --scope user --systemd-user'
         $startedAt = [DateTime]::Parse(
             '2026-08-30T14:00:00Z',
             [Globalization.CultureInfo]::InvariantCulture,
@@ -655,10 +801,15 @@ Describe 'GA evidence issue acceptance contract' {
             tests = [pscustomobject]@{ passed = 1; failed = 0; ignored = 0 }
             startedAt = $startedAt
             endedAt = $endedAt
-            testSelector = 'cargo test --locked --workspace'
+            testSelector = 'linuxSystemdUserServicePackage systemd --user'
             command = $command
+            platform = 'linux'
+            architecture = 'any'
+            operation = 'systemd-user-package'
+            platforms = @('linux')
             rawLogMarkers = @(
-                (Get-RawLogIssue23GateMarker -IssueName 'issue3' -Gate 'linuxSystemdUserServicePackage' -Command $command)
+                (Get-RawLogIssue23GateMarker -IssueName 'issue3' -Gate 'linuxSystemdUserServicePackage' -Command $command),
+                (Get-RawLogIssue3SemanticMarker -Gate 'linuxSystemdUserServicePackage' -Platform 'linux' -Architecture 'any' -Operation 'systemd-user-package' -Platforms @('linux'))
             )
         }
 
@@ -750,11 +901,11 @@ Describe 'GA evidence issue acceptance contract' {
         $workflowSource | Should Match 'binding_count != 15'
         $workflowSource | Should Match 'raw_verification_contract="\$RUNNER_TEMP/cyc-ga-raw-log-contract\.jq"'
         $workflowSource | Should Match 'cat > "\$raw_verification_contract" <<''JQ'''
-        $workflowSource | Should Match 'jq -e --arg commit "\$CYC_GA_SOURCE_COMMIT" --slurpfile manifest "\$evidence_path" \\\r?\n\s*-f "\$raw_verification_contract" "\$raw_verification"'
+        $workflowSource | Should Match 'jq -e --arg commit "\$CYC_GA_SOURCE_COMMIT" \\\r?\n\s*--slurpfile manifest "\$evidence_path" \\\r?\n\s*--slurpfile issue3contract "\$GITHUB_WORKSPACE/scripts/ga-issue3-gate-contract\.json" \\\r?\n\s*-f "\$raw_verification_contract" "\$raw_verification"'
         $workflowSource | Should Match '(?s)cat > "\$raw_verification_contract" <<''JQ''.*\r?\n\s*\(\$manifest\[0\]\).*\r?\n\s*JQ'
         $workflowSource | Should Match 'stable_ga_contract="\$RUNNER_TEMP/cyc-ga-stable-contract\.jq"'
         $workflowSource | Should Match 'cat > "\$stable_ga_contract" <<''JQ'''
-        $workflowSource | Should Match 'jq -e --arg tag "\$CYC_GA_SOURCE_TAG" --arg commit "\$CYC_GA_SOURCE_COMMIT" \\\r?\n\s*-f "\$stable_ga_contract" "\$evidence_path"'
+        $workflowSource | Should Match 'jq -e --arg tag "\$CYC_GA_SOURCE_TAG" --arg commit "\$CYC_GA_SOURCE_COMMIT" \\\r?\n\s*--slurpfile issue3contract "\$GITHUB_WORKSPACE/scripts/ga-issue3-gate-contract\.json" \\\r?\n\s*-f "\$stable_ga_contract" "\$evidence_path"'
         $workflowSource | Should Not Match '-f -'
     }
 
@@ -819,6 +970,74 @@ Describe 'GA evidence issue acceptance contract' {
             -RequiredGates $issue3GateNamesForTest
         $result.status | Should Be 'passed'
         $result.rawLog.sha256 | Should Be $rawLogShaForTest
+        $result.gates.liveMacosRun.platform | Should Be 'macos'
+        $result.gates.liveLinuxControllerWorkerRoundTrip.platform | Should Be 'linux'
+        @($result.gates.platformNativeShells.platforms).Count | Should Be 3
+    }
+
+    It 'loads one shared Issue #3 semantic contract in all three verification surfaces' {
+        $contractPath = Join-Path $testScriptRoot 'ga-issue3-gate-contract.json'
+        Test-Path -LiteralPath $contractPath -PathType Leaf | Should Be $true
+        $contract = (Get-Content -LiteralPath $contractPath -Raw | ConvertFrom-Json)
+        $contract.schemaVersion | Should Be 'cyc.dev/ga-issue3-gate-contract/v1'
+        @($contract.gates.PSObject.Properties).Count | Should Be $issue3GateNamesForTest.Count
+        foreach ($gate in $issue3GateNamesForTest) {
+            $contract.gates.PSObject.Properties[$gate] | Should Not Be $null
+        }
+        $readinessSource | Should Match 'ga-issue3-gate-contract\.json'
+        $rawLogSource | Should Match 'ga-issue3-gate-contract\.json'
+        $workflowSource | Should Match 'slurpfile issue3contract'
+        $workflowSource | Should Match 'issue3_gate_semantics_valid'
+    }
+
+    It 'rejects Issue #3 evidence with a self-consistent but wrong platform' {
+        $record = New-TestIssueEvidence -GateNames $issue3GateNamesForTest
+        $gate = $record.gates.linuxSystemdUserServicePackage
+        $gate.platform = 'macos'
+        $gate.platforms = @('macos')
+        $gate.command = './packaging/worker-kits/macos/install-worker.sh --scope user --systemd-user'
+        $gate.testSelector = 'linuxSystemdUserServicePackage systemd --user'
+        $gate.rawLogMarkers = @(
+            (Get-GaIssue23GateMarker -IssueName 'issue3' -Gate 'linuxSystemdUserServicePackage' -Command $gate.command),
+            (Get-GaIssue3SemanticMarker -Gate 'linuxSystemdUserServicePackage' -Platform 'macos' -Architecture 'any' -Operation 'systemd-user-package' -Platforms @('macos'))
+        )
+        $record.rawLog.markers = @($record.gates.PSObject.Properties | ForEach-Object { @($_.Value.rawLogMarkers) } | ForEach-Object { $_ })
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue3 = $record }) `
+                -Path 'issue3' -Description 'Issue #3 wrong semantic platform' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue3GateNamesForTest
+        }
+    }
+
+    It 'rejects Issue #3 evidence with a wrong artifact architecture or live command' {
+        $record = New-TestIssueEvidence -GateNames $issue3GateNamesForTest
+        $artifact = $record.gates.macosArm64ReleaseArtifact
+        $artifact.architecture = 'x86_64'
+        $artifact.command = 'verify release artifact macos x86_64 bundle'
+        $artifact.rawLogMarkers = @(
+            (Get-GaIssue23GateMarker -IssueName 'issue3' -Gate 'macosArm64ReleaseArtifact' -Command $artifact.command),
+            (Get-GaIssue3SemanticMarker -Gate 'macosArm64ReleaseArtifact' -Platform 'macos' -Architecture 'x86_64' -Operation 'release-artifact' -Platforms @('macos'))
+        )
+        $record.rawLog.markers = @($record.gates.PSObject.Properties | ForEach-Object { @($_.Value.rawLogMarkers) } | ForEach-Object { $_ })
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue3 = $record }) `
+                -Path 'issue3' -Description 'Issue #3 wrong artifact architecture' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue3GateNamesForTest
+        }
+
+        $record = New-TestIssueEvidence -GateNames $issue3GateNamesForTest
+        $live = $record.gates.liveLinuxControllerWorkerRoundTrip
+        $live.command = 'cargo test --workspace --locked'
+        $live.rawLogMarkers = @(
+            (Get-GaIssue23GateMarker -IssueName 'issue3' -Gate 'liveLinuxControllerWorkerRoundTrip' -Command $live.command),
+            (Get-GaIssue3SemanticMarker -Gate 'liveLinuxControllerWorkerRoundTrip' -Platform 'linux' -Architecture 'x86_64' -Operation 'live-controller-worker-roundtrip' -Platforms @('linux'))
+        )
+        $record.rawLog.markers = @($record.gates.PSObject.Properties | ForEach-Object { @($_.Value.rawLogMarkers) } | ForEach-Object { $_ })
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue3 = $record }) `
+                -Path 'issue3' -Description 'Issue #3 missing live Linux command' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue3GateNamesForTest
+        }
     }
 
     It 'accepts a complete source-bound issue 2 evidence record' {

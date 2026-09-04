@@ -261,7 +261,17 @@ bounded `tests.passed`/`tests.failed`/`tests.ignored` counts, and source-bound
 chronological `startedAt`/`endedAt` timestamps. Each marker is bound to its normalized command using
 `CYC-GA-ISSUE2|gate=<gate>|commandSha256=<digest>|status=passed` or the
 corresponding `ISSUE3` form; the aggregate raw-log marker list and downloaded
-envelope must retain every marker exactly once. The
+envelope must retain every marker exactly once. Issue #3 additionally uses the
+versioned contract in `scripts/ga-issue3-gate-contract.json`: every gate record
+must declare lower-case `platform`, `architecture`, `operation`, and an exact
+`platforms` array, satisfy the gate-specific command/selector patterns, and
+retain the derived semantic marker
+`CYC-GA-ISSUE3|gate=<gate>|platform=<platform>|architecture=<architecture>|operation=<operation>|platforms=<sorted-platforms>|status=passed`.
+This binds Linux systemd, macOS LaunchAgent, x86_64/arm64 artifacts, native
+shell/process-group/path-ACL matrices, live controller/worker probes, and
+Developer ID signing/notarization to the named gate instead of accepting a
+generic external command relabelled as platform evidence. The aggregate raw-log
+marker list and downloaded envelope must retain every marker exactly once. The
 `noOpenUnwaivedP0P1Blocker` record additionally embeds a complete source-bound
 GitHub open-issue inventory, pagination/error status, reviewer, stable scope,
 and a non-expired active waiver for each open P0/P1 issue. Bare booleans,

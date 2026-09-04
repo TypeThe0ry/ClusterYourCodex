@@ -1075,6 +1075,49 @@ jobs:
               elif (($entry | has("markers")) and (($entry.markers | type) == "array")) then
                 $entry.markers
               else [] end;
+            def issue3_gate_contract($gate):
+              if (($issue3contract | length) == 1
+                  and (($issue3contract[0].gates | type) == "object"))
+              then $issue3contract[0].gates[$gate]
+              else null end;
+            def issue3_all_patterns_match($value; $patterns):
+              (nonempty_string($value)
+               and (($patterns | type) == "array")
+               and (($patterns | length) > 0)
+               and ([ $patterns[] as $pattern |
+                      select((string_value($value) | test($pattern)) | not)
+                    ] | length == 0));
+            def issue3_semantic_marker($entry; $gate):
+              "CYC-GA-ISSUE3|gate=" + $gate
+              + "|platform=" + string_value($entry.platform)
+              + "|architecture=" + string_value($entry.architecture)
+              + "|operation=" + string_value($entry.operation)
+              + "|platforms=" + (($entry.platforms | map(ascii_downcase) | sort) | join(","))
+              + "|status=passed";
+            def issue3_gate_semantics_valid($entry; $gate):
+              (issue3_gate_contract($gate)) as $contract
+              | (($contract | type) == "object")
+                and (($entry.platform | type) == "string")
+                and ($entry.platform == $contract.platform)
+                and (($entry.architecture | type) == "string")
+                and (($contract.architectures | type) == "array")
+                and (($contract.architectures | index($entry.architecture)) != null)
+                and (($entry.operation | type) == "string")
+                and ($entry.operation == $contract.operation)
+                and (($entry.platforms | type) == "array")
+                and (($entry.platforms | length) > 0)
+                and ([ $entry.platforms[] |
+                       select((type != "string") or (. != (ascii_downcase)))
+                     ] | length == 0)
+                and (($entry.platforms | map(ascii_downcase) | unique | sort)
+                     == ($contract.platforms | map(ascii_downcase) | unique | sort))
+                and (($entry.platforms | length)
+                     == ($entry.platforms | map(ascii_downcase) | unique | length))
+                and issue3_all_patterns_match($entry.command; $contract.commandPatterns)
+                and issue3_all_patterns_match(issue23_selector_value($entry); $contract.selectorPatterns)
+                and ([ issue23_marker_array($entry)[] |
+                       select(. == issue3_semantic_marker($entry; $gate))
+                     ] | length == 1);
             def issue23_gate_matches_manifest($entry; $manifestGate):
               (issue23_selector_value($entry)) as $entrySelector
               | (issue23_selector_value($manifestGate)) as $manifestSelector
@@ -1096,6 +1139,12 @@ jobs:
                 and ($entrySelector == $manifestSelector)
                 and (($entry.command | normalized_command) == ($manifestGate.command | normalized_command))
                 and ($entryMarkers == $manifestMarkers)
+                and (if ($manifestGate | has("platform")) then
+                       ($entry.platform == $manifestGate.platform)
+                       and ($entry.architecture == $manifestGate.architecture)
+                       and ($entry.operation == $manifestGate.operation)
+                       and ($entry.platforms == $manifestGate.platforms)
+                     else true end)
                 and (if ($manifestGate | has("blockerInventory"))
                      then (($entry | has("blockerInventory")) and ($entry.blockerInventory == $manifestGate.blockerInventory))
                      else true end);
@@ -1252,7 +1301,10 @@ jobs:
             and ([.records[] | select(valid_record(.; "issue3"; $m))] | length == 1)
             and ([.records[] | select(valid_record(.; "issue5"; $m))] | length == 1)
           JQ
-          jq -e --arg commit "$CYC_GA_SOURCE_COMMIT" --slurpfile manifest "$evidence_path" \
+          test -f "$GITHUB_WORKSPACE/scripts/ga-issue3-gate-contract.json"
+          jq -e --arg commit "$CYC_GA_SOURCE_COMMIT" \
+            --slurpfile manifest "$evidence_path" \
+            --slurpfile issue3contract "$GITHUB_WORKSPACE/scripts/ga-issue3-gate-contract.json" \
             -f "$raw_verification_contract" "$raw_verification" >/dev/null
           raw_root="$(cd "$raw_log_dir" && pwd -P)"
           while IFS=$'\t' read -r raw_path raw_hash raw_bytes; do
@@ -1736,6 +1788,49 @@ jobs:
               elif (($entry | has("markers")) and (($entry.markers | type) == "array")) then
                 $entry.markers
               else [] end;
+            def issue3_gate_contract($gate):
+              if (($issue3contract | length) == 1
+                  and (($issue3contract[0].gates | type) == "object"))
+              then $issue3contract[0].gates[$gate]
+              else null end;
+            def issue3_all_patterns_match($value; $patterns):
+              (nonempty_string($value)
+               and (($patterns | type) == "array")
+               and (($patterns | length) > 0)
+               and ([ $patterns[] as $pattern |
+                      select((string_value($value) | test($pattern)) | not)
+                    ] | length == 0));
+            def issue3_semantic_marker($entry; $gate):
+              "CYC-GA-ISSUE3|gate=" + $gate
+              + "|platform=" + string_value($entry.platform)
+              + "|architecture=" + string_value($entry.architecture)
+              + "|operation=" + string_value($entry.operation)
+              + "|platforms=" + (($entry.platforms | map(ascii_downcase) | sort) | join(","))
+              + "|status=passed";
+            def issue3_gate_semantics_valid($entry; $gate):
+              (issue3_gate_contract($gate)) as $contract
+              | (($contract | type) == "object")
+                and (($entry.platform | type) == "string")
+                and ($entry.platform == $contract.platform)
+                and (($entry.architecture | type) == "string")
+                and (($contract.architectures | type) == "array")
+                and (($contract.architectures | index($entry.architecture)) != null)
+                and (($entry.operation | type) == "string")
+                and ($entry.operation == $contract.operation)
+                and (($entry.platforms | type) == "array")
+                and (($entry.platforms | length) > 0)
+                and ([ $entry.platforms[] |
+                       select((type != "string") or (. != (ascii_downcase)))
+                     ] | length == 0)
+                and (($entry.platforms | map(ascii_downcase) | unique | sort)
+                     == ($contract.platforms | map(ascii_downcase) | unique | sort))
+                and (($entry.platforms | length)
+                     == ($entry.platforms | map(ascii_downcase) | unique | length))
+                and issue3_all_patterns_match($entry.command; $contract.commandPatterns)
+                and issue3_all_patterns_match(issue23_selector_value($entry); $contract.selectorPatterns)
+                and ([ issue23_marker_array($entry)[] |
+                       select(. == issue3_semantic_marker($entry; $gate))
+                     ] | length == 1);
             def issue23_gate_matches_manifest($entry; $manifestGate):
               (issue23_selector_value($entry)) as $entrySelector
               | (issue23_selector_value($manifestGate)) as $manifestSelector
@@ -1757,6 +1852,12 @@ jobs:
                 and ($entrySelector == $manifestSelector)
                 and (($entry.command | normalized_command) == ($manifestGate.command | normalized_command))
                 and ($entryMarkers == $manifestMarkers)
+                and (if ($manifestGate | has("platform")) then
+                       ($entry.platform == $manifestGate.platform)
+                       and ($entry.architecture == $manifestGate.architecture)
+                       and ($entry.operation == $manifestGate.operation)
+                       and ($entry.platforms == $manifestGate.platforms)
+                     else true end)
                 and (if ($manifestGate | has("blockerInventory"))
                      then (($entry | has("blockerInventory")) and ($entry.blockerInventory == $manifestGate.blockerInventory))
                      else true end);
@@ -1796,6 +1897,7 @@ jobs:
                 and ([ issue23_marker_array($entry)[] |
                        select(test("^CYC-GA-" + ($issue | ascii_upcase) + "\\|gate=" + $gate + "\\|commandSha256=[0-9a-fA-F]{64}\\|status=passed$"))
                      ] | length == 1)
+                and (if $issue == "issue3" then issue3_gate_semantics_valid($entry; $gate) else true end)
                 and (if ($issue == "issue2" and $gate == "noOpenUnwaivedP0P1Blocker") then
                        (($entry | has("blockerInventory")) and blocker_inventory_valid($entry.blockerInventory))
                      elif ($entry | has("blockerInventory")) then false
@@ -1878,7 +1980,9 @@ jobs:
                and ([.issue2.evidenceId, .issue3.evidenceId, .issue5.evidenceId] | unique | length == 3)
                and ([.issue2.rawLog.url, .issue3.rawLog.url, .issue5.rawLog.url] | unique | length == 3)
           JQ
+          test -f "$GITHUB_WORKSPACE/scripts/ga-issue3-gate-contract.json"
           jq -e --arg tag "$CYC_GA_SOURCE_TAG" --arg commit "$CYC_GA_SOURCE_COMMIT" \
+            --slurpfile issue3contract "$GITHUB_WORKSPACE/scripts/ga-issue3-gate-contract.json" \
             -f "$stable_ga_contract" "$evidence_path" >/dev/null
           echo "GA evidence, issue3/issue5 acceptance gates, and stable release-index are source-bound to $bundle_index_hash" >> "$GITHUB_STEP_SUMMARY"
 

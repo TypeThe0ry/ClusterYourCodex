@@ -1,0 +1,94 @@
+{
+  "schemaVersion": "cyc.dev/ga-issue3-gate-contract/v1",
+  "platforms": ["linux", "macos", "windows"],
+  "gates": {
+    "linuxSystemdUserServicePackage": {
+      "platform": "linux",
+      "platforms": ["linux"],
+      "architectures": ["any"],
+      "operation": "systemd-user-package",
+      "commandPatterns": ["(?i)(systemd|systemctl)", "(?i)(--user|systemd-user|user[ -]service)"],
+      "selectorPatterns": ["(?i)linuxSystemdUserServicePackage", "(?i)(systemd|systemctl)"]
+    },
+    "macosLaunchAgentPackage": {
+      "platform": "macos",
+      "platforms": ["macos"],
+      "architectures": ["any"],
+      "operation": "launchagent-package",
+      "commandPatterns": ["(?i)(launchctl|LaunchAgents)", "(?i)(bootstrap|kickstart|print|bootout|install|package)"],
+      "selectorPatterns": ["(?i)macosLaunchAgentPackage", "(?i)(launchctl|LaunchAgents)"]
+    },
+    "linuxX64ReleaseArtifact": {
+      "platform": "linux",
+      "platforms": ["linux"],
+      "architectures": ["x86_64"],
+      "operation": "release-artifact",
+      "commandPatterns": ["(?i)(artifact|release|bundle)", "(?i)(linux|gnu/linux)", "(?i)(x86[_-]?64|amd64|x64)"],
+      "selectorPatterns": ["(?i)linuxX64ReleaseArtifact", "(?i)(x86[_-]?64|amd64|x64)"]
+    },
+    "macosX64ReleaseArtifact": {
+      "platform": "macos",
+      "platforms": ["macos"],
+      "architectures": ["x86_64"],
+      "operation": "release-artifact",
+      "commandPatterns": ["(?i)(artifact|release|bundle)", "(?i)(macos|darwin|osx)", "(?i)(x86[_-]?64|amd64|x64)"],
+      "selectorPatterns": ["(?i)macosX64ReleaseArtifact", "(?i)(x86[_-]?64|amd64|x64)"]
+    },
+    "macosArm64ReleaseArtifact": {
+      "platform": "macos",
+      "platforms": ["macos"],
+      "architectures": ["arm64"],
+      "operation": "release-artifact",
+      "commandPatterns": ["(?i)(artifact|release|bundle)", "(?i)(macos|darwin|osx)", "(?i)(arm64|aarch64)"],
+      "selectorPatterns": ["(?i)macosArm64ReleaseArtifact", "(?i)(arm64|aarch64)"]
+    },
+    "platformNativeShells": {
+      "platform": "multi",
+      "platforms": ["linux", "macos", "windows"],
+      "architectures": ["multi"],
+      "operation": "native-shells",
+      "commandPatterns": ["(?i)(bash|zsh|pwsh|powershell|shell)", "(?i)(linux|macos|darwin|windows)"],
+      "selectorPatterns": ["(?i)platformNativeShells", "(?i)(shell|command)"]
+    },
+    "platformNativeProcessGroups": {
+      "platform": "multi",
+      "platforms": ["linux", "macos", "windows"],
+      "architectures": ["multi"],
+      "operation": "native-process-groups",
+      "commandPatterns": ["(?i)(process[ -]?group|setsid|job[ -]?object|kill|terminate)", "(?i)(linux|macos|darwin|windows)"],
+      "selectorPatterns": ["(?i)platformNativeProcessGroups", "(?i)(process|group|job)"]
+    },
+    "crossPlatformPathAclTests": {
+      "platform": "multi",
+      "platforms": ["linux", "macos", "windows"],
+      "architectures": ["multi"],
+      "operation": "path-acl",
+      "commandPatterns": ["(?i)(acl|chmod|icacls|permissions|path)", "(?i)(linux|macos|darwin|windows)"],
+      "selectorPatterns": ["(?i)crossPlatformPathAclTests", "(?i)(acl|path|permission)"]
+    },
+    "liveMacosRun": {
+      "platform": "macos",
+      "platforms": ["macos"],
+      "architectures": ["x86_64", "arm64"],
+      "operation": "live-controller-worker-roundtrip",
+      "commandPatterns": ["(?i)launchctl", "(?i)(bootstrap|kickstart|print|bootout)", "(?i)(controller[ -]?worker|round[ -]?trip)"],
+      "selectorPatterns": ["(?i)liveMacosRun", "(?i)(launchctl|controller|worker|round[ -]?trip)"]
+    },
+    "liveLinuxControllerWorkerRoundTrip": {
+      "platform": "linux",
+      "platforms": ["linux"],
+      "architectures": ["x86_64", "arm64"],
+      "operation": "live-controller-worker-roundtrip",
+      "commandPatterns": ["(?i)scripts/test-linux-controller-worker-roundtrip[.]sh", "(?i)(controller[ -]?worker|round[ -]?trip)"],
+      "selectorPatterns": ["(?i)liveLinuxControllerWorkerRoundTrip", "(?i)test-linux-controller-worker-roundtrip[.]sh"]
+    },
+    "macosDeveloperIdSigningNotarization": {
+      "platform": "macos",
+      "platforms": ["macos"],
+      "architectures": ["x86_64", "arm64", "universal2"],
+      "operation": "developer-id-signing-notarization",
+      "commandPatterns": ["(?i)codesign", "(?i)(notarytool|notariz)"],
+      "selectorPatterns": ["(?i)macosDeveloperIdSigningNotarization", "(?i)(codesign|notar)"]
+    }
+  }
+}

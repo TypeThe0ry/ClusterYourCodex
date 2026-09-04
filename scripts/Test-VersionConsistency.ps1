@@ -425,6 +425,7 @@ if (-not $SkipNegativeTests) {
             '.github/workflows/release.yml',
             '.github/workflows/ga.yml',
             'scripts/Test-GAReadiness.ps1',
+            'scripts/ga-issue3-gate-contract.json',
             'scripts/Test-ExternalHttpsUrl.py',
             'scripts/Test-GitHubActionPins.ps1'
         )) {
