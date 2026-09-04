@@ -631,6 +631,53 @@ function Wait-NodeReport {
     Fail-RoundTrip 'worker node report did not appear in controller fleet'
 }
 
+function Wait-NodeCapacity {
+    param(
+        [ValidateRange(1, 4096)]
+        [int]$MinimumCpuCores = 1
+    )
+
+    # A hosted Windows runner can still be CPU-saturated for a short period
+    # after the release binaries finish compiling. The worker deliberately
+    # reports zero allocatable cores while its measured load leaves less than
+    # one whole core. Treating that truthful report as a permanent submit
+    # failure makes this live round-trip flaky. Wait for the same fresh fleet
+    # view that the controller will use, then submit only after the requested
+    # minimum headroom is visible. This preserves the fail-closed scheduler
+    # contract and keeps the bounded timeout/retry evidence in the job root.
+    $deadline = [DateTime]::UtcNow.AddSeconds($script:State.TimeoutSeconds)
+    $pollIndex = 0
+    $lastAvailable = $null
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (-not (Test-OwnedProcessAlive -Record $script:State.WorkerProcess)) {
+            Fail-RoundTrip 'worker process exited while waiting for schedulable capacity'
+        }
+        $pollIndex++
+        try {
+            $fleet = Invoke-CycJson -Label ("fleet-capacity-{0:d4}" -f $pollIndex) `
+                -Arguments @('nodes') -Authenticated
+            foreach ($view in @((Get-JsonField $fleet 'nodeViews'))) {
+                if ($null -eq $view -or [string](Get-JsonField $view 'nodeId') -cne $script:State.NodeId) {
+                    continue
+                }
+                $available = Get-JsonField $view 'effectiveResources.availableCpuCores'
+                if ($null -eq $available) {
+                    $available = Get-JsonField $view 'telemetry.document.availableCpuCores'
+                }
+                if ($null -eq $available) { continue }
+                try { $lastAvailable = [int64]$available } catch { continue }
+                if ($lastAvailable -ge $MinimumCpuCores) { return }
+            }
+        } catch {
+            # The controller/worker pair is still live; transient fleet
+            # polling errors are retried until the same bounded deadline.
+        }
+        Start-Sleep -Seconds 1
+    }
+    $observed = if ($null -eq $lastAvailable) { 'unknown' } else { [string]$lastAvailable }
+    Fail-RoundTrip "worker never exposed $MinimumCpuCores allocatable CPU core(s) before timeout (last observed: $observed)"
+}
+
 function Get-RunDurationSeconds {
     param([Parameter(Mandatory)]$Run)
     $started = [DateTimeOffset]::Parse([string](Get-JsonField $Run 'startedAt'))
@@ -1007,6 +1054,8 @@ function Invoke-LiveRoundTrip {
     $uploaded = Invoke-CycJson -Label 'snapshot-upload' -Arguments @('snapshot', 'upload', '--archive', $script:State.SnapshotArchive) -Authenticated
     $snapshotStatus = Invoke-CycJson -Label 'snapshot-status' -Arguments @('snapshot', 'status', $digest) -Authenticated
     if ((Get-JsonField $snapshotStatus 'available') -ne $true) { Fail-RoundTrip 'uploaded snapshot was not available' }
+
+    Wait-NodeCapacity -MinimumCpuCores 1
 
     $script:State.JobId = [Guid]::NewGuid().ToString()
     $powershellStep = @'

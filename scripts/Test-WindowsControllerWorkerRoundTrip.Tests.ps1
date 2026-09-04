@@ -58,4 +58,12 @@ Describe 'Windows controller/worker live round-trip probe contract' {
         $probeSource | Should Match 'foreach \(\$childPid in @\(\$beforeTree\.ProcessIds\)\)'
         $probeSource | Should Match 'if \(-not \$beforeTree\.Available\) \{ \$clean = \$false \}'
     }
+
+    It 'waits for truthful scheduler CPU headroom before submitting the live job' {
+        $probeSource | Should Match 'function Wait-NodeCapacity'
+        $probeSource | Should Match 'effectiveResources\.availableCpuCores'
+        $probeSource | Should Match 'fleet-capacity-'
+        $probeSource | Should Match 'Wait-NodeCapacity -MinimumCpuCores 1'
+        $probeSource | Should Match 'never exposed .*allocatable CPU core'
+    }
 }
