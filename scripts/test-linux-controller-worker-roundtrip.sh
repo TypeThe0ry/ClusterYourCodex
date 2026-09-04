@@ -1069,7 +1069,6 @@ main() {
   [[ "$(uname -s)" == Linux ]] || die "live round-trip requires Linux; refusing to fake Linux acceptance on $(uname -s)"
 
   require_command bash
-  require_command cargo
   require_command python3
   require_command mktemp
   require_command date

@@ -19,9 +19,11 @@ checks Bash helpers; it is not a live acceptance result.
 
 Run from a Linux checkout with:
 
-- `cargo` and the workspace lockfile available (the script builds
-  `cyc-cli`, `cyc-controller`, and `cyc-worker` when matching binaries are not
-  supplied with `CYC_BIN`, `CYC_CONTROLLER_BIN`, and `CYC_WORKER_BIN`);
+- `cargo` and the workspace lockfile available when the script must build
+  `cyc-cli`, `cyc-controller`, and `cyc-worker`; a live probe may instead use
+  three already-built, executable binaries supplied through `CYC_BIN`,
+  `CYC_CONTROLLER_BIN`, and `CYC_WORKER_BIN`, in which case Cargo is not
+  required on the acceptance host;
 - `python3`, Bash, and ordinary Linux `proc`, network, file, and process
   utilities;
 - `/proc` process topology and the Linux child-subreaper operation available
