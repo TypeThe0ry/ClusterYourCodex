@@ -7,6 +7,22 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.81] - 2026-09-04
+
+### Fixed
+
+- Align the tagged developer-preview workflow with the repository's strict
+  `preview.N`, `alpha.N`, `beta.N`, and `rc.N` prerelease contract, including
+  rejection of leading-zero identifiers and stable/dev tags.
+- Normalize every nested raw-log verification timestamp to invariant UTC ISO
+  before Windows PowerShell 5.1 serialization, preventing legacy `/Date(...)\/`
+  values from invalidating otherwise valid GA evidence.
+
+### Tests
+
+- Add a PowerShell 5.1/7 regression covering nested timestamp arrays, culture
+  independence, and fail-closed handling of unspecified `DateTime` values.
+
 ## [0.1.0-preview.80] - 2026-09-04
 
 ### Fixed
@@ -1041,7 +1057,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.80...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.81...HEAD
+[0.1.0-preview.81]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.80...v0.1.0-preview.81
 [0.1.0-preview.80]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.79...v0.1.0-preview.80
 [0.1.0-preview.79]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.78...v0.1.0-preview.79
 [0.1.0-preview.78]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.77...v0.1.0-preview.78
