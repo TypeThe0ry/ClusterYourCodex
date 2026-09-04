@@ -7,6 +7,19 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.80] - 2026-09-04
+
+### Fixed
+
+- Allow the Linux controller/worker live round-trip probe to consume three
+  prebuilt executable binaries through `CYC_BIN`, `CYC_CONTROLLER_BIN`, and
+  `CYC_WORKER_BIN` without requiring Cargo on the acceptance host.
+
+### Tests
+
+- Retain the exact-SHA P1 live round-trip path for hosts that validate signed
+  release binaries without a local Rust toolchain.
+
 ## [0.1.0-preview.79] - 2026-09-04
 
 ### Fixed
@@ -1028,7 +1041,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.79...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.80...HEAD
+[0.1.0-preview.80]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.79...v0.1.0-preview.80
 [0.1.0-preview.79]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.78...v0.1.0-preview.79
 [0.1.0-preview.78]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.77...v0.1.0-preview.78
 [0.1.0-preview.77]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.76...v0.1.0-preview.77
