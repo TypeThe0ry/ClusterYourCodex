@@ -7,6 +7,24 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.77] - 2026-09-04
+
+### Fixed
+
+- Make Linux worker-service uninstall transactional: stop the owned service,
+  stage its unit beside the original, restore the exact bytes when
+  `daemon-reload` fails, and retire the staging file only after the manager
+  accepts the removal.
+- Fail closed when a Linux `systemd` manager or macOS `launchctl` cannot prove
+  that an owned worker service is stopped before uninstall removes its files.
+
+### Tests
+
+- Add Linux regressions for active-service disable failures and daemon-reload
+  rollback, plus a macOS LaunchAgent bootout-failure retry fixture.
+- Bound tagged-preview artifact, indexing, and publication jobs with explicit
+  timeouts so a runner-side hang cannot block the prerelease pipeline forever.
+
 ## [0.1.0-preview.76] - 2026-09-04
 
 ### Added
@@ -971,7 +989,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.76...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.77...HEAD
+[0.1.0-preview.77]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.76...v0.1.0-preview.77
 [0.1.0-preview.76]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.75...v0.1.0-preview.76
 [0.1.0-preview.75]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.74...v0.1.0-preview.75
 [0.1.0-preview.74]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.73...v0.1.0-preview.74
