@@ -66,4 +66,10 @@ Describe 'Windows controller/worker live round-trip probe contract' {
         $probeSource | Should Match 'Wait-NodeCapacity -MinimumCpuCores 1'
         $probeSource | Should Match 'never exposed .*allocatable CPU core'
     }
+
+    It 'keeps the hosted Windows PowerShell fixture timeout finite but above cold-start variance' {
+        $probeSource | Should Match 'timeoutSeconds = 300'
+        $probeSource | Should Match 'Production'
+        $probeSource | Should Match 'job/step timeouts remain unchanged'
+    }
 }

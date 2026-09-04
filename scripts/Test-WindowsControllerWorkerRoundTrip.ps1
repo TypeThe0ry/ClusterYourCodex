@@ -1073,7 +1073,14 @@ Start-Sleep -Seconds 8
         source = [ordered]@{ type = 'snapshot'; digest = $digest; sizeBytes = $size }
         steps = @([ordered]@{ name = 'controller-worker-roundtrip'; shell = 'powershell'; script = $powershellStep })
         artifacts = [ordered]@{ include = @('result.txt'); exclude = @('.git/**') }
-        timeoutSeconds = 60
+        # Hosted Windows runners can spend several minutes starting the first
+        # contained Windows PowerShell process while Defender/JIT and the
+        # suspended-to-job-object hand-off are cold.  Keep this acceptance
+        # fixture finite, but do not let a 60-second application timeout turn
+        # a successful eight-second step into a false negative.  Production
+        # job/step timeouts remain unchanged; this is only the live gate's
+        # deliberately bounded test payload.
+        timeoutSeconds = 300
         placementPolicy = 'balanced'
     }
     Write-Utf8NoBom -Path $script:State.JobSpec -Content ($job | ConvertTo-Json -Depth 20)

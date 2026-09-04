@@ -237,7 +237,7 @@ jobs:
             -CycBin (Join-Path $PWD 'target\release\cyc.exe') `
             -ControllerBin (Join-Path $PWD 'target\release\cyc-controller.exe') `
             -WorkerBin (Join-Path $PWD 'target\release\cyc-worker.exe') `
-            -TimeoutSeconds 180 `
+            -TimeoutSeconds 360 `
             -KeepEvidence
           if ($LASTEXITCODE -ne 0) { throw "Windows controller/worker round trip failed with exit code $LASTEXITCODE." }
       - name: Upload Windows controller/worker round-trip evidence
