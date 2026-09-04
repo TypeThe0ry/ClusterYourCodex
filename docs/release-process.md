@@ -134,6 +134,24 @@ targets, reparse points, and directories, writes to a fresh same-directory
 temporary file, and atomically publishes the result without overwriting an
 existing evidence file.
 
+The `noOpenUnwaivedP0P1Blocker` inventory is also reconciled against a fresh
+live GitHub REST snapshot at readiness time and again immediately before the
+stable publisher. The workflow captures every paginated open repository issue
+(excluding pull requests) as `cyc.dev/ga-open-issue-snapshot/v1`, requires a
+complete, error-free response, and compares canonical issue number, state,
+title, URL, and labels byte-for-byte after normalization. The embedded
+inventory API capture must be no more than 24 hours old; a missing page,
+permission/API error, newly opened issue, changed label, or stale inventory
+fails closed.
+
+The stable source commit must also have a complete, successful push run from
+the canonical `CI` workflow (`.github/workflows/ci.yml`) before either readiness
+job can pass. `scripts/Test-GARequiredChecks.ps1` binds the selected run, every
+job, and every GitHub Actions check-run to the reviewed commit and exact job
+set; the workflow stores that result as `cyc.dev/ga-ci-runs/v1` and repeats the
+same query immediately before publication. A missing, pending, failed, renamed,
+extra, or SHA-mismatched check fails closed.
+
 Issue #5 has an additional, fail-closed evidence contract because its nine
 gates are a cross-platform hostile-workload matrix. Its `rawLog` descriptor
 must contain `platforms: ["linux", "windows", "macos"]` and a non-empty

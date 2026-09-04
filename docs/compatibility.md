@@ -252,6 +252,13 @@ issue snapshot also requires the canonical title, `state_reason=completed`,
 and the repository issue URL, so a duplicate or "not planned" closure cannot
 satisfy GA.
 
+Stable publication also requires a source-bound successful push run from the
+canonical `CI` workflow. The workflow captures the complete paginated run,
+job, and check-run responses as `cyc.dev/ga-ci-runs/v1`, verifies the exact
+workflow path/name, branch, event, SHA, job set, and GitHub Actions producer,
+then repeats that check immediately before publishing. Pending, failed,
+renamed, extra, or SHA-mismatched checks fail closed.
+
 The stable publisher additionally compares the requested attestation signer
 repository and workflow against the protected `production` environment values
 `CYC_GA_TRUSTED_BUILDER_REPO`, `CYC_GA_TRUSTED_BUILDER_WORKFLOW`, and

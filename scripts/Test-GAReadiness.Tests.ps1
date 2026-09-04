@@ -128,6 +128,56 @@ function New-TestBlockerInventory {
     return (($inventory | ConvertTo-Json -Depth 20) | ConvertFrom-Json)
 }
 
+function New-TestOpenIssueSnapshot {
+    param(
+        [object]$Inventory = $null,
+        [string]$CapturedAt = $null
+    )
+
+    if ($null -eq $Inventory) {
+        $Inventory = New-TestBlockerInventory -IncludeWaivedOpenP1
+    }
+    if ([string]::IsNullOrWhiteSpace($CapturedAt)) {
+        $CapturedAt = ([DateTimeOffset]::UtcNow.AddMinutes(-5)).ToString('yyyy-MM-ddTHH:mm:ssZ')
+    }
+
+    $issues = New-Object System.Collections.Generic.List[object]
+    foreach ($issue in @($Inventory.issues)) {
+        $labels = New-Object System.Collections.Generic.List[object]
+        foreach ($label in @($issue.labels)) {
+            [void]$labels.Add([ordered]@{ name = [string]$label.name })
+        }
+        [void]$issues.Add([ordered]@{
+                number = [long]$issue.number
+                state = [string]$issue.state
+                title = [string]$issue.title
+                html_url = [string]$issue.html_url
+                labels = @($labels.ToArray())
+            })
+    }
+    $snapshot = [ordered]@{
+        schemaVersion = 'cyc.dev/ga-open-issue-snapshot/v1'
+        sourceCommit = $expectedCommitForTest
+        capturedAt = $CapturedAt
+        api = [ordered]@{
+            provider = 'github-rest-api'
+            endpoint = 'https://api.github.com/repos/TypeThe0ry/ClusterYourCodex/issues?state=open&per_page=100'
+            requestedState = 'open'
+            complete = $true
+            incomplete = $false
+            hasNextPage = $false
+            pageCount = 1
+            totalCount = $issues.Count
+            returnedCount = $issues.Count
+            capturedAt = $CapturedAt
+            sourceCommit = $expectedCommitForTest
+            error = $null
+        }
+        issues = @($issues.ToArray())
+    }
+    return (($snapshot | ConvertTo-Json -Depth 20) | ConvertFrom-Json)
+}
+
 function New-TestIssueEvidence {
     param(
         [string]$Provider = 'external-lab',
@@ -518,6 +568,15 @@ Describe 'GA evidence issue acceptance contract' {
         $workflowSource | Should Match 'ConvertFrom-Json'
         $workflowSource | Should Match 'readinessDirectory = Join-Path \$env:RUNNER_TEMP'
         $workflowSource | Should Not Match 'outputDirectory = Join-Path \$env:RUNNER_TEMP ''cyc-ga-readiness\\raw-logs'''
+        foreach ($needle in @(
+                'LiveBlockerSnapshotPath',
+                'cyc.dev/ga-open-issue-snapshot/v1',
+                'open-issue-pages.json',
+                '--paginate --slurp',
+                'blockerSnapshotSha256')) {
+            $readinessSource | Should Match ([regex]::Escape($needle))
+            $workflowSource | Should Match ([regex]::Escape($needle))
+        }
     }
 
     It 'keeps raw-log verification executable and fail-closed' {
@@ -562,6 +621,12 @@ Describe 'GA evidence issue acceptance contract' {
         $readinessSource | Should Match 'rawVerificationRootPrefix'
         $readinessSource | Should Match 'downloaded raw-log URL matches'
         $readinessSource | Should Match 'downloaded GA raw-log file hash matches'
+        $workflowSource | Should Match 'Test-GARequiredChecks\.ps1'
+        $workflowSource | Should Match 'cyc\.dev/ga-ci-runs/v1'
+        $workflowSource | Should Match 'ci-run-pages\.json'
+        $workflowSource | Should Match 'ciSnapshotSha256'
+        $workflowSource | Should Match 'actions: read'
+        $workflowSource | Should Match 'checks: read'
     }
 
     It 'emits invariant ISO timestamps when PowerShell materializes gate times as DateTime' {
@@ -844,6 +909,48 @@ Describe 'GA evidence issue acceptance contract' {
             Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue2 = $apiError }) `
                 -Path 'issue2' -Description 'Issue #2 errored blocker API' -ExpectedCommit $expectedCommitForTest `
                 -RequiredGates $issue2GateNamesForTest
+        }
+    }
+
+    It 'binds the blocker inventory to a fresh complete open-issue snapshot' {
+        $record = New-TestIssueEvidence -Provider 'windows-lab' -HostType 'windows-clean-vm' -GateNames $issue2GateNamesForTest
+        $inventory = $record.gates.noOpenUnwaivedP0P1Blocker.blockerInventory
+        $capturedAt = ([DateTimeOffset]::UtcNow.AddMinutes(-5)).ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $inventory.api.capturedAt = $capturedAt
+        $liveSnapshot = New-TestOpenIssueSnapshot -Inventory $inventory -CapturedAt $capturedAt
+
+        $result = Assert-GaLiveBlockerInventory -Inventory $inventory -LiveSnapshot $liveSnapshot `
+            -ExpectedCommit $expectedCommitForTest -Description 'fresh blocker inventory binding'
+        $result.issueCount | Should Be 1
+        $result.maxAgeHours | Should Be 24
+    }
+
+    It 'rejects stale, changed, and malformed live blocker snapshots' {
+        $record = New-TestIssueEvidence -Provider 'windows-lab' -HostType 'windows-clean-vm' -GateNames $issue2GateNamesForTest
+        $inventory = $record.gates.noOpenUnwaivedP0P1Blocker.blockerInventory
+        $capturedAt = ([DateTimeOffset]::UtcNow.AddMinutes(-5)).ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $inventory.api.capturedAt = $capturedAt
+        $liveSnapshot = New-TestOpenIssueSnapshot -Inventory $inventory -CapturedAt $capturedAt
+
+        $changed = ($liveSnapshot | ConvertTo-Json -Depth 20) | ConvertFrom-Json
+        $changed.issues[0].title = 'changed after inventory capture'
+        Assert-TestThrows {
+            Assert-GaLiveBlockerInventory -Inventory $inventory -LiveSnapshot $changed `
+                -ExpectedCommit $expectedCommitForTest -Description 'changed blocker snapshot'
+        }
+
+        $staleInventory = ($inventory | ConvertTo-Json -Depth 20) | ConvertFrom-Json
+        $staleInventory.api.capturedAt = '2020-01-01T00:00:00Z'
+        Assert-TestThrows {
+            Assert-GaLiveBlockerInventory -Inventory $staleInventory -LiveSnapshot $liveSnapshot `
+                -ExpectedCommit $expectedCommitForTest -Description 'stale blocker inventory'
+        }
+
+        $wrongEndpoint = ($liveSnapshot | ConvertTo-Json -Depth 20) | ConvertFrom-Json
+        $wrongEndpoint.api.endpoint = 'https://api.github.com/repos/TypeThe0ry/ClusterYourCodex/issues'
+        Assert-TestThrows {
+            Assert-GaLiveBlockerInventory -Inventory $inventory -LiveSnapshot $wrongEndpoint `
+                -ExpectedCommit $expectedCommitForTest -Description 'malformed blocker endpoint'
         }
     }
 

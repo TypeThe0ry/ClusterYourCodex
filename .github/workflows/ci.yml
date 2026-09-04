@@ -42,6 +42,13 @@ jobs:
           Invoke-Pester
           -Script .\scripts\Test-GAReadiness.Tests.ps1
           -EnableExit
+      - name: Run exact-source CI attestation contract tests
+        shell: powershell
+        run: >-
+          Import-Module Pester -RequiredVersion 3.4.0 -Force;
+          Invoke-Pester
+          -Script .\scripts\Test-GARequiredChecks.Tests.ps1
+          -EnableExit
       - name: Run Issue #5 native selector guard unit tests
         shell: powershell
         run: python .\scripts\test_issue5_selector_guard.py

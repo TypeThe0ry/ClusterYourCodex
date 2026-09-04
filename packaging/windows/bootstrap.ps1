@@ -304,6 +304,36 @@ function Assert-CycCreationPathNoReparse {
     }
 }
 
+function Get-CycAtomicTargetItem {
+    <#
+    Inspect an atomic-writer destination without following a reparse-point
+    leaf. Test-Path -PathType Leaf can report a dangling link as missing, so
+    use Get-Item -Force as the authoritative existence probe and fail closed on
+    every error other than a genuinely absent path. Callers repeat this probe
+    immediately before the replace/move commit to cover the normal
+    check-then-use interval as far as the PowerShell provider permits.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    } catch {
+        if ($_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound) {
+            return $null
+        }
+        throw "Unable to inspect ${Description}: $Path ($($_.Exception.Message))"
+    }
+    if (Test-ReparsePoint $item) {
+        throw "$Description must be a regular file, not a reparse point: $Path"
+    }
+    if ($item.PSIsContainer) {
+        throw "$Description must be a regular file, not a directory: $Path"
+    }
+    return $item
+}
+
 function Get-PayloadFiles {
     param([Parameter(Mandatory = $true)][string]$Root)
     $bundle = Resolve-NormalizedPath $Root
@@ -954,12 +984,7 @@ function Write-CycDurableAtomicBytes {
         Assert-CycCreationPathNoReparse -Path $directory
         [void](New-Item -ItemType Directory -Path $directory -Force)
     }
-    if (Test-Path -LiteralPath $Path) {
-        $targetItem = Get-Item -LiteralPath $Path -Force
-        if ($targetItem.PSIsContainer -or (Test-ReparsePoint $targetItem)) {
-            throw 'AGENTS.md target must be a regular file, not a directory or reparse point.'
-        }
-    }
+    [void](Get-CycAtomicTargetItem -Path $Path -Description 'AGENTS.md target')
     $leaf = Split-Path -Leaf $Path
     $temporary = Join-Path $directory ($leaf + '.cyc-tmp-' + [Guid]::NewGuid().ToString('N'))
     $backup = Join-Path $directory ($leaf + '.cyc-bak-' + [Guid]::NewGuid().ToString('N'))
@@ -982,7 +1007,8 @@ function Write-CycDurableAtomicBytes {
         $stream.Flush($true)
         $stream.Dispose()
         $stream = $null
-        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        $targetItem = Get-CycAtomicTargetItem -Path $Path -Description 'AGENTS.md target'
+        if ($null -ne $targetItem) {
             # Windows PowerShell/.NET Framework requires the backup operand of
             # File.Replace to already be a same-volume regular file.  Passing
             # a merely planned path fails after the temporary payload was
@@ -4938,16 +4964,22 @@ function Restore-FileRollbackSnapshot {
             [void](New-Item -ItemType Directory -Path (Split-Path -Parent $record.targetPath) -Force)
             $temporary = $record.targetPath + '.cyc-rollback-' + [Guid]::NewGuid().ToString('N')
             Copy-Item -LiteralPath $record.backupPath -Destination $temporary -Force
+            [void](Get-CycAtomicTargetItem -Path $record.targetPath -Description 'rollback target')
             Move-Item -LiteralPath $temporary -Destination $record.targetPath -Force
-        } elseif (Test-Path -LiteralPath $record.targetPath -PathType Leaf) {
+        } else {
+            $targetItem = Get-CycAtomicTargetItem -Path $record.targetPath -Description 'rollback target'
+            if ($null -eq $targetItem) { continue }
             Remove-Item -LiteralPath $record.targetPath -Force
         }
     }
     if ($Snapshot.manifestExisted) {
         Assert-CycCreationPathNoReparse -Path (Split-Path -Parent $Snapshot.manifestPath)
         [void](New-Item -ItemType Directory -Path (Split-Path -Parent $Snapshot.manifestPath) -Force)
+        [void](Get-CycAtomicTargetItem -Path $Snapshot.manifestPath -Description 'rollback manifest target')
         Copy-Item -LiteralPath $Snapshot.manifestBackup -Destination $Snapshot.manifestPath -Force
-    } elseif (Test-Path -LiteralPath $Snapshot.manifestPath -PathType Leaf) {
+    } else {
+        $manifestTargetItem = Get-CycAtomicTargetItem -Path $Snapshot.manifestPath -Description 'rollback manifest target'
+        if ($null -eq $manifestTargetItem) { return }
         Remove-Item -LiteralPath $Snapshot.manifestPath -Force
     }
 }
@@ -5512,6 +5544,7 @@ function Write-DurableAtomicJson {
     $backup = Join-Path $directory ($leaf + '.bak-' + [Guid]::NewGuid().ToString('N'))
     $utf8 = [System.Text.UTF8Encoding]::new($false)
     $bytes = $utf8.GetBytes(($Value | ConvertTo-Json -Depth $Depth))
+    [void](Get-CycAtomicTargetItem -Path $Path -Description 'durable JSON target')
     $stream = $null
     $backupStream = $null
     $backupCreated = $false
@@ -5532,7 +5565,8 @@ function Write-DurableAtomicJson {
         $stream.Dispose()
         $stream = $null
 
-        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        $targetItem = Get-CycAtomicTargetItem -Path $Path -Description 'durable JSON target'
+        if ($null -ne $targetItem) {
             # Windows PowerShell/.NET Framework requires the backup operand of
             # File.Replace to already be a same-volume regular file.  Passing
             # a merely planned path fails after the temporary JSON was

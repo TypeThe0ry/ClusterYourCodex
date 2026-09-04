@@ -13,6 +13,8 @@ param(
 
     [string]$IssueSnapshotPath,
 
+    [string]$LiveBlockerSnapshotPath,
+
     [string]$ControlsPath,
 
     [switch]$ContractOnly,
@@ -30,6 +32,8 @@ $RepositoryRoot = [System.IO.Path]::GetFullPath($RepositoryRoot)
 $GaMaximumEvidenceBytes = 64MB
 $GaMaximumRawLogTestCount = [long]1000000000
 $GaRawLogContentSchema = 'cyc.dev/ga-raw-log/v1'
+$GaOpenIssueSnapshotSchema = 'cyc.dev/ga-open-issue-snapshot/v1'
+$GaMaximumBlockerInventoryAge = [TimeSpan]::FromHours(24)
 
 function Assert-GaCondition {
     param(
@@ -1313,6 +1317,147 @@ function Assert-GaBlockerInventory {
     }
 }
 
+function Get-GaIssueSetBinding {
+    param(
+        [Parameter(Mandatory = $true)][object]$Issues,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-GaCondition ($Issues -is [System.Array]) "$Description must be a JSON array"
+    $bindings = New-Object System.Collections.Generic.List[object]
+    foreach ($issue in @($Issues | Sort-Object {
+                [long](Get-GaProperty -Object $_ -Path 'number' -Description $Description)
+            })) {
+        $labels = Get-GaProperty -Object $issue -Path 'labels' -Description $Description
+        $labelBindings = New-Object System.Collections.Generic.List[string]
+        foreach ($label in @($labels | Sort-Object {
+                    [string](Get-GaProperty -Object $_ -Path 'name' -Description $Description)
+                })) {
+            [void]$labelBindings.Add([string](Get-GaProperty -Object $label -Path 'name' -Description $Description))
+        }
+        [void]$bindings.Add([ordered]@{
+                number = [long](Get-GaProperty -Object $issue -Path 'number' -Description $Description)
+                state = [string](Get-GaProperty -Object $issue -Path 'state' -Description $Description)
+                title = [string](Get-GaProperty -Object $issue -Path 'title' -Description $Description)
+                html_url = [string](Get-GaProperty -Object $issue -Path 'html_url' -Description $Description)
+                labels = $labelBindings.ToArray()
+            })
+    }
+    return (($bindings.ToArray()) | ConvertTo-Json -Depth 20 -Compress)
+}
+
+function Assert-GaOpenIssueSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][object]$Snapshot,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-GaExactObjectPropertySet -Object $Snapshot `
+        -Required @('schemaVersion', 'sourceCommit', 'capturedAt', 'api', 'issues') `
+        -Description $Description
+    [void](Assert-GaString -Object $Snapshot -Path 'schemaVersion' -Expected $GaOpenIssueSnapshotSchema -Description $Description)
+    $sourceCommit = Get-GaProperty -Object $Snapshot -Path 'sourceCommit' -Description $Description
+    Assert-GaCondition ($sourceCommit -is [string] -and [string]$sourceCommit -match '^[0-9a-fA-F]{40}$') "$Description.sourceCommit must be a full 40-character commit SHA"
+    Assert-GaCondition ([string]$sourceCommit -ieq $ExpectedCommit) "$Description.sourceCommit must match the reviewed stable source commit"
+    $capturedAt = Convert-GaRawLogInstant -Value (Get-GaProperty -Object $Snapshot -Path 'capturedAt' -Description $Description) -Description "$Description.capturedAt"
+    $now = [DateTimeOffset]::UtcNow
+    Assert-GaCondition ($capturedAt -le $now) "$Description.capturedAt must not be in the future"
+
+    $api = Get-GaProperty -Object $Snapshot -Path 'api' -Description $Description
+    Assert-GaExactObjectPropertySet -Object $api `
+        -Required @('provider', 'endpoint', 'requestedState', 'complete', 'incomplete', 'hasNextPage', 'pageCount', 'totalCount', 'returnedCount', 'capturedAt', 'sourceCommit', 'error') `
+        -Description "$Description.api"
+    [void](Assert-GaString -Object $api -Path 'provider' -Expected 'github-rest-api' -Description "$Description.api")
+    [void](Assert-GaString -Object $api -Path 'requestedState' -Expected 'open' -Description "$Description.api")
+    $endpointValue = Get-GaProperty -Object $api -Path 'endpoint' -Description "$Description.api"
+    $endpointUri = $null
+    Assert-GaCondition ($endpointValue -is [string] -and [Uri]::TryCreate([string]$endpointValue, [UriKind]::Absolute, [ref]$endpointUri)) "$Description.api.endpoint must be an absolute URL"
+    Assert-GaCondition ($endpointUri.Scheme.Equals('https', [StringComparison]::OrdinalIgnoreCase) -and $endpointUri.Host.Equals('api.github.com', [StringComparison]::OrdinalIgnoreCase)) "$Description.api.endpoint must use api.github.com over HTTPS"
+    Assert-GaCondition ([string]::IsNullOrWhiteSpace($endpointUri.UserInfo) -and [string]::IsNullOrWhiteSpace($endpointUri.Fragment)) "$Description.api.endpoint must not contain credentials or fragments"
+    Assert-GaCondition ($endpointUri.AbsolutePath.TrimEnd('/') -ceq '/repos/TypeThe0ry/ClusterYourCodex/issues') "$Description.api.endpoint must target the canonical repository issues endpoint"
+    Assert-GaCondition ($endpointUri.Query -ceq '?state=open&per_page=100') "$Description.api.endpoint must request the complete open issue pages"
+    foreach ($booleanField in @('complete', 'incomplete', 'hasNextPage')) {
+        $booleanValue = Get-GaProperty -Object $api -Path $booleanField -Description "$Description.api"
+        Assert-GaCondition ($booleanValue -is [bool]) "$Description.api.$booleanField must be boolean"
+    }
+    Assert-GaCondition ([bool]$api.complete) "$Description.api.complete must be true"
+    Assert-GaCondition (-not [bool]$api.incomplete) "$Description.api.incomplete must be false"
+    Assert-GaCondition (-not [bool]$api.hasNextPage) "$Description.api.hasNextPage must be false"
+    [void](Assert-GaRawLogCount -Value (Get-GaProperty -Object $api -Path 'pageCount' -Description "$Description.api") -Description "$Description.api.pageCount" -RequirePositive $true)
+    $totalCount = Assert-GaRawLogCount -Value (Get-GaProperty -Object $api -Path 'totalCount' -Description "$Description.api") -Description "$Description.api.totalCount"
+    $returnedCount = Assert-GaRawLogCount -Value (Get-GaProperty -Object $api -Path 'returnedCount' -Description "$Description.api") -Description "$Description.api.returnedCount"
+    $apiCapturedAt = Convert-GaRawLogInstant -Value (Get-GaProperty -Object $api -Path 'capturedAt' -Description "$Description.api") -Description "$Description.api.capturedAt"
+    Assert-GaCondition ($apiCapturedAt -eq $capturedAt) "$Description.api.capturedAt must match capturedAt"
+    Assert-GaCondition ($apiCapturedAt -le $now) "$Description.api.capturedAt must not be in the future"
+    $apiCommit = Get-GaProperty -Object $api -Path 'sourceCommit' -Description "$Description.api"
+    Assert-GaCondition ($apiCommit -is [string] -and [string]$apiCommit -match '^[0-9a-fA-F]{40}$') "$Description.api.sourceCommit must be a full 40-character commit SHA"
+    Assert-GaCondition ([string]$apiCommit -ieq $ExpectedCommit) "$Description.api.sourceCommit must match the reviewed stable source commit"
+    $apiError = Get-GaProperty -Object $api -Path 'error' -Description "$Description.api"
+    Assert-GaCondition ($null -eq $apiError -or ($apiError -is [string] -and [string]::IsNullOrWhiteSpace([string]$apiError))) "$Description.api.error must be null or empty"
+
+    $issues = $Snapshot.PSObject.Properties['issues'].Value
+    Assert-GaCondition ($issues -is [System.Array]) "$Description.issues must be a JSON array"
+    Assert-GaCondition ([long]$returnedCount -eq [long]$issues.Count) "$Description.api.returnedCount must equal the issue snapshot length"
+    Assert-GaCondition ([long]$totalCount -eq [long]$issues.Count) "$Description.api.totalCount must equal the issue snapshot length"
+    $seenIssueNumbers = New-Object 'System.Collections.Generic.HashSet[long]'
+    foreach ($issue in @($issues)) {
+        Assert-GaExactObjectPropertySet -Object $issue -Required @('number', 'state', 'title', 'html_url', 'labels') -Description "$Description.issues entry"
+        $number = Get-GaProperty -Object $issue -Path 'number' -Description "$Description.issues entry"
+        Assert-GaCondition ((Test-GaInteger -Value $number) -and [decimal]$number -gt 0 -and $seenIssueNumbers.Add([long]$number)) "$Description.issues.number must be a unique positive integer"
+        [void](Assert-GaString -Object $issue -Path 'state' -Expected 'open' -Description "$Description.issues #$number")
+        $title = Get-GaProperty -Object $issue -Path 'title' -Description "$Description.issues #$number"
+        Assert-GaCondition ($title -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$title)) "$Description.issues #$number.title must be a non-empty string"
+        [void](Assert-GaString -Object $issue -Path 'html_url' -Expected "https://github.com/$GaBlockerRepository/issues/$number" -Description "$Description.issues #$number")
+        # Read the array-valued labels property through PSObject.Properties so
+        # Windows PowerShell 5.1 does not unwrap a one-label array while
+        # passing it through command substitution.
+        $labelArray = $issue.PSObject.Properties['labels'].Value
+        Assert-GaCondition ($labelArray -is [System.Array]) "$Description.issues #$number.labels must be a JSON array"
+        foreach ($label in @($labelArray)) {
+            Assert-GaExactObjectPropertySet -Object $label -Required @('name') -Description "$Description.issues #$number.labels entry"
+        }
+        [void](Get-GaBlockerPriorityLabels -Labels $labelArray -Description "$Description.issues #$number")
+    }
+
+    return [pscustomobject]@{
+        schemaVersion = $GaOpenIssueSnapshotSchema
+        sourceCommit = [string]$sourceCommit
+        capturedAt = $capturedAt
+        issues = @($issues)
+        issueCount = [int64]$issues.Count
+    }
+}
+
+function Assert-GaLiveBlockerInventory {
+    param(
+        [Parameter(Mandatory = $true)][object]$Inventory,
+        [Parameter(Mandatory = $true)][object]$LiveSnapshot,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    [void](Assert-GaBlockerInventory -Inventory $Inventory -ExpectedCommit $ExpectedCommit -Description "$Description.inventory")
+    $live = Assert-GaOpenIssueSnapshot -Snapshot $LiveSnapshot -ExpectedCommit $ExpectedCommit -Description "$Description.live"
+    $inventoryIssues = $Inventory.PSObject.Properties['issues'].Value
+    $inventoryBinding = Get-GaIssueSetBinding -Issues @($inventoryIssues) -Description "$Description.inventory.issues"
+    $liveBinding = Get-GaIssueSetBinding -Issues @($live.issues) -Description "$Description.live.issues"
+    Assert-GaCondition ($inventoryBinding -ceq $liveBinding) "$Description must match the complete live open-issue snapshot"
+
+    $inventoryApi = Get-GaProperty -Object $Inventory -Path 'api' -Description "$Description.inventory"
+    $inventoryCapturedAt = Convert-GaRawLogInstant -Value (Get-GaProperty -Object $inventoryApi -Path 'capturedAt' -Description "$Description.inventory.api") -Description "$Description.inventory.api.capturedAt"
+    $age = [DateTimeOffset]::UtcNow - $inventoryCapturedAt
+    Assert-GaCondition ($age -ge [TimeSpan]::Zero) "$Description.inventory.api.capturedAt must not be in the future"
+    Assert-GaCondition ($age -le $GaMaximumBlockerInventoryAge) "$Description.inventory.api.capturedAt must be no more than $([int]$GaMaximumBlockerInventoryAge.TotalHours) hours old"
+
+    return [pscustomobject]@{
+        inventoryEvidenceId = [string](Get-GaProperty -Object $Inventory -Path 'evidenceId' -Description $Description)
+        liveCapturedAt = $live.capturedAt
+        issueCount = $live.issueCount
+        maxAgeHours = [int]$GaMaximumBlockerInventoryAge.TotalHours
+    }
+}
+
 function Get-GaBlockerInventoryBinding {
     param(
         [Parameter(Mandatory = $true)][object]$Inventory,
@@ -2118,7 +2263,9 @@ function Assert-GaWorkflowSemanticContract {
     $readinessPermissions = Get-GaYamlSection -Lines $readiness.Lines -Indent 4 -Key 'permissions' -Description 'GA readiness job permissions'
     Assert-GaYamlScalar -Lines $readinessPermissions.Lines -Indent 6 -Key 'contents' -Expected 'read' -Description 'GA readiness job permissions'
     Assert-GaYamlScalar -Lines $readinessPermissions.Lines -Indent 6 -Key 'issues' -Expected 'read' -Description 'GA readiness job permissions'
-    Assert-GaCondition (@($readinessPermissions.Lines | Where-Object { $_.Indent -eq 6 -and $_.Content -match '^([A-Za-z0-9_-]+)\s*:' }).Count -eq 2) 'GA readiness job permissions must not grant extra scopes'
+    Assert-GaYamlScalar -Lines $readinessPermissions.Lines -Indent 6 -Key 'actions' -Expected 'read' -Description 'GA readiness job permissions'
+    Assert-GaYamlScalar -Lines $readinessPermissions.Lines -Indent 6 -Key 'checks' -Expected 'read' -Description 'GA readiness job permissions'
+    Assert-GaCondition (@($readinessPermissions.Lines | Where-Object { $_.Indent -eq 6 -and $_.Content -match '^([A-Za-z0-9_-]+)\s*:' }).Count -eq 4) 'GA readiness job permissions must not grant extra scopes'
 
     $publisher = Get-GaYamlSection -Lines $jobs.Lines -Indent 2 -Key 'stable-publisher' -Description 'stable publisher job'
     Assert-GaYamlScalar -Lines $publisher.Lines -Indent 4 -Key 'if' -Expected "needs.ga-readiness.result == 'success'" -Description 'stable publisher job'
@@ -2126,10 +2273,10 @@ function Assert-GaWorkflowSemanticContract {
     Assert-GaYamlScalar -Lines $publisher.Lines -Indent 4 -Key 'runs-on' -Expected 'ubuntu-latest' -Description 'stable publisher job'
     Assert-GaYamlScalar -Lines $publisher.Lines -Indent 4 -Key 'environment' -Expected 'production' -Description 'stable publisher job'
     $publisherPermissions = Get-GaYamlSection -Lines $publisher.Lines -Indent 4 -Key 'permissions' -Description 'stable publisher job permissions'
-    foreach ($permission in @(@('contents', 'write'), @('issues', 'read'), @('attestations', 'read'))) {
+    foreach ($permission in @(@('contents', 'write'), @('issues', 'read'), @('attestations', 'read'), @('actions', 'read'), @('checks', 'read'))) {
         Assert-GaYamlScalar -Lines $publisherPermissions.Lines -Indent 6 -Key $permission[0] -Expected $permission[1] -Description 'stable publisher job permissions'
     }
-    Assert-GaCondition (@($publisherPermissions.Lines | Where-Object { $_.Indent -eq 6 -and $_.Content -match '^([A-Za-z0-9_-]+)\s*:' }).Count -eq 3) 'stable publisher job permissions must not grant extra scopes'
+    Assert-GaCondition (@($publisherPermissions.Lines | Where-Object { $_.Indent -eq 6 -and $_.Content -match '^([A-Za-z0-9_-]+)\s*:' }).Count -eq 5) 'stable publisher job permissions must not grant extra scopes'
 
     $readinessText = ($readiness.Lines | ForEach-Object { $_.Raw }) -join "`n"
     $publisherText = ($publisher.Lines | ForEach-Object { $_.Raw }) -join "`n"
@@ -2166,6 +2313,15 @@ function Assert-GaWorkflowContract {
         'attestation_cert_identity:',
         'attestation_signer_digest:',
         'Test-GAReadiness.ps1',
+        'Test-GARequiredChecks.ps1',
+        'cyc.dev/ga-ci-runs/v1',
+        'ci-run-pages.json',
+        'ciSnapshotSha256',
+        'LiveBlockerSnapshotPath',
+        'cyc.dev/ga-open-issue-snapshot/v1',
+        'open-issue-pages.json',
+        '--paginate --slurp',
+        'blockerSnapshotSha256',
         'Test-GARawLogs.ps1',
         'Test-StableAssetBundle.ps1',
         'stable-publisher:',
@@ -2407,6 +2563,7 @@ if ($ContractOnly) {
     Assert-GaCondition (-not [string]::IsNullOrWhiteSpace($EvidencePath)) 'EvidencePath is required'
     Assert-GaCondition (-not [string]::IsNullOrWhiteSpace($RawLogVerificationPath)) 'RawLogVerificationPath is required'
     Assert-GaCondition (-not [string]::IsNullOrWhiteSpace($IssueSnapshotPath)) 'IssueSnapshotPath is required'
+    Assert-GaCondition (-not [string]::IsNullOrWhiteSpace($LiveBlockerSnapshotPath)) 'LiveBlockerSnapshotPath is required'
     Assert-GaCondition (-not [string]::IsNullOrWhiteSpace($ControlsPath)) 'ControlsPath is required'
 
     $versionCheckPath = Join-Path $RepositoryRoot 'scripts/Test-VersionConsistency.ps1'
@@ -2539,7 +2696,7 @@ if ($ContractOnly) {
         message = 'Windows clean VM, macOS LaunchAgent, Authenticode, and independent artifact evidence are retained and source-bound'
     })
 
-    [void](Assert-GaIssueEvidence -Evidence $evidence -Path 'issue2' -Description 'Issue #2 Windows installer and desktop-host evidence' -ExpectedCommit $ExpectedCommit -RequiredGates $GaIssue2GateNames)
+    $issue2Evidence = Assert-GaIssueEvidence -Evidence $evidence -Path 'issue2' -Description 'Issue #2 Windows installer and desktop-host evidence' -ExpectedCommit $ExpectedCommit -RequiredGates $GaIssue2GateNames
     [void]$checks.Add([ordered]@{
         name = 'issue-2-evidence'
         status = 'passed'
@@ -2564,6 +2721,18 @@ if ($ContractOnly) {
         name = 'issue-gates'
         status = 'passed'
         message = 'Issues #2, #3, and #5 are closed in the live repository snapshot'
+    })
+
+    $liveBlockerSnapshot = Get-GaJson -Path $LiveBlockerSnapshotPath -Description 'live open-issue blocker snapshot'
+    $blockerCheck = Assert-GaLiveBlockerInventory `
+        -Inventory (Get-GaProperty -Object (Get-GaProperty -Object $issue2Evidence -Path 'gates' -Description 'Issue #2 evidence') -Path 'noOpenUnwaivedP0P1Blocker' -Description 'Issue #2 blocker gate').blockerInventory `
+        -LiveSnapshot $liveBlockerSnapshot `
+        -ExpectedCommit $ExpectedCommit `
+        -Description 'Issue #2 blocker inventory live binding'
+    [void]$checks.Add([ordered]@{
+        name = 'blocker-inventory-live-binding'
+        status = 'passed'
+        message = "Issue #2 blocker inventory matches the complete live open-issue snapshot (count=$($blockerCheck.issueCount), maxAgeHours=$($blockerCheck.maxAgeHours))"
     })
 
     $controls = Get-GaJson -Path $ControlsPath -Description 'live GitHub governance snapshot'

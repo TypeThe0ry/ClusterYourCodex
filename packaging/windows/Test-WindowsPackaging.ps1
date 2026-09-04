@@ -4631,7 +4631,16 @@ exit 91
             $atomicWriter.Value -match '\$backupPrepared\s*=\s*\$true' -and
             $atomicWriter.Value -match '\[System\.IO\.File\]::Replace\(\$temporary,\s*\$Path,\s*\$backup' -and
             $atomicWriter.Value -match '\$operationError') "$atomicName pre-creates the backup and preserves the primary failure"
+        Assert-True ($atomicWriter.Success -and
+            $atomicWriter.Value -match 'Get-CycAtomicTargetItem\s+-Path\s+\$Path' -and
+            $atomicWriter.Value -notmatch 'Test-Path\s+-LiteralPath\s+\$Path\s+-PathType\s+Leaf') "$atomicName rechecks a regular destination immediately before replacement"
     }
+    $atomicTargetHelper = [regex]::Match($bootstrapSource, 'function Get-CycAtomicTargetItem[\s\S]+?function Get-PayloadFiles')
+    Assert-True ($atomicTargetHelper.Success -and
+        $atomicTargetHelper.Value -match 'Get-Item\s+-LiteralPath\s+\$Path\s+-Force\s+-ErrorAction\s+Stop' -and
+        $atomicTargetHelper.Value -match 'ErrorCategory\]::ObjectNotFound' -and
+        $atomicTargetHelper.Value -match 'Test-ReparsePoint\s+\$item' -and
+        $atomicTargetHelper.Value -match '\$item\.PSIsContainer') 'atomic writers fail closed for valid and dangling reparse-point leaves'
     Assert-True ($bootstrapSource -match 'if \(\$script:ProfileMatrixTaskGate -eq ''none''\)[\s\S]+Start-ScheduledTask') 'bootstrap keeps task start on the normal production path only'
     Assert-True ($bootstrapSource -match 'enabled = \$true; logonType = \$script:ScheduledTaskLogonType') 'bootstrap binds enabled controller plan entries to the selected task principal'
 

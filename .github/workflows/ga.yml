@@ -43,6 +43,8 @@ on:
 permissions:
   contents: read
   issues: read
+  actions: read
+  checks: read
 
 jobs:
   ga-readiness:
@@ -52,6 +54,8 @@ jobs:
     permissions:
       contents: read
       issues: read
+      actions: read
+      checks: read
     env:
       CYC_GA_SOURCE_TAG: ${{ inputs.source_tag }}
       CYC_GA_EVIDENCE_URL: ${{ inputs.evidence_url }}
@@ -121,6 +125,113 @@ jobs:
               [string]$result.productVersion -cne $env:CYC_GA_SOURCE_TAG.Substring(1)) {
             throw "Stable version identity is inconsistent with $env:CYC_GA_SOURCE_TAG."
           }
+
+      - name: Verify exact-source CI run and required checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          ci_dir="$RUNNER_TEMP/cyc-ga-readiness"
+          mkdir -p "$ci_dir"
+          [[ "$CYC_GA_SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]
+          ci_run_api="repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&head_sha=$CYC_GA_SOURCE_COMMIT&per_page=100"
+          ci_run_url="https://api.github.com/$ci_run_api"
+          if ! gh api --paginate --slurp "$ci_run_api" > "$ci_dir/ci-run-pages.json"; then
+            echo 'failed to snapshot the exact-source CI workflow runs' >&2
+            exit 1
+          fi
+          if ! jq -e 'type == "array" and length > 0 and all(.[]; type == "object" and (.workflow_runs | type == "array") and (.total_count | type == "number"))' "$ci_dir/ci-run-pages.json" >/dev/null; then
+            echo 'CI workflow-run pagination returned an incomplete page envelope' >&2
+            exit 1
+          fi
+          selected_run_id="$(jq -r --arg sha "$CYC_GA_SOURCE_COMMIT" '
+            [ .[] | .workflow_runs[]
+              | select(.name == "CI" and .path == ".github/workflows/ci.yml"
+                       and .head_branch == "main" and .event == "push"
+                       and ((.head_sha | ascii_downcase) == ($sha | ascii_downcase)))
+            ]
+            | sort_by(.run_number, .run_attempt, .updated_at, .id)
+            | if length == 0 then empty else .[-1].id end
+          ' "$ci_dir/ci-run-pages.json")"
+          [[ "$selected_run_id" =~ ^[1-9][0-9]*$ ]]
+          ci_jobs_api="repos/$GITHUB_REPOSITORY/actions/runs/$selected_run_id/jobs?per_page=100"
+          ci_jobs_url="https://api.github.com/$ci_jobs_api"
+          if ! gh api --paginate --slurp "$ci_jobs_api" > "$ci_dir/ci-job-pages.json"; then
+            echo 'failed to snapshot the exact-source CI jobs' >&2
+            exit 1
+          fi
+          if ! jq -e 'type == "array" and length > 0 and all(.[]; type == "object" and (.jobs | type == "array") and (.total_count | type == "number"))' "$ci_dir/ci-job-pages.json" >/dev/null; then
+            echo 'CI job pagination returned an incomplete page envelope' >&2
+            exit 1
+          fi
+          ci_checks_api="repos/$GITHUB_REPOSITORY/commits/$CYC_GA_SOURCE_COMMIT/check-runs?per_page=100"
+          ci_checks_url="https://api.github.com/$ci_checks_api"
+          if ! gh api --paginate --slurp "$ci_checks_api" > "$ci_dir/ci-check-run-pages.json"; then
+            echo 'failed to snapshot the exact-source CI check runs' >&2
+            exit 1
+          fi
+          if ! jq -e 'type == "array" and length > 0 and all(.[]; type == "object" and (.check_runs | type == "array") and (.total_count | type == "number"))' "$ci_dir/ci-check-run-pages.json" >/dev/null; then
+            echo 'CI check-run pagination returned an incomplete page envelope' >&2
+            exit 1
+          fi
+          set +e
+          ci_proof="$(pwsh -NoLogo -NoProfile -NonInteractive -File ./scripts/Test-GARequiredChecks.ps1 \
+            -Repository "$GITHUB_REPOSITORY" \
+            -ExpectedCommit "$CYC_GA_SOURCE_COMMIT" \
+            -Workflow ci.yml \
+            -WorkflowName CI \
+            -WorkflowPath .github/workflows/ci.yml \
+            -Branch main \
+            -Event push \
+            -RunListPath "$ci_dir/ci-run-pages.json" \
+            -JobsPath "$ci_dir/ci-job-pages.json" \
+            -CheckRunsPath "$ci_dir/ci-check-run-pages.json" \
+            -Json 2>&1)"
+          ci_proof_status=$?
+          set -e
+          printf '%s\n' "$ci_proof" > "$ci_dir/ci-required-checks.json"
+          if (( ci_proof_status != 0 )); then
+            cat "$ci_dir/ci-required-checks.json" >&2
+            exit "$ci_proof_status"
+          fi
+          jq -e --arg sha "$CYC_GA_SOURCE_COMMIT" \
+            'type == "object" and .status == "passed" and (.sourceCommit | ascii_downcase) == ($sha | ascii_downcase)' \
+            "$ci_dir/ci-required-checks.json" >/dev/null
+          captured_at="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+          proof_sha256="$(sha256sum "$ci_dir/ci-required-checks.json" | awk '{print tolower($1)}')"
+          jq -S -n \
+            --arg schemaVersion 'cyc.dev/ga-ci-runs/v1' \
+            --arg commit "$CYC_GA_SOURCE_COMMIT" \
+            --arg capturedAt "$captured_at" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg runEndpoint "$ci_run_url" \
+            --arg jobsEndpoint "$ci_jobs_url" \
+            --arg checkRunsEndpoint "$ci_checks_url" \
+            --arg proofSha256 "$proof_sha256" \
+            --argjson runId "$selected_run_id" \
+            --slurpfile proof "$ci_dir/ci-required-checks.json" \
+            '{schemaVersion: $schemaVersion, sourceCommit: $commit, capturedAt: $capturedAt,
+              repository: $repository,
+              workflow: {name: "CI", path: ".github/workflows/ci.yml", branch: "main", event: "push", runId: $runId},
+              api: {provider: "github-rest-api", complete: true, incomplete: false, hasNextPage: false,
+                    runEndpoint: $runEndpoint, jobsEndpoint: $jobsEndpoint, checkRunsEndpoint: $checkRunsEndpoint},
+              proofSha256: $proofSha256, proof: $proof[0]}' \
+            > "$ci_dir/ci-snapshot.json"
+          jq -e --arg sha "$CYC_GA_SOURCE_COMMIT" \
+            'type == "object" and .schemaVersion == "cyc.dev/ga-ci-runs/v1" and
+             (.sourceCommit | ascii_downcase) == ($sha | ascii_downcase) and
+             .api.provider == "github-rest-api" and .api.complete == true and
+             .api.incomplete == false and .api.hasNextPage == false and
+             .proof.status == "passed"' \
+            "$ci_dir/ci-snapshot.json" >/dev/null
+          ci_snapshot_sha256="$(sha256sum "$ci_dir/ci-snapshot.json" | awk '{print tolower($1)}')"
+          printf 'CYC_GA_CI_SNAPSHOT_PATH=%s\n' "$ci_dir/ci-snapshot.json" >> "$GITHUB_ENV"
+          printf 'CYC_GA_CI_SNAPSHOT_SHA256=%s\n' "$ci_snapshot_sha256" >> "$GITHUB_ENV"
+          printf 'CYC_GA_CI_PROOF_PATH=%s\n' "$ci_dir/ci-required-checks.json" >> "$GITHUB_ENV"
+          {
+            echo "Exact-source CI proof: run $selected_run_id, commit $CYC_GA_SOURCE_COMMIT"
+            echo "Required checks: $(jq -r '.counts.passed' "$ci_dir/ci-required-checks.json")"
+            echo "CI snapshot SHA-256: $ci_snapshot_sha256"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Download and hash externally captured GA evidence
         shell: bash
@@ -194,6 +305,42 @@ jobs:
             '{issues: [$issue2[0], $issue3[0], $issue5[0]]}' \
             > "$gate_dir/issues.json"
 
+          # Re-query the complete open-issue collection instead of relying on
+          # the externally captured blocker inventory. Pull requests are
+          # intentionally excluded because the inventory contract describes
+          # repository issues, not review check-runs.
+          open_issue_endpoint="https://api.github.com/repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100"
+          if ! gh api --paginate --slurp "$open_issue_endpoint" > "$gate_dir/open-issue-pages.json"; then
+            echo 'failed to snapshot the complete open-issue collection' >&2
+            exit 1
+          fi
+          if ! jq -e 'type == "array" and all(.[]; type == "array")' "$gate_dir/open-issue-pages.json" >/dev/null; then
+            echo 'open-issue API pagination returned an incomplete page envelope' >&2
+            exit 1
+          fi
+          captured_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          jq -S -n \
+            --arg commit "$CYC_GA_SOURCE_COMMIT" \
+            --arg capturedAt "$captured_at" \
+            --arg endpoint "$open_issue_endpoint" \
+            --slurpfile pages "$gate_dir/open-issue-pages.json" \
+            '
+              ($pages[0]) as $pageArrays
+              | [ $pageArrays[] | .[]
+                  | select((has("pull_request") | not))
+                  | {number, state, title, html_url, labels: [ .labels[]? | {name} ]}
+                ] as $issues
+              | {schemaVersion: "cyc.dev/ga-open-issue-snapshot/v1",
+                 sourceCommit: $commit,
+                 capturedAt: $capturedAt,
+                 api: {provider: "github-rest-api", endpoint: $endpoint,
+                       requestedState: "open", complete: true, incomplete: false,
+                       hasNextPage: false, pageCount: ($pageArrays | length),
+                       totalCount: ($issues | length), returnedCount: ($issues | length),
+                       capturedAt: $capturedAt, sourceCommit: $commit, error: null},
+                 issues: $issues}
+            ' > "$gate_dir/open-issues.json"
+
           if gh api "repos/$GITHUB_REPOSITORY" > "$gate_dir/repository.json"; then
             :
           else
@@ -239,6 +386,7 @@ jobs:
             '{defaultBranch: $defaultBranch, branchProtection: ($branch[0] + {protectionDetails: $branchProtection[0]}), productionEnvironment: $environment[0], deploymentBranchPolicies: $policies[0]}' \
             > "$gate_dir/controls.json"
           echo "CYC_GA_ISSUE_SNAPSHOT_PATH=$gate_dir/issues.json" >> "$GITHUB_ENV"
+          echo "CYC_GA_LIVE_BLOCKER_SNAPSHOT_PATH=$gate_dir/open-issues.json" >> "$GITHUB_ENV"
           echo "CYC_GA_CONTROLS_PATH=$gate_dir/controls.json" >> "$GITHUB_ENV"
           echo "CYC_GA_REPORT_DIR=$gate_dir" >> "$GITHUB_ENV"
 
@@ -255,6 +403,7 @@ jobs:
               -EvidencePath $env:CYC_GA_EVIDENCE_PATH `
               -RawLogVerificationPath $env:CYC_GA_RAW_LOG_VERIFICATION_PATH `
               -IssueSnapshotPath $env:CYC_GA_ISSUE_SNAPSHOT_PATH `
+              -LiveBlockerSnapshotPath $env:CYC_GA_LIVE_BLOCKER_SNAPSHOT_PATH `
               -ControlsPath $env:CYC_GA_CONTROLS_PATH `
               -Json)
             $readinessExitCode = $LASTEXITCODE
@@ -295,6 +444,8 @@ jobs:
       contents: write
       issues: read
       attestations: read
+      actions: read
+      checks: read
     env:
       CYC_GA_SOURCE_TAG: ${{ inputs.source_tag }}
       CYC_GA_EVIDENCE_URL: ${{ inputs.evidence_url }}
@@ -1812,6 +1963,113 @@ jobs:
           done
           echo "Verified cryptographic provenance for ${#subjects[@]} indexed payload artifacts" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Revalidate exact-source CI run and required checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          ci_dir="$RUNNER_TEMP/cyc-ga-final"
+          mkdir -p "$ci_dir"
+          [[ "$CYC_GA_SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]
+          ci_run_api="repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&head_sha=$CYC_GA_SOURCE_COMMIT&per_page=100"
+          ci_run_url="https://api.github.com/$ci_run_api"
+          if ! gh api --paginate --slurp "$ci_run_api" > "$ci_dir/ci-run-pages.json"; then
+            echo 'failed to snapshot the exact-source CI workflow runs before publish' >&2
+            exit 1
+          fi
+          if ! jq -e 'type == "array" and length > 0 and all(.[]; type == "object" and (.workflow_runs | type == "array") and (.total_count | type == "number"))' "$ci_dir/ci-run-pages.json" >/dev/null; then
+            echo 'final CI workflow-run pagination returned an incomplete page envelope' >&2
+            exit 1
+          fi
+          selected_run_id="$(jq -r --arg sha "$CYC_GA_SOURCE_COMMIT" '
+            [ .[] | .workflow_runs[]
+              | select(.name == "CI" and .path == ".github/workflows/ci.yml"
+                       and .head_branch == "main" and .event == "push"
+                       and ((.head_sha | ascii_downcase) == ($sha | ascii_downcase)))
+            ]
+            | sort_by(.run_number, .run_attempt, .updated_at, .id)
+            | if length == 0 then empty else .[-1].id end
+          ' "$ci_dir/ci-run-pages.json")"
+          [[ "$selected_run_id" =~ ^[1-9][0-9]*$ ]]
+          ci_jobs_api="repos/$GITHUB_REPOSITORY/actions/runs/$selected_run_id/jobs?per_page=100"
+          ci_jobs_url="https://api.github.com/$ci_jobs_api"
+          if ! gh api --paginate --slurp "$ci_jobs_api" > "$ci_dir/ci-job-pages.json"; then
+            echo 'failed to snapshot the exact-source CI jobs before publish' >&2
+            exit 1
+          fi
+          if ! jq -e 'type == "array" and length > 0 and all(.[]; type == "object" and (.jobs | type == "array") and (.total_count | type == "number"))' "$ci_dir/ci-job-pages.json" >/dev/null; then
+            echo 'final CI job pagination returned an incomplete page envelope' >&2
+            exit 1
+          fi
+          ci_checks_api="repos/$GITHUB_REPOSITORY/commits/$CYC_GA_SOURCE_COMMIT/check-runs?per_page=100"
+          ci_checks_url="https://api.github.com/$ci_checks_api"
+          if ! gh api --paginate --slurp "$ci_checks_api" > "$ci_dir/ci-check-run-pages.json"; then
+            echo 'failed to snapshot the exact-source CI check runs before publish' >&2
+            exit 1
+          fi
+          if ! jq -e 'type == "array" and length > 0 and all(.[]; type == "object" and (.check_runs | type == "array") and (.total_count | type == "number"))' "$ci_dir/ci-check-run-pages.json" >/dev/null; then
+            echo 'final CI check-run pagination returned an incomplete page envelope' >&2
+            exit 1
+          fi
+          set +e
+          ci_proof="$(pwsh -NoLogo -NoProfile -NonInteractive -File ./scripts/Test-GARequiredChecks.ps1 \
+            -Repository "$GITHUB_REPOSITORY" \
+            -ExpectedCommit "$CYC_GA_SOURCE_COMMIT" \
+            -Workflow ci.yml \
+            -WorkflowName CI \
+            -WorkflowPath .github/workflows/ci.yml \
+            -Branch main \
+            -Event push \
+            -RunListPath "$ci_dir/ci-run-pages.json" \
+            -JobsPath "$ci_dir/ci-job-pages.json" \
+            -CheckRunsPath "$ci_dir/ci-check-run-pages.json" \
+            -Json 2>&1)"
+          ci_proof_status=$?
+          set -e
+          printf '%s\n' "$ci_proof" > "$ci_dir/ci-required-checks.json"
+          if (( ci_proof_status != 0 )); then
+            cat "$ci_dir/ci-required-checks.json" >&2
+            exit "$ci_proof_status"
+          fi
+          jq -e --arg sha "$CYC_GA_SOURCE_COMMIT" \
+            'type == "object" and .status == "passed" and (.sourceCommit | ascii_downcase) == ($sha | ascii_downcase)' \
+            "$ci_dir/ci-required-checks.json" >/dev/null
+          captured_at="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+          proof_sha256="$(sha256sum "$ci_dir/ci-required-checks.json" | awk '{print tolower($1)}')"
+          jq -S -n \
+            --arg schemaVersion 'cyc.dev/ga-ci-runs/v1' \
+            --arg commit "$CYC_GA_SOURCE_COMMIT" \
+            --arg capturedAt "$captured_at" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg runEndpoint "$ci_run_url" \
+            --arg jobsEndpoint "$ci_jobs_url" \
+            --arg checkRunsEndpoint "$ci_checks_url" \
+            --arg proofSha256 "$proof_sha256" \
+            --argjson runId "$selected_run_id" \
+            --slurpfile proof "$ci_dir/ci-required-checks.json" \
+            '{schemaVersion: $schemaVersion, sourceCommit: $commit, capturedAt: $capturedAt,
+              repository: $repository,
+              workflow: {name: "CI", path: ".github/workflows/ci.yml", branch: "main", event: "push", runId: $runId},
+              api: {provider: "github-rest-api", complete: true, incomplete: false, hasNextPage: false,
+                    runEndpoint: $runEndpoint, jobsEndpoint: $jobsEndpoint, checkRunsEndpoint: $checkRunsEndpoint},
+              proofSha256: $proofSha256, proof: $proof[0]}' \
+            > "$ci_dir/ci-snapshot.json"
+          jq -e --arg sha "$CYC_GA_SOURCE_COMMIT" \
+            'type == "object" and .schemaVersion == "cyc.dev/ga-ci-runs/v1" and
+             (.sourceCommit | ascii_downcase) == ($sha | ascii_downcase) and
+             .api.provider == "github-rest-api" and .api.complete == true and
+             .api.incomplete == false and .api.hasNextPage == false and
+             .proof.status == "passed"' \
+            "$ci_dir/ci-snapshot.json" >/dev/null
+          ci_snapshot_sha256="$(sha256sum "$ci_dir/ci-snapshot.json" | awk '{print tolower($1)}')"
+          printf 'CYC_GA_FINAL_CI_SNAPSHOT_PATH=%s\n' "$ci_dir/ci-snapshot.json" >> "$GITHUB_ENV"
+          printf 'CYC_GA_FINAL_CI_SNAPSHOT_SHA256=%s\n' "$ci_snapshot_sha256" >> "$GITHUB_ENV"
+          printf 'CYC_GA_FINAL_CI_PROOF_PATH=%s\n' "$ci_dir/ci-required-checks.json" >> "$GITHUB_ENV"
+          {
+            echo "Final exact-source CI proof: run $selected_run_id, commit $CYC_GA_SOURCE_COMMIT"
+            echo "Final required checks: $(jq -r '.counts.passed' "$ci_dir/ci-required-checks.json")"
+            echo "Final CI snapshot SHA-256: $ci_snapshot_sha256"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Revalidate final governance, issues, tag, and release state before publish
         shell: bash
         run: |
@@ -1838,6 +2096,41 @@ jobs:
             --slurpfile issue5 "$final_gate_dir/issue-5.json" \
             '{issues: [$issue2[0], $issue3[0], $issue5[0]]}' \
             > "$final_gate_dir/issues.json"
+
+          # Reconcile the complete open-issue inventory again immediately
+          # before publication. A stale externally captured blocker inventory
+          # must never survive the final governance check.
+          open_issue_endpoint="https://api.github.com/repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100"
+          if ! gh api --paginate --slurp "$open_issue_endpoint" > "$final_gate_dir/open-issue-pages.json"; then
+            echo 'failed to snapshot the complete open-issue collection before publish' >&2
+            exit 1
+          fi
+          if ! jq -e 'type == "array" and all(.[]; type == "array")' "$final_gate_dir/open-issue-pages.json" >/dev/null; then
+            echo 'final open-issue API pagination returned an incomplete page envelope' >&2
+            exit 1
+          fi
+          captured_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          jq -S -n \
+            --arg commit "$CYC_GA_SOURCE_COMMIT" \
+            --arg capturedAt "$captured_at" \
+            --arg endpoint "$open_issue_endpoint" \
+            --slurpfile pages "$final_gate_dir/open-issue-pages.json" \
+            '
+              ($pages[0]) as $pageArrays
+              | [ $pageArrays[] | .[]
+                  | select((has("pull_request") | not))
+                  | {number, state, title, html_url, labels: [ .labels[]? | {name} ]}
+                ] as $issues
+              | {schemaVersion: "cyc.dev/ga-open-issue-snapshot/v1",
+                 sourceCommit: $commit,
+                 capturedAt: $capturedAt,
+                 api: {provider: "github-rest-api", endpoint: $endpoint,
+                       requestedState: "open", complete: true, incomplete: false,
+                       hasNextPage: false, pageCount: ($pageArrays | length),
+                       totalCount: ($issues | length), returnedCount: ($issues | length),
+                       capturedAt: $capturedAt, sourceCommit: $commit, error: null},
+                 issues: $issues}
+            ' > "$final_gate_dir/open-issues.json"
 
           if gh api "repos/$GITHUB_REPOSITORY" > "$final_gate_dir/repository.json"; then
             :
@@ -1886,9 +2179,11 @@ jobs:
             --arg indexSha256 "$CYC_STABLE_INDEX_SHA256" \
             --arg bundleSha256 "$CYC_STABLE_ASSET_SHA256" \
             --arg evidenceSha256 "$CYC_GA_EVIDENCE_SHA256" \
+            --arg ciSnapshotSha256 "$CYC_GA_FINAL_CI_SNAPSHOT_SHA256" \
+            --arg blockerSnapshotSha256 "$(sha256sum "$final_gate_dir/open-issues.json" | awk '{print tolower($1)}')" \
             --slurpfile issues "$final_gate_dir/issues.json" \
             --slurpfile controls "$final_gate_dir/controls.json" \
-            '{schemaVersion: $schemaVersion, sourceTag: $tag, sourceCommit: $commit, stableIndexSha256: $indexSha256, stableBundleSha256: $bundleSha256, evidenceSha256: $evidenceSha256, issues: $issues[0], controls: $controls[0]}' \
+            '{schemaVersion: $schemaVersion, sourceTag: $tag, sourceCommit: $commit, stableIndexSha256: $indexSha256, stableBundleSha256: $bundleSha256, evidenceSha256: $evidenceSha256, ciSnapshotSha256: $ciSnapshotSha256, blockerSnapshotSha256: $blockerSnapshotSha256, issues: $issues[0], controls: $controls[0]}' \
             > "$final_snapshot"
           final_snapshot_hash="$(sha256sum "$final_snapshot" | awk '{print tolower($1)}')"
           printf 'CYC_GA_FINAL_SNAPSHOT_PATH=%s\n' "$final_snapshot" >> "$GITHUB_ENV"
@@ -1902,6 +2197,7 @@ jobs:
             -EvidencePath "$RUNNER_TEMP/cyc-ga-evidence.json" \
             -RawLogVerificationPath "$CYC_GA_RAW_LOG_VERIFICATION_PATH" \
             -IssueSnapshotPath "$final_gate_dir/issues.json" \
+            -LiveBlockerSnapshotPath "$final_gate_dir/open-issues.json" \
             -ControlsPath "$final_gate_dir/controls.json" \
             -Json 2>&1)"
           final_result_status=$?
