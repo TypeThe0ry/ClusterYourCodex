@@ -7,6 +7,21 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.79] - 2026-09-04
+
+### Fixed
+
+- Verify annotated prerelease tags through an isolated fetched ref because the
+  GitHub checkout action rewrites the normal tag ref to the detached commit.
+- Wait for truthful scheduler CPU headroom before submitting the Windows live
+  controller/worker round-trip job, avoiding transient capacity conflicts while
+  preserving fail-closed resource accounting.
+
+### Tests
+
+- Add a Windows round-trip regression for the scheduler headroom wait and run
+  the full cross-platform CI plus independent P1 validation at this commit.
+
 ## [0.1.0-preview.78] - 2026-09-04
 
 ### Fixed
@@ -1010,7 +1025,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.78...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.79...HEAD
+[0.1.0-preview.79]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.78...v0.1.0-preview.79
 [0.1.0-preview.78]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.77...v0.1.0-preview.78
 [0.1.0-preview.77]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.76...v0.1.0-preview.77
 [0.1.0-preview.76]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.75...v0.1.0-preview.76
