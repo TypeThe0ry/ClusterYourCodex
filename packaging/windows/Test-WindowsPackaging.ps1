@@ -39,6 +39,23 @@ function Assert-ThrowsLike {
     Assert-True $matched "$Message (observed: $observed)"
 }
 
+# Windows PowerShell 5.1 may prompt (and, with -Confirm:$false, may follow)
+# a directory junction when Remove-Item is used.  Test cleanup must remove
+# only the reparse point itself, never enumerate or delete the foreign target.
+function Remove-CycTestJunction {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
+        throw "Test cleanup expected a reparse point: $Path"
+    }
+    if ($item.PSIsContainer) {
+        [System.IO.Directory]::Delete($item.FullName, $false)
+    } else {
+        [System.IO.File]::Delete($item.FullName)
+    }
+}
+
 function Convert-CycPackagingJson {
     param([Parameter(Mandatory = $true)][string]$Raw)
 
@@ -293,7 +310,7 @@ try {
         Assert-True (Test-Path -LiteralPath $reparseJunction) 'reparse-point cleanup rejection leaves the foreign junction untouched'
     } finally {
         if (Test-Path -LiteralPath $reparseJunction) {
-            Remove-Item -LiteralPath $reparseJunction -Force
+            Remove-CycTestJunction -Path $reparseJunction
         }
         if (Test-Path -LiteralPath $reparseInstallRoot) {
             Remove-Item -LiteralPath $reparseInstallRoot -Recurse -Force
@@ -1732,7 +1749,7 @@ exit 4
                 Get-CycCodexOnlyInstallState -InstallRoot $codexOnlyInstall -DataRoot $codexOnlyData -CodexHome $codexOnlyHome
             }
         } finally {
-            Remove-Item -LiteralPath $junctionPath -Force
+            Remove-CycTestJunction -Path $junctionPath
         }
 
         [void](New-Item -ItemType Directory -Path $codexOnlyHome -Force)
