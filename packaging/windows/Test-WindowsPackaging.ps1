@@ -5066,8 +5066,13 @@ exit 0
         $profileMatrixSource -match '\$boundProcess\.Kill\(\)') 'profile matrix task cleanup binds exact-path identity validation and termination to one process handle'
     Assert-True ($profileMatrixSource -match 'function Stop-ProfileMatrixOwnedTaskRuntime' -and
         $profileMatrixSource -match 'could not prove owned task runtime termination' -and
-        $profileMatrixSource -match 'WaitForExit\(10000\)') 'profile matrix proves an auto-started task runtime is reaped within a bounded window'
-    Assert-True ($profileMatrixSource -match 'Assert-ProfileMatrixTaskSnapshot[\s\S]+Assert-ProfileMatrixTaskOwnership[\s\S]+Stop-ProfileMatrixOwnedTaskRuntime -Ownership \$ownership[\s\S]+\$restoredRunning = \$false') 'profile matrix reaps an AtLogOn runtime after restoring a rollback snapshot'
+        $profileMatrixSource -match 'WaitForExit\(10000\)' -and
+        $profileMatrixSource -match 'StableAbsenceSeconds = 2' -and
+        $profileMatrixSource -match 'could not observe a stable \$StableAbsenceSeconds-second') 'profile matrix proves an auto-started task runtime is absent for a stable bounded window'
+    Assert-True ($profileMatrixSource -match 'function Invoke-ProfileMatrixBoundedTaskEnd' -and
+        $profileMatrixSource -match '/End /TN' -and
+        $profileMatrixSource -match 'A scheduler-requested end suppresses RestartCount handling') 'profile matrix asks Task Scheduler to end task instances before handle-bound termination'
+    Assert-True ($profileMatrixSource -match 'Assert-ProfileMatrixTaskSnapshot[\s\S]+Assert-ProfileMatrixTaskOwnership[\s\S]+Stop-ProfileMatrixOwnedTaskRuntime -Ownership \$ownership -CaseRoot \$resolvedCaseRoot[\s\S]+\$restoredRunning = \$false') 'profile matrix reaps an AtLogOn runtime after restoring a rollback snapshot'
     Assert-True ($profileMatrixSource -match 'function Invoke-ProfileMatrixBoundedTaskRemoval' -and
         $profileMatrixSource -match 'schtasks\.exe' -and
         $profileMatrixSource -match '/Delete /TN' -and
