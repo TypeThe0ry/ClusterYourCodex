@@ -717,6 +717,15 @@ jobs:
                   "macos": ("residualExternalReconciliationVerified=1",),
               },
           }
+          def issue5_marker_matches(marker, contract):
+              # uid/gid carry a runtime-selected dedicated identity.  Every
+              # other native marker is a fixed contract value and must match
+              # the complete string, not just its prefix.
+              if contract == "uid=":
+                  return re.fullmatch(r"uid=[0-9]+", marker) is not None
+              if contract == "gid=":
+                  return re.fullmatch(r"gid=[0-9]+", marker) is not None
+              return marker == contract
           seen_gates = set()
           seen_run_platform = {}
           binding_count = 0
@@ -848,10 +857,10 @@ jobs:
                       raise SystemExit(f"{description}.markers is not an array of strings")
                   required_prefixes = issue5_required_prefixes.get(gate_name, {}).get(platform, ())
                   if gate_name == "restartResidualProcessReconciliation":
-                      if not any(any(marker.startswith(prefix) for marker in markers)
+                      if not any(any(issue5_marker_matches(marker, prefix) for marker in markers)
                                  for prefix in required_prefixes):
                           raise SystemExit(f"{description}.markers is missing the native residual marker for {platform}")
-                  elif not all(any(marker.startswith(prefix) for marker in markers)
+                  elif not all(any(issue5_marker_matches(marker, prefix) for marker in markers)
                                for prefix in required_prefixes):
                       raise SystemExit(f"{description}.markers is missing a required native marker for {platform}")
                   normalized = normalized_command(command, description)
@@ -883,10 +892,10 @@ jobs:
                   for platform in ("linux", "windows", "macos"):
                       required_prefixes = issue5_required_prefixes.get(gate_name, {}).get(platform, ())
                       if gate_name == "restartResidualProcessReconciliation":
-                          required_ok = any(any(marker.startswith(prefix) for marker in aggregate_markers)
+                          required_ok = any(any(issue5_marker_matches(marker, prefix) for marker in aggregate_markers)
                                             for prefix in required_prefixes)
                       else:
-                          required_ok = all(any(marker.startswith(prefix) for marker in aggregate_markers)
+                          required_ok = all(any(issue5_marker_matches(marker, prefix) for marker in aggregate_markers)
                                              for prefix in required_prefixes)
                       if not required_ok:
                           raise SystemExit(f"Issue #5 gate {gate_name}.markers is missing the retained native marker for {platform}")
@@ -1665,8 +1674,16 @@ jobs:
                 and ([ $markers[] | select(type != "string") ] | length == 0)
                 and ([ $markers[] | strings | select(test("^[[:space:]]*$")) ] | length == 0)
                 and (($markers | unique | length) == ($markers | length));
-              def issue5_has_prefix($markers; $prefix):
-                ([ $markers[] | strings | select(startswith($prefix)) ] | length) > 0;
+              def issue5_marker_matches($marker; $contract):
+                if $contract == "uid=" then
+                  ($marker | test("^uid=[0-9]+$"))
+                elif $contract == "gid=" then
+                  ($marker | test("^gid=[0-9]+$"))
+                else
+                  $marker == $contract
+                end;
+              def issue5_has_contract($markers; $contract):
+                ([ $markers[] | strings | select(issue5_marker_matches(.; $contract)) ] | length) > 0;
               def issue5_residual_prefixes($platform):
                 if $platform == "linux" then
                   ["residual_empty", "residualCgroupVerified=1", "residualIdentityProcessesVerified=1"]
@@ -1677,7 +1694,7 @@ jobs:
                 else [] end;
               def issue5_has_native_residual_marker($markers; $platform):
                 ([ issue5_residual_prefixes($platform)[] as $prefix |
-                   select(issue5_has_prefix($markers; $prefix)) ] | length) > 0;
+                   select(issue5_has_contract($markers; $prefix)) ] | length) > 0;
               def issue5_required_prefixes($platform; $gate):
                 if $gate == "linuxDedicatedExecutionIdentity" then
                   ["uid=", "gid="]
@@ -1707,9 +1724,9 @@ jobs:
               def issue5_has_required_markers($markers; $platform; $gate):
                 (issue5_required_prefixes($platform; $gate)) as $prefixes
                 | if $gate == "restartResidualProcessReconciliation" then
-                    ([ $prefixes[] as $prefix | select(issue5_has_prefix($markers; $prefix)) ] | length) > 0
+                    ([ $prefixes[] as $prefix | select(issue5_has_contract($markers; $prefix)) ] | length) > 0
                   else
-                    ([ $prefixes[] as $prefix | select(issue5_has_prefix($markers; $prefix)) ] | length) == ($prefixes | length)
+                    ([ $prefixes[] as $prefix | select(issue5_has_contract($markers; $prefix)) ] | length) == ($prefixes | length)
                   end;
               def issue5_marker_valid($marker; $platform; $gate):
                 (($marker | type) == "string")

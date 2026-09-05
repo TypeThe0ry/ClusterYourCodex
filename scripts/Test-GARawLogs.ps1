@@ -146,6 +146,24 @@ $GaIssue5ResidualMarkerPrefixes = [ordered]@{
     windows = @('residualJobObjectVerified=1')
     macos = @('residualExternalReconciliationVerified=1')
 }
+
+function Test-RawLogIssue5NativeMarker {
+    param(
+        [Parameter(Mandatory = $true)][string]$Candidate,
+        [Parameter(Mandatory = $true)][string]$Contract
+    )
+
+    # Only uid/gid carry a runtime-selected value.  Keep those values to
+    # unsigned decimal digits and require every fixed native marker to match
+    # the complete ordinal string, never merely a prefix.
+    if ($Contract -ceq 'uid=') {
+        return $Candidate -cmatch '^uid=[0-9]+$'
+    }
+    if ($Contract -ceq 'gid=') {
+        return $Candidate -cmatch '^gid=[0-9]+$'
+    }
+    return $Candidate.Equals($Contract, [StringComparison]::Ordinal)
+}
 $GaIssue5RunIdentifierPattern = '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
 $GaIssue5IsoInstantPattern = '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\s]+(Z|[+-][0-9]{2}:[0-9]{2})$'
 $GaBlockerInventorySchema = 'cyc.dev/ga-blocker-inventory/v1'
@@ -1385,11 +1403,9 @@ function Assert-RawLogIssue5RequiredMarkers {
     if ($requiredPrefixes.Count -gt 0) {
         foreach ($prefix in $requiredPrefixes) {
             $matched = @($Markers | Where-Object {
-                    $candidate = [string]$_
-                    $candidate.Equals($prefix, [StringComparison]::Ordinal) -or
-                    $candidate.StartsWith($prefix, [StringComparison]::Ordinal)
+                    Test-RawLogIssue5NativeMarker -Candidate ([string]$_) -Contract ([string]$prefix)
                 })
-            Assert-RawLogCondition ($matched.Count -gt 0) "$Description.rawLogMarkers contains a native marker beginning with '$prefix'"
+            Assert-RawLogCondition ($matched.Count -gt 0) "$Description.rawLogMarkers contains the exact native marker contract '$prefix'"
         }
     }
     if ($GaIssue5PlatformGateMarkerPrefixes.Contains($Gate)) {
@@ -1398,11 +1414,9 @@ function Assert-RawLogIssue5RequiredMarkers {
             Assert-RawLogCondition ($GaIssue5PlatformGateMarkerPrefixes[$Gate].Contains($markerPlatform)) "$Description.rawLogMarkers has no reviewed platform marker contract for '$Gate' on '$markerPlatform'"
             foreach ($prefix in @($GaIssue5PlatformGateMarkerPrefixes[$Gate][$markerPlatform])) {
                 $matched = @($Markers | Where-Object {
-                        $candidate = [string]$_
-                        $candidate.Equals($prefix, [StringComparison]::Ordinal) -or
-                        $candidate.StartsWith($prefix, [StringComparison]::Ordinal)
+                        Test-RawLogIssue5NativeMarker -Candidate ([string]$_) -Contract ([string]$prefix)
                     })
-                Assert-RawLogCondition ($matched.Count -gt 0) "$Description.rawLogMarkers contains the '$markerPlatform' native marker beginning with '$prefix'"
+                Assert-RawLogCondition ($matched.Count -gt 0) "$Description.rawLogMarkers contains the exact '$markerPlatform' native marker contract '$prefix'"
             }
         }
     }
@@ -1413,9 +1427,7 @@ function Assert-RawLogIssue5RequiredMarkers {
             $anyMatched = @()
             foreach ($prefix in @($GaIssue5ResidualMarkerPrefixes[$markerPlatform])) {
                 $anyMatched += @($Markers | Where-Object {
-                        $candidate = [string]$_
-                        $candidate.Equals($prefix, [StringComparison]::Ordinal) -or
-                        $candidate.StartsWith($prefix, [StringComparison]::Ordinal)
+                        Test-RawLogIssue5NativeMarker -Candidate ([string]$_) -Contract ([string]$prefix)
                     })
             }
             Assert-RawLogCondition ($anyMatched.Count -gt 0) "$Description.rawLogMarkers must contain a native residual-process reconciliation marker for platform '$markerPlatform'"

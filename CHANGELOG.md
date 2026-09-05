@@ -7,6 +7,22 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.84] - 2026-09-05
+
+### Fixed
+
+- Harden Issue #5 native marker validation across the readiness verifier,
+  raw-log downloader, and protected workflow contract: fixed values now require
+  an exact ordinal match, while Linux `uid=`/`gid=` values accept only unsigned
+  decimal identities. Suffix-polluted markers such as
+  `windowsJobObjectVerified=1junk` and `residual_empty_extra` now fail closed.
+
+### Tests
+
+- Add regression coverage for suffixed fixed markers, malformed Linux identity
+  markers, and the independent Python/JQ contract so all release gate surfaces
+  share the same exact-marker semantics.
+
 ## [0.1.0-preview.83] - 2026-09-05
 
 ### Fixed
@@ -1111,7 +1127,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.83...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.84...HEAD
+[0.1.0-preview.84]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.83...v0.1.0-preview.84
 [0.1.0-preview.83]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.82...v0.1.0-preview.83
 [0.1.0-preview.82]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.81...v0.1.0-preview.82
 [0.1.0-preview.81]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.80...v0.1.0-preview.81

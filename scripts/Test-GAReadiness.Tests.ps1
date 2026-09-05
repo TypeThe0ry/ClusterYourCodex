@@ -1554,6 +1554,68 @@ Describe 'GA evidence issue acceptance contract' {
         }
     }
 
+    It 'requires exact Issue #5 native marker contracts and numeric Linux identities' {
+        $record = New-TestIssue5Evidence
+        $record.gates.windowsJobObject.rawLogMarkers = @($record.gates.windowsJobObject.rawLogMarkers |
+            ForEach-Object {
+                if ([string]$_ -ceq 'windowsJobObjectVerified=1') {
+                    'windowsJobObjectVerified=1junk'
+                } else {
+                    $_
+                }
+            })
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 suffixed Windows marker' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+
+        $record = New-TestIssue5Evidence
+        $record.gates.linuxDedicatedExecutionIdentity.rawLogMarkers = @($record.gates.linuxDedicatedExecutionIdentity.rawLogMarkers |
+            ForEach-Object {
+                if ([string]$_ -ceq 'uid=1007') { 'uid=abc' }
+                elseif ([string]$_ -ceq 'gid=1007') { 'gid=-1' }
+                else { $_ }
+            })
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 malformed Linux identity markers' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+
+        $record = New-TestIssue5Evidence
+        $record.gates.restartResidualProcessReconciliation.runs[0].rawLogMarkers = @(
+            $record.gates.restartResidualProcessReconciliation.runs[0].rawLogMarkers |
+                ForEach-Object {
+                    if ([string]$_ -ceq 'residual_empty') { 'residual_empty_extra' } else { $_ }
+                }
+        )
+        Assert-TestThrows {
+            Assert-GaIssueEvidence -Evidence ([pscustomobject]@{ issue5 = $record }) `
+                -Path 'issue5' -Description 'Issue #5 suffixed residual marker' -ExpectedCommit $expectedCommitForTest `
+                -RequiredGates $issue5GateNamesForTest
+        }
+
+        Assert-TestThrows {
+            Assert-RawLogIssue5RequiredMarkers -Markers @('windowsJobObjectVerified=1junk') `
+                -Gate 'windowsJobObject' -Platform 'windows' -Description 'Issue #5 raw suffixed marker'
+        }
+        Assert-TestThrows {
+            Assert-RawLogIssue5RequiredMarkers -Markers @('uid=abc', 'gid=-1') `
+                -Gate 'linuxDedicatedExecutionIdentity' -Platform 'linux' -Description 'Issue #5 raw malformed identities'
+        }
+        Assert-TestThrows {
+            Assert-RawLogIssue5RequiredMarkers -Markers @('residual_empty_extra') `
+                -Gate 'restartResidualProcessReconciliation' -Platform 'linux' -Description 'Issue #5 raw suffixed residual marker'
+        }
+
+        $readinessSource | Should Match 'Test-GaIssue5NativeMarker'
+        $rawLogSource | Should Match 'Test-RawLogIssue5NativeMarker'
+        $workflowSource | Should Match 'issue5_marker_matches'
+        $workflowSource | Should Not Match 'marker\.startswith\(prefix\)'
+        $workflowSource | Should Not Match 'issue5_has_prefix'
+    }
+
     It 'requires source-bound provenance on every Issue #5 run' {
         $record = New-TestIssue5Evidence
         [void]$record.gates.jobsCannotReadWorkerCredentials.runs[0].PSObject.Properties.Remove('runId')

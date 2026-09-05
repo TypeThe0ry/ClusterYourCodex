@@ -354,11 +354,12 @@ $GaIssue5GateExpectedPlatforms = [ordered]@{
     jobsCannotReadWorkerCredentials = @('linux', 'windows', 'macos')
     restartResidualProcessReconciliation = @('linux', 'windows', 'macos')
 }
-# These are the native Linux probe markers already emitted by the hostile
-# isolation test/result.  A marker is matched as a prefix so dynamic values
-# such as ``uid=1007`` remain valid while a generic ``ok`` line cannot satisfy
-# the gate.  Cross-platform rows still require their source-bound composite
-# marker; platform-specific native implementations may add their own detail.
+# These are the native probe markers emitted by the hostile-isolation
+# test/result.  Fixed markers are exact values.  The Linux identity markers
+# are the only dynamic values and accept digits after their fixed key; a
+# suffix such as ``windowsJobObjectVerified=1junk`` must never satisfy a gate.
+# Cross-platform rows still require their source-bound composite marker;
+# platform-specific native implementations may add unrelated detail markers.
 $GaIssue5RequiredMarkerPrefixes = [ordered]@{
     linuxDedicatedExecutionIdentity = @('uid=', 'gid=')
     linuxCgroupV2Reconciliation = @('cgroup_escape=blocked', 'cgroup.threads_escape=blocked')
@@ -386,6 +387,24 @@ $GaIssue5ResidualMarkerPrefixes = [ordered]@{
     linux = @('residual_empty', 'residualCgroupVerified=1', 'residualIdentityProcessesVerified=1')
     windows = @('residualJobObjectVerified=1')
     macos = @('residualExternalReconciliationVerified=1')
+}
+
+function Test-GaIssue5NativeMarker {
+    param(
+        [Parameter(Mandatory = $true)][string]$Candidate,
+        [Parameter(Mandatory = $true)][string]$Contract
+    )
+
+    # uid/gid carry a runtime-selected dedicated identity.  Keep that
+    # variability constrained to an unsigned decimal value; every other
+    # native marker is a fixed, ordinal contract value.
+    if ($Contract -ceq 'uid=') {
+        return $Candidate -cmatch '^uid=[0-9]+$'
+    }
+    if ($Contract -ceq 'gid=') {
+        return $Candidate -cmatch '^gid=[0-9]+$'
+    }
+    return $Candidate.Equals($Contract, [System.StringComparison]::Ordinal)
 }
 $GaIssue5RunIdentifierPattern = '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
 $GaIssue5IsoInstantPattern = '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\s]+(Z|[+-][0-9]{2}:[0-9]{2})$'
@@ -630,11 +649,9 @@ function Assert-GaIssue5RequiredMarkers {
     if ($requiredPrefixes.Count -gt 0) {
         foreach ($prefix in $requiredPrefixes) {
             $matched = @($Markers | Where-Object {
-                    $candidate = [string]$_
-                    $candidate.Equals($prefix, [System.StringComparison]::Ordinal) -or
-                    $candidate.StartsWith($prefix, [System.StringComparison]::Ordinal)
+                    Test-GaIssue5NativeMarker -Candidate ([string]$_) -Contract ([string]$prefix)
                 })
-            Assert-GaCondition ($matched.Count -gt 0) "$Description.rawLogMarkers must contain a native marker beginning with '$prefix'"
+            Assert-GaCondition ($matched.Count -gt 0) "$Description.rawLogMarkers must contain the exact native marker contract '$prefix'"
         }
     }
     if ($GaIssue5PlatformGateMarkerPrefixes.Contains($Gate)) {
@@ -643,11 +660,9 @@ function Assert-GaIssue5RequiredMarkers {
             Assert-GaCondition ($GaIssue5PlatformGateMarkerPrefixes[$Gate].Contains($markerPlatform)) "$Description.rawLogMarkers has no reviewed platform marker contract for '$Gate' on '$markerPlatform'"
             foreach ($prefix in @($GaIssue5PlatformGateMarkerPrefixes[$Gate][$markerPlatform])) {
                 $matched = @($Markers | Where-Object {
-                        $candidate = [string]$_
-                        $candidate.Equals($prefix, [System.StringComparison]::Ordinal) -or
-                        $candidate.StartsWith($prefix, [System.StringComparison]::Ordinal)
+                        Test-GaIssue5NativeMarker -Candidate ([string]$_) -Contract ([string]$prefix)
                     })
-                Assert-GaCondition ($matched.Count -gt 0) "$Description.rawLogMarkers must contain the '$markerPlatform' native marker beginning with '$prefix'"
+                Assert-GaCondition ($matched.Count -gt 0) "$Description.rawLogMarkers must contain the exact '$markerPlatform' native marker contract '$prefix'"
             }
         }
     }
@@ -658,9 +673,7 @@ function Assert-GaIssue5RequiredMarkers {
             $anyMatched = @()
             foreach ($prefix in @($GaIssue5ResidualMarkerPrefixes[$markerPlatform])) {
                 $anyMatched += @($Markers | Where-Object {
-                        $candidate = [string]$_
-                        $candidate.Equals($prefix, [System.StringComparison]::Ordinal) -or
-                        $candidate.StartsWith($prefix, [System.StringComparison]::Ordinal)
+                        Test-GaIssue5NativeMarker -Candidate ([string]$_) -Contract ([string]$prefix)
                     })
             }
             Assert-GaCondition ($anyMatched.Count -gt 0) "$Description.rawLogMarkers must contain a native residual-process reconciliation marker for platform '$markerPlatform'"
