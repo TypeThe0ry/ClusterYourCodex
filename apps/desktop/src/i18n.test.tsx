@@ -4,11 +4,13 @@ import {
   DEFAULT_LOCALE,
   I18nProvider,
   LOCALE_STORAGE_KEY,
+  SUPPORTED_LOCALES,
   type Locale,
   normalizeLocale,
   persistLocale,
   resolveInitialLocale,
   translate,
+  translations,
   type TranslationKey,
   useI18n,
 } from "./i18n";
@@ -71,6 +73,14 @@ describe("i18n", () => {
     expect(translate("es", "integration.pluginDescriptionShort")).toContain("puente MCP");
     expect(translate("ja", "provision.action.retryPassword")).toBe("修正したパスワードで再試行");
     expectTypeOf<Locale>().toEqualTypeOf<"en" | "zh-CN" | "es" | "ja">();
+  });
+
+  it("keeps the complete desktop catalog available in every supported locale", () => {
+    const englishKeys = Object.keys(translations.en).sort();
+    expect(englishKeys).toHaveLength(448);
+    for (const locale of SUPPORTED_LOCALES) {
+      expect(Object.keys(translations[locale]).sort()).toEqual(englishKeys);
+    }
   });
 
   it("provides the resolved locale and translator to React consumers", () => {
