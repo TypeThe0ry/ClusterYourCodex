@@ -26,11 +26,12 @@ Codex → Run the check**. The primary action is state-aware: when the local
 controller is offline it opens setup, when the controller is ready it starts
 computer enrollment, and after a worker is present it opens Codex integration.
 English, Simplified Chinese, Spanish, and Japanese can be switched from the
-top bar, and the choice is saved locally. The high-frequency navigation and
-setup path is translated for all four locales; uncommon forensic evidence
-strings use an English fallback until their domain glossary is reviewed.
-Optional SSH fields and the full technical verification record stay under
-**Advanced options** so the normal setup path remains short.
+top bar, and the choice is saved locally. Every one of the 448 desktop catalog
+keys is present in all four locales, including navigation, provisioning,
+integration errors, credential recovery, and verification evidence; technical
+identifiers such as host names, capability names, and command output remain
+verbatim by design. Optional SSH fields and the full technical verification
+record stay under **Advanced options** so the normal setup path remains short.
 
 ## Windows preview setup and acceptance path
 
