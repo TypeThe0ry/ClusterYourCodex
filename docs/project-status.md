@@ -37,7 +37,7 @@ capability until the opt-in isolation contract in Issue #5 is complete.
 | Linux worker packages | Linux x64 and arm64 Worker Kit archives, native shell/process-group paths, and systemd lifecycle packages | Tagged Linux artifact jobs, Worker Kit native/structural checks, and the preview.83 exact-SHA P1 controller/worker job | Repeat exact-SHA/native validation for each candidate; Issue #3's remaining platform gate is macOS |
 | macOS Worker Kits | x64 and arm64 archives, manifest/checksum/publisher-key contract, macOS capability reporting | Tagged macOS artifact jobs and kit contract checks | Real macOS host, LaunchAgent install/start/stop/restart, managed live run, and round trip |
 | Add Computer and credentials | GUI onboarding model, native credential-vault boundary, host-key fingerprint flow, password/agent/private-key paths | Static contract and local source review | Live authentication and cross-node GUI/MCP acceptance on supported hosts |
-| Desktop UX and localization | One three-step first-run path, compact Add Computer form, collapsed advanced verification, duplicate hero CTA removed, and persistent English/Simplified Chinese selection across dashboard, tasks, rules, integration evidence, and provisioning | Chrome visual/interaction audit of merged PR #36 (`87fb8d2`) plus 95 desktop tests, workspace lint/test/build, and release contract checks | Add further locales and translate backend-provided diagnostic messages when localized error catalogs are available |
+| Desktop UX and localization | One state-aware three-step first-run path, compact Add Computer form, collapsed advanced verification, duplicate hero CTA removed, localized runtime diagnostics, and persistent English/Simplified Chinese/Spanish/Japanese selection across dashboard, tasks, rules, integration evidence, and provisioning | Chrome visual/interaction audit of the preview.87 branch plus 95 desktop tests, workspace lint/test/build, and release contract checks | Review the English fallback strings in the additional locale catalogs and keep translating newly introduced backend diagnostics |
 | Hostile-workload isolation | Linux dedicated identity/cgroup reconciliation hardening; Windows/macOS capability reporting and fail-closed scheduling boundary | Linux unit/native probes and static contracts | Windows Job Object + protected external guard, macOS external reconciliation, and a complete three-platform hostile matrix (Issue #5) |
 | Public release pipeline | Version identity, signed-kit metadata, SBOM/provenance/index validation, protected GA workflow | Main CI and preview producer jobs | All applicable issue gates, external evidence, protected production review, and independent post-download verification |
 
@@ -62,6 +62,12 @@ service-manager, credential, or cross-node acceptance gate.
   desktop tests, workspace lint/test/build, main CI, CodeQL, and local release
   contract checks all pass. The tagged preview workflow and downloaded asset
   evidence are recorded in the follow-up release update below.
+- The preview.87 candidate makes the primary CTA follow controller state so an
+  offline first run opens setup instead of a doomed SSH modal, and adds
+  Spanish/Japanese catalogs with an explicit English fallback for less common
+  forensic evidence. Chrome smoke covered the English, 简体中文, Español, and
+  日本語 home/computer flows; runtime bridge errors stayed localized while
+  retaining their technical error codes.
 - The previously published preview.85 candidate was downloaded into a clean directory after publication.
   All 23 assets, 11 SHA-256 sidecars/SHA256SUMS records, 10 release-index
   records, the CycloneDX SBOM, and all 10 GitHub provenance attestations were

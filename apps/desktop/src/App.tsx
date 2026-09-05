@@ -16,7 +16,7 @@ import {
   type IntegrationStatus,
 } from "./api/integration";
 import type { FleetInfo, JobStatus, NodeStatus, NodeSummary } from "./api/types";
-import { localeOptions, type TranslationKey, useI18n } from "./i18n";
+import { localeOptions, type TranslationKey, type TranslationValues, useI18n } from "./i18n";
 
 type Page = "home" | "computers" | "tasks" | "rules" | "integration";
 type IconName =
@@ -44,6 +44,15 @@ const navigation: Array<{ id: Page; labelKey: TranslationKey; icon: IconName }> 
   { id: "rules", labelKey: "nav.routingRules", icon: "rules" },
   { id: "integration", labelKey: "nav.integration", icon: "codex" },
 ];
+
+const statusAriaKeys: Record<NodeStatus | "connected" | "disconnected", TranslationKey> = {
+  online: "status.online",
+  busy: "status.busy",
+  offline: "status.offline",
+  unknown: "status.unknown",
+  connected: "status.online",
+  disconnected: "status.offline",
+};
 
 const pageTitles: Record<Page, { titleKey: TranslationKey; subtitleKey: TranslationKey }> = {
   home: {
@@ -116,8 +125,9 @@ function Logo() {
 }
 
 function StatusDot({ status }: { status: NodeStatus | "connected" | "disconnected" }) {
+  const { t } = useI18n();
   const normalized = status === "connected" ? "online" : status === "disconnected" ? "offline" : status;
-  return <span className={`status-dot status-${normalized}`} aria-label={status} />;
+  return <span className={`status-dot status-${normalized}`} aria-label={t(statusAriaKeys[status])} />;
 }
 
 function EmptyState({
@@ -177,6 +187,82 @@ const fullRunLayerKeys: Record<FullRunLayerId, TranslationKey> = {
   cleanup: "integration.layer.cleanup",
 };
 
+const controllerErrorKeys: Readonly<Record<string, TranslationKey>> = {
+  transport_unavailable: "error.controllerTransport",
+  invalid_response: "error.controllerInvalidResponse",
+  no_eligible_node: "error.noEligibleNode",
+  invalid_job: "error.invalidJob",
+  plan_mismatch: "error.planMismatch",
+  not_found: "error.resourceNotFound",
+};
+
+const integrationErrorKeys: Readonly<Record<string, TranslationKey>> = {
+  bridge_unavailable: "error.integrationBridgeUnavailable",
+  invalid_native_response: "error.integrationInvalidResponse",
+  codex_not_found: "error.codexNotFound",
+  codex_cli_broken: "error.codexCliBroken",
+  integration_payload_unavailable: "error.integrationPayloadUnavailable",
+  marketplace_install_failed: "error.marketplaceInstallFailed",
+  plugin_install_failed: "error.pluginInstallFailed",
+  integration_state_unavailable: "error.integrationStateUnavailable",
+  repair_required: "error.repairRequired",
+  integration_self_test_failed: "error.integrationSelfTestFailed",
+  integration_busy_retryable: "error.integrationBusyRetryable",
+  full_run_check_busy: "error.fullRunCheckBusy",
+  full_run_check_unavailable: "error.fullRunCheckUnavailable",
+};
+
+type Translator = (key: TranslationKey, values?: TranslationValues) => string;
+
+function errorCode(caught: unknown): string | undefined {
+  if (typeof caught !== "object" || caught === null || !("code" in caught)) return undefined;
+  const code = (caught as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function localizedUiError(caught: unknown, t: Translator, fallbackKey: TranslationKey): string {
+  const code = errorCode(caught);
+  if (caught instanceof ControllerApiError && (caught.status === 401 || caught.status === 403)) {
+    return t("error.controllerAuth");
+  }
+  if (code && controllerErrorKeys[code]) return t(controllerErrorKeys[code]);
+  if (code && integrationErrorKeys[code]) return t(integrationErrorKeys[code]);
+  if (caught instanceof ControllerApiError && caught.status !== undefined) {
+    return t("error.controllerRequestFailed", { status: caught.status });
+  }
+  if (caught instanceof Error) return caught.message;
+  return t(fallbackKey);
+}
+
+function localizedStaleReason(reason: string | undefined, t: Translator): string | undefined {
+  if (!reason) return undefined;
+  const exact: Readonly<Record<string, TranslationKey>> = {
+    "The PASS has no renderer freshness baseline.": "integration.stale.noBaseline",
+    "The controller is offline.": "integration.stale.controllerOffline",
+    "Codex integration status is not freshly verified.": "integration.stale.statusNotFresh",
+    "The plugin was installed or repaired after this PASS.": "integration.stale.pluginChanged",
+    "The verified integration identity changed after this PASS.": "integration.stale.identityChanged",
+    "No current fleet snapshot is available.": "integration.stale.noFleet",
+    "The worker selected by this PASS is no longer present.": "integration.stale.workerMissing",
+    "The worker selected by this PASS is no longer online.": "integration.stale.workerOffline",
+    "The worker selected by this PASS is no longer schedulable.": "integration.stale.workerUnschedulable",
+    "The worker selected by this PASS has missed the freshness grace window.": "integration.stale.workerFreshness",
+  };
+  const exactKey = exact[reason];
+  if (exactKey) return t(exactKey);
+  const stateMatch = /^Codex integration is (?<state>[a-z ]+)\.$/.exec(reason);
+  if (stateMatch?.groups?.state) {
+    const normalized = stateMatch.groups.state.replaceAll(" ", "_") as IntegrationState;
+    const stateKey = integrationLabelKeys[normalized];
+    return t("integration.stale.integrationState", { state: stateKey ? t(stateKey) : stateMatch.groups.state });
+  }
+  const revisionMatch = /^Fleet revision changed from (?<from>\d+) to (?<to>\d+)\.$/.exec(reason);
+  if (revisionMatch?.groups) {
+    return t("integration.stale.fleetRevision", { from: revisionMatch.groups.from, to: revisionMatch.groups.to });
+  }
+  return reason;
+}
+
 function statusLabel(status: JobStatus, t: (key: TranslationKey) => string) {
   return t(jobStatusKeys[status]);
 }
@@ -219,6 +305,11 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
   const nodes = fleet?.nodes ?? [];
   const onlineNodes = nodes.filter((node) => node.status === "online" || node.status === "busy").length;
   const recentJobs = fleet?.recentJobs ?? [];
+  const primaryAction: { label: string; icon: IconName; onClick: () => void } = !online
+    ? { label: t("home.openSetup"), icon: "terminal", onClick: () => openPage("integration") }
+    : nodes.length === 0
+      ? { label: t("home.addComputer"), icon: "plus", onClick: openAddComputer }
+      : { label: t("home.connectCodex"), icon: "codex", onClick: () => openPage("integration") };
 
   return (
     <>
@@ -229,7 +320,7 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
           <h2>{t("home.title")}</h2>
           <p>{t("home.description")}</p>
           <div className="hero-actions">
-            <button className="button button-dark" onClick={openAddComputer}><Icon name="plus" /> {t("home.addComputer")}</button>
+            <button className="button button-dark" onClick={primaryAction.onClick}><Icon name={primaryAction.icon} /> {primaryAction.label}</button>
           </div>
         </div>
         <div className="hero-visual" aria-hidden="true">
@@ -247,7 +338,7 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
             <p>{t("home.quickStartDescription")}</p>
           </div>
           <ol className="first-run-steps">
-            <li><span>1</span><strong>{t("home.stepAdd")}</strong><button className="text-button small" onClick={openAddComputer}>{t("home.stepStart")} <Icon name="arrow" size={14} /></button></li>
+            <li><span>1</span><strong>{t("home.stepAdd")}</strong><button className="text-button small" onClick={primaryAction.onClick}>{online ? t("home.stepStart") : t("home.openSetup")} <Icon name="arrow" size={14} /></button></li>
             <li><span>2</span><strong>{t("home.stepConnect")}</strong><button className="text-button small" onClick={() => openPage("integration")}>{t("home.stepOpen")} <Icon name="arrow" size={14} /></button></li>
             <li><span>3</span><strong>{t("home.stepCheck")}</strong><small>{t("home.stepPending")}</small></li>
           </ol>
@@ -482,11 +573,11 @@ function IntegrationPage({
       if (sequence !== statusSequence.current) return;
       setStatus(undefined);
       setStatusFresh(false);
-      setError(caught instanceof Error ? caught.message : "Could not read Codex integration status");
+      setError(localizedUiError(caught, t, "error.integrationOperationFailed"));
     } finally {
       if (sequence === statusSequence.current) setStatusChecking(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void refreshStatus();
@@ -525,11 +616,11 @@ function IntegrationPage({
     } catch (caught) {
       setStatus(undefined);
       setStatusFresh(false);
-      setError(caught instanceof Error ? caught.message : "Codex plugin installation failed");
+      setError(localizedUiError(caught, t, "error.pluginInstallFailed"));
     } finally {
       setOperation(undefined);
     }
-  }, []);
+  }, [t]);
 
   const runPluginCheck = useCallback(async () => {
     setOperation("check");
@@ -545,11 +636,11 @@ function IntegrationPage({
     } catch (caught) {
       setStatus(undefined);
       setStatusFresh(false);
-      setError(caught instanceof Error ? caught.message : "Codex plugin check failed");
+      setError(localizedUiError(caught, t, "error.integrationSelfTestFailed"));
     } finally {
       setOperation(undefined);
     }
-  }, []);
+  }, [t]);
 
   const runFullCheck = useCallback(async () => {
     if (!status || !statusFresh) return;
@@ -586,14 +677,14 @@ function IntegrationPage({
     } catch (caught) {
       if (sequence !== fullRunOperationSequence.current) return;
       setFullRunResult(undefined);
-      setFullRunError(caught instanceof Error ? caught.message : "Full Run Check failed to start");
+      setFullRunError(localizedUiError(caught, t, "error.fullRunCheckUnavailable"));
     } finally {
       if (sequence === fullRunOperationSequence.current) {
         setOperation(undefined);
         void refreshStatus();
       }
     }
-  }, [integrationGeneration, refreshStatus, status, statusFresh]);
+  }, [integrationGeneration, refreshStatus, status, statusFresh, t]);
 
   const pluginConnected = statusFresh && status?.state === "connected" && status.agentsIntegrated;
   const pluginInstalled = statusFresh && status?.pluginEnabled && status.agentsIntegrated &&
@@ -679,7 +770,7 @@ function IntegrationPage({
         <p>{t("integration.fullRunDescription")}</p>
         <ol>{(fullRunResult?.layers ?? fullRunLayerIds.map((id, index) => ({ id, state: operation === "full_check" && index === 0 ? "running" as const : "pending" as const, message: operation === "full_check" && index === 0 ? t("integration.layerNativeRunning") : t("integration.layerWaiting") }))).map((layer) => <li className={`layer-${layer.state}`} key={layer.id} title={layer.message}><i>{layer.state === "passed" ? "✓" : layer.state === "failed" ? "!" : layer.state === "running" ? "↻" : layer.state === "skipped" ? "×" : "—"}</i><span><strong>{t(fullRunLayerKeys[layer.id])}</strong><small>{layer.message}</small></span></li>)}</ol>
         {fullRunError ? <div className="full-run-evidence is-error" role="alert"><strong>{t("integration.fullRunError")}</strong><span>{fullRunError}</span></div> : null}
-        {staleReason ? <div className="full-run-evidence is-stale" role="status"><strong>{t("integration.historicalPassStale")}</strong><span>{staleReason}</span><span>{t("integration.historicalPassHint")}</span></div> : null}
+        {staleReason ? <div className="full-run-evidence is-stale" role="status"><strong>{t("integration.historicalPassStale")}</strong><span>{localizedStaleReason(staleReason, t)}</span><span>{t("integration.historicalPassHint")}</span></div> : null}
         {fullRunResult ? (
           <div className={`full-run-evidence ${fullRunResult.state === "running" ? "is-running" : fullRunResult.state === "passed" && !staleReason ? "is-success" : fullRunResult.state === "failed" ? "is-error" : "is-stale"}`} aria-live="polite">
             <strong>{fullRunResult.state === "running"
@@ -746,14 +837,14 @@ export function App() {
       setFleet(undefined);
       setAccessError(
         error instanceof ControllerApiError && (error.code === "transport_unavailable" || error.status === 401 || error.status === 403)
-          ? error.message
+          ? localizedUiError(error, t, "error.controllerUnavailable")
           : undefined,
       );
     } finally {
       if (sequence === refreshSequence.current && sequence >= lastAppliedRefresh.current) setLastCheckedAt(new Date());
       setLoadingCount((current) => Math.max(0, current - 1));
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void refresh();
@@ -802,7 +893,7 @@ export function App() {
             <label className="language-picker"><span>{t("language.label")}</span><select aria-label={t("language.label")} onChange={(event) => setLocale(event.target.value as typeof locale)} value={locale}>{localeOptions.map((option) => <option key={option.locale} value={option.locale}>{t(option.labelKey)}</option>)}</select></label>
             <span className={`live-status ${online ? "is-online" : ""}`}><StatusDot status={online ? "connected" : "disconnected"} />{statusCopy}</span>
             <button className={`icon-button refresh-button ${loading ? "spinning" : ""}`} onClick={() => void refresh()} aria-label={t("controller.refreshStatus")}><Icon name="refresh" /></button>
-            <button className="button button-primary" onClick={openAddComputer}><Icon name="plus" /> {t("computers.add")}</button>
+            <button className="button button-primary" onClick={online ? openAddComputer : () => setPage("integration")}><Icon name={online ? "plus" : "terminal"} /> {online ? t("computers.add") : t("controller.openSetup")}</button>
           </div>
         </header>
 

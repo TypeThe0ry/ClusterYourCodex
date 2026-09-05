@@ -123,7 +123,46 @@ const authenticationLabelKeys: Record<SshAuthenticationMethod, TranslationKey> =
   private_key: "provision.privateKey",
 };
 
+const provisioningErrorKeys: Readonly<Record<string, TranslationKey>> = {
+  bridge_unavailable: "error.provisionBridgeUnavailable",
+  invalid_request: "error.provisionInvalidRequest",
+  invalid_id: "error.provisionInvalidId",
+  not_found: "error.provisionNotFound",
+  revision_conflict: "error.provisionRevisionConflict",
+  host_key_mismatch: "error.provisionHostKeyMismatch",
+  credential_required: "error.provisionCredentialRequired",
+  credential_store_unavailable: "error.provisionCredentialStoreUnavailable",
+  private_key_invalid: "error.provisionPrivateKeyInvalid",
+  SSH_PRIVATE_KEY_INVALID: "error.provisionPrivateKeyInvalid",
+  SSH_PRIVATE_KEY_UNAVAILABLE: "error.provisionPrivateKeyUnavailable",
+  SSH_PRIVATE_KEY_REJECTED: "error.provisionPrivateKeyRejected",
+  SSH_AGENT_UNAVAILABLE: "error.provisionAgentUnavailable",
+  SSH_AGENT_REJECTED: "error.provisionAgentRejected",
+  SSH_AUTH_METHOD_UNSUPPORTED: "error.provisionAuthMethodUnsupported",
+  worker_kit_catalog_unavailable: "error.provisionWorkerKitUnavailable",
+  controller_unavailable: "error.provisionControllerUnavailable",
+  provisioning_store_unavailable: "error.provisionStoreUnavailable",
+  driver_unavailable: "error.provisionDriverUnavailable",
+  operation_unavailable: "error.provisionOperationUnavailable",
+  drive_limit_reached: "error.provisionDriveLimit",
+  automatic_advance_deadline: "error.provisionAutomaticDeadline",
+  PAIRING_PROVISIONING_FAILED: "error.provisionPairingFailed",
+  PAIRING_WORKER_INSTALL_FAILED: "error.provisionWorkerInstallFailed",
+  PAIRING_WORKER_PAIRING_FAILED: "error.provisionWorkerPairingFailed",
+  PAIRING_WORKER_HEALTH_CHECK_FAILED: "error.provisionWorkerHealthFailed",
+  PAIRING_EXPIRED: "error.provisionExpired",
+};
+
 type Translator = (key: TranslationKey, values?: TranslationValues) => string;
+
+function localizedProvisioningError(
+  error: Pick<ProvisioningClientError, "code" | "message"> | { code: string; message: string } | undefined,
+  t: Translator,
+): string | undefined {
+  if (!error) return undefined;
+  const key = provisioningErrorKeys[error.code];
+  return key ? t(key) : error.message;
+}
 
 function localizedProvisioningActionLabel(
   action: ProvisioningUiAction,
@@ -554,7 +593,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
 
   const runAction = useCallback(async (action: Exclude<ProvisioningUiAction, "approve_host_key" | "forget_ssh_password">) => {
     if (!selected) return;
-    if (action === "remove" && !window.confirm(`Remove ${selected.displayName} and its managed worker?`)) return;
+    if (action === "remove" && !window.confirm(t("provision.confirmRemove", { name: selected.displayName }))) return;
     const pendingAuto = autoTimers.current.get(selected.id);
     if (pendingAuto !== undefined) {
       window.clearTimeout(pendingAuto);
@@ -585,7 +624,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
       setOperation(undefined);
       void refresh(true);
     }
-  }, [actionSecret, applyResult, refresh, selected]);
+  }, [actionSecret, applyResult, refresh, selected, t]);
 
   const approveHostKey = useCallback(async () => {
     if (!selected || !hostKeyConfirmed) return;
@@ -633,7 +672,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
 
       {error ? (
         <div className="provisioning-error" role="alert">
-          <strong>{error.code}</strong><span>{error.message}</span>{error.retryable ? <small>{t("common.retryable")}</small> : null}
+          <strong>{error.code}</strong><span>{localizedProvisioningError(error, t)}</span>{error.retryable ? <small>{t("common.retryable")}</small> : null}
         </div>
       ) : null}
 
@@ -692,7 +731,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
               {selected.state === "failed" && selected.failure ? (
                 <section className="provisioning-failure">
                   <strong>{selected.failure.code}</strong>
-                  <p>{selected.failure.message}</p>
+                  <p>{localizedProvisioningError(selected.failure, t)}</p>
                   <p>{t("provision.failedAt", { step: t(stepLabelKeys[selected.step]) })} {selected.failure.retryable ? t("provision.retryCheckpoint") : t("provision.rollbackIncomplete")}</p>
                 </section>
               ) : null}
