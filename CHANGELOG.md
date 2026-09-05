@@ -7,6 +7,20 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+### Fixed
+
+- Complete the Spanish and Japanese desktop catalogs so controller errors,
+  provisioning recovery, Full Run Check evidence, stale-pass reasons, and
+  credential prompts stay in the selected language instead of falling back to
+  English.
+
+### Tests
+
+- Exercise the four-language home, Codex integration, and Add Computer flows in
+  Chrome; confirm locale persistence, `html[lang]`, collapsed advanced options,
+  and a clean browser console.
+- Re-run the desktop TypeScript lint and 95-test suite after the catalog update.
+
 ## [0.1.0-preview.89] - 2026-09-06
 
 ### Changed
