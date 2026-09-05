@@ -7,9 +7,9 @@ change.
 
 - **Snapshot date:** 2026-09-06
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
-- **Snapshot baseline:** `main` at `aabaf17a7b2da96454ade42a1505178e555bdf8d` before the preview.86 UI candidate
+- **Snapshot baseline:** `main` at `87fb8d228eab06aa648662aed9a9ad8d4ed9d4fa` (merged PR #36, preview.86 UI candidate)
 - **Current candidate version:** `0.1.0-preview.86`
-- **Latest published release:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85), promoted unchanged to **stable-testing** (`isPrerelease=false`)
+- **Latest published release:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85), promoted unchanged to **stable-testing** (`isPrerelease=false`); preview.86 is the next public prerelease candidate
 - **Release channels:** `v0.1.0-preview.85` is the current immutable
   stable-testing build. Its embedded version remains a preview and Certified GA remains blocked by
   the open Issue #2, #3, and #5 acceptance gates.
@@ -31,13 +31,13 @@ capability until the opt-in isolation contract in Issue #5 is complete.
 
 | Area | Implemented in the repository | Evidence currently available | Remaining gate |
 | --- | --- | --- | --- |
-| Controller, protocol, scheduler, CLI | Rust controller/worker/protocol/scheduler crates and typed workload placement | Main CI, Rust tests, and version checks pass on `c760447` | Live cross-node GUI/MCP round trip |
+| Controller, protocol, scheduler, CLI | Rust controller/worker/protocol/scheduler crates and typed workload placement | Main CI, Rust tests, and version checks pass on `87fb8d2` (run [33984723773](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33984723773)) | Live cross-node GUI/MCP round trip |
 | Windows desktop and tray host | Tauri 2 desktop, native controller proxy, bundled MCP runtime, per-user integration path | Windows packaging/static contracts and preview artifact jobs | Clean Windows 11 VM lifecycle, packaged tray acceptance, production Authenticode |
-| Windows worker path | Current-user controller/worker task and data-directory ACL model; installer repair/rollback plumbing | Windows packaging tests and hosted preview acceptance | Real Windows controller-to-Windows-worker run with retained logs/artifacts |
+| Windows worker path | Current-user controller/worker task and data-directory ACL model; installer repair/rollback plumbing | Windows packaging tests and hosted controller/worker round trip in main CI [33984723773](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33984723773) | Independent real Windows controller-to-Windows-worker run with retained logs/artifacts |
 | Linux worker packages | Linux x64 and arm64 Worker Kit archives, native shell/process-group paths, and systemd lifecycle packages | Tagged Linux artifact jobs, Worker Kit native/structural checks, and the preview.83 exact-SHA P1 controller/worker job | Repeat exact-SHA/native validation for each candidate; Issue #3's remaining platform gate is macOS |
 | macOS Worker Kits | x64 and arm64 archives, manifest/checksum/publisher-key contract, macOS capability reporting | Tagged macOS artifact jobs and kit contract checks | Real macOS host, LaunchAgent install/start/stop/restart, managed live run, and round trip |
 | Add Computer and credentials | GUI onboarding model, native credential-vault boundary, host-key fingerprint flow, password/agent/private-key paths | Static contract and local source review | Live authentication and cross-node GUI/MCP acceptance on supported hosts |
-| Desktop UX and localization | One three-step first-run path, compact Add Computer form, collapsed advanced verification, duplicate hero CTA removed, and persistent English/Simplified Chinese selection across dashboard, tasks, rules, integration evidence, and provisioning | Chrome visual/interaction audit on the preview.86 candidate plus 95 desktop tests, workspace lint/test/build, and release contract checks | Add further locales and translate backend-provided diagnostic messages when localized error catalogs are available |
+| Desktop UX and localization | One three-step first-run path, compact Add Computer form, collapsed advanced verification, duplicate hero CTA removed, and persistent English/Simplified Chinese selection across dashboard, tasks, rules, integration evidence, and provisioning | Chrome visual/interaction audit of merged PR #36 (`87fb8d2`) plus 95 desktop tests, workspace lint/test/build, and release contract checks | Add further locales and translate backend-provided diagnostic messages when localized error catalogs are available |
 | Hostile-workload isolation | Linux dedicated identity/cgroup reconciliation hardening; Windows/macOS capability reporting and fail-closed scheduling boundary | Linux unit/native probes and static contracts | Windows Job Object + protected external guard, macOS external reconciliation, and a complete three-platform hostile matrix (Issue #5) |
 | Public release pipeline | Version identity, signed-kit metadata, SBOM/provenance/index validation, protected GA workflow | Main CI and preview producer jobs | All applicable issue gates, external evidence, protected production review, and independent post-download verification |
 
@@ -48,7 +48,7 @@ service-manager, credential, or cross-node acceptance gate.
 
 ## Current CI and release state
 
-- Main CI run [`33967478225`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33967478225), CodeQL run [`33967478232`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33967478232), and dependency security run [`33967478228`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33967478228) passed for `c760447`.
+- Main CI run [`33984723773`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33984723773), CodeQL run [`33984723787`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33984723787), and dependency security run [`33984723762`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33984723762) passed for the exact merged source `87fb8d228eab06aa648662aed9a9ad8d4ed9d4fa`.
 - The tagged [`v0.1.0-preview.84` workflow](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33946635188) completed with one failure: **Clean Windows 11 ARM64 compatibility acceptance (x64 emulation)**. The first `standard-ascii` child timed out after 900 seconds while the elevated helper was cleaning up an auto-started `AtLogOn` task runtime. Producer jobs passed, but publication was skipped, so preview.84 is not a published release.
 - The merged preview.85 repair replaces the unbounded PowerShell task-unregister path with bounded native scheduler operations, binds exact-path validation and termination to one process handle, asks Task Scheduler to end running instances before fallback termination, requires a stable no-process window, reaps runtimes after both registration and rollback restoration, and preserves flattened helper-history evidence. Tagged run [`33968855403`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33968855403) completed successfully, including Windows x64 native lifecycle checks and clean Windows 11 ARM64 x64-emulation fresh deployment, silent Setup, and standard/admin ASCII/non-ASCII profile acceptance.
 - The merged preview.85 source also contains the first Chrome-audited desktop
@@ -56,13 +56,13 @@ service-manager, credential, or cross-node acceptance gate.
   Computer keeps only required credentials visible, Advanced verification is
   collapsed by default, and the selected locale persists locally.
 - The preview.86 candidate extends that localization to every desktop-owned
-  surface and removes the duplicate hero Connect Codex action. The candidate
-  has passed the Chrome English/简体中文 interaction pass, locale persistence
-  reload check, 95 desktop tests, workspace lint/test/build, and local release
-  contract checks. The exact merged SHA, tagged workflow, and downloaded
-  asset evidence will be recorded here immediately after the PR is merged and
-  the preview tag completes.
-- The public candidate was downloaded into a clean directory after publication.
+  surface and removes the duplicate hero Connect Codex action. PR [#36](https://github.com/TypeThe0ry/ClusterYourCodex/pull/36)
+  merged as `87fb8d228eab06aa648662aed9a9ad8d4ed9d4fa`; the Chrome
+  English/简体中文 interaction pass, locale persistence reload check, 95
+  desktop tests, workspace lint/test/build, main CI, CodeQL, and local release
+  contract checks all pass. The tagged preview workflow and downloaded asset
+  evidence are recorded in the follow-up release update below.
+- The previously published preview.85 candidate was downloaded into a clean directory after publication.
   All 23 assets, 11 SHA-256 sidecars/SHA256SUMS records, 10 release-index
   records, the CycloneDX SBOM, and all 10 GitHub provenance attestations were
   independently verified. The exact Release was then promoted to
