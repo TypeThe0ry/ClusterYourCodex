@@ -15,7 +15,7 @@ anyhow.workspace = true
 clap = { workspace = true, features = ["env"] }
 cyc-protocol = { path = "../cyc-protocol" }
 reqwest.workspace = true
-rcgen = "0.13.2"
+rcgen = "0.14.9"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde_json.workspace = true
 sha2.workspace = true
