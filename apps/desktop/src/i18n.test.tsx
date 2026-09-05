@@ -66,6 +66,10 @@ describe("i18n", () => {
     expect(translate("zh-CN", "integration.stale.fleetRevision", { from: 4, to: 5 })).toBe("电脑集群修订版本从 4 变为 5。");
     expect(translate("es", "home.addComputer")).toBe("Añadir computadora");
     expect(translate("ja", "home.addComputer")).toBe("コンピューターを追加");
+    expect(translate("es", "rules.gpuTarget")).toBe("Preferir computadoras con NVIDIA");
+    expect(translate("ja", "rules.predictableTitle")).toBe("予測可能な設計");
+    expect(translate("es", "integration.pluginDescriptionShort")).toContain("puente MCP");
+    expect(translate("ja", "provision.action.retryPassword")).toBe("修正したパスワードで再試行");
     expectTypeOf<Locale>().toEqualTypeOf<"en" | "zh-CN" | "es" | "ja">();
   });
 
