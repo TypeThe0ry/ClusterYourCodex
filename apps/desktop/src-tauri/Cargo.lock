@@ -238,6 +238,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -508,7 +514,7 @@ dependencies = [
 name = "clusteryourcodex-desktop-host"
 version = "0.1.0-preview.89"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "cyc-protocol",
  "cyc-provision",
@@ -738,7 +744,7 @@ dependencies = [
 name = "cyc-provision"
 version = "0.1.0-preview.89"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "cyc-protocol",
  "cyc-secrets",
@@ -767,7 +773,7 @@ dependencies = [
 name = "cyc-ssh"
 version = "0.1.0-preview.89"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "cyc-secrets",
  "sha2",
  "ssh2",
@@ -4169,7 +4175,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
