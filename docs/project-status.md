@@ -7,7 +7,7 @@ change.
 
 - **Snapshot date:** 2026-09-06
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
-- **Snapshot baseline:** `origin/main` at `32b8bac` (merged PR #44, status baseline; latest UI code change is PR #42 at `886387f`)
+- **Snapshot baseline:** `origin/main` at `4407cfc` (merged PR #45, complete desktop localization; latest tagged product candidate remains preview.89)
 - **Current candidate version:** `0.1.0-preview.89` (`v0.1.0-preview.89` points to `e8691ac92603da3b883e9312915650fbba68eb35`)
 - **Latest published release:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85), promoted unchanged to **stable-testing** (`isPrerelease=false`); preview.86 and preview.87 are cancelled superseded candidates, preview.88 is superseded, and preview.89 is the active tagged prerelease candidate
 - **Release channels:** `v0.1.0-preview.85` is the current immutable
@@ -77,12 +77,14 @@ service-manager, credential, or cross-node acceptance gate.
   duplicate top-bar **Add computer** button on a true first-run Home screen;
   the contextual **Start** action remains the only primary onboarding entry,
   while the button returns on the Computers page and after setup history exists.
-- The current localization follow-up completes all 448 catalog keys for
-  Spanish and Japanese, including controller/provisioning errors, integration
-  evidence, stale-pass explanations, and credential recovery. Chrome checks
-  confirm all four locales switch and persist without console errors; the
-  change is tracked in the active localization PR and remains a prerelease-only
-  UI update until it is merged and included in a new candidate tag.
+- PR [#45](https://github.com/TypeThe0ry/ClusterYourCodex/pull/45) completes all
+  448 catalog keys for Spanish and Japanese, including
+  controller/provisioning errors, integration evidence, stale-pass explanations,
+  and credential recovery. It merged as `4407cfcebeaf4e83356b30b6a90c72d79f92c046`;
+  Chrome checks confirm all four locales switch and persist without console
+  errors. The catalog change is on `main` but is not part of tagged preview.89;
+  the next preview tag must carry it before any public artifact can claim the
+  complete four-language catalog.
 - The previously published preview.85 candidate was downloaded into a clean directory after publication.
   All 23 assets, 11 SHA-256 sidecars/SHA256SUMS records, 10 release-index
   records, the CycloneDX SBOM, and all 10 GitHub provenance attestations were
