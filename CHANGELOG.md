@@ -23,6 +23,28 @@ are versioned independently from the product.
   both workspace lockfiles, restoring the dependency-policy gate without
   changing the SSH API surface.
 
+## [0.1.0-preview.86] - 2026-09-06
+
+### Fixed
+
+- Complete the desktop English/Simplified Chinese localization across the
+  dashboard, task history, routing rules, Codex integration evidence, and
+  Add Computer provisioning timeline, credential recovery, inventory, and
+  advanced capacity controls.
+- Remove the duplicate Connect Codex hero action so first use has one clear
+  path: add a computer, connect the plugin, then run the check.
+- Localize authentication choices, service scope, job kinds, capacity labels,
+  controller proxy recovery, and accessibility labels while preserving the
+  existing credential and host-key boundaries.
+
+### Tests
+
+- Verify the English and Simplified Chinese first-run, task, routing, Codex
+  integration, and Add Computer flows in Chrome after a Vite HMR refresh.
+- Confirm locale persistence and the matching `html[lang]` value after a full
+  reload; desktop 95-test suite, workspace lint/test/build, and release
+  contract checks pass locally.
+
 ## [0.1.0-preview.85] - 2026-09-05
 
 ### Fixed
@@ -1191,7 +1213,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.85...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.86...HEAD
+[0.1.0-preview.86]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.85...v0.1.0-preview.86
 [0.1.0-preview.85]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.84...v0.1.0-preview.85
 [0.1.0-preview.84]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.83...v0.1.0-preview.84
 [0.1.0-preview.83]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.82...v0.1.0-preview.83

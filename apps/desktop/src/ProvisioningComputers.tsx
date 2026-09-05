@@ -15,7 +15,7 @@ import {
   type StartComputerInput,
   type SshAuthenticationMethod,
 } from "./api/provisioning";
-import { useI18n } from "./i18n";
+import { useI18n, type TranslationKey, type TranslationValues } from "./i18n";
 
 const stepLabels: Record<ProvisioningStep, string> = {
   draft: "Created",
@@ -70,6 +70,83 @@ const authenticationLabels: Record<SshAuthenticationMethod, string> = {
   agent: "Native SSH agent",
   private_key: "Private key",
 };
+
+const stepLabelKeys: Record<ProvisioningStep, TranslationKey> = {
+  draft: "provision.step.created",
+  ssh_connecting: "provision.step.sshConnecting",
+  host_key_pending: "provision.step.hostKey",
+  authenticated: "provision.step.authenticated",
+  discovering: "provision.step.discovery",
+  credential_stored: "provision.step.credentialPolicy",
+  kit_staged: "provision.step.kitStaged",
+  worker_installed: "provision.step.workerInstalled",
+  enrollment_issued: "provision.step.enrollmentIssued",
+  paired: "provision.step.paired",
+  service_enabled: "provision.step.serviceEnabled",
+  heartbeat_seen: "provision.step.heartbeat",
+  smoke_check: "provision.step.smokeCheck",
+  ready: "provision.step.ready",
+};
+
+const stateLabelKeys: Record<ProvisioningComputer["state"], TranslationKey> = {
+  ...stepLabelKeys,
+  failed: "provision.state.failed",
+};
+
+const actionLabelKeys: Record<ProvisioningUiAction, TranslationKey> = {
+  approve_host_key: "provision.action.approveHostKey",
+  continue: "provision.action.continue",
+  resume: "provision.action.resume",
+  retry: "provision.action.retry",
+  repair: "provision.action.repair",
+  rollback: "provision.action.rollback",
+  remove: "provision.action.remove",
+  forget_ssh_password: "provision.action.forgetPassword",
+};
+
+const jobKindLabelKeys: Record<AllowedJobKind, TranslationKey> = {
+  build: "provision.jobKind.build",
+  test: "provision.jobKind.test",
+  static_analysis: "provision.jobKind.staticAnalysis",
+  compute: "provision.jobKind.compute",
+  gpu: "provision.jobKind.gpu",
+  container: "provision.jobKind.container",
+  service: "provision.jobKind.service",
+  data_transform: "provision.jobKind.dataTransform",
+  media_transform: "provision.jobKind.mediaTransform",
+  render: "provision.jobKind.render",
+};
+
+const authenticationLabelKeys: Record<SshAuthenticationMethod, TranslationKey> = {
+  password: "provision.password",
+  agent: "provision.nativeAgent",
+  private_key: "provision.privateKey",
+};
+
+type Translator = (key: TranslationKey, values?: TranslationValues) => string;
+
+function localizedProvisioningActionLabel(
+  action: ProvisioningUiAction,
+  computer: ProvisioningComputer,
+  t: Translator,
+): string {
+  if (action === "retry" && computer.attention === "credential") {
+    return computer.credential.authenticationMethod === "private_key"
+      ? t("provision.action.retryPrivateKey")
+      : t("provision.action.retryPassword");
+  }
+  if (action !== "continue") return t(actionLabelKeys[action]);
+  if (computer.attention === "credential") {
+    const secret = computer.credential.authenticationMethod === "private_key"
+      ? t("provision.privateKeyPassphrase")
+      : t("provision.password");
+    if (computer.intent === "rollback") return t("provision.action.continueRollback", { secret });
+    if (computer.intent === "remove") return t("provision.action.continueRemoval", { secret });
+    return t("provision.action.continueSetup", { secret });
+  }
+  if (computer.attention === "external") return t("provision.action.checkNow");
+  return t(actionLabelKeys[action]);
+}
 
 export interface AddForm {
   displayName: string;
@@ -197,9 +274,10 @@ function hasActiveWork(computers: ProvisioningComputer[]): boolean {
 }
 
 function Timeline({ computer }: { computer: ProvisioningComputer }) {
+  const { t } = useI18n();
   const activeIndex = PROVISIONING_STEPS.indexOf(computer.step);
   return (
-    <ol className="provisioning-timeline" aria-label="Provisioning timeline">
+    <ol className="provisioning-timeline" aria-label={t("provision.timeline")}>
       {PROVISIONING_STEPS.map((step, index) => {
         const failed = computer.state === "failed" && step === computer.step;
         const done = computer.state === "ready" || index < activeIndex;
@@ -207,7 +285,7 @@ function Timeline({ computer }: { computer: ProvisioningComputer }) {
         return (
           <li className={failed ? "failed" : done ? "done" : active ? "active" : "pending"} key={step}>
             <i>{failed ? "!" : done ? "✓" : index + 1}</i>
-            <span>{stepLabels[step]}</span>
+            <span>{t(stepLabelKeys[step])}</span>
           </li>
         );
       })}
@@ -555,18 +633,18 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
 
       {error ? (
         <div className="provisioning-error" role="alert">
-          <strong>{error.code}</strong><span>{error.message}</span>{error.retryable ? <small>Retryable</small> : null}
+          <strong>{error.code}</strong><span>{error.message}</span>{error.retryable ? <small>{t("common.retryable")}</small> : null}
         </div>
       ) : null}
 
       {computers.length ? (
         <div className="provisioning-workspace">
-          <div className="provisioning-record-list" aria-label="Provisioning records">
+          <div className="provisioning-record-list" aria-label={t("provision.records")}>
             {computers.map((computer) => (
               <button className={computer.id === selectedId ? "selected" : ""} key={computer.id} onClick={() => setSelectedId(computer.id)}>
                 <span className={`provisioning-state state-${computer.state}`} />
                 <span><strong>{computer.displayName}</strong><small>{computer.endpoint.username}@{computer.endpoint.host}:{computer.endpoint.port}</small></span>
-                <em>{stateLabels[computer.state]}</em>
+                <em>{t(stateLabelKeys[computer.state])}</em>
               </button>
             ))}
           </div>
@@ -574,19 +652,19 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
           {selected ? (
             <article className="provisioning-detail">
               <header>
-                <div><span className="eyebrow">MANAGED SETUP</span><h3>{selected.displayName}</h3><p>{selected.endpoint.username}@{selected.endpoint.host}:{selected.endpoint.port} · {authenticationLabels[selected.credential.authenticationMethod]}</p></div>
-                <span className={`status-pill provision-${selected.state}`}>{stateLabels[selected.state]}</span>
+                <div><span className="eyebrow">{t("provision.managedSetup")}</span><h3>{selected.displayName}</h3><p>{selected.endpoint.username}@{selected.endpoint.host}:{selected.endpoint.port} · {t(authenticationLabelKeys[selected.credential.authenticationMethod])}</p></div>
+                <span className={`status-pill provision-${selected.state}`}>{t(stateLabelKeys[selected.state])}</span>
               </header>
 
               <Timeline computer={selected} />
 
               {selected.attention === "host_key" && selected.hostKey && !selected.hostKey.approved ? (
                 <section className="host-key-confirmation">
-                  <strong>Verify this SSH host key</strong>
-                  <p>Compare the full fingerprint with the computer itself. Approval is bound to this exact key.</p>
-                  <dl><dt>Algorithm</dt><dd>{selected.hostKey.algorithm}</dd><dt>SHA256 fingerprint</dt><dd className="fingerprint">{selected.hostKey.fingerprint}</dd></dl>
-                  <label className="confirmation-check"><input checked={hostKeyConfirmed} onChange={(event) => setHostKeyConfirmed(event.target.checked)} type="checkbox" /> I verified this exact fingerprint.</label>
-                  <button className="button button-primary" disabled={!hostKeyConfirmed || Boolean(operation) || selectedAutoBusy} onClick={() => void approveHostKey()}>{operation === "approve_host_key" ? "Approving…" : "Approve once and continue"}</button>
+                  <strong>{t("provision.verifyHostKey")}</strong>
+                  <p>{t("provision.hostKeyDescription")}</p>
+                  <dl><dt>{t("provision.algorithm")}</dt><dd>{selected.hostKey.algorithm}</dd><dt>{t("provision.fingerprint")}</dt><dd className="fingerprint">{selected.hostKey.fingerprint}</dd></dl>
+                  <label className="confirmation-check"><input checked={hostKeyConfirmed} onChange={(event) => setHostKeyConfirmed(event.target.checked)} type="checkbox" /> {t("provision.fingerprintCheck")}</label>
+                  <button className="button button-primary" disabled={!hostKeyConfirmed || Boolean(operation) || selectedAutoBusy} onClick={() => void approveHostKey()}>{operation === "approve_host_key" ? t("provision.approving") : t("provision.approveContinue")}</button>
                 </section>
               ) : null}
 
@@ -594,20 +672,20 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
                 <section className="credential-resume">
                   <strong>{selected.credential.authenticationMethod === "private_key"
                     ? selected.failure?.code === "SSH_PRIVATE_KEY_REJECTED"
-                      ? "Private key or passphrase rejected"
-                      : "Private-key passphrase required"
+                       ? t("provision.privateKeyRejected")
+                       : t("provision.passphraseRequired")
                     : selected.failure?.code === "SSH_AUTH_REJECTED"
-                      ? "SSH password rejected"
-                      : "SSH password required"}</strong>
+                       ? t("provision.sshPasswordRejected")
+                       : t("provision.passwordRequired")}</strong>
                   <p>{selected.credential.authenticationMethod === "private_key"
-                    ? "Enter the optional private-key passphrase for this retry. After submission, the renderer drops its request reference and the native copy is cleared when the operation settles."
+                     ? t("provision.retryPassphrase")
                     : selected.failure?.code === "SSH_AUTH_REJECTED"
-                      ? "SSH rejected the attempted or stored credential. Enter the corrected password to retry this same setup record."
-                      : "The session-only secret is no longer available. Enter it again; it is passed directly to the native secret boundary."}</p>
-                  <label>{selected.credential.authenticationMethod === "private_key" ? "Private-key passphrase" : "Password"}<input autoComplete="new-password" onChange={(event) => setActionSecret(event.target.value)} type="password" value={actionSecret} /></label>
+                       ? t("provision.retryPassword")
+                       : t("provision.sessionSecret")}</p>
+                  <label>{selected.credential.authenticationMethod === "private_key" ? t("provision.privateKeyPassphrase") : t("provision.password")}<input autoComplete="new-password" onChange={(event) => setActionSecret(event.target.value)} type="password" value={actionSecret} /></label>
                   <small>{selected.credential.authenticationMethod === "private_key"
-                    ? "The key path remains durable, but this passphrase is never stored in the provisioning journal or credential vault."
-                    : "The original remember-password policy is durable. A remembered replacement is saved only after SSH accepts it."}</small>
+                     ? t("provision.privateKeyDurable")
+                     : t("provision.rememberedReplacement")}</small>
                 </section>
               ) : null}
 
@@ -615,18 +693,18 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
                 <section className="provisioning-failure">
                   <strong>{selected.failure.code}</strong>
                   <p>{selected.failure.message}</p>
-                  <p>Failed at {stepLabels[selected.step]}. {selected.failure.retryable ? "Retry this exact checkpoint, or roll it back." : "Roll back or remove this incomplete setup record."}</p>
+                  <p>{t("provision.failedAt", { step: t(stepLabelKeys[selected.step]) })} {selected.failure.retryable ? t("provision.retryCheckpoint") : t("provision.rollbackIncomplete")}</p>
                 </section>
               ) : null}
 
-              {selected.attention === "external" ? <div className="provisioning-wait"><span className="spinner" />Automatically waiting for pairing, a post-enable daemon heartbeat, the real smoke job, and its cleanup receipt.</div> : null}
+              {selected.attention === "external" ? <div className="provisioning-wait"><span className="spinner" />{t("provision.waitingExternal")}</div> : null}
 
               {selected.inventory ? (
                 <section className="inventory-summary">
-                  <div><span>Operating system</span><strong>{selected.inventory.operatingSystem} · {selected.inventory.architecture}</strong></div>
-                  <div><span>CPU</span><strong>{selected.inventory.cpuModel} · {selected.inventory.logicalCpuCount} threads</strong></div>
-                  <div><span>Memory</span><strong>{Math.round(selected.inventory.memoryBytes / 1024 / 1024 / 1024)} GiB</strong></div>
-                  <div><span>GPU</span><strong>{selected.inventory.gpuDevices.map((gpu) => gpu.name).join(", ") || "None detected"}</strong></div>
+                  <div><span>{t("provision.operatingSystem")}</span><strong>{selected.inventory.operatingSystem} · {selected.inventory.architecture}</strong></div>
+                  <div><span>{t("provision.cpu")}</span><strong>{selected.inventory.cpuModel} · {selected.inventory.logicalCpuCount} {t("provision.threads")}</strong></div>
+                  <div><span>{t("provision.memory")}</span><strong>{Math.round(selected.inventory.memoryBytes / 1024 / 1024 / 1024)} {t("provision.gib")}</strong></div>
+                  <div><span>{t("provision.gpu")}</span><strong>{selected.inventory.gpuDevices.map((gpu) => gpu.name).join(", ") || t("provision.noneDetected")}</strong></div>
                 </section>
               ) : null}
 
@@ -638,11 +716,11 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
                     key={action}
                     onClick={() => action === "forget_ssh_password" ? void forgetPassword() : void runAction(action)}
                   >
-                    {operation === action ? "Working…" : provisioningActionLabel(action, selected)}
+                    {operation === action ? t("integration.working") : localizedProvisioningActionLabel(action, selected, t)}
                   </button>
                 ))}
               </footer>
-              <small className="record-meta">Revision {selected.revision} · cycle {selected.cycle} · updated {new Date(selected.updatedAt).toLocaleString()}</small>
+              <small className="record-meta">{t("provision.revisionMeta", { revision: selected.revision, cycle: selected.cycle, time: new Date(selected.updatedAt).toLocaleString() })}</small>
             </article>
           ) : null}
         </div>
@@ -667,31 +745,31 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
                   privateKeyPath: "",
                   rememberPassword: authenticationMethod === "password" && form.rememberPassword,
                 });
-              }} value={form.authenticationMethod}><option value="password">{t("provision.password")}</option><option value="agent">Native SSH agent</option><option value="private_key">Private key file</option></select></label>
+              }} value={form.authenticationMethod}><option value="password">{t("provision.password")}</option><option value="agent">{t("provision.nativeAgent")}</option><option value="private_key">{t("provision.privateKey")}</option></select></label>
               {form.authenticationMethod === "password" ? <label className="wide">{t("provision.password")}<input autoComplete="new-password" onChange={(event) => setForm({ ...form, password: event.target.value })} required type="password" value={form.password} /></label> : null}
               {form.authenticationMethod === "private_key" ? <>
-                <label className="wide">Private-key path<input autoComplete="off" onChange={(event) => setForm({ ...form, privateKeyPath: event.target.value })} placeholder="C:\\Users\\you\\.ssh\\id_ed25519" required value={form.privateKeyPath} /></label>
-                <label className="wide">Passphrase (optional)<input autoComplete="new-password" onChange={(event) => setForm({ ...form, passphrase: event.target.value })} type="password" value={form.passphrase} /></label>
+                <label className="wide">{t("provision.privateKeyPath")}<input autoComplete="off" onChange={(event) => setForm({ ...form, privateKeyPath: event.target.value })} placeholder="C:\\Users\\you\\.ssh\\id_ed25519" required value={form.privateKeyPath} /></label>
+                <label className="wide">{t("provision.passphraseOptional")}<input autoComplete="new-password" onChange={(event) => setForm({ ...form, passphrase: event.target.value })} type="password" value={form.passphrase} /></label>
               </> : null}
-              {form.authenticationMethod === "agent" ? <small className="wide auth-method-note">ClusterYourCodex will use identities already exposed by the native SSH agent. No secret is requested or stored.</small> : null}
+              {form.authenticationMethod === "agent" ? <small className="wide auth-method-note">{t("provision.agentNote")}</small> : null}
             </div>
             {form.authenticationMethod === "password" ? <label className="check-row"><input checked={form.rememberPassword} onChange={(event) => setForm({ ...form, rememberPassword: event.target.checked })} type="checkbox" /> {t("provision.rememberPassword")}</label> : null}
 
             <details className="advanced-options">
               <summary>{t("provision.advanced")}</summary>
               <div className="form-grid">
-                <label className="wide">{t("provision.displayName")}<input maxLength={128} onChange={(event) => setForm({ ...form, displayName: event.target.value })} placeholder="Defaults to host until discovery" value={form.displayName} /></label>
+                <label className="wide">{t("provision.displayName")}<input maxLength={128} onChange={(event) => setForm({ ...form, displayName: event.target.value })} placeholder={t("provision.displayNamePlaceholder")} value={form.displayName} /></label>
                 <label>{t("provision.sshPort")}<input max={65535} min={1} onChange={(event) => setForm({ ...form, port: event.target.value })} required type="number" value={form.port} /></label>
-                <label>Service scope<select onChange={(event) => setForm({ ...form, serviceScope: event.target.value as AddForm["serviceScope"] })} value={form.serviceScope}><option value="auto">Automatic</option><option value="user">Current user</option><option value="system">System</option></select></label>
-                <label>Routing priority<input max={10000} min={-10000} onChange={(event) => setForm({ ...form, priority: event.target.value })} type="number" value={form.priority} /></label>
-                <label className="wide">Worker workspace (absolute)<input onChange={(event) => setForm({ ...form, workspace: event.target.value })} placeholder="Auto-select by OS" value={form.workspace} /></label>
-                <label>Max parallel jobs<input min={1} onChange={(event) => setForm({ ...form, maximumParallelJobs: event.target.value })} type="number" value={form.maximumParallelJobs} /></label>
-                <label>CPU limit %<input max={100} min={1} onChange={(event) => setForm({ ...form, cpuLimitPercent: event.target.value })} type="number" value={form.cpuLimitPercent} /></label>
-                <label>Memory limit MiB<input min={1} onChange={(event) => setForm({ ...form, memoryLimitMiB: event.target.value })} type="number" value={form.memoryLimitMiB} /></label>
+                <label>{t("provision.serviceScope")}<select onChange={(event) => setForm({ ...form, serviceScope: event.target.value as AddForm["serviceScope"] })} value={form.serviceScope}><option value="auto">{t("provision.scope.auto")}</option><option value="user">{t("provision.scope.user")}</option><option value="system">{t("provision.scope.system")}</option></select></label>
+                <label>{t("provision.routingPriority")}<input max={10000} min={-10000} onChange={(event) => setForm({ ...form, priority: event.target.value })} type="number" value={form.priority} /></label>
+                <label className="wide">{t("provision.workerWorkspace")}<input onChange={(event) => setForm({ ...form, workspace: event.target.value })} placeholder={t("provision.workerWorkspacePlaceholder")} value={form.workspace} /></label>
+                <label>{t("provision.maxParallelJobs")}<input min={1} onChange={(event) => setForm({ ...form, maximumParallelJobs: event.target.value })} type="number" value={form.maximumParallelJobs} /></label>
+                <label>{t("provision.cpuLimit")}<input max={100} min={1} onChange={(event) => setForm({ ...form, cpuLimitPercent: event.target.value })} type="number" value={form.cpuLimitPercent} /></label>
+                <label>{t("provision.memoryLimit")}<input min={1} onChange={(event) => setForm({ ...form, memoryLimitMiB: event.target.value })} type="number" value={form.memoryLimitMiB} /></label>
               </div>
-              <fieldset><legend>Allowed job kinds</legend><div className="job-kind-grid">{(Object.keys(jobKindLabels) as AllowedJobKind[]).map((kind) => <label key={kind}><input checked={form.allowedJobKinds.includes(kind)} onChange={(event) => setForm({ ...form, allowedJobKinds: event.target.checked ? [...form.allowedJobKinds, kind] : form.allowedJobKinds.filter((item) => item !== kind) })} type="checkbox" />{jobKindLabels[kind]}</label>)}</div>{form.allowedJobKinds.length === 0 ? <small role="alert">Select at least one job kind.</small> : null}</fieldset>
-              <label className="check-row"><input checked={form.allowOnBattery} onChange={(event) => setForm({ ...form, allowOnBattery: event.target.checked })} type="checkbox" /> Allow jobs while this computer is on battery</label>
-              <small>Routing priority and typed capacity policy are synchronized after pairing and enforced atomically during placement. The current worker containment advertises one safe execution slot.</small>
+              <fieldset><legend>{t("provision.allowedJobKinds")}</legend><div className="job-kind-grid">{(Object.keys(jobKindLabels) as AllowedJobKind[]).map((kind) => <label key={kind}><input checked={form.allowedJobKinds.includes(kind)} onChange={(event) => setForm({ ...form, allowedJobKinds: event.target.checked ? [...form.allowedJobKinds, kind] : form.allowedJobKinds.filter((item) => item !== kind) })} type="checkbox" />{t(jobKindLabelKeys[kind])}</label>)}</div>{form.allowedJobKinds.length === 0 ? <small role="alert">{t("provision.selectJobKind")}</small> : null}</fieldset>
+              <label className="check-row"><input checked={form.allowOnBattery} onChange={(event) => setForm({ ...form, allowOnBattery: event.target.checked })} type="checkbox" /> {t("provision.allowOnBattery")}</label>
+              <small>{t("provision.advancedDescription")}</small>
             </details>
 
             <footer><button className="button button-secondary" disabled={Boolean(operation)} onClick={resetAndCloseWizard} type="button">{t("common.cancel")}</button><button className="button button-primary" disabled={Boolean(operation) || form.allowedJobKinds.length === 0 || (form.authenticationMethod === "password" && !form.password) || (form.authenticationMethod === "private_key" && !form.privateKeyPath.trim())} type="submit">{operation === "start" ? t("status.connecting") : t("common.continue")}</button></footer>
