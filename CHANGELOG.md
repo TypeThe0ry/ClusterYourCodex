@@ -7,6 +7,16 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+### Documentation
+
+- Record the successful `v0.1.0-preview.85` tagged workflow, including clean
+  Windows 11 ARM64 x64-emulation fresh-deployment, silent Setup, and
+  standard/admin ASCII/non-ASCII profile acceptance.
+- Record the immutable stable-testing promotion after independent verification
+  of all 23 published assets, 11 checksum records, 10 release-index subjects,
+  the CycloneDX SBOM, and all 10 GitHub provenance attestations. The embedded
+  product version remains `0.1.0-preview.85`; Certified GA gates remain open.
+
 ## [0.1.0-preview.85] - 2026-09-05
 
 ### Fixed

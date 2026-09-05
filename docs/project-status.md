@@ -5,13 +5,13 @@ the current checkout and live GitHub state, rather than on chat history. Update
 it in the same pull request as every implementation, CI, packaging, or release
 change.
 
-- **Snapshot date:** 2026-09-05
+- **Snapshot date:** 2026-09-06
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
-- **Snapshot baseline:** `main` at `c760447fe46e441aeca311467a11ce7453a9f030`
+- **Snapshot baseline:** `main` at `ff9d1021f1b1d0e07395517e249daaca10d30e15`
 - **Current candidate version:** `0.1.0-preview.85`
-- **Latest published release:** [`v0.1.0-preview.83`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.83)
-- **Release channels:** `v0.1.0-preview.85` is the current immutable candidate
-  for maintainer-authorized stable-testing. Certified GA remains blocked by
+- **Latest published release:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85), promoted unchanged to **stable-testing** (`isPrerelease=false`)
+- **Release channels:** `v0.1.0-preview.85` is the current immutable
+  stable-testing build. Its embedded version remains a preview and Certified GA remains blocked by
   the open Issue #2, #3, and #5 acceptance gates.
 
 ## What the product does
@@ -50,15 +50,18 @@ service-manager, credential, or cross-node acceptance gate.
 
 - Main CI run [`33967478225`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33967478225), CodeQL run [`33967478232`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33967478232), and dependency security run [`33967478228`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33967478228) passed for `c760447`.
 - The tagged [`v0.1.0-preview.84` workflow](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33946635188) completed with one failure: **Clean Windows 11 ARM64 compatibility acceptance (x64 emulation)**. The first `standard-ascii` child timed out after 900 seconds while the elevated helper was cleaning up an auto-started `AtLogOn` task runtime. Producer jobs passed, but publication was skipped, so preview.84 is not a published release.
-- The merged preview.85 repair replaces the unbounded PowerShell task-unregister path with bounded native scheduler operations, binds exact-path validation and termination to one process handle, asks Task Scheduler to end running instances before fallback termination, requires a stable no-process window, reaps runtimes after both registration and rollback restoration, and preserves flattened helper-history evidence. Main CI passed the repaired Windows install lifecycle and controller/worker live round trip; tagged run [`33968855403`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33968855403) is producing the public candidate assets.
+- The merged preview.85 repair replaces the unbounded PowerShell task-unregister path with bounded native scheduler operations, binds exact-path validation and termination to one process handle, asks Task Scheduler to end running instances before fallback termination, requires a stable no-process window, reaps runtimes after both registration and rollback restoration, and preserves flattened helper-history evidence. Tagged run [`33968855403`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33968855403) completed successfully, including Windows x64 native lifecycle checks and clean Windows 11 ARM64 x64-emulation fresh deployment, silent Setup, and standard/admin ASCII/non-ASCII profile acceptance.
 - The merged preview.85 source also contains the first Chrome-audited desktop
   simplification and bilingual UI: first use is one three-step path, Add
   Computer keeps only required credentials visible, Advanced verification is
   collapsed by default, and the selected locale persists locally.
-- Public candidate tags start as non-draft GitHub prereleases. The maintainer has
-  authorized promoting the exact preview.85 candidate to **stable-testing**
-  after its published assets pass post-download verification. This changes
-  only the GitHub Release flag and does not satisfy or bypass Certified GA.
+- The public candidate was downloaded into a clean directory after publication.
+  All 23 assets, 11 SHA-256 sidecars/SHA256SUMS records, 10 release-index
+  records, the CycloneDX SBOM, and all 10 GitHub provenance attestations were
+  independently verified. The exact Release was then promoted to
+  **stable-testing** by changing only its GitHub prerelease flag and notes; its
+  tag, product version, source commit, and asset bytes were preserved. This
+  does not satisfy or bypass Certified GA.
 
 ## Open issue gates
 
