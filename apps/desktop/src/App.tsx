@@ -305,6 +305,7 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
   const nodes = fleet?.nodes ?? [];
   const onlineNodes = nodes.filter((node) => node.status === "online" || node.status === "busy").length;
   const recentJobs = fleet?.recentJobs ?? [];
+  const isFirstRun = nodes.length === 0 && recentJobs.length === 0;
   const primaryAction: { label: string; icon: IconName; onClick: () => void } = !online
     ? { label: t("home.openSetup"), icon: "terminal", onClick: () => openPage("integration") }
     : nodes.length === 0
@@ -319,9 +320,9 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
           <span className="eyebrow"><Icon name="spark" size={15} /> {t("home.eyebrow")}</span>
           <h2>{t("home.title")}</h2>
           <p>{t("home.description")}</p>
-          <div className="hero-actions">
+          {!isFirstRun ? <div className="hero-actions">
             <button className="button button-dark" onClick={primaryAction.onClick}><Icon name={primaryAction.icon} /> {primaryAction.label}</button>
-          </div>
+          </div> : null}
         </div>
         <div className="hero-visual" aria-hidden="true">
           <div className="orbit orbit-large"><span className="orbit-node node-a"><Icon name="computer" /></span><span className="orbit-node node-b"><Icon name="gpu" /></span></div>
@@ -338,7 +339,7 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
             <p>{t("home.quickStartDescription")}</p>
           </div>
           <ol className="first-run-steps">
-            <li><span>1</span><strong>{t("home.stepAdd")}</strong><button className="text-button small" onClick={primaryAction.onClick}>{online ? t("home.stepStart") : t("home.openSetup")} <Icon name="arrow" size={14} /></button></li>
+            <li><span>1</span><strong>{t("home.stepAdd")}</strong>{online ? <button className="text-button small" onClick={primaryAction.onClick}>{t("home.stepStart")} <Icon name="arrow" size={14} /></button> : <small>{t("controller.offline")}</small>}</li>
             <li><span>2</span><strong>{t("home.stepConnect")}</strong><button className="text-button small" onClick={() => openPage("integration")}>{t("home.stepOpen")} <Icon name="arrow" size={14} /></button></li>
             <li><span>3</span><strong>{t("home.stepCheck")}</strong><small>{t("home.stepPending")}</small></li>
           </ol>
@@ -893,7 +894,7 @@ export function App() {
             <label className="language-picker"><span>{t("language.label")}</span><select aria-label={t("language.label")} onChange={(event) => setLocale(event.target.value as typeof locale)} value={locale}>{localeOptions.map((option) => <option key={option.locale} value={option.locale}>{t(option.labelKey)}</option>)}</select></label>
             <span className={`live-status ${online ? "is-online" : ""}`}><StatusDot status={online ? "connected" : "disconnected"} />{statusCopy}</span>
             <button className={`icon-button refresh-button ${loading ? "spinning" : ""}`} onClick={() => void refresh()} aria-label={t("controller.refreshStatus")}><Icon name="refresh" /></button>
-            <button className="button button-primary" onClick={online ? openAddComputer : () => setPage("integration")}><Icon name={online ? "plus" : "terminal"} /> {online ? t("computers.add") : t("controller.openSetup")}</button>
+            {online ? <button className="button button-primary" onClick={openAddComputer}><Icon name="plus" /> {t("computers.add")}</button> : null}
           </div>
         </header>
 

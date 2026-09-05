@@ -672,7 +672,15 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
 
       {error ? (
         <div className="provisioning-error" role="alert">
-          <strong>{error.code}</strong><span>{localizedProvisioningError(error, t)}</span>{error.retryable ? <small>{t("common.retryable")}</small> : null}
+          <span className="provisioning-error-icon"><span aria-hidden="true">!</span></span>
+          <span className="provisioning-error-copy">
+            <strong>{localizedProvisioningError(error, t)}</strong>
+            {error.retryable ? <small>{t("common.retryable")}</small> : null}
+          </span>
+          <details className="provisioning-error-details">
+            <summary>{t("provision.showDetails")}</summary>
+            <code>{error.code}</code>
+          </details>
         </div>
       ) : null}
 
@@ -730,8 +738,11 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
 
               {selected.state === "failed" && selected.failure ? (
                 <section className="provisioning-failure">
-                  <strong>{selected.failure.code}</strong>
-                  <p>{localizedProvisioningError(selected.failure, t)}</p>
+                  <strong>{localizedProvisioningError(selected.failure, t)}</strong>
+                  <details className="provisioning-error-details">
+                    <summary>{t("provision.showDetails")}</summary>
+                    <code>{selected.failure.code}</code>
+                  </details>
                   <p>{t("provision.failedAt", { step: t(stepLabelKeys[selected.step]) })} {selected.failure.retryable ? t("provision.retryCheckpoint") : t("provision.rollbackIncomplete")}</p>
                 </section>
               ) : null}

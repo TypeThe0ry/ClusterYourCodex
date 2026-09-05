@@ -7,9 +7,9 @@ change.
 
 - **Snapshot date:** 2026-09-06
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
-- **Snapshot baseline:** `main` at `f0ca393d910732ece9395245eb6bf659de2fd47d` (merged PR #39, core locale coverage)
-- **Current candidate version:** `0.1.0-preview.88`
-- **Latest published release:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85), promoted unchanged to **stable-testing** (`isPrerelease=false`); preview.86 and preview.87 are in-flight historical candidates, and preview.88 is the next public prerelease candidate
+- **Snapshot baseline:** `origin/main` at `56d659c9a60e1e015ebf4cc7c0ef8f5ba4f950e1` (merged PR #40, preview.88 source)
+- **Current candidate version:** `0.1.0-preview.89`
+- **Latest published release:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85), promoted unchanged to **stable-testing** (`isPrerelease=false`); preview.86 and preview.87 are cancelled superseded candidates, preview.88 is the current tagged candidate, and preview.89 is the next UI-fix prerelease candidate
 - **Release channels:** `v0.1.0-preview.85` is the current immutable
   stable-testing build. Its embedded version remains a preview and Certified GA remains blocked by
   the open Issue #2, #3, and #5 acceptance gates.
@@ -37,7 +37,7 @@ capability until the opt-in isolation contract in Issue #5 is complete.
 | Linux worker packages | Linux x64 and arm64 Worker Kit archives, native shell/process-group paths, and systemd lifecycle packages | Tagged Linux artifact jobs, Worker Kit native/structural checks, and the preview.83 exact-SHA P1 controller/worker job | Repeat exact-SHA/native validation for each candidate; Issue #3's remaining platform gate is macOS |
 | macOS Worker Kits | x64 and arm64 archives, manifest/checksum/publisher-key contract, macOS capability reporting | Tagged macOS artifact jobs and kit contract checks | Real macOS host, LaunchAgent install/start/stop/restart, managed live run, and round trip |
 | Add Computer and credentials | GUI onboarding model, native credential-vault boundary, host-key fingerprint flow, password/agent/private-key paths | Static contract and local source review | Live authentication and cross-node GUI/MCP acceptance on supported hosts |
-| Desktop UX and localization | One state-aware three-step first-run path, compact Add Computer form, collapsed advanced verification, duplicate hero CTA removed, localized runtime diagnostics, and persistent English/Simplified Chinese/Spanish/Japanese selection across dashboard, tasks, rules, integration evidence, and provisioning | Chrome visual/interaction audit of the preview.88 candidate plus 95 desktop tests, workspace lint/test/build, and release contract checks | Review the documented English fallback strings for deep forensic evidence and translate newly introduced backend diagnostics |
+| Desktop UX and localization | One state-aware three-step first-run path with one setup CTA, compact Add Computer form, collapsed advanced verification, quiet offline top bar, localized runtime diagnostics, and persistent English/Simplified Chinese/Spanish/Japanese selection across dashboard, tasks, rules, integration evidence, and provisioning | Chrome visual/interaction audit of the preview.89 candidate plus 95 desktop tests, workspace lint/test/build, and release contract checks | Review the documented English fallback strings for deep forensic evidence and translate newly introduced backend diagnostics |
 | Hostile-workload isolation | Linux dedicated identity/cgroup reconciliation hardening; Windows/macOS capability reporting and fail-closed scheduling boundary | Linux unit/native probes and static contracts | Windows Job Object + protected external guard, macOS external reconciliation, and a complete three-platform hostile matrix (Issue #5) |
 | Public release pipeline | Version identity, signed-kit metadata, SBOM/provenance/index validation, protected GA workflow | Main CI and preview producer jobs | All applicable issue gates, external evidence, protected production review, and independent post-download verification |
 
@@ -69,6 +69,11 @@ service-manager, credential, or cross-node acceptance gate.
   provisioning, actions, and status labels. PR [#39](https://github.com/TypeThe0ry/ClusterYourCodex/pull/39)
   merged as `f0ca393d910732ece9395245eb6bf659de2fd47d`; local desktop tests,
   workspace lint/test/build, and the Chrome Japanese routing-rules smoke pass.
+- The preview.89 candidate simplifies the offline top-bar state and moves
+  first-run setup to one contextual CTA and moves provisioning error codes
+  behind a localized technical-details disclosure;
+  this branch is the next prerelease candidate and still requires the tagged
+  workflow and post-download asset verification before its status is final.
 - The previously published preview.85 candidate was downloaded into a clean directory after publication.
   All 23 assets, 11 SHA-256 sidecars/SHA256SUMS records, 10 release-index
   records, the CycloneDX SBOM, and all 10 GitHub provenance attestations were
