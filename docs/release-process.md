@@ -15,6 +15,25 @@ and must be published with `prerelease: true`. The prerelease workflow rejects
 stable `vX.Y.Z` tags. A stable tag is enabled only through a separate protected
 GA gate after every applicable item in `RELEASE.md` passes.
 
+## Repository update contract
+
+Every implementation or release change is published through a pull request.
+The PR must update the durable repository record that describes the change:
+
+- `docs/project-status.md` records the feature matrix, exact commit/run
+  evidence, and any remaining Issue #2/#3/#5 gate;
+- `CHANGELOG.md` records the user-visible change under the exact preview
+  version; and
+- affected GitHub issues are updated with the PR, commit, workflow run, exit
+  code, artifact or log link, and the still-open acceptance items.
+
+The PR is merged only after the required CI, CodeQL, dependency, packaging,
+and platform checks reported by GitHub are green. A green PR does not close a
+platform or governance gate whose required external evidence is still absent.
+Every public build produced while those gates remain open is a non-draft
+GitHub prerelease; the stable publisher stays disabled until the executable GA
+workflow passes.
+
 ## Version identity
 
 `VERSION` is the source value. Ecosystem manifests need their own copied

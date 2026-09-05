@@ -7,6 +7,34 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.85] - 2026-09-05
+
+### Fixed
+
+- Bound Windows profile-matrix task cleanup: reap only the exact validated
+  disposable action executable and remove the scheduled task through a bounded
+  native `schtasks.exe` process. This prevents an auto-started `AtLogOn` task
+  from holding the elevated helper indefinitely on Windows 11 ARM64/x64
+  emulation.
+- Flatten legacy helper-history projections and always publish the durable
+  evidence as a plain JSON array, preserving the individual request records
+  needed to diagnose a failed profile case.
+
+### Documentation
+
+- Add [`docs/project-status.md`](docs/project-status.md) as the repository
+  source of truth for implemented features, exact CI evidence, open Issue
+  #2/#3/#5 gates, and the preview-only release policy.
+- Require every future implementation, CI, or release update to land through a
+  PR with synchronized status, changelog, issue, and exact-check evidence.
+
+### Tests
+
+- Add static release-contract checks for bounded task-runtime reaping, native
+  task deletion, and stable helper-evidence array serialization. Local Rust,
+  frontend, GA-readiness, format, and diff checks pass; the clean Windows 11
+  ARM64 profile matrix remains the tagged CI acceptance gate.
+
 ## [0.1.0-preview.84] - 2026-09-05
 
 ### Fixed
@@ -1127,7 +1155,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.84...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.85...HEAD
+[0.1.0-preview.85]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.84...v0.1.0-preview.85
 [0.1.0-preview.84]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.83...v0.1.0-preview.84
 [0.1.0-preview.83]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.82...v0.1.0-preview.83
 [0.1.0-preview.82]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.81...v0.1.0-preview.82

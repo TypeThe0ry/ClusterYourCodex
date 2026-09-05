@@ -12,6 +12,11 @@ user-owned fleet, then return verified logs and artifacts.
 > `containmentReady=false`, and `liveReady=false`. Prerelease installers remain
 > code-unsigned. Verify the published SHA-256 sidecar before running one.
 
+The exact implementation matrix, verified evidence, open Issue #2/#3/#5 gates,
+and the current release blocker are maintained in
+[docs/project-status.md](docs/project-status.md). That file is updated in the
+same pull request as every feature, CI, or release change.
+
 ## Windows preview setup and acceptance path
 
 The flow below is the implemented preview workflow and the procedure for

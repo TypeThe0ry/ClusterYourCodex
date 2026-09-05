@@ -5056,6 +5056,21 @@ exit 0
         $profileMatrixSource -match 'WaitForExit\(100\)' -and
         $profileMatrixSource -match 'taskkill\.exe' -and
         $profileMatrixSource -match 'child timed out after \$ChildTimeoutSeconds') 'profile matrix child lifetimes have bounded process-tree termination'
+    Assert-True ($profileMatrixSource -match 'function Get-ProfileMatrixOwnedTaskProcesses' -and
+        $profileMatrixSource -match 'Get-CimInstance -ClassName Win32_Process' -and
+        $profileMatrixSource -match 'ExecutablePath' -and
+        $profileMatrixSource -match '/PID \$processId') 'profile matrix task cleanup scopes forceful termination to the validated action executable'
+    Assert-True ($profileMatrixSource -match 'function Stop-ProfileMatrixOwnedTaskRuntime' -and
+        $profileMatrixSource -match 'could not prove owned task runtime termination' -and
+        $profileMatrixSource -match 'WaitForExit\(30000\)') 'profile matrix proves an auto-started task runtime is reaped within a bounded window'
+    Assert-True ($profileMatrixSource -match 'function Invoke-ProfileMatrixBoundedTaskRemoval' -and
+        $profileMatrixSource -match 'schtasks\.exe' -and
+        $profileMatrixSource -match '/Delete /TN' -and
+        $profileMatrixSource -match 'WaitForExit\(\$TimeoutSeconds \* 1000\)' -and
+        $profileMatrixSource -notmatch 'Unregister-ScheduledTask') 'profile matrix removes tasks through a bounded native scheduler command instead of an unbounded PowerShell unregister call'
+    Assert-True ($profileMatrixSource -match 'function Get-ProfileMatrixTaskHelperHistoryRecords' -and
+        $profileMatrixSource -match 'historyArray' -and
+        $profileMatrixSource -match 'Value \(,\$historyArray\)') 'profile matrix helper evidence is flattened and always serialized as a JSON array'
     Assert-True ($profileMatrixSource -notmatch '@\(& \$windowsPowerShell \@childArguments') 'profile matrix current-user mode does not use an unbounded synchronous child invocation'
     Assert-True ($profileMatrixSource -match 'Add-LocalGroupMember') 'profile matrix exercises an administrator account'
     Assert-True ($profileMatrixSource -match 'Remove-LocalUser') 'profile matrix removes disposable local users'
