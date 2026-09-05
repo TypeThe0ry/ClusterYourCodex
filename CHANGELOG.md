@@ -7,6 +7,25 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.89] - 2026-09-06
+
+### Changed
+
+- Simplify offline setup by keeping the top-bar action quiet while the
+  dedicated offline banner remains the single setup entry point; the first-run
+  home card now avoids a duplicate hero CTA and shows the offline state inline.
+- Present worker-provisioning failures as localized, actionable messages by
+  default; move diagnostic error codes behind an explicit technical-details
+  disclosure for support and troubleshooting.
+
+### Tests
+
+- Re-run the desktop 95-test suite, TypeScript lint, and production renderer
+  build after the UI simplification.
+- Verify the Chinese, Spanish, and Japanese computer flows in Chrome and
+  confirm the localized technical-details disclosure remains collapsed by
+  default.
+
 ## [0.1.0-preview.88] - 2026-09-06
 
 ### Fixed
@@ -1253,7 +1272,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.88...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.89...HEAD
+[0.1.0-preview.89]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.88...v0.1.0-preview.89
 [0.1.0-preview.88]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.87...v0.1.0-preview.88
 [0.1.0-preview.87]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.86...v0.1.0-preview.87
 [0.1.0-preview.86]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.85...v0.1.0-preview.86
