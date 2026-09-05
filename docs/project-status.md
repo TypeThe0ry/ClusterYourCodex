@@ -7,7 +7,7 @@ change.
 
 - **Snapshot date:** 2026-09-06
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
-- **Snapshot baseline:** `origin/main` at `886387fab368eea080388326fad55aeea5f3c41a` (merged PR #42, first-run CTA simplification)
+- **Snapshot baseline:** `origin/main` at `f160e169cbc0ee2d0466aa3a0d3c65746a2b3873` (merged PR #43, status refresh; latest code change is PR #42 at `886387f`)
 - **Current candidate version:** `0.1.0-preview.89` (`v0.1.0-preview.89` points to `e8691ac92603da3b883e9312915650fbba68eb35`)
 - **Latest published release:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85), promoted unchanged to **stable-testing** (`isPrerelease=false`); preview.86 and preview.87 are cancelled superseded candidates, preview.88 is superseded, and preview.89 is the active tagged prerelease candidate
 - **Release channels:** `v0.1.0-preview.85` is the current immutable
