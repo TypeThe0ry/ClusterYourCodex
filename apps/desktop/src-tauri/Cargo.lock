@@ -759,7 +759,7 @@ version = "0.1.0-preview.85"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
