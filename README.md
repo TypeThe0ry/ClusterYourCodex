@@ -22,10 +22,15 @@ and the current release blocker are maintained in
 same pull request as every feature, CI, or release change.
 
 The desktop UI now starts with one three-step path: **Add a computer → Connect
-Codex → Run the check**. English and Simplified Chinese can be switched from
-the top bar, and the choice is saved locally. Optional SSH fields and the full
-technical verification record stay under **Advanced options** so the normal
-setup path remains short.
+Codex → Run the check**. The primary action is state-aware: when the local
+controller is offline it opens setup, when the controller is ready it starts
+computer enrollment, and after a worker is present it opens Codex integration.
+English, Simplified Chinese, Spanish, and Japanese can be switched from the
+top bar, and the choice is saved locally. The high-frequency navigation and
+setup path is translated for all four locales; uncommon forensic evidence
+strings use an English fallback until their domain glossary is reviewed.
+Optional SSH fields and the full technical verification record stay under
+**Advanced options** so the normal setup path remains short.
 
 ## Windows preview setup and acceptance path
 

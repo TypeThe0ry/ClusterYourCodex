@@ -7,6 +7,28 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.87] - 2026-09-06
+
+### Fixed
+
+- Localize controller, integration, and worker-provisioning runtime errors so
+  failed setup and recovery states do not fall back to English in the Chinese
+  interface.
+- Translate stale Full Run Check reasons and status-dot accessibility labels;
+  keep technical error codes visible for support diagnostics while presenting
+  the actionable message in the selected locale.
+- Make the hero and top-bar action state-aware: offline opens Codex setup,
+  ready controllers start computer enrollment, and an existing worker opens
+  integration.
+- Add Spanish and Japanese catalogs for the high-frequency navigation and
+  setup path, with an explicit English fallback for uncommon evidence fields.
+
+### Tests
+
+- Exercise the new error, stale-reason, and four-locale translations in the
+  desktop i18n suite and re-run the Chrome English/Simplified Chinese/
+  Spanish/Japanese navigation and setup smoke.
+
 ### Documentation
 
 - Record the successful `v0.1.0-preview.85` tagged workflow, including clean
@@ -1213,7 +1235,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.86...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.87...HEAD
+[0.1.0-preview.87]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.86...v0.1.0-preview.87
 [0.1.0-preview.86]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.85...v0.1.0-preview.86
 [0.1.0-preview.85]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.84...v0.1.0-preview.85
 [0.1.0-preview.84]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.83...v0.1.0-preview.84

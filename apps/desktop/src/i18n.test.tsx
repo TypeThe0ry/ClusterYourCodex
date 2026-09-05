@@ -27,6 +27,8 @@ describe("i18n", () => {
     expect(normalizeLocale("en-US")).toBe("en");
     expect(normalizeLocale("zh_Hans_SG")).toBe("zh-CN");
     expect(normalizeLocale("zh-CN")).toBe("zh-CN");
+    expect(normalizeLocale("es-MX")).toBe("es");
+    expect(normalizeLocale("ja-JP")).toBe("ja");
     expect(normalizeLocale("fr-FR")).toBeUndefined();
   });
 
@@ -34,6 +36,8 @@ describe("i18n", () => {
     const stored = memoryStorage({ [LOCALE_STORAGE_KEY]: "en" });
     expect(resolveInitialLocale({ storage: stored, navigatorLanguage: "zh-CN" })).toBe("en");
     expect(resolveInitialLocale({ storage: memoryStorage(), navigatorLanguage: "zh-Hans" })).toBe("zh-CN");
+    expect(resolveInitialLocale({ storage: memoryStorage(), navigatorLanguage: "es-MX" })).toBe("es");
+    expect(resolveInitialLocale({ storage: memoryStorage(), navigatorLanguage: "ja-JP" })).toBe("ja");
     expect(resolveInitialLocale({ storage: memoryStorage(), navigatorLanguage: "de-DE" })).toBe(DEFAULT_LOCALE);
   });
 
@@ -58,7 +62,11 @@ describe("i18n", () => {
     const key: TranslationKey = "controller.offlineDescription";
     expect(translate("en", key, { port: 47831 })).toContain("47831");
     expect(translate("zh-CN", "provision.successDescription", { name: "Helio" })).toBe("Helio 已可用于 Codex 工作。");
-    expectTypeOf<Locale>().toEqualTypeOf<"en" | "zh-CN">();
+    expect(translate("zh-CN", "error.provisionBridgeUnavailable")).toBe("安全桌面工作机设置桥接器不可用");
+    expect(translate("zh-CN", "integration.stale.fleetRevision", { from: 4, to: 5 })).toBe("电脑集群修订版本从 4 变为 5。");
+    expect(translate("es", "home.addComputer")).toBe("Añadir computadora");
+    expect(translate("ja", "home.addComputer")).toBe("コンピューターを追加");
+    expectTypeOf<Locale>().toEqualTypeOf<"en" | "zh-CN" | "es" | "ja">();
   });
 
   it("provides the resolved locale and translator to React consumers", () => {
