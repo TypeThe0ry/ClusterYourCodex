@@ -5082,7 +5082,7 @@ exit 0
         $profileMatrixSource -match 'bare PID can refer to a replacement process' -and
         $profileMatrixSource -notmatch 'Unregister-ScheduledTask') 'profile matrix removes tasks through a bounded native scheduler command instead of an unbounded PowerShell unregister call'
     Assert-True ($profileMatrixSource -match 'function Get-ProfileMatrixRootTaskStrict' -and
-        $profileMatrixSource -match "Get-ScheduledTask -TaskName '\*' -TaskPath '\\\\' -ErrorAction Stop" -and
+        $profileMatrixSource -match "Get-ScheduledTask -TaskName '\*' -TaskPath '\\' -ErrorAction Stop" -and
         $profileMatrixSource -match 'empty, successfully queried result' -and
         $profileMatrixSource -match 'Get-ProfileMatrixRootTaskStrict -TaskName') 'profile matrix distinguishes confirmed task absence from scheduler query failure'
     Assert-True ($profileMatrixSource -match 'function Get-ProfileMatrixTaskHelperHistoryRecords' -and
