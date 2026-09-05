@@ -5064,6 +5064,10 @@ exit 0
         $profileMatrixSource -match '\$boundProcess\.MainModule\.FileName' -and
         $profileMatrixSource -match '\$boundProcess\.StartTime' -and
         $profileMatrixSource -match '\$boundProcess\.Kill\(\)') 'profile matrix task cleanup binds exact-path identity validation and termination to one process handle'
+    Assert-True ($profileMatrixSource -match '\$boundProcessExited = \$false' -and
+        $profileMatrixSource -match '\$boundProcess\.HasExited' -and
+        $profileMatrixSource -match 'if \(\$boundProcessExited\)\s*\{\s*continue\s*\}' -and
+        $profileMatrixSource -match 'Preserve[\s\S]+failures for a live process') 'profile matrix treats post-handle exit races as cleanup progress while preserving live-process inspection failures'
     Assert-True ($profileMatrixSource -match 'function Stop-ProfileMatrixOwnedTaskRuntime' -and
         $profileMatrixSource -match 'could not prove owned task runtime termination' -and
         $profileMatrixSource -match 'WaitForExit\(10000\)' -and

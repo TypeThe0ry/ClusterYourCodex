@@ -1041,6 +1041,20 @@ function Stop-ProfileMatrixOwnedTaskRuntime {
             } catch [System.ArgumentException] {
                 # The owned process exited before a handle could be acquired.
                 continue
+            } catch {
+                # Task Scheduler may complete the requested /End after the
+                # handle is acquired but before MainModule or StartTime can be
+                # read. Treat that race as cleanup progress only when the same
+                # bound process handle proves the process has exited. Preserve
+                # access, identity, and inspection failures for a live process.
+                $boundProcessExited = $false
+                if ($null -ne $boundProcess) {
+                    try { $boundProcessExited = [bool]$boundProcess.HasExited } catch { }
+                }
+                if ($boundProcessExited) {
+                    continue
+                }
+                throw
             } finally {
                 if ($null -ne $boundProcess) { $boundProcess.Dispose() }
             }
