@@ -11,11 +11,12 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Bound Windows profile-matrix task cleanup: reap only the exact validated
-  disposable action executable and remove the scheduled task through a bounded
-  native `schtasks.exe` process. This prevents an auto-started `AtLogOn` task
-  from holding the elevated helper indefinitely on Windows 11 ARM64/x64
-  emulation.
+- Bound Windows profile-matrix task cleanup: validate and terminate the exact
+  disposable action through one process handle, reap runtimes after both task
+  registration and rollback restoration, and remove the scheduled task through
+  a bounded native `schtasks.exe` process. This closes PID-reuse and restored
+  `AtLogOn` runtime races that could otherwise hold the elevated helper on
+  Windows 11 ARM64/x64 emulation.
 - Flatten legacy helper-history projections and always publish the durable
   evidence as a plain JSON array, preserving the individual request records
   needed to diagnose a failed profile case.
@@ -30,10 +31,11 @@ are versioned independently from the product.
 
 ### Tests
 
-- Add static release-contract checks for bounded task-runtime reaping, native
-  task deletion, and stable helper-evidence array serialization. Local Rust,
-  frontend, GA-readiness, format, and diff checks pass; the clean Windows 11
-  ARM64 profile matrix remains the tagged CI acceptance gate.
+- Add static release-contract checks for handle-bound task-runtime reaping,
+  rollback-restored runtime cleanup, native task deletion, and stable
+  helper-evidence array serialization. Local Rust, frontend, GA-readiness,
+  format, and diff checks pass; the clean Windows 11 ARM64 profile matrix
+  remains the tagged CI acceptance gate.
 
 ## [0.1.0-preview.84] - 2026-09-05
 

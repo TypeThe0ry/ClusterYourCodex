@@ -5059,10 +5059,15 @@ exit 0
     Assert-True ($profileMatrixSource -match 'function Get-ProfileMatrixOwnedTaskProcesses' -and
         $profileMatrixSource -match 'Get-CimInstance -ClassName Win32_Process' -and
         $profileMatrixSource -match 'ExecutablePath' -and
-        $profileMatrixSource -match '/PID \$processId') 'profile matrix task cleanup scopes forceful termination to the validated action executable'
+        $profileMatrixSource -match 'GetProcessById\(\$processId\)' -and
+        $profileMatrixSource -match '\[void\]\$boundProcess\.Handle' -and
+        $profileMatrixSource -match '\$boundProcess\.MainModule\.FileName' -and
+        $profileMatrixSource -match '\$boundProcess\.StartTime' -and
+        $profileMatrixSource -match '\$boundProcess\.Kill\(\)') 'profile matrix task cleanup binds exact-path identity validation and termination to one process handle'
     Assert-True ($profileMatrixSource -match 'function Stop-ProfileMatrixOwnedTaskRuntime' -and
         $profileMatrixSource -match 'could not prove owned task runtime termination' -and
-        $profileMatrixSource -match 'WaitForExit\(30000\)') 'profile matrix proves an auto-started task runtime is reaped within a bounded window'
+        $profileMatrixSource -match 'WaitForExit\(10000\)') 'profile matrix proves an auto-started task runtime is reaped within a bounded window'
+    Assert-True ($profileMatrixSource -match 'Assert-ProfileMatrixTaskSnapshot[\s\S]+Assert-ProfileMatrixTaskOwnership[\s\S]+Stop-ProfileMatrixOwnedTaskRuntime -Ownership \$ownership[\s\S]+\$restoredRunning = \$false') 'profile matrix reaps an AtLogOn runtime after restoring a rollback snapshot'
     Assert-True ($profileMatrixSource -match 'function Invoke-ProfileMatrixBoundedTaskRemoval' -and
         $profileMatrixSource -match 'schtasks\.exe' -and
         $profileMatrixSource -match '/Delete /TN' -and

@@ -988,13 +988,10 @@ function Stop-ProfileMatrixOwnedTaskRuntime {
     # Windows builds. Never leave that process running while the child waits
     # for the registration response, and never kill a process until the exact
     # action executable has been validated by Assert-ProfileMatrixTaskOwnership.
-    $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
-    if (-not (Test-Path -LiteralPath $taskKill -PathType Leaf)) {
-        throw 'profile-matrix task helper could not locate taskkill.exe.'
-    }
+    $expectedExecutable = Resolve-ProfileMatrixPath ([string]$Ownership.executable)
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
-        $processes = @(Get-ProfileMatrixOwnedTaskProcesses -Executable ([string]$Ownership.executable))
+        $processes = @(Get-ProfileMatrixOwnedTaskProcesses -Executable $expectedExecutable)
         if ($processes.Count -eq 0) { return }
         foreach ($process in $processes) {
             $processId = 0
@@ -1002,18 +999,31 @@ function Stop-ProfileMatrixOwnedTaskRuntime {
             if ($processId -le 0) {
                 throw 'profile-matrix task helper observed an owned task process without a valid PID.'
             }
-            & $taskKill /PID $processId /T /F *> $null
-            $taskKillExit = [int]$LASTEXITCODE
-            if ($taskKillExit -ne 0) {
-                # The process may have exited between CIM enumeration and
-                # taskkill. Re-enumerate before treating the non-zero result
-                # as a failure; a remaining exact-path process is a hard
-                # failure and must not be hidden by a race.
-                $stillOwned = @(Get-ProfileMatrixOwnedTaskProcesses -Executable ([string]$Ownership.executable))
-                if ($stillOwned.Count -gt 0) {
-                    throw "profile-matrix task helper could not terminate owned task process $processId (taskkill exit $taskKillExit)."
+
+            # Bind validation and termination to one native process handle.
+            # A bare taskkill PID can target an unrelated replacement process
+            # if the owned process exits and Windows reuses its PID between
+            # enumeration and termination.
+            $boundProcess = $null
+            try {
+                $boundProcess = [System.Diagnostics.Process]::GetProcessById($processId)
+                [void]$boundProcess.Handle
+                $observedExecutable = Resolve-ProfileMatrixPath ([string]$boundProcess.MainModule.FileName)
+                $observedStart = $boundProcess.StartTime.ToUniversalTime()
+                $expectedStart = ([DateTime]$process.CreationDate).ToUniversalTime()
+                if (-not [string]::Equals($observedExecutable, $expectedExecutable, [System.StringComparison]::OrdinalIgnoreCase) -or
+                    [Math]::Abs(($observedStart - $expectedStart).TotalSeconds) -gt 1) {
+                    continue
                 }
-                return
+                $boundProcess.Kill()
+                if (-not $boundProcess.WaitForExit(10000)) {
+                    throw "profile-matrix task helper could not terminate handle-bound owned task process $processId."
+                }
+            } catch [System.ArgumentException] {
+                # The owned process exited before a handle could be acquired.
+                continue
+            } finally {
+                if ($null -ne $boundProcess) { $boundProcess.Dispose() }
             }
         }
         Start-Sleep -Milliseconds 100
@@ -1306,6 +1316,7 @@ function Invoke-ProfileMatrixTaskHelperRequest {
                 @($ownership.triggerSids | Where-Object { $_ -ceq $Sid }).Count -ne 1) {
                 throw 'profile-matrix task helper observed a restored task with different identity bindings.'
             }
+            [void](Stop-ProfileMatrixOwnedTaskRuntime -Ownership $ownership)
             $restoredRunning = $false
         }
         $status = 'passed'
