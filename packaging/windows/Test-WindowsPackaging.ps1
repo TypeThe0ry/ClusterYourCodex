@@ -5071,12 +5071,15 @@ exit 0
         $profileMatrixSource -match 'could not observe a stable \$StableAbsenceSeconds-second') 'profile matrix proves an auto-started task runtime is absent for a stable bounded window'
     Assert-True ($profileMatrixSource -match 'function Invoke-ProfileMatrixBoundedTaskEnd' -and
         $profileMatrixSource -match '/End /TN' -and
-        $profileMatrixSource -match 'A scheduler-requested end suppresses RestartCount handling') 'profile matrix asks Task Scheduler to end task instances before handle-bound termination'
+        $profileMatrixSource -match 'A scheduler-requested end suppresses RestartCount handling' -and
+        $profileMatrixSource -match '\$schedulerProcess\.Kill\(\)' -and
+        $profileMatrixSource -match 'bound process handle') 'profile matrix asks Task Scheduler to end task instances and binds timeout termination to the launched scheduler process handle'
     Assert-True ($profileMatrixSource -match 'Assert-ProfileMatrixTaskSnapshot[\s\S]+Assert-ProfileMatrixTaskOwnership[\s\S]+Stop-ProfileMatrixOwnedTaskRuntime -Ownership \$ownership -CaseRoot \$resolvedCaseRoot[\s\S]+\$restoredRunning = \$false') 'profile matrix reaps an AtLogOn runtime after restoring a rollback snapshot'
     Assert-True ($profileMatrixSource -match 'function Invoke-ProfileMatrixBoundedTaskRemoval' -and
         $profileMatrixSource -match 'schtasks\.exe' -and
         $profileMatrixSource -match '/Delete /TN' -and
         $profileMatrixSource -match 'WaitForExit\(\$TimeoutSeconds \* 1000\)' -and
+        $profileMatrixSource -match 'bare PID can refer to a replacement process' -and
         $profileMatrixSource -notmatch 'Unregister-ScheduledTask') 'profile matrix removes tasks through a bounded native scheduler command instead of an unbounded PowerShell unregister call'
     Assert-True ($profileMatrixSource -match 'function Get-ProfileMatrixTaskHelperHistoryRecords' -and
         $profileMatrixSource -match 'historyArray' -and

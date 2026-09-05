@@ -15,6 +15,7 @@ are versioned independently from the product.
   disposable action through one process handle, reap runtimes after both task
   registration and rollback restoration, request a bounded scheduler-owned
   task end before fallback termination, require a stable no-process window,
+  bind timed-out scheduler-command termination to the exact process handle,
   and remove the task through a bounded native `schtasks.exe` process. This
   closes PID-reuse, delayed-start, restart-on-failure, and restored `AtLogOn`
   runtime races that could otherwise hold the elevated helper on Windows 11

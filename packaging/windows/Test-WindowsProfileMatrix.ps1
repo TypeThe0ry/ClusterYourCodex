@@ -1068,10 +1068,8 @@ function Invoke-ProfileMatrixBoundedTaskEnd {
         throw "profile-matrix task end case root does not exist: $resolvedCaseRoot"
     }
     $schtasks = Join-Path $env:SystemRoot 'System32\schtasks.exe'
-    $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
-    if (-not (Test-Path -LiteralPath $schtasks -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $taskKill -PathType Leaf)) {
-        throw 'profile-matrix task end requires schtasks.exe and taskkill.exe.'
+    if (-not (Test-Path -LiteralPath $schtasks -PathType Leaf)) {
+        throw 'profile-matrix task end requires schtasks.exe.'
     }
     $taskIdentifier = '\' + $TaskName
     $arguments = '/End /TN "{0}"' -f $taskIdentifier.Replace('"', '')
@@ -1089,17 +1087,17 @@ function Invoke-ProfileMatrixBoundedTaskEnd {
             -RedirectStandardError $stderrPath `
             -PassThru
         if (-not $schedulerProcess.WaitForExit($TimeoutSeconds * 1000)) {
-            $taskKillExit = -1
-            try {
-                & $taskKill /PID $schedulerProcess.Id /T /F *> $null
-                $taskKillExit = [int]$LASTEXITCODE
-            } catch { }
+            # Terminate through the exact Process instance returned by
+            # Start-Process. A second command aimed at the numeric PID could
+            # kill an unrelated process if schtasks exits and Windows reuses
+            # its PID between the timeout and fallback termination.
+            try { $schedulerProcess.Kill() } catch [System.InvalidOperationException] { }
             $terminated = $false
             try { $terminated = [bool]$schedulerProcess.WaitForExit(30000) } catch { }
             if (-not $terminated) {
-                throw "profile-matrix task end command did not terminate (pid=$($schedulerProcess.Id), taskkillExit=$taskKillExit)."
+                throw "profile-matrix task end command did not terminate through its bound process handle (pid=$($schedulerProcess.Id))."
             }
-            throw "profile-matrix task end timed out after $TimeoutSeconds seconds (task=$TaskName, taskkillExit=$taskKillExit)."
+            throw "profile-matrix task end timed out after $TimeoutSeconds seconds (task=$TaskName)."
         }
         try { $schedulerProcess.Refresh() } catch { }
         $exitCode = [int]$schedulerProcess.ExitCode
@@ -1145,10 +1143,8 @@ function Invoke-ProfileMatrixBoundedTaskRemoval {
         throw "profile-matrix task removal case root does not exist: $resolvedCaseRoot"
     }
     $schtasks = Join-Path $env:SystemRoot 'System32\schtasks.exe'
-    $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
-    if (-not (Test-Path -LiteralPath $schtasks -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $taskKill -PathType Leaf)) {
-        throw 'profile-matrix task removal requires schtasks.exe and taskkill.exe.'
+    if (-not (Test-Path -LiteralPath $schtasks -PathType Leaf)) {
+        throw 'profile-matrix task removal requires schtasks.exe.'
     }
     $taskIdentifier = '\' + $TaskName
     $arguments = '/Delete /TN "{0}" /F' -f $taskIdentifier.Replace('"', '')
@@ -1166,17 +1162,15 @@ function Invoke-ProfileMatrixBoundedTaskRemoval {
             -RedirectStandardError $stderrPath `
             -PassThru
         if (-not $schedulerProcess.WaitForExit($TimeoutSeconds * 1000)) {
-            $taskKillExit = -1
-            try {
-                & $taskKill /PID $schedulerProcess.Id /T /F *> $null
-                $taskKillExit = [int]$LASTEXITCODE
-            } catch { }
+            # Keep timeout termination bound to the process handle created by
+            # Start-Process; a bare PID can refer to a replacement process.
+            try { $schedulerProcess.Kill() } catch [System.InvalidOperationException] { }
             $terminated = $false
             try { $terminated = [bool]$schedulerProcess.WaitForExit(30000) } catch { }
             if (-not $terminated) {
-                throw "profile-matrix task removal command did not terminate (pid=$($schedulerProcess.Id), taskkillExit=$taskKillExit)."
+                throw "profile-matrix task removal command did not terminate through its bound process handle (pid=$($schedulerProcess.Id))."
             }
-            throw "profile-matrix task removal timed out after $TimeoutSeconds seconds (task=$TaskName, taskkillExit=$taskKillExit)."
+            throw "profile-matrix task removal timed out after $TimeoutSeconds seconds (task=$TaskName)."
         }
         try { $schedulerProcess.Refresh() } catch { }
         $exitCode = [int]$schedulerProcess.ExitCode
