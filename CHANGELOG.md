@@ -17,6 +17,12 @@ are versioned independently from the product.
   the CycloneDX SBOM, and all 10 GitHub provenance attestations. The embedded
   product version remains `0.1.0-preview.85`; Certified GA gates remain open.
 
+### Security
+
+- Update `libssh2-sys` from the newly yanked `0.3.2` release to `0.3.3` in
+  both workspace lockfiles, restoring the dependency-policy gate without
+  changing the SSH API surface.
+
 ## [0.1.0-preview.85] - 2026-09-05
 
 ### Fixed
