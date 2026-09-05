@@ -24,7 +24,7 @@ time = "=0.3.47"
 tokio.workspace = true
 uuid.workspace = true
 walkdir = "2.5"
-x509-parser = { version = "0.17", features = ["verify"] }
+x509-parser = { version = "0.18", features = ["verify"] }
 zeroize.workspace = true
 zstd = "0.13"
 
