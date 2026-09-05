@@ -956,6 +956,312 @@ function Assert-ProfileMatrixTaskOwnership {
     }
 }
 
+function Get-ProfileMatrixOwnedTaskProcesses {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable
+    )
+
+    $expectedExecutable = Resolve-ProfileMatrixPath $Executable
+    $matches = New-Object System.Collections.Generic.List[object]
+    foreach ($process in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+        $pathProperty = $process.PSObject.Properties['ExecutablePath']
+        if ($null -eq $pathProperty -or [string]::IsNullOrWhiteSpace([string]$pathProperty.Value)) {
+            continue
+        }
+        $observedExecutable = $null
+        try { $observedExecutable = Resolve-ProfileMatrixPath ([string]$pathProperty.Value) } catch { continue }
+        if ([string]::Equals($observedExecutable, $expectedExecutable, [System.StringComparison]::OrdinalIgnoreCase)) {
+            [void]$matches.Add($process)
+        }
+    }
+    return $matches.ToArray()
+}
+
+function Stop-ProfileMatrixOwnedTaskRuntime {
+    param(
+        [Parameter(Mandatory = $true)]$Ownership,
+        [Parameter(Mandatory = $true)][string]$CaseRoot,
+        [Parameter(Mandatory = $true)][ValidateSet('ClusterYourCodex Controller', 'ClusterYourCodex Worker')][string]$TaskName,
+        [ValidateRange(1, 10)][int]$StableAbsenceSeconds = 2,
+        [ValidateRange(5, 120)][int]$TimeoutSeconds = 30
+    )
+
+    # Registering an AtLogOn task while the disposable account is already
+    # logged on can cause Task Scheduler to start it immediately on some
+    # Windows builds. Never leave that process running while the child waits
+    # for the registration response, and never kill a process until the exact
+    # action executable has been validated by Assert-ProfileMatrixTaskOwnership.
+    $expectedExecutable = Resolve-ProfileMatrixPath ([string]$Ownership.executable)
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+    $absenceSince = $null
+    do {
+        $processes = @(Get-ProfileMatrixOwnedTaskProcesses -Executable $expectedExecutable)
+        if ($processes.Count -eq 0) {
+            if ($null -eq $absenceSince) {
+                $absenceSince = [DateTimeOffset]::UtcNow
+            } elseif (([DateTimeOffset]::UtcNow - $absenceSince).TotalSeconds -ge $StableAbsenceSeconds) {
+                return
+            }
+            Start-Sleep -Milliseconds 100
+            continue
+        }
+
+        $absenceSince = $null
+        # Ask Task Scheduler to end the instance before the handle-bound
+        # fallback. A scheduler-requested end suppresses RestartCount handling;
+        # killing the action first can be interpreted as a failure and restart
+        # it after the helper's cleanup horizon.
+        [void](Invoke-ProfileMatrixBoundedTaskEnd -CaseRoot $CaseRoot -TaskName $TaskName)
+        foreach ($process in $processes) {
+            $processId = 0
+            try { $processId = [int]$process.ProcessId } catch { }
+            if ($processId -le 0) {
+                throw 'profile-matrix task helper observed an owned task process without a valid PID.'
+            }
+
+            # Bind validation and termination to one native process handle.
+            # A bare taskkill PID can target an unrelated replacement process
+            # if the owned process exits and Windows reuses its PID between
+            # enumeration and termination.
+            $boundProcess = $null
+            try {
+                $boundProcess = [System.Diagnostics.Process]::GetProcessById($processId)
+                [void]$boundProcess.Handle
+                $observedExecutable = Resolve-ProfileMatrixPath ([string]$boundProcess.MainModule.FileName)
+                $observedStart = $boundProcess.StartTime.ToUniversalTime()
+                $expectedStart = ([DateTime]$process.CreationDate).ToUniversalTime()
+                if (-not [string]::Equals($observedExecutable, $expectedExecutable, [System.StringComparison]::OrdinalIgnoreCase) -or
+                    [Math]::Abs(($observedStart - $expectedStart).TotalSeconds) -gt 1) {
+                    continue
+                }
+                $boundProcess.Kill()
+                if (-not $boundProcess.WaitForExit(10000)) {
+                    throw "profile-matrix task helper could not terminate handle-bound owned task process $processId."
+                }
+            } catch [System.ArgumentException] {
+                # The owned process exited before a handle could be acquired.
+                continue
+            } catch {
+                # Task Scheduler may complete the requested /End after the
+                # handle is acquired but before MainModule or StartTime can be
+                # read. Treat that race as cleanup progress only when the same
+                # bound process handle proves the process has exited. Preserve
+                # access, identity, and inspection failures for a live process.
+                $boundProcessExited = $false
+                if ($null -ne $boundProcess) {
+                    try { $boundProcessExited = [bool]$boundProcess.HasExited } catch { }
+                }
+                if ($boundProcessExited) {
+                    continue
+                }
+                throw
+            } finally {
+                if ($null -ne $boundProcess) { $boundProcess.Dispose() }
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+
+    $remaining = @(Get-ProfileMatrixOwnedTaskProcesses -Executable $expectedExecutable)
+    if ($remaining.Count -gt 0) {
+        $remainingIds = @($remaining | ForEach-Object { [string]$_.ProcessId }) -join ','
+        throw "profile-matrix task helper could not prove owned task runtime termination (pids=$remainingIds)."
+    }
+    throw "profile-matrix task helper could not observe a stable $StableAbsenceSeconds-second owned-runtime absence window."
+}
+
+function Invoke-ProfileMatrixBoundedTaskEnd {
+    param(
+        [Parameter(Mandatory = $true)][string]$CaseRoot,
+        [Parameter(Mandatory = $true)][ValidateSet('ClusterYourCodex Controller', 'ClusterYourCodex Worker')][string]$TaskName,
+        [ValidateRange(5, 120)][int]$TimeoutSeconds = 30
+    )
+
+    $resolvedCaseRoot = Resolve-ProfileMatrixPath $CaseRoot
+    if (-not (Test-Path -LiteralPath $resolvedCaseRoot -PathType Container)) {
+        throw "profile-matrix task end case root does not exist: $resolvedCaseRoot"
+    }
+    $schtasks = Join-Path $env:SystemRoot 'System32\schtasks.exe'
+    if (-not (Test-Path -LiteralPath $schtasks -PathType Leaf)) {
+        throw 'profile-matrix task end requires schtasks.exe.'
+    }
+    $taskIdentifier = '\' + $TaskName
+    $arguments = '/End /TN "{0}"' -f $taskIdentifier.Replace('"', '')
+    $suffix = [Guid]::NewGuid().ToString('N')
+    $stdoutPath = Join-Path $resolvedCaseRoot ("task-end-$suffix.stdout.log")
+    $stderrPath = Join-Path $resolvedCaseRoot ("task-end-$suffix.stderr.log")
+    $schedulerProcess = $null
+    try {
+        $schedulerProcess = Start-Process `
+            -FilePath $schtasks `
+            -ArgumentList $arguments `
+            -WorkingDirectory $resolvedCaseRoot `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -PassThru
+        if (-not $schedulerProcess.WaitForExit($TimeoutSeconds * 1000)) {
+            # Terminate through the exact Process instance returned by
+            # Start-Process. A second command aimed at the numeric PID could
+            # kill an unrelated process if schtasks exits and Windows reuses
+            # its PID between the timeout and fallback termination.
+            try { $schedulerProcess.Kill() } catch [System.InvalidOperationException] { }
+            $terminated = $false
+            try { $terminated = [bool]$schedulerProcess.WaitForExit(30000) } catch { }
+            if (-not $terminated) {
+                throw "profile-matrix task end command did not terminate through its bound process handle (pid=$($schedulerProcess.Id))."
+            }
+            throw "profile-matrix task end timed out after $TimeoutSeconds seconds (task=$TaskName)."
+        }
+        try { $schedulerProcess.Refresh() } catch { }
+        $exitCode = [int]$schedulerProcess.ExitCode
+        if ($exitCode -ne 0) {
+            # The action can exit between enumeration and /End. The caller
+            # re-enumerates and requires a stable absence window; only a still
+            # running instance turns a benign scheduler race into a failure.
+            Start-Sleep -Milliseconds 100
+            $task = Get-ProfileMatrixRootTaskStrict -TaskName $TaskName
+            $taskState = if ($null -ne $task) { [string]$task.State } else { 'Absent' }
+            if ($taskState -eq 'Running') {
+                $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
+                $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
+                throw "profile-matrix task end failed for $TaskName with schtasks exit $exitCode. stdout=$stdout stderr=$stderr"
+            }
+        }
+        return [PSCustomObject]@{
+            taskName = $TaskName
+            command = "$schtasks $arguments"
+            exitCode = $exitCode
+            stdout = $stdoutPath
+            stderr = $stderrPath
+        }
+    } finally {
+        if ($null -ne $schedulerProcess) { $schedulerProcess.Dispose() }
+    }
+}
+
+function Get-ProfileMatrixRootTaskStrict {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('ClusterYourCodex Controller', 'ClusterYourCodex Worker')][string]$TaskName
+    )
+
+    # Enumerate the root task folder with terminating errors, then distinguish
+    # an empty, successfully queried result from a scheduler/CIM/permission
+    # failure. A target-specific query with SilentlyContinue makes both states
+    # look like `$null` and can turn failed cleanup into a false success.
+    $matches = @(
+        Get-ScheduledTask -TaskName '*' -TaskPath '\' -ErrorAction Stop |
+            Where-Object {
+                [string]$_.TaskName -ceq $TaskName -and
+                [string]$_.TaskPath -ceq '\'
+            }
+    )
+    if ($matches.Count -gt 1) {
+        throw "profile-matrix task query returned duplicate root tasks for $TaskName."
+    }
+    if ($matches.Count -eq 0) { return $null }
+    return $matches[0]
+}
+
+function Invoke-ProfileMatrixBoundedTaskRemoval {
+    param(
+        [Parameter(Mandatory = $true)][string]$CaseRoot,
+        [Parameter(Mandatory = $true)][ValidateSet('ClusterYourCodex Controller', 'ClusterYourCodex Worker')][string]$TaskName,
+        [ValidateRange(5, 120)][int]$TimeoutSeconds = 30
+    )
+
+    # The PowerShell task-unregister API can wait indefinitely when Task
+    # Scheduler has a still-running AtLogOn instance in the disposable user's
+    # session. Use the native schtasks delete operation in a separately bounded
+    # process instead; the task action was already validated and reaped by the
+    # caller.
+    $resolvedCaseRoot = Resolve-ProfileMatrixPath $CaseRoot
+    if (-not (Test-Path -LiteralPath $resolvedCaseRoot -PathType Container)) {
+        throw "profile-matrix task removal case root does not exist: $resolvedCaseRoot"
+    }
+    $schtasks = Join-Path $env:SystemRoot 'System32\schtasks.exe'
+    if (-not (Test-Path -LiteralPath $schtasks -PathType Leaf)) {
+        throw 'profile-matrix task removal requires schtasks.exe.'
+    }
+    $taskIdentifier = '\' + $TaskName
+    $arguments = '/Delete /TN "{0}" /F' -f $taskIdentifier.Replace('"', '')
+    $suffix = [Guid]::NewGuid().ToString('N')
+    $stdoutPath = Join-Path $resolvedCaseRoot ("task-removal-$suffix.stdout.log")
+    $stderrPath = Join-Path $resolvedCaseRoot ("task-removal-$suffix.stderr.log")
+    $schedulerProcess = $null
+    try {
+        $schedulerProcess = Start-Process `
+            -FilePath $schtasks `
+            -ArgumentList $arguments `
+            -WorkingDirectory $resolvedCaseRoot `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -PassThru
+        if (-not $schedulerProcess.WaitForExit($TimeoutSeconds * 1000)) {
+            # Keep timeout termination bound to the process handle created by
+            # Start-Process; a bare PID can refer to a replacement process.
+            try { $schedulerProcess.Kill() } catch [System.InvalidOperationException] { }
+            $terminated = $false
+            try { $terminated = [bool]$schedulerProcess.WaitForExit(30000) } catch { }
+            if (-not $terminated) {
+                throw "profile-matrix task removal command did not terminate through its bound process handle (pid=$($schedulerProcess.Id))."
+            }
+            throw "profile-matrix task removal timed out after $TimeoutSeconds seconds (task=$TaskName)."
+        }
+        try { $schedulerProcess.Refresh() } catch { }
+        $exitCode = [int]$schedulerProcess.ExitCode
+        if ($exitCode -ne 0) {
+            # A concurrent cleanup can win the race after ownership was
+            # validated. Treat that narrow case as already absent; a task that
+            # remains present is still a hard failure with captured diagnostics.
+            $remaining = Get-ProfileMatrixRootTaskStrict -TaskName $TaskName
+            if ($null -ne $remaining) {
+                $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
+                $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
+                throw "profile-matrix task removal failed for $TaskName with schtasks exit $exitCode. stdout=$stdout stderr=$stderr"
+            }
+        }
+        return [PSCustomObject]@{
+            taskName = $TaskName
+            command = "$schtasks $arguments"
+            exitCode = $exitCode
+            stdout = $stdoutPath
+            stderr = $stderrPath
+        }
+    } finally {
+        if ($null -ne $schedulerProcess) { $schedulerProcess.Dispose() }
+    }
+}
+
+function Get-ProfileMatrixTaskHelperHistoryRecords {
+    param([Parameter(Mandatory = $true)]$Value)
+
+    # Windows PowerShell can deserialize a prior JSON array through a generic
+    # List projection ({value: [...], Count: n}) when the file was written by a
+    # one-element pipeline. Flatten that compatibility shape while retaining
+    # only actual versioned helper records. This keeps durable evidence a plain
+    # JSON array instead of allowing wrapper objects to nest on every request.
+    $entries = if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
+        $Value
+    } else {
+        @($Value)
+    }
+    foreach ($entry in $entries) {
+        if ($null -eq $entry) { continue }
+        $valueProperty = $entry.PSObject.Properties['value']
+        $countProperty = $entry.PSObject.Properties['Count']
+        $schemaProperty = $entry.PSObject.Properties['schemaVersion']
+        if ($null -ne $valueProperty -and $null -ne $countProperty -and $null -eq $schemaProperty) {
+            foreach ($nested in @(Get-ProfileMatrixTaskHelperHistoryRecords -Value $valueProperty.Value)) {
+                $nested
+            }
+            continue
+        }
+        $entry
+    }
+}
+
 function Invoke-ProfileMatrixTaskHelperRequest {
     param(
         [Parameter(Mandatory = $true)][string]$CaseRoot,
@@ -1077,18 +1383,20 @@ function Invoke-ProfileMatrixTaskHelperRequest {
                 -Force | Out-Null
             $task = Get-ScheduledTask -TaskName ([string]$request.taskName) -TaskPath '\' -ErrorAction Stop
             $ownership = Assert-ProfileMatrixTaskOwnership -Task $task -Sid $Sid -ExpectedAction $action
+            [void](Stop-ProfileMatrixOwnedTaskRuntime -Ownership $ownership -CaseRoot $resolvedCaseRoot -TaskName ([string]$request.taskName))
             $observedLogonType = [string]$task.Principal.LogonType
             if ($observedLogonType -notin @('Interactive', 'InteractiveToken', '3')) {
                 throw "profile-matrix task helper observed unexpected task logon type $observedLogonType."
             }
         } elseif ($operation -eq 'Unregister') {
-            $task = Get-ScheduledTask -TaskName ([string]$request.taskName) -TaskPath '\' -ErrorAction SilentlyContinue
+            $task = Get-ProfileMatrixRootTaskStrict -TaskName ([string]$request.taskName)
             if ($null -ne $task) {
                 $ownership = Assert-ProfileMatrixTaskOwnership -Task $task -Sid $Sid
-                Stop-ScheduledTask -TaskName ([string]$request.taskName) -TaskPath '\' -ErrorAction SilentlyContinue
-                Unregister-ScheduledTask -TaskName ([string]$request.taskName) -TaskPath '\' -Confirm:$false -ErrorAction Stop
+                [void](Stop-ProfileMatrixOwnedTaskRuntime -Ownership $ownership -CaseRoot $resolvedCaseRoot -TaskName ([string]$request.taskName))
+                [void](Invoke-ProfileMatrixBoundedTaskRemoval -CaseRoot $resolvedCaseRoot -TaskName ([string]$request.taskName))
+                [void](Stop-ProfileMatrixOwnedTaskRuntime -Ownership $ownership -CaseRoot $resolvedCaseRoot -TaskName ([string]$request.taskName))
             }
-            if ($null -ne (Get-ScheduledTask -TaskName ([string]$request.taskName) -TaskPath '\' -ErrorAction SilentlyContinue)) {
+            if ($null -ne (Get-ProfileMatrixRootTaskStrict -TaskName ([string]$request.taskName))) {
                 throw "profile-matrix task helper could not remove $([string]$request.taskName)."
             }
         } else {
@@ -1131,6 +1439,7 @@ function Invoke-ProfileMatrixTaskHelperRequest {
                 @($ownership.triggerSids | Where-Object { $_ -ceq $Sid }).Count -ne 1) {
                 throw 'profile-matrix task helper observed a restored task with different identity bindings.'
             }
+            [void](Stop-ProfileMatrixOwnedTaskRuntime -Ownership $ownership -CaseRoot $resolvedCaseRoot -TaskName ([string]$request.taskName))
             $restoredRunning = $false
         }
         $status = 'passed'
@@ -1167,11 +1476,18 @@ function Invoke-ProfileMatrixTaskHelperRequest {
     }
     $requestRemoved = $false
     try {
-        $history = @()
+        $history = New-Object System.Collections.Generic.List[object]
         if (Test-Path -LiteralPath $EvidencePath -PathType Leaf) {
-            try { $history = @(Read-ProfileMatrixUtf8Json -Path $EvidencePath) } catch { $history = @() }
+            try {
+                foreach ($historyRecord in @(Get-ProfileMatrixTaskHelperHistoryRecords -Value (Read-ProfileMatrixUtf8Json -Path $EvidencePath))) {
+                    [void]$history.Add($historyRecord)
+                }
+            } catch { $history = New-Object System.Collections.Generic.List[object] }
         }
-        Write-ProfileMatrixAtomicJson -Path $EvidencePath -Value @($history + $record)
+        [void]$history.Add($record)
+        $historyArray = [object[]]::new($history.Count)
+        $history.CopyTo($historyArray)
+        Write-ProfileMatrixAtomicJson -Path $EvidencePath -Value (,$historyArray)
         # Consume the request before publishing the response. The child may
         # observe the response and immediately publish its next request; an
         # unconditional finally-time delete would then remove that new request.
@@ -1187,15 +1503,19 @@ function Invoke-ProfileMatrixTaskHelperRequest {
 }
 
 function Remove-ProfileMatrixTaskHelperTasks {
-    param([Parameter(Mandatory = $true)][string]$Sid)
+    param(
+        [Parameter(Mandatory = $true)][string]$CaseRoot,
+        [Parameter(Mandatory = $true)][string]$Sid
+    )
     $profilePath = Get-ProfileMatrixProfilePathForSid -Sid $Sid
     foreach ($taskName in @('ClusterYourCodex Controller', 'ClusterYourCodex Worker')) {
-        $task = Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction SilentlyContinue
+        $task = Get-ProfileMatrixRootTaskStrict -TaskName $taskName
         if ($null -eq $task) { continue }
-        [void](Assert-ProfileMatrixTaskOwnership -Task $task -Sid $Sid)
-        Stop-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $taskName -TaskPath '\' -Confirm:$false -ErrorAction Stop
-        if ($null -ne (Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction SilentlyContinue)) {
+        $ownership = Assert-ProfileMatrixTaskOwnership -Task $task -Sid $Sid
+        [void](Stop-ProfileMatrixOwnedTaskRuntime -Ownership $ownership -CaseRoot $CaseRoot -TaskName $taskName)
+        [void](Invoke-ProfileMatrixBoundedTaskRemoval -CaseRoot $CaseRoot -TaskName $taskName)
+        [void](Stop-ProfileMatrixOwnedTaskRuntime -Ownership $ownership -CaseRoot $CaseRoot -TaskName $taskName)
+        if ($null -ne (Get-ProfileMatrixRootTaskStrict -TaskName $taskName)) {
             throw "profile-matrix task helper could not remove owned task $taskName."
         }
     }
@@ -1601,7 +1921,7 @@ try {
             }
             if (-not $CurrentUserOnly) {
                 if ($null -ne $sid) {
-                    try { Remove-ProfileMatrixTaskHelperTasks -Sid $sid } catch {
+                    try { Remove-ProfileMatrixTaskHelperTasks -CaseRoot $caseRoot -Sid $sid } catch {
                         $message = "task cleanup failed: $([string]$_.Exception.Message)"
                         if ([string]::IsNullOrWhiteSpace($caseCleanupFailureMessage)) {
                             $caseCleanupFailureMessage = $message

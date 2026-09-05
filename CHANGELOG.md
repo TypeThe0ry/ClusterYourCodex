@@ -7,6 +7,51 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.85] - 2026-09-05
+
+### Fixed
+
+- Simplify the desktop first-run experience into one three-step path, move
+  optional SSH display-name and port fields behind Advanced options, collapse
+  the full controller-to-worker proof behind Advanced verification, and make
+  the layout usable without horizontal scrolling at compact desktop widths.
+- Add the first localized desktop experience for English and Simplified
+  Chinese, including a persistent language selector, translated navigation,
+  first-run guidance, Add Computer essentials, controller state, and the main
+  Codex integration checklist.
+- Exclude Tauri's native `src-tauri/target` output from the Vite development
+  watcher so Windows linker or antivirus file locks cannot abort GUI startup
+  with `EBUSY` before the desktop window is created.
+- Bound Windows profile-matrix task cleanup: validate and terminate the exact
+  disposable action through one process handle, reap runtimes after both task
+  registration and rollback restoration, request a bounded scheduler-owned
+  task end before fallback termination, require a stable no-process window,
+  bind timed-out scheduler-command termination to the exact process handle,
+  distinguish confirmed task absence from scheduler-query failure, and remove
+  the task through a bounded native `schtasks.exe` process. This
+  closes PID-reuse, delayed-start, restart-on-failure, and restored `AtLogOn`
+  runtime races that could otherwise hold the elevated helper on Windows 11
+  ARM64/x64 emulation.
+- Flatten legacy helper-history projections and always publish the durable
+  evidence as a plain JSON array, preserving the individual request records
+  needed to diagnose a failed profile case.
+
+### Documentation
+
+- Add [`docs/project-status.md`](docs/project-status.md) as the repository
+  source of truth for implemented features, exact CI evidence, open Issue
+  #2/#3/#5 gates, and the preview-only release policy.
+- Require every future implementation, CI, or release update to land through a
+  PR with synchronized status, changelog, issue, and exact-check evidence.
+
+### Tests
+
+- Add static release-contract checks for handle-bound task-runtime reaping,
+  rollback-restored runtime cleanup, scheduler-end ordering, stable absence,
+  native task deletion, and stable helper-evidence array serialization. Local
+  Rust, frontend, GA-readiness, format, and diff checks pass; the clean Windows
+  11 ARM64 profile matrix remains the tagged CI acceptance gate.
+
 ## [0.1.0-preview.84] - 2026-09-05
 
 ### Fixed
@@ -1127,7 +1172,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.84...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.85...HEAD
+[0.1.0-preview.85]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.84...v0.1.0-preview.85
 [0.1.0-preview.84]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.83...v0.1.0-preview.84
 [0.1.0-preview.83]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.82...v0.1.0-preview.83
 [0.1.0-preview.82]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.81...v0.1.0-preview.82

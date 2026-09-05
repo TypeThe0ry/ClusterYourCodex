@@ -12,6 +12,17 @@ user-owned fleet, then return verified logs and artifacts.
 > `containmentReady=false`, and `liveReady=false`. Prerelease installers remain
 > code-unsigned. Verify the published SHA-256 sidecar before running one.
 
+The exact implementation matrix, verified evidence, open Issue #2/#3/#5 gates,
+and the current release blocker are maintained in
+[docs/project-status.md](docs/project-status.md). That file is updated in the
+same pull request as every feature, CI, or release change.
+
+The desktop UI now starts with one three-step path: **Add a computer → Connect
+Codex → Run the check**. English and Simplified Chinese can be switched from
+the top bar, and the choice is saved locally. Optional SSH fields and the full
+technical verification record stay under **Advanced options** so the normal
+setup path remains short.
+
 ## Windows preview setup and acceptance path
 
 The flow below is the implemented preview workflow and the procedure for
@@ -40,10 +51,11 @@ hardware.
    install, pair, start, and probe stages. Accepted remembered passwords are
    stored only in the native credential vault; passwords, key passphrases, and
    keys never enter Codex tool calls.
-5. Run **Full Run Check**, restart Codex once when prompted, then ask Codex to
-   run a meaningful build or test. Preserve the resulting source, placement,
-   native-exit, log, artifact, and cleanup evidence; a successful run proves
-   that exact environment, not the still-pending global live-acceptance matrix.
+5. Open **Advanced verification**, run **Full Run Check**, restart Codex once
+   when prompted, then ask Codex to run a meaningful build or test. Preserve
+   the resulting source, placement, native-exit, log, artifact, and cleanup
+   evidence; a successful run proves that exact environment, not the
+   still-pending global live-acceptance matrix.
 
 Rerun the exact same-version Setup for the verified Repair path. Installing a
 newer prerelease over an older one is an experimental upgrade-acceptance path;

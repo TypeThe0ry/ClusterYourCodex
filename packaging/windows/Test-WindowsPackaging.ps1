@@ -5056,6 +5056,42 @@ exit 0
         $profileMatrixSource -match 'WaitForExit\(100\)' -and
         $profileMatrixSource -match 'taskkill\.exe' -and
         $profileMatrixSource -match 'child timed out after \$ChildTimeoutSeconds') 'profile matrix child lifetimes have bounded process-tree termination'
+    Assert-True ($profileMatrixSource -match 'function Get-ProfileMatrixOwnedTaskProcesses' -and
+        $profileMatrixSource -match 'Get-CimInstance -ClassName Win32_Process' -and
+        $profileMatrixSource -match 'ExecutablePath' -and
+        $profileMatrixSource -match 'GetProcessById\(\$processId\)' -and
+        $profileMatrixSource -match '\[void\]\$boundProcess\.Handle' -and
+        $profileMatrixSource -match '\$boundProcess\.MainModule\.FileName' -and
+        $profileMatrixSource -match '\$boundProcess\.StartTime' -and
+        $profileMatrixSource -match '\$boundProcess\.Kill\(\)') 'profile matrix task cleanup binds exact-path identity validation and termination to one process handle'
+    Assert-True ($profileMatrixSource -match '\$boundProcessExited = \$false' -and
+        $profileMatrixSource -match '\$boundProcess\.HasExited' -and
+        $profileMatrixSource -match 'if \(\$boundProcessExited\)\s*\{\s*continue\s*\}' -and
+        $profileMatrixSource -match 'Preserve[\s\S]+failures for a live process') 'profile matrix treats post-handle exit races as cleanup progress while preserving live-process inspection failures'
+    Assert-True ($profileMatrixSource -match 'function Stop-ProfileMatrixOwnedTaskRuntime' -and
+        $profileMatrixSource -match 'could not prove owned task runtime termination' -and
+        $profileMatrixSource -match 'WaitForExit\(10000\)' -and
+        $profileMatrixSource -match 'StableAbsenceSeconds = 2' -and
+        $profileMatrixSource -match 'could not observe a stable \$StableAbsenceSeconds-second') 'profile matrix proves an auto-started task runtime is absent for a stable bounded window'
+    Assert-True ($profileMatrixSource -match 'function Invoke-ProfileMatrixBoundedTaskEnd' -and
+        $profileMatrixSource -match '/End /TN' -and
+        $profileMatrixSource -match 'A scheduler-requested end suppresses RestartCount handling' -and
+        $profileMatrixSource -match '\$schedulerProcess\.Kill\(\)' -and
+        $profileMatrixSource -match 'bound process handle') 'profile matrix asks Task Scheduler to end task instances and binds timeout termination to the launched scheduler process handle'
+    Assert-True ($profileMatrixSource -match 'Assert-ProfileMatrixTaskSnapshot[\s\S]+Assert-ProfileMatrixTaskOwnership[\s\S]+Stop-ProfileMatrixOwnedTaskRuntime -Ownership \$ownership -CaseRoot \$resolvedCaseRoot[\s\S]+\$restoredRunning = \$false') 'profile matrix reaps an AtLogOn runtime after restoring a rollback snapshot'
+    Assert-True ($profileMatrixSource -match 'function Invoke-ProfileMatrixBoundedTaskRemoval' -and
+        $profileMatrixSource -match 'schtasks\.exe' -and
+        $profileMatrixSource -match '/Delete /TN' -and
+        $profileMatrixSource -match 'WaitForExit\(\$TimeoutSeconds \* 1000\)' -and
+        $profileMatrixSource -match 'bare PID can refer to a replacement process' -and
+        $profileMatrixSource -notmatch 'Unregister-ScheduledTask') 'profile matrix removes tasks through a bounded native scheduler command instead of an unbounded PowerShell unregister call'
+    Assert-True ($profileMatrixSource -match 'function Get-ProfileMatrixRootTaskStrict' -and
+        $profileMatrixSource -match "Get-ScheduledTask -TaskName '\*' -TaskPath '\\' -ErrorAction Stop" -and
+        $profileMatrixSource -match 'empty, successfully queried result' -and
+        $profileMatrixSource -match 'Get-ProfileMatrixRootTaskStrict -TaskName') 'profile matrix distinguishes confirmed task absence from scheduler query failure'
+    Assert-True ($profileMatrixSource -match 'function Get-ProfileMatrixTaskHelperHistoryRecords' -and
+        $profileMatrixSource -match 'historyArray' -and
+        $profileMatrixSource -match 'Value \(,\$historyArray\)') 'profile matrix helper evidence is flattened and always serialized as a JSON array'
     Assert-True ($profileMatrixSource -notmatch '@\(& \$windowsPowerShell \@childArguments') 'profile matrix current-user mode does not use an unbounded synchronous child invocation'
     Assert-True ($profileMatrixSource -match 'Add-LocalGroupMember') 'profile matrix exercises an administrator account'
     Assert-True ($profileMatrixSource -match 'Remove-LocalUser') 'profile matrix removes disposable local users'
