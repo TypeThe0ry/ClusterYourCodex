@@ -7,6 +7,24 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.88] - 2026-09-06
+
+### Fixed
+
+- Complete the Spanish and Japanese translations for the core desktop flow:
+  dashboard, task history, routing rules, Codex integration, computer
+  provisioning, actions, and status labels no longer fall back to English.
+- Keep deep forensic evidence strings on the documented English fallback until
+  their technical glossaries are reviewed, while preserving error codes for
+  support diagnostics.
+
+### Tests
+
+- Add regression assertions for Spanish routing/integration strings and
+  Japanese routing/provisioning strings.
+- Re-run the workspace lint, test, and build suites and Chrome Japanese rules
+  smoke after the HMR refresh.
+
 ## [0.1.0-preview.87] - 2026-09-06
 
 ### Fixed
@@ -1235,7 +1253,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.87...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.88...HEAD
+[0.1.0-preview.88]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.87...v0.1.0-preview.88
 [0.1.0-preview.87]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.86...v0.1.0-preview.87
 [0.1.0-preview.86]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.85...v0.1.0-preview.86
 [0.1.0-preview.85]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.84...v0.1.0-preview.85
