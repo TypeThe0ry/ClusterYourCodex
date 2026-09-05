@@ -7,6 +7,7 @@ import {
   fullRunLayerIds,
   fullRunStaleReason,
   integrationStatusIdentity,
+  type FullRunLayerId,
   type FullRunCheckResult,
   type FullRunEvidenceBaseline,
   type IntegrationActionResult,
@@ -148,11 +149,40 @@ function formatElapsed(milliseconds?: number) {
   return `${minutes}m ${seconds % 60}s`;
 }
 
-function statusLabel(status: JobStatus) {
-  return status.charAt(0).toUpperCase() + status.slice(1);
+const nodeStatusKeys: Record<NodeStatus, TranslationKey> = {
+  online: "status.online",
+  busy: "status.busy",
+  offline: "status.offline",
+  unknown: "status.unknown",
+};
+
+const jobStatusKeys: Record<JobStatus, TranslationKey> = {
+  queued: "status.queued",
+  preparing: "status.preparing",
+  running: "status.running",
+  verifying: "status.verifying",
+  succeeded: "status.succeeded",
+  failed: "status.failed",
+  cancelled: "status.cancelled",
+};
+
+const fullRunLayerKeys: Record<FullRunLayerId, TranslationKey> = {
+  plugin_check: "integration.layer.pluginCheck",
+  fresh_heartbeat: "integration.layer.freshHeartbeat",
+  source_snapshot: "integration.layer.sourceSnapshot",
+  worker_selection: "integration.layer.workerSelection",
+  remote_execution: "integration.layer.remoteExecution",
+  log_verification: "integration.layer.logVerification",
+  artifact_verification: "integration.layer.artifactVerification",
+  cleanup: "integration.layer.cleanup",
+};
+
+function statusLabel(status: JobStatus, t: (key: TranslationKey) => string) {
+  return t(jobStatusKeys[status]);
 }
 
 function NodeRow({ node }: { node: NodeSummary }) {
+  const { t } = useI18n();
   const memory = node.resources?.memoryTotalMiB
     ? Math.round(((node.resources.memoryUsedMiB ?? 0) / node.resources.memoryTotalMiB) * 100)
     : undefined;
@@ -163,23 +193,23 @@ function NodeRow({ node }: { node: NodeSummary }) {
       <div className="node-main">
         <div className="node-title"><StatusDot status={node.status} /><strong>{node.name}</strong></div>
         <span>{node.os} · {node.arch} · {node.address}</span>
-        <span>{node.availability ? `Availability: ${node.availability}` : `Status: ${node.status}`}</span>
-        {node.slots && <span>{node.slots.available}/{node.slots.effective} execution slots available</span>}
+        <span>{node.availability ? t("home.availability", { value: node.availability }) : t("home.statusValue", { value: t(nodeStatusKeys[node.status]) })}</span>
+        {node.slots && <span>{t("home.executionSlots", { available: node.slots.available, effective: node.slots.effective })}</span>}
         {node.availabilityReasons?.[0] && <span className="capacity-reason">{node.availabilityReasons[0]}</span>}
-        {node.telemetry && <span className="capacity-reason">Telemetry seq {node.telemetry.sequence} · boot {node.telemetry.bootGeneration} · received {new Date(node.telemetry.receivedAt).toLocaleTimeString()}</span>}
+        {node.telemetry && <span className="capacity-reason">{t("home.telemetry", { sequence: node.telemetry.sequence, bootGeneration: node.telemetry.bootGeneration, time: new Date(node.telemetry.receivedAt).toLocaleTimeString() })}</span>}
       </div>
       <div className="node-capabilities">
         {node.capabilities.slice(0, 3).map((capability) => <span key={capability}>{capability}</span>)}
       </div>
       <div className="resource-cell">
-        <span>CPU {node.resources?.cpuPercent === undefined ? "—" : `${Math.round(node.resources.cpuPercent)}%`}</span>
+        <span>{t("home.cpu")} {node.resources?.cpuPercent === undefined ? "—" : `${Math.round(node.resources.cpuPercent)}%`}</span>
         <div className="meter"><i style={{ width: `${node.resources?.cpuPercent ?? 0}%` }} /></div>
       </div>
       <div className="resource-cell">
-        <span>Memory {memory === undefined ? "—" : `${memory}%`}</span>
+        <span>{t("home.memory")} {memory === undefined ? "—" : `${memory}%`}</span>
         <div className="meter"><i style={{ width: `${memory ?? 0}%` }} /></div>
       </div>
-      <button className="icon-button" aria-label={`More options for ${node.name}`}><Icon name="more" /></button>
+      <button className="icon-button" aria-label={t("common.moreOptionsFor", { name: node.name })}><Icon name="more" /></button>
     </div>
   );
 }
@@ -200,7 +230,6 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
           <p>{t("home.description")}</p>
           <div className="hero-actions">
             <button className="button button-dark" onClick={openAddComputer}><Icon name="plus" /> {t("home.addComputer")}</button>
-            <button className="text-button" onClick={() => openPage("integration")}>{t("home.stepConnect")} <Icon name="arrow" /></button>
           </div>
         </div>
         <div className="hero-visual" aria-hidden="true">
@@ -227,54 +256,54 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
       <section className="stat-grid">
         <article className="stat-card">
           <div className="stat-icon mint"><Icon name="computer" /></div>
-          <div><span>Available computers</span><strong>{online ? `${onlineNodes} / ${nodes.length}` : "—"}</strong></div>
-          <button className="stat-link" onClick={() => openPage("computers")}>View fleet <Icon name="arrow" size={14} /></button>
+          <div><span>{t("home.stats.availableComputers")}</span><strong>{online ? `${onlineNodes} / ${nodes.length}` : "—"}</strong></div>
+          <button className="stat-link" onClick={() => openPage("computers")}>{t("home.stats.viewFleet")} <Icon name="arrow" size={14} /></button>
         </article>
         <article className="stat-card">
           <div className="stat-icon amber"><Icon name="tasks" /></div>
-          <div><span>Running now</span><strong>{online ? fleet?.controller.activeJobs ?? 0 : "—"}</strong></div>
-          <span className="stat-note">{online ? `${fleet?.controller.queuedJobs ?? 0} queued` : "Controller offline"}</span>
+          <div><span>{t("home.stats.runningNow")}</span><strong>{online ? fleet?.controller.activeJobs ?? 0 : "—"}</strong></div>
+          <span className="stat-note">{online ? t("home.stats.queued", { count: fleet?.controller.queuedJobs ?? 0 }) : t("home.stats.controllerOffline")}</span>
         </article>
         <article className="stat-card">
           <div className="stat-icon violet"><Icon name="check" /></div>
-          <div><span>Completed today</span><strong>{online ? fleet?.controller.completedToday ?? 0 : "—"}</strong></div>
-          <span className="stat-note">Verified runs</span>
+          <div><span>{t("home.stats.completedToday")}</span><strong>{online ? fleet?.controller.completedToday ?? 0 : "—"}</strong></div>
+          <span className="stat-note">{t("home.stats.verifiedRuns")}</span>
         </article>
       </section>
 
       <section className="dashboard-grid">
         <article className="panel fleet-panel">
           <header className="panel-header">
-            <div><h3>Fleet overview</h3><p>Live capacity Codex can use</p></div>
-            <button className="text-button small" onClick={() => openPage("computers")}>Manage <Icon name="arrow" size={14} /></button>
+            <div><h3>{t("home.fleetOverview")}</h3><p>{t("home.liveCapacity")}</p></div>
+            <button className="text-button small" onClick={() => openPage("computers")}>{t("home.manage")} <Icon name="arrow" size={14} /></button>
           </header>
           {nodes.length > 0 ? <div className="node-list">{nodes.slice(0, 4).map((node) => <NodeRow key={node.id} node={node} />)}</div> : (
             <EmptyState
               icon="computer"
-              title="No computers connected yet"
-              copy="Add your first machine and Codex can start delegating heavy work."
-              action={<button className="button button-primary" onClick={openAddComputer}><Icon name="plus" /> Add computer</button>}
+              title={t("home.noComputersConnected")}
+              copy={t("home.addMachineDescription")}
+              action={<button className="button button-primary" onClick={openAddComputer}><Icon name="plus" /> {t("computers.add")}</button>}
             />
           )}
         </article>
 
         <article className="panel activity-panel">
           <header className="panel-header">
-            <div><h3>Recent tasks</h3><p>Delegated by Codex</p></div>
-            <button className="text-button small" onClick={() => openPage("tasks")}>View all <Icon name="arrow" size={14} /></button>
+            <div><h3>{t("home.recentTasks")}</h3><p>{t("home.delegatedByCodex")}</p></div>
+            <button className="text-button small" onClick={() => openPage("tasks")}>{t("home.viewAll")} <Icon name="arrow" size={14} /></button>
           </header>
           {recentJobs.length > 0 ? (
             <div className="task-list">
               {recentJobs.slice(0, 5).map((job) => (
                 <div className="task-row" key={job.id}>
                   <span className={`task-state task-${job.status}`}><Icon name={job.status === "succeeded" ? "check" : "terminal"} size={15} /></span>
-                  <div><strong>{job.title ?? `${job.kind} task`}</strong><span>{job.nodeName ?? "Waiting for placement"}</span></div>
+                  <div><strong>{job.title ?? t("home.taskKind", { kind: job.kind })}</strong><span>{job.nodeName ?? t("home.waitingPlacement")}</span></div>
                   <time>{formatElapsed(job.elapsedMs)}</time>
                 </div>
               ))}
             </div>
           ) : (
-            <EmptyState icon="tasks" title="No delegated tasks yet" copy="When Codex sends work to your fleet, each run will appear here." />
+            <EmptyState icon="tasks" title={t("home.noDelegatedTasks")} copy={t("home.taskWillAppear")} />
           )}
         </article>
       </section>
@@ -308,44 +337,46 @@ function ComputersPage({ fleet, addRequest }: { fleet?: FleetInfo; addRequest: n
 }
 
 function TasksPage({ fleet }: { fleet?: FleetInfo }) {
+  const { t } = useI18n();
   const jobs = fleet?.recentJobs ?? [];
   return (
     <section className="panel page-panel">
       <header className="panel-header">
-        <div><h3>Task history</h3><p>Source identity, placement, native exit code, and artifacts stay attached to every run.</p></div>
-        <div className="filter-group"><button className="chip active">All</button><button className="chip">Running</button><button className="chip">Failed</button></div>
+        <div><h3>{t("tasks.historyTitle")}</h3><p>{t("tasks.historyDescription")}</p></div>
+        <div className="filter-group"><button className="chip active">{t("tasks.filterAll")}</button><button className="chip">{t("tasks.filterRunning")}</button><button className="chip">{t("tasks.filterFailed")}</button></div>
       </header>
       {jobs.length ? (
         <div className="task-table">
-          <div className="table-head"><span>Task</span><span>Computer</span><span>Status</span><span>Duration</span></div>
+          <div className="table-head"><span>{t("tasks.column.task")}</span><span>{t("tasks.column.computer")}</span><span>{t("tasks.column.status")}</span><span>{t("tasks.column.duration")}</span></div>
           {jobs.map((job) => (
             <div className="table-row" key={job.id}>
               <div>
-                <strong>{job.title ?? `${job.kind} task`}</strong><span>{job.id}</span>
+                <strong>{job.title ?? t("home.taskKind", { kind: job.kind })}</strong><span>{job.id}</span>
                 {job.placement ? <PlacementDetails job={job} /> : null}
               </div>
               <span>{job.nodeName ?? "—"}</span>
-              <span className={`status-pill job-${job.status}`}>{statusLabel(job.status)}</span>
+              <span className={`status-pill job-${job.status}`}>{statusLabel(job.status, t)}</span>
               <span>{formatElapsed(job.elapsedMs)}</span>
             </div>
           ))}
         </div>
-      ) : <EmptyState icon="tasks" title="Your task history is empty" copy="Ask Codex to run a meaningful build, test, container, or GPU workload. ClusterYourCodex will record it here." />}
+      ) : <EmptyState icon="tasks" title={t("tasks.emptyTitle")} copy={t("tasks.emptyDescription")} />}
     </section>
   );
 }
 
 function PlacementDetails({ job }: { job: NonNullable<FleetInfo["recentJobs"]>[number] }) {
+  const { t } = useI18n();
   const selectedId = job.placement?.selectedNodeId ?? job.nodeId;
   const selected = job.placement?.candidates.find((candidate) => candidate.nodeId === selectedId);
   const excluded = job.placement?.candidates.filter((candidate) => !candidate.eligible) ?? [];
   if (!job.placement || (!selected && excluded.length === 0)) return null;
   return (
     <details className="placement-details">
-      <summary>Why this computer</summary>
+      <summary>{t("tasks.whyComputer")}</summary>
       {selected ? (
         <div>
-          <strong>Selected: {selected.nodeName}</strong>
+          <strong>{t("tasks.selected", { name: selected.nodeName })}</strong>
           {selected.scoreComponents.map((component) => (
             <span key={`${component.key}:${component.detail}`}>{component.value >= 0 ? "+" : "−"} {component.detail}</span>
           ))}
@@ -353,7 +384,7 @@ function PlacementDetails({ job }: { job: NonNullable<FleetInfo["recentJobs"]>[n
       ) : null}
       {excluded.slice(0, 4).map((candidate) => (
         <div key={candidate.nodeId}>
-          <strong>{candidate.nodeName} excluded</strong>
+          <strong>{t("tasks.excluded", { name: candidate.nodeName })}</strong>
           {candidate.rejectionReasons.slice(0, 3).map((reason) => <span key={`${reason.code}:${reason.detail}`}>− {reason.detail}</span>)}
         </div>
       ))}
@@ -362,37 +393,38 @@ function PlacementDetails({ job }: { job: NonNullable<FleetInfo["recentJobs"]>[n
 }
 
 const builtInRules = [
-  { icon: "gpu" as IconName, name: "GPU workloads", target: "Prefer NVIDIA-capable computers", tone: "violet" },
-  { icon: "computer" as IconName, name: "Windows builds", target: "Require Windows and compatible toolchains", tone: "blue" },
-  { icon: "terminal" as IconName, name: "Linux builds and containers", target: "Prefer the fastest eligible Linux computer", tone: "mint" },
-  { icon: "clock" as IconName, name: "Light always-on tasks", target: "Prefer low-load, service-suitable computers", tone: "amber" },
+  { icon: "gpu" as IconName, nameKey: "rules.gpuWorkloads" as TranslationKey, targetKey: "rules.gpuTarget" as TranslationKey, tone: "violet" },
+  { icon: "computer" as IconName, nameKey: "rules.windowsBuilds" as TranslationKey, targetKey: "rules.windowsTarget" as TranslationKey, tone: "blue" },
+  { icon: "terminal" as IconName, nameKey: "rules.linuxBuilds" as TranslationKey, targetKey: "rules.linuxTarget" as TranslationKey, tone: "mint" },
+  { icon: "clock" as IconName, nameKey: "rules.lightTasks" as TranslationKey, targetKey: "rules.lightTarget" as TranslationKey, tone: "amber" },
 ];
 
 function RulesPage() {
+  const { t } = useI18n();
   return (
     <div className="rules-layout">
       <section className="panel page-panel">
-        <header className="panel-header with-actions"><div><h3>Active routing rules</h3><p>Hard compatibility always wins before performance preference.</p></div><button className="button button-secondary"><Icon name="plus" /> New rule</button></header>
+        <header className="panel-header with-actions"><div><h3>{t("rules.title")}</h3><p>{t("rules.description")}</p></div><button className="button button-secondary"><Icon name="plus" /> {t("rules.newRule")}</button></header>
         <div className="rule-list">
           {builtInRules.map((rule, index) => (
-            <div className="rule-row" key={rule.name}>
+            <div className="rule-row" key={rule.nameKey}>
               <span className="drag-handle">⠿</span>
               <span className={`stat-icon ${rule.tone}`}><Icon name={rule.icon} /></span>
-              <div><strong>{rule.name}</strong><span>{rule.target}</span></div>
-              <span className="rule-order">Priority {index + 1}</span>
+              <div><strong>{t(rule.nameKey)}</strong><span>{t(rule.targetKey)}</span></div>
+              <span className="rule-order">{t("rules.priority", { number: index + 1 })}</span>
               <label className="switch"><input type="checkbox" defaultChecked /><span /></label>
-              <button className="icon-button" aria-label={`More options for ${rule.name}`}><Icon name="more" /></button>
+              <button className="icon-button" aria-label={t("common.moreOptionsFor", { name: t(rule.nameKey) })}><Icon name="more" /></button>
             </div>
           ))}
         </div>
       </section>
       <aside className="panel explanation-card">
         <div className="stat-icon mint"><Icon name="shield" /></div>
-        <h3>Predictable by design</h3>
-        <p>Codex sees the selected computer and the exact reasons before a task starts. State-changing jobs never jump to another machine after they begin.</p>
-        <div className="decision-order"><span>1</span><p><strong>Compatibility</strong>OS, architecture, tools, GPU</p></div>
-        <div className="decision-order"><span>2</span><p><strong>Availability</strong>Health, queue, free resources</p></div>
-        <div className="decision-order"><span>3</span><p><strong>Preference</strong>Your rule priority</p></div>
+        <h3>{t("rules.predictableTitle")}</h3>
+        <p>{t("rules.predictableDescription")}</p>
+        <div className="decision-order"><span>1</span><p><strong>{t("rules.compatibility")}</strong>{t("rules.compatibilityDetail")}</p></div>
+        <div className="decision-order"><span>2</span><p><strong>{t("rules.availability")}</strong>{t("rules.availabilityDetail")}</p></div>
+        <div className="decision-order"><span>3</span><p><strong>{t("rules.preference")}</strong>{t("rules.preferenceDetail")}</p></div>
       </aside>
     </div>
   );
@@ -600,7 +632,7 @@ function IntegrationPage({
     <div className="integration-layout">
       <section className="integration-hero panel">
         <div className="integration-mark"><Icon name="codex" size={40} /><span><i /><i /><i /></span></div>
-        <span className="eyebrow">CODEX + YOUR COMPUTERS</span>
+        <span className="eyebrow">{t("integration.heroEyebrow")}</span>
         <h2>{pluginConnected ? t("integration.connectedTitle") : t("integration.connectTitle")}</h2>
         <p>{t("integration.pluginDescription")}</p>
         <div className="connection-statuses">
@@ -610,9 +642,9 @@ function IntegrationPage({
         {statusFresh && status ? (
           <div className={`integration-state state-${status.state}`}>
             <strong>{t(integrationLabelKeys[status.state])}</strong><span>{status.message}</span>
-            {status.installedVersion ? <small>Plugin v{status.installedVersion}{status.cliVersion ? ` · ${status.cliVersion}` : ""}{status.agentsIntegrated ? " · global AGENTS verified" : " · global AGENTS missing or drifted"}</small> : null}
-            {status.activeRuntime ? <small>Active Codex runtime online · PID {status.activeRuntime.pid} · started {new Date(status.activeRuntime.startedAt).toLocaleString()} · bridge {status.activeRuntime.bridgeVersion}</small> : null}
-            <small>Status checked {new Date(status.checkedAtMs).toLocaleString()}</small>
+            {status.installedVersion ? <small>{t("integration.pluginVersion", { version: status.installedVersion })}{status.cliVersion ? ` · ${status.cliVersion}` : ""}{status.agentsIntegrated ? ` · ${t("integration.agentsVerified")}` : ` · ${t("integration.agentsMissing")}`}</small> : null}
+            {status.activeRuntime ? <small>{t("integration.activeRuntime", { pid: status.activeRuntime.pid, started: new Date(status.activeRuntime.startedAt).toLocaleString(), bridge: status.activeRuntime.bridgeVersion })}</small> : null}
+            <small>{t("integration.statusChecked", { time: new Date(status.checkedAtMs).toLocaleString() })}</small>
             <button className="text-button small" disabled={busy || statusChecking} onClick={() => void refreshStatus()}>{statusChecking ? t("integration.checking") : t("integration.checkAgain")}</button>
           </div>
         ) : (
@@ -629,49 +661,49 @@ function IntegrationPage({
           <div className={`integration-result ${actionPassed ? "is-success" : "is-error"}`} aria-live="polite">
             <strong>{"passed" in result
               ? result.passed
-                ? result.status.state === "connected" ? "Standalone plugin self-test passed; live runtime is Connected" : `Standalone plugin self-test passed; live runtime is ${t(integrationLabelKeys[result.status.state])}`
-                : "Standalone plugin self-test failed"
+                ? result.status.state === "connected" ? t("integration.selfTestPassedConnected") : t("integration.selfTestPassedState", { state: t(integrationLabelKeys[result.status.state]) })
+                : t("integration.selfTestFailed")
               : actionPassed
-                ? result.restartRequired ? "Plugin installed — restart Codex" : "Plugin install/repair transaction completed"
-                : "Plugin install/repair did not reach a healthy installed state"}</strong>
+                ? result.restartRequired ? t("integration.pluginInstalledRestart") : t("integration.installCompleted")
+                : t("integration.installUnhealthy")}</strong>
             {resultSteps.map((item) => <span key={item.id}><i>{item.passed ? "✓" : "!"}</i>{item.message}</span>)}
-            {"durationMs" in result ? <small>Standalone check completed in {result.durationMs} ms{result.restartRecommended ? " · Codex restart is still recommended" : ""}</small> : null}
-            {"durationMs" in result && result.selfTestExecutor ? <small>Isolated installed-MCP executor · PID {result.selfTestExecutor.pid} · session {result.selfTestExecutor.sessionId} · bridge {result.selfTestExecutor.bridgeVersion}</small> : null}
+            {"durationMs" in result ? <small>{t("integration.standaloneCompleted", { duration: result.durationMs, restart: result.restartRecommended ? t("integration.restartRecommended") : "" })}</small> : null}
+            {"durationMs" in result && result.selfTestExecutor ? <small>{t("integration.executorShort", { pid: result.selfTestExecutor.pid, session: result.selfTestExecutor.sessionId, bridge: result.selfTestExecutor.bridgeVersion })}</small> : null}
           </div>
         ) : null}
       </section>
       <details className="panel full-run-details">
-        <summary><span><strong>{t("integration.advanced")}</strong><small>{t("integration.advancedDescription")}</small></span><span className={`status-pill check-${fullRunVisualState}`}>{fullRunVisualState === "running" ? "Running" : fullRunVisualState === "passed" ? "Passed" : fullRunVisualState === "failed" ? "Failed" : fullRunVisualState === "stale" ? "Stale" : "Ready"}</span></summary>
+        <summary><span><strong>{t("integration.advanced")}</strong><small>{t("integration.advancedDescription")}</small></span><span className={`status-pill check-${fullRunVisualState}`}>{fullRunVisualState === "running" ? t("integration.fullRunRunning") : fullRunVisualState === "passed" ? t("integration.fullRunPassed") : fullRunVisualState === "failed" ? t("integration.fullRunFailed") : fullRunVisualState === "stale" ? t("integration.fullRunStale") : t("integration.fullRunReady")}</span></summary>
       <section className="full-run-check">
-        <header><div><span className="eyebrow">END-TO-END VALIDATION</span><h3>Full Run Check</h3></div><span className={`status-pill check-${fullRunVisualState}`}>{fullRunVisualState === "running" ? "Running" : fullRunVisualState === "passed" ? "Passed" : fullRunVisualState === "failed" ? "Failed" : fullRunVisualState === "stale" ? "Stale" : "Ready"}</span></header>
-        <p>This is a real bounded proof: require an active Codex runtime online, separately run an isolated installed-MCP end-to-end executor, require a fresh managed-worker heartbeat, execute over managed HTTPS, verify outputs, and require an authoritative removal receipt.</p>
-        <ol>{(fullRunResult?.layers ?? fullRunLayerIds.map((id, index) => ({ id, state: operation === "full_check" && index === 0 ? "running" as const : "pending" as const, message: operation === "full_check" && index === 0 ? "Native end-to-end check is running." : "Waiting for the native check." }))).map((layer) => <li className={`layer-${layer.state}`} key={layer.id} title={layer.message}><i>{layer.state === "passed" ? "✓" : layer.state === "failed" ? "!" : layer.state === "running" ? "↻" : layer.state === "skipped" ? "×" : "—"}</i><span><strong>{layer.id.split("_").map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ")}</strong><small>{layer.message}</small></span></li>)}</ol>
-        {fullRunError ? <div className="full-run-evidence is-error" role="alert"><strong>Full Run Check could not complete</strong><span>{fullRunError}</span></div> : null}
-        {staleReason ? <div className="full-run-evidence is-stale" role="status"><strong>Historical PASS is stale</strong><span>{staleReason}</span><span>Run Full Check again before relying on this proof.</span></div> : null}
+        <header><div><span className="eyebrow">{t("integration.fullRunEyebrow")}</span><h3>{t("integration.fullRunTitle")}</h3></div><span className={`status-pill check-${fullRunVisualState}`}>{fullRunVisualState === "running" ? t("integration.fullRunRunning") : fullRunVisualState === "passed" ? t("integration.fullRunPassed") : fullRunVisualState === "failed" ? t("integration.fullRunFailed") : fullRunVisualState === "stale" ? t("integration.fullRunStale") : t("integration.fullRunReady")}</span></header>
+        <p>{t("integration.fullRunDescription")}</p>
+        <ol>{(fullRunResult?.layers ?? fullRunLayerIds.map((id, index) => ({ id, state: operation === "full_check" && index === 0 ? "running" as const : "pending" as const, message: operation === "full_check" && index === 0 ? t("integration.layerNativeRunning") : t("integration.layerWaiting") }))).map((layer) => <li className={`layer-${layer.state}`} key={layer.id} title={layer.message}><i>{layer.state === "passed" ? "✓" : layer.state === "failed" ? "!" : layer.state === "running" ? "↻" : layer.state === "skipped" ? "×" : "—"}</i><span><strong>{t(fullRunLayerKeys[layer.id])}</strong><small>{layer.message}</small></span></li>)}</ol>
+        {fullRunError ? <div className="full-run-evidence is-error" role="alert"><strong>{t("integration.fullRunError")}</strong><span>{fullRunError}</span></div> : null}
+        {staleReason ? <div className="full-run-evidence is-stale" role="status"><strong>{t("integration.historicalPassStale")}</strong><span>{staleReason}</span><span>{t("integration.historicalPassHint")}</span></div> : null}
         {fullRunResult ? (
           <div className={`full-run-evidence ${fullRunResult.state === "running" ? "is-running" : fullRunResult.state === "passed" && !staleReason ? "is-success" : fullRunResult.state === "failed" ? "is-error" : "is-stale"}`} aria-live="polite">
             <strong>{fullRunResult.state === "running"
-              ? `Full Run Check running${fullRunResult.failure ? ` · cleanup after ${fullRunResult.failure.code}` : ""}`
+              ? `${t("integration.fullRunRunning")}${fullRunResult.failure ? ` · cleanup after ${fullRunResult.failure.code}` : ""}`
               : fullRunResult.state === "passed"
-                ? staleReason ? "Previous end-to-end proof (stale)" : "End-to-end worker proof passed"
-                : `Full Run Check failed${fullRunResult.failure ? ` · ${fullRunResult.failure.code}` : ""}`}</strong>
+                ? staleReason ? t("integration.fullRunStale") : t("integration.fullRunPassed")
+                : `${t("integration.fullRunFailed")}${fullRunResult.failure ? ` · ${fullRunResult.failure.code}` : ""}`}</strong>
             <span>{fullRunResult.finishedAt
-              ? `Check window ${new Date(fullRunResult.startedAt).toLocaleString()} → ${new Date(fullRunResult.finishedAt).toLocaleString()} · ${fullRunResult.durationMs} ms`
-              : `Check started ${new Date(fullRunResult.startedAt).toLocaleString()} · ${fullRunResult.durationMs} ms elapsed`}</span>
-            <span>{fullRunResult.integration ? `Active Codex runtime online · PID ${fullRunResult.integration.activeRuntime.pid} · started ${new Date(fullRunResult.integration.activeRuntime.startedAt).toLocaleString()} · bridge ${fullRunResult.integration.activeRuntime.bridgeVersion} · independently reverified ${fullRunResult.integration.activeRuntime.reverifiedAfterRun ? "yes" : "no"}` : "No active Codex runtime evidence was accepted."}</span>
-            <span>{fullRunResult.integration?.selfTestExecutor ? `Isolated installed-MCP end-to-end executor · PID ${fullRunResult.integration.selfTestExecutor.pid} · session ${fullRunResult.integration.selfTestExecutor.sessionId} · MCP tools: ${fullRunResult.integration.selfTestExecutor.mcpToolsExercised.join(", ")} · controller round trip ${new Date(fullRunResult.integration.selfTestExecutor.controllerRoundTripAt).toLocaleString()}` : "No isolated installed-MCP executor evidence was accepted."}</span>
-            <span>{fullRunResult.selectedNode ? `Worker ${fullRunResult.selectedNode.name} (${fullRunResult.selectedNode.id}) · heartbeat ${new Date(fullRunResult.selectedNode.heartbeatAt).toLocaleString()}` : "No worker evidence was accepted."}</span>
-            <span>{fullRunResult.transport ? `${fullRunResult.transport.transport} · TLS ${fullRunResult.transport.tls ? "verified" : "missing"} · per-node credential reference ${fullRunResult.transport.credentialReferencePresent ? "present" : "missing"} · ${fullRunResult.transport.endpoint}` : "No managed transport evidence was accepted."}</span>
-            <span>{fullRunResult.placement ? `Plan ${fullRunResult.placement.planId} · score ${fullRunResult.placement.score} · revisions ${fullRunResult.placement.fleetRevision}/${fullRunResult.placement.nodeRevision}/${fullRunResult.placement.policyRevision}${fleetObservedAt ? ` · current fleet observed ${new Date(fleetObservedAt).toLocaleString()}` : ""}` : "No controller placement evidence was accepted."}</span>
-            <span>{fullRunResult.finalFleet ? `Post-run fleet revision ${fullRunResult.finalFleet.fleetRevision} · observed ${new Date(fullRunResult.finalFleet.observedAt).toLocaleString()}${fleetRevision !== undefined ? ` · current revision ${fleetRevision}` : ""}` : "No post-run fleet freshness evidence was accepted."}</span>
-            <span>{fullRunResult.snapshot ? `${fullRunResult.snapshot.digest} · ${fullRunResult.snapshot.sizeBytes} bytes` : "No snapshot receipt was accepted."}</span>
-            <span>{fullRunResult.job ? `Job ${fullRunResult.job.jobId} · run ${fullRunResult.job.runId} · ${fullRunResult.job.observedStates.join(" → ")} · exit ${fullRunResult.job.exitCode ?? "pending"}` : "No job receipt has been accepted yet."}</span>
-            {fullRunResult.logs.map((log) => <span key={log.stream}>Log {log.stream} · {log.sizeBytes} bytes · {log.chunkCount} chunk(s) · SHA-256 {log.sha256}</span>)}
-            {fullRunResult.artifacts.map((artifact) => <span key={artifact.id}>Artifact {artifact.name} · {artifact.sizeBytes} bytes · SHA-256 {artifact.sha256}</span>)}
-            <span>{fullRunResult.cleanup ? `Cleanup ${fullRunResult.cleanup.status} · ${fullRunResult.cleanup.relativeRoot} deleted · terminal version ${fullRunResult.cleanup.terminalStateVersion} · reservation released by ${fullRunResult.cleanup.releaseReason} at ${new Date(fullRunResult.cleanup.reservationReleasedAt).toLocaleString()}` : "No authoritative cleanup receipt was accepted."}</span>
+              ? t("integration.checkWindow", { started: new Date(fullRunResult.startedAt).toLocaleString(), finished: new Date(fullRunResult.finishedAt).toLocaleString(), duration: fullRunResult.durationMs })
+              : t("integration.checkStarted", { started: new Date(fullRunResult.startedAt).toLocaleString(), duration: fullRunResult.durationMs })}</span>
+            <span>{fullRunResult.integration ? t("integration.runtimeEvidence", { pid: fullRunResult.integration.activeRuntime.pid, started: new Date(fullRunResult.integration.activeRuntime.startedAt).toLocaleString(), bridge: fullRunResult.integration.activeRuntime.bridgeVersion, reverified: fullRunResult.integration.activeRuntime.reverifiedAfterRun ? t("integration.runtimeReverifiedYes") : t("integration.runtimeReverifiedNo") }) : t("integration.noRuntimeEvidence")}</span>
+            <span>{fullRunResult.integration?.selfTestExecutor ? t("integration.executorEvidence", { pid: fullRunResult.integration.selfTestExecutor.pid, session: fullRunResult.integration.selfTestExecutor.sessionId, tools: fullRunResult.integration.selfTestExecutor.mcpToolsExercised.join(", "), time: new Date(fullRunResult.integration.selfTestExecutor.controllerRoundTripAt).toLocaleString() }) : t("integration.noExecutorEvidence")}</span>
+            <span>{fullRunResult.selectedNode ? t("integration.workerEvidence", { name: fullRunResult.selectedNode.name, id: fullRunResult.selectedNode.id, time: new Date(fullRunResult.selectedNode.heartbeatAt).toLocaleString() }) : t("integration.noWorkerEvidence")}</span>
+            <span>{fullRunResult.transport ? t("integration.transportEvidence", { transport: fullRunResult.transport.transport, tls: fullRunResult.transport.tls ? t("integration.tlsVerified") : t("integration.tlsMissing"), credential: fullRunResult.transport.credentialReferencePresent ? t("integration.credentialPresent") : t("integration.credentialMissing"), endpoint: fullRunResult.transport.endpoint }) : t("integration.noTransportEvidence")}</span>
+            <span>{fullRunResult.placement ? t("integration.placementEvidence", { plan: fullRunResult.placement.planId, score: fullRunResult.placement.score, fleet: fullRunResult.placement.fleetRevision, node: fullRunResult.placement.nodeRevision, policy: fullRunResult.placement.policyRevision, current: fleetObservedAt ? t("integration.currentFleetObserved", { time: new Date(fleetObservedAt).toLocaleString() }) : "" }) : t("integration.noPlacementEvidence")}</span>
+            <span>{fullRunResult.finalFleet ? t("integration.fleetEvidence", { revision: fullRunResult.finalFleet.fleetRevision, time: new Date(fullRunResult.finalFleet.observedAt).toLocaleString(), current: fleetRevision !== undefined ? t("integration.currentRevision", { revision: fleetRevision }) : "" }) : t("integration.noFleetEvidence")}</span>
+            <span>{fullRunResult.snapshot ? t("integration.snapshotEvidence", { digest: fullRunResult.snapshot.digest, bytes: fullRunResult.snapshot.sizeBytes }) : t("integration.noSnapshotEvidence")}</span>
+            <span>{fullRunResult.job ? t("integration.jobEvidence", { job: fullRunResult.job.jobId, run: fullRunResult.job.runId, states: fullRunResult.job.observedStates.join(" → "), exit: fullRunResult.job.exitCode ?? t("integration.exitPending") }) : t("integration.noJobEvidence")}</span>
+            {fullRunResult.logs.map((log) => <span key={log.stream}>{t("integration.logEvidence", { stream: log.stream, bytes: log.sizeBytes, chunks: log.chunkCount, sha256: log.sha256 })}</span>)}
+            {fullRunResult.artifacts.map((artifact) => <span key={artifact.id}>{t("integration.artifactEvidence", { name: artifact.name, bytes: artifact.sizeBytes, sha256: artifact.sha256 })}</span>)}
+            <span>{fullRunResult.cleanup ? t("integration.cleanupEvidence", { status: fullRunResult.cleanup.status, root: fullRunResult.cleanup.relativeRoot, version: fullRunResult.cleanup.terminalStateVersion, reason: fullRunResult.cleanup.releaseReason, time: new Date(fullRunResult.cleanup.reservationReleasedAt).toLocaleString() }) : t("integration.noCleanupEvidence")}</span>
           </div>
         ) : null}
-        <button className="button button-secondary" disabled={busy || statusChecking || !online || !pluginConnected} onClick={() => void runFullCheck()}>{operation === "full_check" ? "Running real worker proof…" : staleReason ? "Run Full Check again" : "Run Full Check"}</button>
+        <button className="button button-secondary" disabled={busy || statusChecking || !online || !pluginConnected} onClick={() => void runFullCheck()}>{operation === "full_check" ? t("integration.fullRunRunningProof") : staleReason ? t("integration.fullRunAgain") : t("integration.fullRunTitle")}</button>
       </section>
       </details>
     </div>
@@ -741,7 +773,7 @@ export function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <Logo />
-        <nav aria-label="Primary navigation">
+        <nav aria-label={t("nav.primary") }>
           <span className="nav-label">{t("nav.workspace").toUpperCase()}</span>
           {navigation.slice(0, 4).map((item) => (
             <button className={page === item.id ? "active" : ""} key={item.id} onClick={() => setPage(item.id)}>
@@ -769,7 +801,7 @@ export function App() {
           <div className="topbar-actions">
             <label className="language-picker"><span>{t("language.label")}</span><select aria-label={t("language.label")} onChange={(event) => setLocale(event.target.value as typeof locale)} value={locale}>{localeOptions.map((option) => <option key={option.locale} value={option.locale}>{t(option.labelKey)}</option>)}</select></label>
             <span className={`live-status ${online ? "is-online" : ""}`}><StatusDot status={online ? "connected" : "disconnected"} />{statusCopy}</span>
-            <button className={`icon-button refresh-button ${loading ? "spinning" : ""}`} onClick={() => void refresh()} aria-label="Refresh controller status"><Icon name="refresh" /></button>
+            <button className={`icon-button refresh-button ${loading ? "spinning" : ""}`} onClick={() => void refresh()} aria-label={t("controller.refreshStatus")}><Icon name="refresh" /></button>
             <button className="button button-primary" onClick={openAddComputer}><Icon name="plus" /> {t("computers.add")}</button>
           </div>
         </header>
@@ -778,7 +810,7 @@ export function App() {
           <div className="offline-banner"><Icon name="terminal" /><div><strong>{t("controller.offlineTitle")}</strong><span>{t("controller.offlineDescription", { port: 47831 })}</span></div><button className="text-button small" onClick={() => setPage("integration")}>{t("controller.openSetup")} <Icon name="arrow" size={14} /></button></div>
         ) : null}
         {accessError && !loading ? (
-          <div className="offline-banner auth-banner"><Icon name="shield" /><div><strong>The secure controller proxy is unavailable.</strong><span>{accessError}</span></div><button className="text-button small" onClick={() => setPage("integration")}>Repair integration <Icon name="arrow" size={14} /></button></div>
+          <div className="offline-banner auth-banner"><Icon name="shield" /><div><strong>{t("controller.proxyUnavailable")}</strong><span>{accessError}</span></div><button className="text-button small" onClick={() => setPage("integration")}>{t("controller.repairIntegration")} <Icon name="arrow" size={14} /></button></div>
         ) : null}
 
         <div className="page-content">

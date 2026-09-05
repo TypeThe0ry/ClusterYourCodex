@@ -7,8 +7,8 @@ change.
 
 - **Snapshot date:** 2026-09-06
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
-- **Snapshot baseline:** `main` at `ff9d1021f1b1d0e07395517e249daaca10d30e15`
-- **Current candidate version:** `0.1.0-preview.85`
+- **Snapshot baseline:** `main` at `aabaf17a7b2da96454ade42a1505178e555bdf8d` before the preview.86 UI candidate
+- **Current candidate version:** `0.1.0-preview.86`
 - **Latest published release:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85), promoted unchanged to **stable-testing** (`isPrerelease=false`)
 - **Release channels:** `v0.1.0-preview.85` is the current immutable
   stable-testing build. Its embedded version remains a preview and Certified GA remains blocked by
@@ -37,7 +37,7 @@ capability until the opt-in isolation contract in Issue #5 is complete.
 | Linux worker packages | Linux x64 and arm64 Worker Kit archives, native shell/process-group paths, and systemd lifecycle packages | Tagged Linux artifact jobs, Worker Kit native/structural checks, and the preview.83 exact-SHA P1 controller/worker job | Repeat exact-SHA/native validation for each candidate; Issue #3's remaining platform gate is macOS |
 | macOS Worker Kits | x64 and arm64 archives, manifest/checksum/publisher-key contract, macOS capability reporting | Tagged macOS artifact jobs and kit contract checks | Real macOS host, LaunchAgent install/start/stop/restart, managed live run, and round trip |
 | Add Computer and credentials | GUI onboarding model, native credential-vault boundary, host-key fingerprint flow, password/agent/private-key paths | Static contract and local source review | Live authentication and cross-node GUI/MCP acceptance on supported hosts |
-| Desktop UX and localization | One three-step first-run path, compact Add Computer form, collapsed advanced verification, and persistent English/Simplified Chinese selection | Chrome visual/interaction audit plus 95 desktop tests, TypeScript lint, and production Vite build on the preview.85 repair branch | Extend translations to low-level diagnostic and evidence strings as additional locales are added |
+| Desktop UX and localization | One three-step first-run path, compact Add Computer form, collapsed advanced verification, duplicate hero CTA removed, and persistent English/Simplified Chinese selection across dashboard, tasks, rules, integration evidence, and provisioning | Chrome visual/interaction audit on the preview.86 candidate plus 95 desktop tests, workspace lint/test/build, and release contract checks | Add further locales and translate backend-provided diagnostic messages when localized error catalogs are available |
 | Hostile-workload isolation | Linux dedicated identity/cgroup reconciliation hardening; Windows/macOS capability reporting and fail-closed scheduling boundary | Linux unit/native probes and static contracts | Windows Job Object + protected external guard, macOS external reconciliation, and a complete three-platform hostile matrix (Issue #5) |
 | Public release pipeline | Version identity, signed-kit metadata, SBOM/provenance/index validation, protected GA workflow | Main CI and preview producer jobs | All applicable issue gates, external evidence, protected production review, and independent post-download verification |
 
@@ -55,6 +55,13 @@ service-manager, credential, or cross-node acceptance gate.
   simplification and bilingual UI: first use is one three-step path, Add
   Computer keeps only required credentials visible, Advanced verification is
   collapsed by default, and the selected locale persists locally.
+- The preview.86 candidate extends that localization to every desktop-owned
+  surface and removes the duplicate hero Connect Codex action. The candidate
+  has passed the Chrome English/简体中文 interaction pass, locale persistence
+  reload check, 95 desktop tests, workspace lint/test/build, and local release
+  contract checks. The exact merged SHA, tagged workflow, and downloaded
+  asset evidence will be recorded here immediately after the PR is merged and
+  the preview tag completes.
 - The public candidate was downloaded into a clean directory after publication.
   All 23 assets, 11 SHA-256 sidecars/SHA256SUMS records, 10 release-index
   records, the CycloneDX SBOM, and all 10 GitHub provenance attestations were
