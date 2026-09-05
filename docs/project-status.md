@@ -7,11 +7,12 @@ change.
 
 - **Snapshot date:** 2026-09-05
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
-- **Snapshot baseline:** `main` at `911dd58ec2da2488a1a5e5d5ed0a6fb17dd79e58`
+- **Snapshot baseline:** `main` at `c760447fe46e441aeca311467a11ce7453a9f030`
 - **Current candidate version:** `0.1.0-preview.85`
 - **Latest published release:** [`v0.1.0-preview.83`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.83)
-- **Stable release:** not enabled; the GA workflow remains blocked by the open
-  Issue #2, #3, and #5 acceptance gates.
+- **Release channels:** `v0.1.0-preview.85` is the current immutable candidate
+  for maintainer-authorized stable-testing. Certified GA remains blocked by
+  the open Issue #2, #3, and #5 acceptance gates.
 
 ## What the product does
 
@@ -30,7 +31,7 @@ capability until the opt-in isolation contract in Issue #5 is complete.
 
 | Area | Implemented in the repository | Evidence currently available | Remaining gate |
 | --- | --- | --- | --- |
-| Controller, protocol, scheduler, CLI | Rust controller/worker/protocol/scheduler crates and typed workload placement | Main CI, Rust tests, and version checks pass on `911dd58` | Live cross-node GUI/MCP round trip |
+| Controller, protocol, scheduler, CLI | Rust controller/worker/protocol/scheduler crates and typed workload placement | Main CI, Rust tests, and version checks pass on `c760447` | Live cross-node GUI/MCP round trip |
 | Windows desktop and tray host | Tauri 2 desktop, native controller proxy, bundled MCP runtime, per-user integration path | Windows packaging/static contracts and preview artifact jobs | Clean Windows 11 VM lifecycle, packaged tray acceptance, production Authenticode |
 | Windows worker path | Current-user controller/worker task and data-directory ACL model; installer repair/rollback plumbing | Windows packaging tests and hosted preview acceptance | Real Windows controller-to-Windows-worker run with retained logs/artifacts |
 | Linux worker packages | Linux x64 and arm64 Worker Kit archives, native shell/process-group paths, and systemd lifecycle packages | Tagged Linux artifact jobs, Worker Kit native/structural checks, and the preview.83 exact-SHA P1 controller/worker job | Repeat exact-SHA/native validation for each candidate; Issue #3's remaining platform gate is macOS |
@@ -47,14 +48,17 @@ service-manager, credential, or cross-node acceptance gate.
 
 ## Current CI and release state
 
-- Main CI run [`33945591426`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33945591426) and dependency security run [`33945591423`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33945591423) passed for `911dd58`.
+- Main CI run [`33967478225`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33967478225), CodeQL run [`33967478232`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33967478232), and dependency security run [`33967478228`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33967478228) passed for `c760447`.
 - The tagged [`v0.1.0-preview.84` workflow](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33946635188) completed with one failure: **Clean Windows 11 ARM64 compatibility acceptance (x64 emulation)**. The first `standard-ascii` child timed out after 900 seconds while the elevated helper was cleaning up an auto-started `AtLogOn` task runtime. Producer jobs passed, but publication was skipped, so preview.84 is not a published release.
-- The repair branch replaces the unbounded PowerShell task-unregister path with bounded native scheduler operations, binds exact-path validation and termination to one process handle, asks Task Scheduler to end running instances before fallback termination, requires a stable no-process window, reaps runtimes after both registration and rollback restoration, and preserves flattened helper-history evidence. The tagged workflow must pass this acceptance job before the next public preview is published.
-- The preview.85 repair branch also contains the first Chrome-audited desktop
+- The merged preview.85 repair replaces the unbounded PowerShell task-unregister path with bounded native scheduler operations, binds exact-path validation and termination to one process handle, asks Task Scheduler to end running instances before fallback termination, requires a stable no-process window, reaps runtimes after both registration and rollback restoration, and preserves flattened helper-history evidence. Main CI passed the repaired Windows install lifecycle and controller/worker live round trip; tagged run [`33968855403`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33968855403) is producing the public candidate assets.
+- The merged preview.85 source also contains the first Chrome-audited desktop
   simplification and bilingual UI: first use is one three-step path, Add
   Computer keeps only required credentials visible, Advanced verification is
   collapsed by default, and the selected locale persists locally.
-- All public preview tags are non-draft GitHub releases with `prerelease=true`. No stable tag or `prerelease=false` release is allowed while the gates below remain open.
+- Public candidate tags start as non-draft GitHub prereleases. The maintainer has
+  authorized promoting the exact preview.85 candidate to **stable-testing**
+  after its published assets pass post-download verification. This changes
+  only the GitHub Release flag and does not satisfy or bypass Certified GA.
 
 ## Open issue gates
 
@@ -92,9 +96,12 @@ need independent evidence. Issue #5 must remain open until all nine gates pass.
    `isDraft=false`.
 5. Download every primary asset and sidecar, verify hashes/index/SBOM/provenance,
    and attach exact evidence to this file and the applicable issues.
-6. Keep stable blocked until the protected GA workflow validates the external
-   evidence manifest, issue closure, governance, production signing, and
-   independent post-download checks described in [`RELEASE.md`](../RELEASE.md)
+6. An explicitly authorized stable-testing promotion may change only the
+   verified candidate Release flag; preserve its tag, product version, assets,
+   checksums, provenance, and limitations.
+7. Keep Certified GA blocked until the protected GA workflow validates the
+   external evidence manifest, issue closure, governance, production signing,
+   and independent post-download checks described in [`RELEASE.md`](../RELEASE.md)
    and [`docs/release-process.md`](release-process.md).
 
 The next update must replace the snapshot metadata and CI links with the exact

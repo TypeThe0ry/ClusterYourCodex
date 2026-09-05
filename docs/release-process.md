@@ -1,6 +1,6 @@
 # Release process
 
-## Rule: prerelease until GA evidence is complete
+## Release channels
 
 All intermediate public versions use:
 
@@ -11,9 +11,27 @@ vX.Y.Z-beta.N
 vX.Y.Z-rc.N
 ```
 
-and must be published with `prerelease: true`. The prerelease workflow rejects
-stable `vX.Y.Z` tags. A stable tag is enabled only through a separate protected
-GA gate after every applicable item in `RELEASE.md` passes.
+and are initially published with `prerelease: true`. The prerelease workflow
+rejects stable `vX.Y.Z` tags.
+
+There are two deliberately different meanings of "stable":
+
+- **Stable-testing promotion** is a maintainer-authorized GitHub Release state
+  for an exact, already-published prerelease candidate. It changes only the
+  GitHub `prerelease` flag so early users can install and test that immutable
+  candidate. The tag, product version, assets, checksums, provenance, and
+  documented limitations remain unchanged. Release notes must say
+  `stable-testing`, name the embedded prerelease product version, and list the
+  missing certification gates. A promotion must never rename or hand-repack
+  an asset.
+- **Certified GA** is a stable `vX.Y.Z` product build. It is enabled only
+  through the separate protected GA workflow after every applicable item in
+  `RELEASE.md` passes, including external platform, signing, governance, and
+  post-download evidence.
+
+A stable-testing promotion is therefore a distribution convenience, not
+evidence that Certified GA gates passed. The protected GA workflow remains the
+only authority allowed to claim Certified GA.
 
 ## Repository update contract
 
@@ -30,9 +48,10 @@ The PR must update the durable repository record that describes the change:
 The PR is merged only after the required CI, CodeQL, dependency, packaging,
 and platform checks reported by GitHub are green. A green PR does not close a
 platform or governance gate whose required external evidence is still absent.
-Every public build produced while those gates remain open is a non-draft
-GitHub prerelease; the stable publisher stays disabled until the executable GA
-workflow passes.
+Every public build produced while those gates remain open starts as a
+non-draft GitHub prerelease. A maintainer may promote one exact candidate to
+stable-testing under the immutable-promotion rules above; the Certified GA
+publisher stays disabled until the executable GA workflow passes.
 
 ## Version identity
 
@@ -80,12 +99,31 @@ agree exactly.
     acceptance jobs have passed. It is deliberately separate from the
     protected stable `production` environment and can publish only a
     `prerelease: true` release.
-11. Publish/retain as prerelease only after artifact acceptance; the stable
-    `production` environment is reserved for the independent GA workflow.
+11. Publish/retain as prerelease after artifact acceptance. If the maintainer
+    explicitly authorizes stable-testing, promote that same immutable Release
+    only after its published assets and sidecars pass post-download checks;
+    keep the `production` environment reserved for Certified GA.
 12. Update issues with the exact tag, commit, workflow run, exit codes, elapsed
    time, artifact hashes, cleanup state, and any unverified gate.
 
-## GA transition
+## Stable-testing promotion
+
+Stable-testing operates on an existing public candidate Release. Before
+promotion, verify that the tag resolves to the reviewed commit, the Release is
+non-draft, every expected asset is present, every SHA-256 sidecar matches, and
+the release index/provenance checks pass. Then update the Release notes with:
+
+- the exact embedded prerelease product version and source SHA;
+- the candidate workflow and verification evidence;
+- a direct statement that the build is code-unsigned when applicable; and
+- every remaining Certified GA gate.
+
+The promotion may set `isPrerelease=false`; it must not create a stable
+`vX.Y.Z` tag, change product version metadata, replace assets, or claim
+Certified GA. Any later workflow that restores `isPrerelease=true` must be
+followed by the same verification before re-promoting the candidate.
+
+## Certified GA transition
 
 GA is not a rename of an RC asset. It is built from the approved exact source
 through the protected stable workflow with production signing and independent

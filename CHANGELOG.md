@@ -43,6 +43,9 @@ are versioned independently from the product.
   #2/#3/#5 gates, and the preview-only release policy.
 - Require every future implementation, CI, or release update to land through a
   PR with synchronized status, changelog, issue, and exact-check evidence.
+- Define an immutable stable-testing promotion for an explicitly authorized,
+  already-published preview candidate while keeping Certified GA exclusively
+  behind the protected external-evidence workflow.
 
 ### Tests
 
