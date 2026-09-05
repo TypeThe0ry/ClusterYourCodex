@@ -15,6 +15,7 @@ import {
   type IntegrationStatus,
 } from "./api/integration";
 import type { FleetInfo, JobStatus, NodeStatus, NodeSummary } from "./api/types";
+import { localeOptions, type TranslationKey, useI18n } from "./i18n";
 
 type Page = "home" | "computers" | "tasks" | "rules" | "integration";
 type IconName =
@@ -35,34 +36,34 @@ type IconName =
   | "gpu"
   | "more";
 
-const navigation: Array<{ id: Page; label: string; icon: IconName }> = [
-  { id: "home", label: "Home", icon: "home" },
-  { id: "computers", label: "Computers", icon: "computer" },
-  { id: "tasks", label: "Tasks", icon: "tasks" },
-  { id: "rules", label: "Routing rules", icon: "rules" },
-  { id: "integration", label: "Codex integration", icon: "codex" },
+const navigation: Array<{ id: Page; labelKey: TranslationKey; icon: IconName }> = [
+  { id: "home", labelKey: "nav.home", icon: "home" },
+  { id: "computers", labelKey: "nav.computers", icon: "computer" },
+  { id: "tasks", labelKey: "nav.tasks", icon: "tasks" },
+  { id: "rules", labelKey: "nav.routingRules", icon: "rules" },
+  { id: "integration", labelKey: "nav.integration", icon: "codex" },
 ];
 
-const pageTitles: Record<Page, { title: string; subtitle: string }> = {
+const pageTitles: Record<Page, { titleKey: TranslationKey; subtitleKey: TranslationKey }> = {
   home: {
-    title: "Your Codex fleet",
-    subtitle: "One place to see where Codex is working and why.",
+    titleKey: "home.pageTitle",
+    subtitleKey: "home.pageSubtitle",
   },
   computers: {
-    title: "Computers",
-    subtitle: "Connect the machines Codex can use for builds, tests, and compute.",
+    titleKey: "computers.title",
+    subtitleKey: "computers.pageSubtitle",
   },
   tasks: {
-    title: "Tasks",
-    subtitle: "Track every delegated run from queue to verified artifact.",
+    titleKey: "tasks.title",
+    subtitleKey: "tasks.pageSubtitle",
   },
   rules: {
-    title: "Routing rules",
-    subtitle: "Decide which computer Codex should prefer for each kind of work.",
+    titleKey: "nav.routingRules",
+    subtitleKey: "rules.pageSubtitle",
   },
   integration: {
-    title: "Codex integration",
-    subtitle: "Keep the desktop controller and Codex plugin connected.",
+    titleKey: "nav.integration",
+    subtitleKey: "integration.pageSubtitle",
   },
 };
 
@@ -184,6 +185,7 @@ function NodeRow({ node }: { node: NodeSummary }) {
 }
 
 function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetInfo; online: boolean; openPage: (page: Page) => void; openAddComputer: () => void }) {
+  const { t } = useI18n();
   const nodes = fleet?.nodes ?? [];
   const onlineNodes = nodes.filter((node) => node.status === "online" || node.status === "busy").length;
   const recentJobs = fleet?.recentJobs ?? [];
@@ -193,12 +195,12 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
       <section className="hero-card">
         <div className="hero-glow" />
         <div className="hero-copy">
-          <span className="eyebrow"><Icon name="spark" size={15} /> CODEX COMPUTE POOL</span>
-          <h2>Let Codex use every<br />computer you own.</h2>
-          <p>Add Windows, Linux, and GPU machines. ClusterYourCodex chooses the right one, runs the work, and brings the result back.</p>
+          <span className="eyebrow"><Icon name="spark" size={15} /> {t("home.eyebrow")}</span>
+          <h2>{t("home.title")}</h2>
+          <p>{t("home.description")}</p>
           <div className="hero-actions">
-            <button className="button button-dark" onClick={openAddComputer}><Icon name="plus" /> Add a computer</button>
-            <button className="text-button" onClick={() => openPage("integration")}>Connect Codex <Icon name="arrow" /></button>
+            <button className="button button-dark" onClick={openAddComputer}><Icon name="plus" /> {t("home.addComputer")}</button>
+            <button className="text-button" onClick={() => openPage("integration")}>{t("home.stepConnect")} <Icon name="arrow" /></button>
           </div>
         </div>
         <div className="hero-visual" aria-hidden="true">
@@ -208,6 +210,20 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
         </div>
       </section>
 
+      {nodes.length === 0 && recentJobs.length === 0 ? (
+        <section className="panel first-run-panel" aria-labelledby="first-run-title">
+          <div className="first-run-copy">
+            <span className="eyebrow">{t("home.quickStart")}</span>
+            <h3 id="first-run-title">{t("home.quickStartTitle")}</h3>
+            <p>{t("home.quickStartDescription")}</p>
+          </div>
+          <ol className="first-run-steps">
+            <li><span>1</span><strong>{t("home.stepAdd")}</strong><button className="text-button small" onClick={openAddComputer}>{t("home.stepStart")} <Icon name="arrow" size={14} /></button></li>
+            <li><span>2</span><strong>{t("home.stepConnect")}</strong><button className="text-button small" onClick={() => openPage("integration")}>{t("home.stepOpen")} <Icon name="arrow" size={14} /></button></li>
+            <li><span>3</span><strong>{t("home.stepCheck")}</strong><small>{t("home.stepPending")}</small></li>
+          </ol>
+        </section>
+      ) : <>
       <section className="stat-grid">
         <article className="stat-card">
           <div className="stat-icon mint"><Icon name="computer" /></div>
@@ -262,26 +278,28 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
           )}
         </article>
       </section>
+      </>}
     </>
   );
 }
 
 function ComputersPage({ fleet, addRequest }: { fleet?: FleetInfo; addRequest: number }) {
+  const { t } = useI18n();
   const nodes = fleet?.nodes ?? [];
   return (
     <div className="computers-layout">
       <ProvisioningComputers addRequest={addRequest} />
       <section className="panel page-panel">
         <header className="panel-header">
-          <div><h3>Connected computers</h3><p>Only workers that completed pairing, heartbeat, and smoke check appear here.</p></div>
+          <div><h3>{t("computers.connectedTitle")}</h3><p>{t("computers.connectedDescription")}</p></div>
         </header>
         {nodes.length ? (
           <div className="node-list full">{nodes.map((node) => <NodeRow key={node.id} node={node} />)}</div>
         ) : (
           <EmptyState
             icon="computer"
-            title="No ready workers yet"
-            copy="The setup record above moves here only after the real controller reports a healthy managed worker."
+            title={t("computers.noReadyTitle")}
+            copy={t("computers.noReadyDescription")}
           />
         )}
       </section>
@@ -380,15 +398,15 @@ function RulesPage() {
   );
 }
 
-const integrationLabels: Record<IntegrationState, string> = {
-  not_found: "Codex not found",
-  not_installed: "Not installed",
-  installed: "Installed",
-  restart_required: "Restart required",
-  connected: "Connected",
-  stale: "Check stale",
-  broken: "Needs repair",
-  version_mismatch: "Update required",
+const integrationLabelKeys: Record<IntegrationState, TranslationKey> = {
+  not_found: "integration.state.notFound",
+  not_installed: "integration.state.notInstalled",
+  installed: "integration.state.installed",
+  restart_required: "integration.state.restartRequired",
+  connected: "integration.state.connected",
+  stale: "integration.state.stale",
+  broken: "integration.state.broken",
+  version_mismatch: "integration.state.versionMismatch",
 };
 
 function IntegrationPage({
@@ -402,6 +420,7 @@ function IntegrationPage({
   fleetRevision?: number;
   fleetObservedAt?: string;
 }) {
+  const { t } = useI18n();
   const [status, setStatus] = useState<IntegrationStatus>();
   const [statusFresh, setStatusFresh] = useState(false);
   const [statusChecking, setStatusChecking] = useState(true);
@@ -550,10 +569,10 @@ function IntegrationPage({
     status.installedVersion === status.desiredVersion &&
     ["installed", "restart_required", "connected", "stale"].includes(status.state);
   const installLabel = status?.state === "not_installed" || status?.state === "not_found"
-    ? "Install plugin"
+    ? t("integration.install")
     : status?.state === "version_mismatch"
-      ? "Update plugin"
-      : "Repair plugin";
+      ? t("integration.update")
+      : t("integration.repair");
   const resultSteps = result && "steps" in result ? result.steps : result?.checks;
   const standalonePassed = result && "passed" in result ? result.passed : undefined;
   const actionPassed = result && "steps" in result
@@ -582,35 +601,35 @@ function IntegrationPage({
       <section className="integration-hero panel">
         <div className="integration-mark"><Icon name="codex" size={40} /><span><i /><i /><i /></span></div>
         <span className="eyebrow">CODEX + YOUR COMPUTERS</span>
-        <h2>{pluginConnected ? "Codex is connected." : "Connect Codex to your fleet."}</h2>
-        <p>The plugin gives Codex eight focused tools to inspect, snapshot, plan, submit, monitor, and cancel delegated work. Machine credentials stay inside the local controller.</p>
+        <h2>{pluginConnected ? t("integration.connectedTitle") : t("integration.connectTitle")}</h2>
+        <p>{t("integration.pluginDescription")}</p>
         <div className="connection-statuses">
-          <div><StatusDot status={online ? "connected" : "disconnected"} /><span>Desktop controller</span><strong>{online ? "Online" : "Offline"}</strong></div>
-          <div><StatusDot status={pluginConnected ? "connected" : "disconnected"} /><span>Codex plugin</span><strong>{statusFresh && status ? integrationLabels[status.state] : statusChecking ? "Checking…" : "Unknown"}</strong></div>
+          <div><StatusDot status={online ? "connected" : "disconnected"} /><span>{t("integration.desktopController")}</span><strong>{online ? t("status.online") : t("status.offline")}</strong></div>
+          <div><StatusDot status={pluginConnected ? "connected" : "disconnected"} /><span>{t("integration.codexPlugin")}</span><strong>{statusFresh && status ? t(integrationLabelKeys[status.state]) : statusChecking ? t("integration.checking") : t("integration.unknown")}</strong></div>
         </div>
         {statusFresh && status ? (
           <div className={`integration-state state-${status.state}`}>
-            <strong>{integrationLabels[status.state]}</strong><span>{status.message}</span>
+            <strong>{t(integrationLabelKeys[status.state])}</strong><span>{status.message}</span>
             {status.installedVersion ? <small>Plugin v{status.installedVersion}{status.cliVersion ? ` · ${status.cliVersion}` : ""}{status.agentsIntegrated ? " · global AGENTS verified" : " · global AGENTS missing or drifted"}</small> : null}
             {status.activeRuntime ? <small>Active Codex runtime online · PID {status.activeRuntime.pid} · started {new Date(status.activeRuntime.startedAt).toLocaleString()} · bridge {status.activeRuntime.bridgeVersion}</small> : null}
             <small>Status checked {new Date(status.checkedAtMs).toLocaleString()}</small>
-            <button className="text-button small" disabled={busy || statusChecking} onClick={() => void refreshStatus()}>{statusChecking ? "Checking…" : "Check again"}</button>
+            <button className="text-button small" disabled={busy || statusChecking} onClick={() => void refreshStatus()}>{statusChecking ? t("integration.checking") : t("integration.checkAgain")}</button>
           </div>
         ) : (
-          <div className="integration-state state-stale"><strong>Status not verified</strong><span>A fresh native status response is required before Connected or Full Run is enabled.</span><button className="text-button small" disabled={busy || statusChecking} onClick={() => void refreshStatus()}>{statusChecking ? "Checking…" : "Check again"}</button></div>
+          <div className="integration-state state-stale"><strong>{t("integration.statusNotVerified")}</strong><span>{t("integration.statusNeedsRefresh")}</span><button className="text-button small" disabled={busy || statusChecking} onClick={() => void refreshStatus()}>{statusChecking ? t("integration.checking") : t("integration.checkAgain")}</button></div>
         )}
       </section>
       <section className="panel setup-panel">
-        <header className="panel-header"><div><h3>Setup checklist</h3><p>Three steps, no manual JSON editing.</p></div></header>
-        <div className={`setup-step ${online ? "done" : "current"}`}><span>{online ? <Icon name="check" /> : "1"}</span><div><strong>Install the controller</strong><p>{online ? "Authenticated local API and fleet snapshot are responding on loopback." : "Start or repair the local controller first."}</p></div></div>
-        <div className={`setup-step ${pluginInstalled ? "done" : "current"}`}><span>{pluginInstalled ? <Icon name="check" /> : "2"}</span><div><strong>Install the Codex plugin</strong><p>Add or repair only the bundled Skill and MCP bridge.</p></div><button className="button button-secondary" disabled={busy || statusChecking || status?.state === "not_found"} onClick={() => void install()}>{operation === "install" ? "Working…" : installLabel}</button></div>
-        <div className={`setup-step ${pluginConnected ? "done" : pluginInstalled ? "current" : ""}`}><span>{pluginConnected ? <Icon name="check" /> : "3"}</span><div><strong>Codex Plugin Check</strong><p>Start a standalone installed-package MCP self-test, then separately require the live Codex runtime receipt before reporting Connected.</p></div><button className="text-button small" disabled={busy || statusChecking || !online || !pluginInstalled} onClick={() => void runPluginCheck()}>{operation === "check" ? "Checking…" : "Run plugin check"} <Icon name="arrow" size={14} /></button></div>
-        {error ? <div className="integration-result is-error" role="alert"><strong>Integration operation failed</strong><span>{error}</span><button className="text-button small" disabled={busy || statusChecking} onClick={() => void refreshStatus()}>Refresh status</button></div> : null}
+        <header className="panel-header"><div><h3>{t("integration.checklistTitle")}</h3><p>{t("integration.checklistDescription")}</p></div></header>
+        <div className={`setup-step ${online ? "done" : "current"}`}><span>{online ? <Icon name="check" /> : "1"}</span><div><strong>{t("integration.stepController")}</strong><p>{online ? t("integration.controllerReady") : t("integration.controllerStart")}</p></div></div>
+        <div className={`setup-step ${pluginInstalled ? "done" : "current"}`}><span>{pluginInstalled ? <Icon name="check" /> : "2"}</span><div><strong>{t("integration.stepPlugin")}</strong><p>{t("integration.pluginDescriptionShort")}</p></div><button className="button button-secondary" disabled={busy || statusChecking || status?.state === "not_found"} onClick={() => void install()}>{operation === "install" ? t("integration.working") : installLabel}</button></div>
+        <div className={`setup-step ${pluginConnected ? "done" : pluginInstalled ? "current" : ""}`}><span>{pluginConnected ? <Icon name="check" /> : "3"}</span><div><strong>{t("integration.stepCheck")}</strong><p>{t("integration.pluginCheckDescription")}</p></div><button className="text-button small" disabled={busy || statusChecking || !online || !pluginInstalled} onClick={() => void runPluginCheck()}>{operation === "check" ? t("integration.checking") : t("integration.stepCheck")} <Icon name="arrow" size={14} /></button></div>
+        {error ? <div className="integration-result is-error" role="alert"><strong>{t("integration.operationFailed")}</strong><span>{error}</span><button className="text-button small" disabled={busy || statusChecking} onClick={() => void refreshStatus()}>{t("integration.refreshStatus")}</button></div> : null}
         {result && resultSteps ? (
           <div className={`integration-result ${actionPassed ? "is-success" : "is-error"}`} aria-live="polite">
             <strong>{"passed" in result
               ? result.passed
-                ? result.status.state === "connected" ? "Standalone plugin self-test passed; live runtime is Connected" : `Standalone plugin self-test passed; live runtime is ${integrationLabels[result.status.state]}`
+                ? result.status.state === "connected" ? "Standalone plugin self-test passed; live runtime is Connected" : `Standalone plugin self-test passed; live runtime is ${t(integrationLabelKeys[result.status.state])}`
                 : "Standalone plugin self-test failed"
               : actionPassed
                 ? result.restartRequired ? "Plugin installed — restart Codex" : "Plugin install/repair transaction completed"
@@ -621,7 +640,9 @@ function IntegrationPage({
           </div>
         ) : null}
       </section>
-      <section className="panel full-run-check">
+      <details className="panel full-run-details">
+        <summary><span><strong>{t("integration.advanced")}</strong><small>{t("integration.advancedDescription")}</small></span><span className={`status-pill check-${fullRunVisualState}`}>{fullRunVisualState === "running" ? "Running" : fullRunVisualState === "passed" ? "Passed" : fullRunVisualState === "failed" ? "Failed" : fullRunVisualState === "stale" ? "Stale" : "Ready"}</span></summary>
+      <section className="full-run-check">
         <header><div><span className="eyebrow">END-TO-END VALIDATION</span><h3>Full Run Check</h3></div><span className={`status-pill check-${fullRunVisualState}`}>{fullRunVisualState === "running" ? "Running" : fullRunVisualState === "passed" ? "Passed" : fullRunVisualState === "failed" ? "Failed" : fullRunVisualState === "stale" ? "Stale" : "Ready"}</span></header>
         <p>This is a real bounded proof: require an active Codex runtime online, separately run an isolated installed-MCP end-to-end executor, require a fresh managed-worker heartbeat, execute over managed HTTPS, verify outputs, and require an authoritative removal receipt.</p>
         <ol>{(fullRunResult?.layers ?? fullRunLayerIds.map((id, index) => ({ id, state: operation === "full_check" && index === 0 ? "running" as const : "pending" as const, message: operation === "full_check" && index === 0 ? "Native end-to-end check is running." : "Waiting for the native check." }))).map((layer) => <li className={`layer-${layer.state}`} key={layer.id} title={layer.message}><i>{layer.state === "passed" ? "✓" : layer.state === "failed" ? "!" : layer.state === "running" ? "↻" : layer.state === "skipped" ? "×" : "—"}</i><span><strong>{layer.id.split("_").map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ")}</strong><small>{layer.message}</small></span></li>)}</ol>
@@ -652,11 +673,13 @@ function IntegrationPage({
         ) : null}
         <button className="button button-secondary" disabled={busy || statusChecking || !online || !pluginConnected} onClick={() => void runFullCheck()}>{operation === "full_check" ? "Running real worker proof…" : staleReason ? "Run Full Check again" : "Run Full Check"}</button>
       </section>
+      </details>
     </div>
   );
 }
 
 export function App() {
+  const { locale, setLocale, t } = useI18n();
   const [page, setPage] = useState<Page>("home");
   const [fleet, setFleet] = useState<FleetInfo>();
   const [online, setOnline] = useState(false);
@@ -708,50 +731,51 @@ export function App() {
 
   const heading = pageTitles[page];
   const statusCopy = useMemo(() => {
-    if (loading && !lastCheckedAt) return "Checking controller…";
-    if (accessError) return "Secure proxy unavailable";
-    if (!online) return "Controller offline";
-    return `${fleet?.nodes.filter((node) => node.status === "online" || node.status === "busy").length ?? 0} computers available`;
-  }, [accessError, fleet, lastCheckedAt, loading, online]);
+    if (loading && !lastCheckedAt) return t("controller.checking");
+    if (accessError) return t("controller.proxyUnavailable");
+    if (!online) return t("controller.offline");
+    return t("controller.availableCount", { count: fleet?.nodes.filter((node) => node.status === "online" || node.status === "busy").length ?? 0 });
+  }, [accessError, fleet, lastCheckedAt, loading, online, t]);
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <Logo />
         <nav aria-label="Primary navigation">
-          <span className="nav-label">WORKSPACE</span>
+          <span className="nav-label">{t("nav.workspace").toUpperCase()}</span>
           {navigation.slice(0, 4).map((item) => (
             <button className={page === item.id ? "active" : ""} key={item.id} onClick={() => setPage(item.id)}>
-              <Icon name={item.icon} /><span>{item.label}</span>
+              <Icon name={item.icon} /><span>{t(item.labelKey)}</span>
               {item.id === "tasks" && (fleet?.controller.activeJobs ?? 0) > 0 ? <em>{fleet?.controller.activeJobs}</em> : null}
             </button>
           ))}
-          <span className="nav-label integration-label">INTEGRATION</span>
+          <span className="nav-label integration-label">{t("nav.integrationGroup").toUpperCase()}</span>
           {navigation.slice(4).map((item) => (
-            <button className={page === item.id ? "active" : ""} key={item.id} onClick={() => setPage(item.id)}><Icon name={item.icon} /><span>{item.label}</span></button>
+            <button className={page === item.id ? "active" : ""} key={item.id} onClick={() => setPage(item.id)}><Icon name={item.icon} /><span>{t(item.labelKey)}</span></button>
           ))}
         </nav>
         <div className="sidebar-bottom">
           <div className="controller-card">
-            <div><StatusDot status={online ? "connected" : "disconnected"} /><strong>{online ? "Controller online" : accessError ? "Integration unavailable" : "Controller offline"}</strong></div>
-            <span>{online ? `v${fleet?.controller.version ?? "0.1"} · localhost` : accessError ? "Secure host proxy required" : "Waiting on port 47831"}</span>
+            <div><StatusDot status={online ? "connected" : "disconnected"} /><strong>{online ? t("controller.online") : accessError ? t("controller.integrationUnavailable") : t("controller.offline")}</strong></div>
+            <span>{online ? `v${fleet?.controller.version ?? "0.1"} · localhost` : accessError ? t("controller.proxyUnavailable") : t("controller.waiting")}</span>
           </div>
-          <div className="profile"><span className="avatar">CY</span><div><strong>Local workspace</strong><span>Personal fleet</span></div><Icon name="more" /></div>
+          <div className="profile"><span className="avatar">CY</span><div><strong>{t("workspace.local")}</strong><span>{t("workspace.personalFleet")}</span></div><Icon name="more" /></div>
         </div>
       </aside>
 
       <main className="main-content">
         <header className="topbar">
-          <div><h1>{heading.title}</h1><p>{heading.subtitle}</p></div>
+          <div><h1>{t(heading.titleKey)}</h1><p>{t(heading.subtitleKey)}</p></div>
           <div className="topbar-actions">
+            <label className="language-picker"><span>{t("language.label")}</span><select aria-label={t("language.label")} onChange={(event) => setLocale(event.target.value as typeof locale)} value={locale}>{localeOptions.map((option) => <option key={option.locale} value={option.locale}>{t(option.labelKey)}</option>)}</select></label>
             <span className={`live-status ${online ? "is-online" : ""}`}><StatusDot status={online ? "connected" : "disconnected"} />{statusCopy}</span>
             <button className={`icon-button refresh-button ${loading ? "spinning" : ""}`} onClick={() => void refresh()} aria-label="Refresh controller status"><Icon name="refresh" /></button>
-            <button className="button button-primary" onClick={openAddComputer}><Icon name="plus" /> Add computer</button>
+            <button className="button button-primary" onClick={openAddComputer}><Icon name="plus" /> {t("computers.add")}</button>
           </div>
         </header>
 
         {!online && !accessError && !loading ? (
-          <div className="offline-banner"><Icon name="terminal" /><div><strong>The local controller is not responding.</strong><span>Start ClusterYourCodex Controller on port 47831, then refresh.</span></div><button className="text-button small" onClick={() => setPage("integration")}>Open setup <Icon name="arrow" size={14} /></button></div>
+          <div className="offline-banner"><Icon name="terminal" /><div><strong>{t("controller.offlineTitle")}</strong><span>{t("controller.offlineDescription", { port: 47831 })}</span></div><button className="text-button small" onClick={() => setPage("integration")}>{t("controller.openSetup")} <Icon name="arrow" size={14} /></button></div>
         ) : null}
         {accessError && !loading ? (
           <div className="offline-banner auth-banner"><Icon name="shield" /><div><strong>The secure controller proxy is unavailable.</strong><span>{accessError}</span></div><button className="text-button small" onClick={() => setPage("integration")}>Repair integration <Icon name="arrow" size={14} /></button></div>

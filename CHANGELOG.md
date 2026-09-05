@@ -11,6 +11,14 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Simplify the desktop first-run experience into one three-step path, move
+  optional SSH display-name and port fields behind Advanced options, collapse
+  the full controller-to-worker proof behind Advanced verification, and make
+  the layout usable without horizontal scrolling at compact desktop widths.
+- Add the first localized desktop experience for English and Simplified
+  Chinese, including a persistent language selector, translated navigation,
+  first-run guidance, Add Computer essentials, controller state, and the main
+  Codex integration checklist.
 - Exclude Tauri's native `src-tauri/target` output from the Vite development
   watcher so Windows linker or antivirus file locks cannot abort GUI startup
   with `EBUSY` before the desktop window is created.

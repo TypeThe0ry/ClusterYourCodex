@@ -36,6 +36,7 @@ capability until the opt-in isolation contract in Issue #5 is complete.
 | Linux worker packages | Linux x64 and arm64 Worker Kit archives, native shell/process-group paths, and systemd lifecycle packages | Tagged Linux artifact jobs, Worker Kit native/structural checks, and the preview.83 exact-SHA P1 controller/worker job | Repeat exact-SHA/native validation for each candidate; Issue #3's remaining platform gate is macOS |
 | macOS Worker Kits | x64 and arm64 archives, manifest/checksum/publisher-key contract, macOS capability reporting | Tagged macOS artifact jobs and kit contract checks | Real macOS host, LaunchAgent install/start/stop/restart, managed live run, and round trip |
 | Add Computer and credentials | GUI onboarding model, native credential-vault boundary, host-key fingerprint flow, password/agent/private-key paths | Static contract and local source review | Live authentication and cross-node GUI/MCP acceptance on supported hosts |
+| Desktop UX and localization | One three-step first-run path, compact Add Computer form, collapsed advanced verification, and persistent English/Simplified Chinese selection | Chrome visual/interaction audit plus 95 desktop tests, TypeScript lint, and production Vite build on the preview.85 repair branch | Extend translations to low-level diagnostic and evidence strings as additional locales are added |
 | Hostile-workload isolation | Linux dedicated identity/cgroup reconciliation hardening; Windows/macOS capability reporting and fail-closed scheduling boundary | Linux unit/native probes and static contracts | Windows Job Object + protected external guard, macOS external reconciliation, and a complete three-platform hostile matrix (Issue #5) |
 | Public release pipeline | Version identity, signed-kit metadata, SBOM/provenance/index validation, protected GA workflow | Main CI and preview producer jobs | All applicable issue gates, external evidence, protected production review, and independent post-download verification |
 
@@ -49,6 +50,10 @@ service-manager, credential, or cross-node acceptance gate.
 - Main CI run [`33945591426`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33945591426) and dependency security run [`33945591423`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33945591423) passed for `911dd58`.
 - The tagged [`v0.1.0-preview.84` workflow](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33946635188) completed with one failure: **Clean Windows 11 ARM64 compatibility acceptance (x64 emulation)**. The first `standard-ascii` child timed out after 900 seconds while the elevated helper was cleaning up an auto-started `AtLogOn` task runtime. Producer jobs passed, but publication was skipped, so preview.84 is not a published release.
 - The repair branch replaces the unbounded PowerShell task-unregister path with bounded native scheduler operations, binds exact-path validation and termination to one process handle, asks Task Scheduler to end running instances before fallback termination, requires a stable no-process window, reaps runtimes after both registration and rollback restoration, and preserves flattened helper-history evidence. The tagged workflow must pass this acceptance job before the next public preview is published.
+- The preview.85 repair branch also contains the first Chrome-audited desktop
+  simplification and bilingual UI: first use is one three-step path, Add
+  Computer keeps only required credentials visible, Advanced verification is
+  collapsed by default, and the selected locale persists locally.
 - All public preview tags are non-draft GitHub releases with `prerelease=true`. No stable tag or `prerelease=false` release is allowed while the gates below remain open.
 
 ## Open issue gates

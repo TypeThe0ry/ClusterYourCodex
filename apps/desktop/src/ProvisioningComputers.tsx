@@ -15,6 +15,7 @@ import {
   type StartComputerInput,
   type SshAuthenticationMethod,
 } from "./api/provisioning";
+import { useI18n } from "./i18n";
 
 const stepLabels: Record<ProvisioningStep, string> = {
   draft: "Created",
@@ -265,6 +266,7 @@ export function provisioningActionLabel(
 }
 
 export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number }) {
+  const { t } = useI18n();
   const initialModal = useMemo(resetProvisioningModal, []);
   const [computers, setComputers] = useState<ProvisioningComputer[]>([]);
   const [selectedId, setSelectedId] = useState<string>();
@@ -544,10 +546,10 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
   return (
     <section className="panel page-panel provisioning-panel">
       <header className="panel-header with-actions">
-        <div><h3>Add Computer setup</h3><p>Durable SSH setup records resume after a desktop restart.</p></div>
+        <div><h3>{t("provision.title")}</h3><p>{t("provision.subtitle")}</p></div>
         <div className="provisioning-header-actions">
-          <button className="button button-secondary" disabled={loading || Boolean(operation)} onClick={() => void refresh()}>{loading ? "Loading…" : "Refresh"}</button>
-          <button className="button button-primary" disabled={Boolean(operation)} onClick={() => setShowWizard(true)}>＋ Add computer</button>
+          <button className="button button-secondary" disabled={loading || Boolean(operation)} onClick={() => void refresh()}>{loading ? t("common.loading") : t("common.refresh")}</button>
+          <button className="button button-primary" disabled={Boolean(operation)} onClick={() => setShowWizard(true)}>＋ {t("computers.add")}</button>
         </div>
       </header>
 
@@ -645,19 +647,17 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
           ) : null}
         </div>
       ) : !loading ? (
-        <div className="provisioning-empty"><strong>No setup records yet</strong><p>Add a computer to start real SSH discovery and managed worker installation.</p><button className="button button-primary" onClick={() => setShowWizard(true)}>Add your first computer</button></div>
+        <div className="provisioning-empty"><strong>{t("computers.emptyTitle")}</strong><p>{t("computers.emptyDescription")}</p><button className="button button-primary" onClick={() => setShowWizard(true)}>{t("home.addComputer")}</button></div>
       ) : null}
 
       {showWizard ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !operation) resetAndCloseWizard(); }}>
           <form className="computer-wizard" onSubmit={(event) => void start(event)}>
-            <header><div><span className="eyebrow">ADD COMPUTER</span><h2>Connect over SSH</h2><p>Choose password, native SSH agent, or a validated local private key. Authentication secrets are passed only to the native host.</p></div><button aria-label="Close Add Computer" className="modal-close" disabled={Boolean(operation)} onClick={resetAndCloseWizard} type="button">×</button></header>
+            <header><div><span className="eyebrow">{t("provision.title").toUpperCase()}</span><h2>{t("provision.connectSsh")}</h2><p>{t("provision.subtitle")}</p></div><button aria-label={t("common.close")} className="modal-close" disabled={Boolean(operation)} onClick={resetAndCloseWizard} type="button">×</button></header>
             <div className="form-grid">
-              <label className="wide">Display name (optional)<input maxLength={128} onChange={(event) => setForm({ ...form, displayName: event.target.value })} placeholder="Defaults to host until discovery" value={form.displayName} /></label>
-              <label className="wide">Host or IP<input autoFocus maxLength={1024} onChange={(event) => setForm({ ...form, host: event.target.value })} required value={form.host} /></label>
-              <label>Port<input max={65535} min={1} onChange={(event) => setForm({ ...form, port: event.target.value })} required type="number" value={form.port} /></label>
-              <label>SSH user<input maxLength={256} onChange={(event) => setForm({ ...form, username: event.target.value })} required value={form.username} /></label>
-              <label className="wide">Authentication<select onChange={(event) => {
+              <label className="wide">{t("provision.host")}<input autoFocus maxLength={1024} onChange={(event) => setForm({ ...form, host: event.target.value })} required value={form.host} /></label>
+              <label className="wide">{t("provision.user")}<input maxLength={256} onChange={(event) => setForm({ ...form, username: event.target.value })} required value={form.username} /></label>
+              <label className="wide">{t("provision.authentication")}<select onChange={(event) => {
                 const authenticationMethod = event.target.value as SshAuthenticationMethod;
                 setForm({
                   ...form,
@@ -667,19 +667,21 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
                   privateKeyPath: "",
                   rememberPassword: authenticationMethod === "password" && form.rememberPassword,
                 });
-              }} value={form.authenticationMethod}><option value="password">Password</option><option value="agent">Native SSH agent</option><option value="private_key">Private key file</option></select></label>
-              {form.authenticationMethod === "password" ? <label className="wide">SSH password<input autoComplete="new-password" onChange={(event) => setForm({ ...form, password: event.target.value })} required type="password" value={form.password} /></label> : null}
+              }} value={form.authenticationMethod}><option value="password">{t("provision.password")}</option><option value="agent">Native SSH agent</option><option value="private_key">Private key file</option></select></label>
+              {form.authenticationMethod === "password" ? <label className="wide">{t("provision.password")}<input autoComplete="new-password" onChange={(event) => setForm({ ...form, password: event.target.value })} required type="password" value={form.password} /></label> : null}
               {form.authenticationMethod === "private_key" ? <>
                 <label className="wide">Private-key path<input autoComplete="off" onChange={(event) => setForm({ ...form, privateKeyPath: event.target.value })} placeholder="C:\\Users\\you\\.ssh\\id_ed25519" required value={form.privateKeyPath} /></label>
                 <label className="wide">Passphrase (optional)<input autoComplete="new-password" onChange={(event) => setForm({ ...form, passphrase: event.target.value })} type="password" value={form.passphrase} /></label>
               </> : null}
               {form.authenticationMethod === "agent" ? <small className="wide auth-method-note">ClusterYourCodex will use identities already exposed by the native SSH agent. No secret is requested or stored.</small> : null}
             </div>
-            {form.authenticationMethod === "password" ? <label className="check-row"><input checked={form.rememberPassword} onChange={(event) => setForm({ ...form, rememberPassword: event.target.checked })} type="checkbox" /> Remember securely in Windows Credential Manager</label> : null}
+            {form.authenticationMethod === "password" ? <label className="check-row"><input checked={form.rememberPassword} onChange={(event) => setForm({ ...form, rememberPassword: event.target.checked })} type="checkbox" /> {t("provision.rememberPassword")}</label> : null}
 
             <details className="advanced-options">
-              <summary>Advanced options</summary>
+              <summary>{t("provision.advanced")}</summary>
               <div className="form-grid">
+                <label className="wide">{t("provision.displayName")}<input maxLength={128} onChange={(event) => setForm({ ...form, displayName: event.target.value })} placeholder="Defaults to host until discovery" value={form.displayName} /></label>
+                <label>{t("provision.sshPort")}<input max={65535} min={1} onChange={(event) => setForm({ ...form, port: event.target.value })} required type="number" value={form.port} /></label>
                 <label>Service scope<select onChange={(event) => setForm({ ...form, serviceScope: event.target.value as AddForm["serviceScope"] })} value={form.serviceScope}><option value="auto">Automatic</option><option value="user">Current user</option><option value="system">System</option></select></label>
                 <label>Routing priority<input max={10000} min={-10000} onChange={(event) => setForm({ ...form, priority: event.target.value })} type="number" value={form.priority} /></label>
                 <label className="wide">Worker workspace (absolute)<input onChange={(event) => setForm({ ...form, workspace: event.target.value })} placeholder="Auto-select by OS" value={form.workspace} /></label>
@@ -692,7 +694,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
               <small>Routing priority and typed capacity policy are synchronized after pairing and enforced atomically during placement. The current worker containment advertises one safe execution slot.</small>
             </details>
 
-            <footer><button className="button button-secondary" disabled={Boolean(operation)} onClick={resetAndCloseWizard} type="button">Cancel</button><button className="button button-primary" disabled={Boolean(operation) || form.allowedJobKinds.length === 0 || (form.authenticationMethod === "password" && !form.password) || (form.authenticationMethod === "private_key" && !form.privateKeyPath.trim())} type="submit">{operation === "start" ? "Connecting…" : "Connect and inspect"}</button></footer>
+            <footer><button className="button button-secondary" disabled={Boolean(operation)} onClick={resetAndCloseWizard} type="button">{t("common.cancel")}</button><button className="button button-primary" disabled={Boolean(operation) || form.allowedJobKinds.length === 0 || (form.authenticationMethod === "password" && !form.password) || (form.authenticationMethod === "private_key" && !form.privateKeyPath.trim())} type="submit">{operation === "start" ? t("status.connecting") : t("common.continue")}</button></footer>
           </form>
         </div>
       ) : null}
