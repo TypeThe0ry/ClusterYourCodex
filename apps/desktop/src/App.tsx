@@ -860,6 +860,8 @@ export function App() {
     if (!online) return t("controller.offline");
     return t("controller.availableCount", { count: fleet?.nodes.filter((node) => node.status === "online" || node.status === "busy").length ?? 0 });
   }, [accessError, fleet, lastCheckedAt, loading, online, t]);
+  const hasSetupHistory = (fleet?.nodes.length ?? 0) > 0 || (fleet?.recentJobs?.length ?? 0) > 0;
+  const showAddComputer = online && (page !== "home" || hasSetupHistory);
 
   return (
     <div className="app-shell">
@@ -894,7 +896,7 @@ export function App() {
             <label className="language-picker"><span>{t("language.label")}</span><select aria-label={t("language.label")} onChange={(event) => setLocale(event.target.value as typeof locale)} value={locale}>{localeOptions.map((option) => <option key={option.locale} value={option.locale}>{t(option.labelKey)}</option>)}</select></label>
             <span className={`live-status ${online ? "is-online" : ""}`}><StatusDot status={online ? "connected" : "disconnected"} />{statusCopy}</span>
             <button className={`icon-button refresh-button ${loading ? "spinning" : ""}`} onClick={() => void refresh()} aria-label={t("controller.refreshStatus")}><Icon name="refresh" /></button>
-            {online ? <button className="button button-primary" onClick={openAddComputer}><Icon name="plus" /> {t("computers.add")}</button> : null}
+            {showAddComputer ? <button className="button button-primary" onClick={openAddComputer}><Icon name="plus" /> {t("computers.add")}</button> : null}
           </div>
         </header>
 
