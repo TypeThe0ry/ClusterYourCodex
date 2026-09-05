@@ -11,6 +11,9 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Exclude Tauri's native `src-tauri/target` output from the Vite development
+  watcher so Windows linker or antivirus file locks cannot abort GUI startup
+  with `EBUSY` before the desktop window is created.
 - Bound Windows profile-matrix task cleanup: validate and terminate the exact
   disposable action through one process handle, reap runtimes after both task
   registration and rollback restoration, request a bounded scheduler-owned
