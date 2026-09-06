@@ -7,9 +7,9 @@ change.
 
 - **Snapshot date:** 2026-09-06
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
-- **Snapshot baseline:** `origin/main` at `4407cfc` (merged PR #45, complete desktop localization; latest tagged product candidate remains preview.89)
+- **Snapshot baseline:** `origin/main` at `d564f35` (merged PR #48, catalog regression coverage; latest tagged product candidate remains preview.89)
 - **Current candidate version:** `0.1.0-preview.89` (`v0.1.0-preview.89` points to `e8691ac92603da3b883e9312915650fbba68eb35`)
-- **Latest published release:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85), promoted unchanged to **stable-testing** (`isPrerelease=false`); preview.86 and preview.87 are cancelled superseded candidates, preview.88 is superseded, and preview.89 is the active tagged prerelease candidate
+- **Latest published release:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85), promoted unchanged to **stable-testing** (`isPrerelease=false`); preview.86 and preview.87 are cancelled superseded candidates, preview.88 is superseded, and preview.89 was cancelled after its Windows ARM64 profile-matrix helper exceeded the bounded acceptance window; the next preview tag must include the timeout hardening
 - **Release channels:** `v0.1.0-preview.85` is the current immutable
   stable-testing build. Its embedded version remains a preview and Certified GA remains blocked by
   the open Issue #2, #3, and #5 acceptance gates.
@@ -37,7 +37,7 @@ capability until the opt-in isolation contract in Issue #5 is complete.
 | Linux worker packages | Linux x64 and arm64 Worker Kit archives, native shell/process-group paths, and systemd lifecycle packages | Tagged Linux artifact jobs, Worker Kit native/structural checks, and the preview.83 exact-SHA P1 controller/worker job | Repeat exact-SHA/native validation for each candidate; Issue #3's remaining platform gate is macOS |
 | macOS Worker Kits | x64 and arm64 archives, manifest/checksum/publisher-key contract, macOS capability reporting | Tagged macOS artifact jobs and kit contract checks | Real macOS host, LaunchAgent install/start/stop/restart, managed live run, and round trip |
 | Add Computer and credentials | GUI onboarding model, native credential-vault boundary, host-key fingerprint flow, password/agent/private-key paths | Static contract and local source review | Live authentication and cross-node GUI/MCP acceptance on supported hosts |
-| Desktop UX and localization | One state-aware three-step first-run path with a single contextual setup CTA, compact Add Computer form, collapsed advanced verification, quiet offline top bar, and persistent English/Simplified Chinese/Spanish/Japanese selection across dashboard, tasks, rules, integration evidence, provisioning, errors, and credential recovery | Chrome visual/interaction audit of the local `origin/main` UI plus four-language home/integration/computer checks, `html[lang]` persistence, zero console errors, 95 desktop tests, workspace lint/test/build, and preview.89 release contract checks | Keep the catalog review loop running for newly introduced backend diagnostics and confirm translated wording with native-language reviewers |
+| Desktop UX and localization | One state-aware three-step first-run path with a single contextual setup CTA, compact Add Computer form, collapsed advanced verification, quiet offline top bar, and persistent English/Simplified Chinese/Spanish/Japanese selection across dashboard, tasks, rules, integration evidence, provisioning, errors, and credential recovery | Chrome visual/interaction audit of the local `origin/main` UI plus four-language home/integration/computer checks, `html[lang]` persistence, zero console errors, 96 desktop tests, workspace lint/test/build, and preview.89 release contract checks | Keep the catalog review loop running for newly introduced backend diagnostics and confirm translated wording with native-language reviewers |
 | Hostile-workload isolation | Linux dedicated identity/cgroup reconciliation hardening; Windows/macOS capability reporting and fail-closed scheduling boundary | Linux unit/native probes and static contracts | Windows Job Object + protected external guard, macOS external reconciliation, and a complete three-platform hostile matrix (Issue #5) |
 | Public release pipeline | Version identity, signed-kit metadata, SBOM/provenance/index validation, protected GA workflow | Main CI and preview producer jobs | All applicable issue gates, external evidence, protected production review, and independent post-download verification |
 
@@ -69,10 +69,14 @@ service-manager, credential, or cross-node acceptance gate.
   provisioning, actions, and status labels. PR [#39](https://github.com/TypeThe0ry/ClusterYourCodex/pull/39)
   merged as `f0ca393d910732ece9395245eb6bf659de2fd47d`; local desktop tests,
   workspace lint/test/build, and the Chrome Japanese routing-rules smoke pass.
-- The preview.89 candidate simplifies the offline top-bar state and moves
-  first-run setup to one contextual CTA and moves provisioning error codes
-  behind a localized technical-details disclosure;
-   tagged workflow [`33992231739`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33992231739) is the active prerelease producer and still requires completion plus post-download asset verification before its release status is final.
+- The preview.89 candidate simplified the offline top-bar state and moved
+  first-run setup to one contextual CTA and provisioning error codes behind a
+  localized technical-details disclosure. Its tagged workflow
+  [`33992231739`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33992231739)
+  was cancelled after the Windows 11 ARM64 profile matrix remained inside the
+  elevated helper path past the intended 900-second child boundary; no public
+  preview.89 Release was created. The follow-up adds bounded CIM provider
+  queries before the next tagged candidate is attempted.
 - PR [#42](https://github.com/TypeThe0ry/ClusterYourCodex/pull/42) then removed the
   duplicate top-bar **Add computer** button on a true first-run Home screen;
   the contextual **Start** action remains the only primary onboarding entry,
@@ -85,6 +89,10 @@ service-manager, credential, or cross-node acceptance gate.
   errors. The catalog change is on `main` but is not part of tagged preview.89;
   the next preview tag must carry it before any public artifact can claim the
   complete four-language catalog.
+- The current follow-up keeps the Computers screen to one Add Computer action,
+  localizes the private-key path example, and removes the remaining core-flow
+  heartbeat/smoke-check English fallbacks from Spanish and Japanese. Desktop
+  tests assert those strings and the 449-key catalog remains aligned.
 - The previously published preview.85 candidate was downloaded into a clean directory after publication.
   All 23 assets, 11 SHA-256 sidecars/SHA256SUMS records, 10 release-index
   records, the CycloneDX SBOM, and all 10 GitHub provenance attestations were

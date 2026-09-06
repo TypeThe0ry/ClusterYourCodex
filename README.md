@@ -26,7 +26,7 @@ Codex → Run the check**. The primary action is state-aware: when the local
 controller is offline it opens setup, when the controller is ready it starts
 computer enrollment, and after a worker is present it opens Codex integration.
 English, Simplified Chinese, Spanish, and Japanese can be switched from the
-top bar, and the choice is saved locally. Every one of the 448 desktop catalog
+top bar, and the choice is saved locally. Every one of the 449 desktop catalog
 keys is present in all four locales, including navigation, provisioning,
 integration errors, credential recovery, and verification evidence; technical
 identifiers such as host names, capability names, and command output remain

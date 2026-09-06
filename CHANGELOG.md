@@ -13,13 +13,19 @@ are versioned independently from the product.
   provisioning recovery, Full Run Check evidence, stale-pass reasons, and
   credential prompts stay in the selected language instead of falling back to
   English.
+- Keep the Computers screen to one Add Computer action, localize the private
+  key path example, and remove the last core-flow heartbeat/smoke-check English
+  fallbacks from the Spanish and Japanese UI.
+- Bound Windows profile-matrix CIM lookups so a stalled WMI provider cannot
+  strand the elevated helper indefinitely; the harness now fails with retained
+  diagnostics and lets the release workflow continue to cleanup.
 
 ### Tests
 
 - Exercise the four-language home, Codex integration, and Add Computer flows in
   Chrome; confirm locale persistence, `html[lang]`, collapsed advanced options,
   and a clean browser console.
-- Re-run the desktop TypeScript lint and 95-test suite after the catalog update.
+- Re-run the desktop TypeScript lint and 96-test suite after the catalog update.
 
 ## [0.1.0-preview.89] - 2026-09-06
 

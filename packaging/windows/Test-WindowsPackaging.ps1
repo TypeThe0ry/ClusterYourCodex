@@ -5058,6 +5058,7 @@ exit 0
         $profileMatrixSource -match 'child timed out after \$ChildTimeoutSeconds') 'profile matrix child lifetimes have bounded process-tree termination'
     Assert-True ($profileMatrixSource -match 'function Get-ProfileMatrixOwnedTaskProcesses' -and
         $profileMatrixSource -match 'Get-CimInstance -ClassName Win32_Process' -and
+        $profileMatrixSource -match 'Get-CimInstance -ClassName Win32_Process[^\r\n]+-OperationTimeoutSec 15' -and
         $profileMatrixSource -match 'ExecutablePath' -and
         $profileMatrixSource -match 'GetProcessById\(\$processId\)' -and
         $profileMatrixSource -match '\[void\]\$boundProcess\.Handle' -and

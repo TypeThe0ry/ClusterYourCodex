@@ -449,7 +449,11 @@ function Resolve-ProfileMatrixAccountName {
         }
     } catch { }
     try {
-        $account = Get-CimInstance -ClassName Win32_UserAccount -Filter ("SID='{0}'" -f $Sid) -ErrorAction Stop |
+        # CIM can block behind a broken WMI provider on hosted ARM64/x64
+        # runners. Keep the SID lookup bounded so the profile-matrix parent
+        # can publish diagnostics and terminate the case instead of stranding
+        # the entire workflow.
+        $account = Get-CimInstance -ClassName Win32_UserAccount -Filter ("SID='{0}'" -f $Sid) -OperationTimeoutSec 15 -ErrorAction Stop |
             Select-Object -First 1
         if ($null -ne $account -and
             -not [string]::IsNullOrWhiteSpace([string]$account.Domain) -and
@@ -630,7 +634,7 @@ function Get-ProfileMatrixProfilePathForSid {
     }
 
     try {
-        $profile = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop |
+        $profile = Get-CimInstance -ClassName Win32_UserProfile -OperationTimeoutSec 15 -ErrorAction Stop |
             Where-Object { [string]$_.SID -ceq $normalizedSid } |
             Select-Object -First 1
         if ($null -ne $profile -and -not [string]::IsNullOrWhiteSpace([string]$profile.LocalPath)) {
@@ -963,7 +967,7 @@ function Get-ProfileMatrixOwnedTaskProcesses {
 
     $expectedExecutable = Resolve-ProfileMatrixPath $Executable
     $matches = New-Object System.Collections.Generic.List[object]
-    foreach ($process in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+    foreach ($process in @(Get-CimInstance -ClassName Win32_Process -OperationTimeoutSec 15 -ErrorAction Stop)) {
         $pathProperty = $process.PSObject.Properties['ExecutablePath']
         if ($null -eq $pathProperty -or [string]::IsNullOrWhiteSpace([string]$pathProperty.Value)) {
             continue
@@ -1590,7 +1594,7 @@ function Remove-ProfileMatrixUserProfile {
         [Parameter(Mandatory = $true)][string]$Sid,
         [Parameter(Mandatory = $true)][string]$UserName
     )
-    $profile = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop |
+    $profile = Get-CimInstance -ClassName Win32_UserProfile -OperationTimeoutSec 15 -ErrorAction Stop |
         Where-Object { [string]$_.SID -ceq $Sid } |
         Select-Object -First 1
     if ($null -eq $profile) { return }
@@ -1611,7 +1615,7 @@ function Remove-ProfileMatrixUserProfile {
     $lastFailure = $null
     for ($attempt = 0; $attempt -lt 20; $attempt++) {
         try {
-            $current = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop |
+            $current = Get-CimInstance -ClassName Win32_UserProfile -OperationTimeoutSec 15 -ErrorAction Stop |
                 Where-Object { [string]$_.SID -ceq $Sid } |
                 Select-Object -First 1
             if ($null -ne $current) {
@@ -1626,7 +1630,7 @@ function Remove-ProfileMatrixUserProfile {
                 Test-ProfileMatrixReparseFree -Root $resolved
                 Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction Stop
             }
-            $remaining = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop |
+            $remaining = Get-CimInstance -ClassName Win32_UserProfile -OperationTimeoutSec 15 -ErrorAction Stop |
                 Where-Object { [string]$_.SID -ceq $Sid } |
                 Select-Object -First 1
             if ($null -eq $remaining -and -not (Test-Path -LiteralPath $resolved)) {
@@ -1646,7 +1650,7 @@ function Remove-ProfileMatrixUserProfile {
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
 if ($RequireWindows11) {
-    $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+    $os = Get-CimInstance -ClassName Win32_OperatingSystem -OperationTimeoutSec 15 -ErrorAction Stop
     Assert-ProfileMatrix ([string]$os.Caption -match '\bWindows 11\b') "Windows 11 is required (observed: $([string]$os.Caption))"
 }
 if (-not $CurrentUserOnly) {
