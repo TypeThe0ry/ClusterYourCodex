@@ -7,12 +7,12 @@ Windows controller and worker. It contains no credentials.
 ## Run identity
 
 - **Host:** Windows x64 development host
-- **Source commit:** `f61c1c7cc3a9e9437cac1e5714d9154f6702c0c9`
+- **Source commit:** `6f1f27265e99f32950d1581af961ff9842ed08a3`
 - **Binaries:** `cyc-controller` and `cyc-worker`, rebuilt from the preview.95
   checkout
 - **Probe:** `scripts/Test-WindowsControllerWorkerRoundTrip.ps1`
 - **Evidence root:**
-  `C:\Users\admin\AppData\Local\Temp\cyc-windows-controller-worker-roundtrip.0040b16045814f3a8ac9fcd3b59595ae`
+  `C:\Users\admin\AppData\Local\Temp\cyc-windows-controller-worker-roundtrip.35117f598c584e88bf35b8ea1345db4b`
 - **Result:** `status=passed`, observed states `queued → running → succeeded`,
   run duration 8 seconds
 
