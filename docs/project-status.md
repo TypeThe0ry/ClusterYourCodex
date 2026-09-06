@@ -7,12 +7,10 @@ change.
 
 - **Snapshot date:** 2026-09-06
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
-- **Snapshot baseline:** `origin/main` at `71aa3d7` (merged PR #49, UI simplification/localization and bounded Windows profile-matrix lookups; preview.90 candidate is now ready for tagging)
-- **Current candidate version:** `0.1.0-preview.90` (main CI, CodeQL, and dependency security are green; the annotated `v0.1.0-preview.90` tag is the next public prerelease step)
-- **Latest published release:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85), promoted unchanged to **stable-testing** (`isPrerelease=false`); preview.86 and preview.87 are cancelled superseded candidates, preview.88 is superseded, and preview.89 was cancelled after its Windows ARM64 profile-matrix helper exceeded the bounded acceptance window; bounded CIM/WMI timeout hardening is merged in `71aa3d7`
-- **Release channels:** `v0.1.0-preview.85` is the current immutable
-  stable-testing build. Its embedded version remains a preview and Certified GA remains blocked by
-  the open Issue #2, #3, and #5 acceptance gates.
+- **Snapshot baseline:** `origin/main` at `17eec6b` (merged PR #50, compact UI/localization release candidate and public preview.90 source)
+- **Latest published preview:** [`v0.1.0-preview.90`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.90), published from the annotated tag at the merged SHA; GitHub reports `isPrerelease=true` and `isDraft=false`
+- **Previous stable-testing exception:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85) remains immutable **stable-testing** (`isPrerelease=false`) for the explicitly authorized test channel. Its embedded product version is still a preview; it is not Certified GA.
+- **Release channels:** preview.90 is the current public prerelease. Certified GA remains blocked by the open Issue #2, #3, and #5 acceptance gates; no `prerelease=false` Certified GA release has been created.
 
 ## What the product does
 
@@ -31,13 +29,13 @@ capability until the opt-in isolation contract in Issue #5 is complete.
 
 | Area | Implemented in the repository | Evidence currently available | Remaining gate |
 | --- | --- | --- | --- |
-| Controller, protocol, scheduler, CLI | Rust controller/worker/protocol/scheduler crates and typed workload placement | Merged-main CI [run 34004021556](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34004021556) passed Rust tests on Ubuntu, macOS, and Windows plus the live Windows controller/worker round trip | Live cross-node GUI/MCP round trip |
+| Controller, protocol, scheduler, CLI | Rust controller/worker/protocol/scheduler crates and typed workload placement | Merged-main CI [run 34008302124](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34008302124) passed Rust tests on Ubuntu, macOS, and Windows plus the live Windows controller/worker round trip | Live cross-node GUI/MCP round trip |
 | Windows desktop and tray host | Tauri 2 desktop, native controller proxy, bundled MCP runtime, per-user integration path | Windows packaging/static contracts and preview artifact jobs | Clean Windows 11 VM lifecycle, packaged tray acceptance, production Authenticode |
-| Windows worker path | Current-user controller/worker task and data-directory ACL model; installer repair/rollback plumbing | Windows packaging tests plus live controller/worker round trip in merged-main [run 34004021556](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34004021556); bounded profile-matrix provider queries merged in `71aa3d7` | Independent real Windows controller-to-Windows-worker run with retained logs/artifacts |
+| Windows worker path | Current-user controller/worker task and data-directory ACL model; installer repair/rollback plumbing | Windows packaging tests plus live controller/worker round trip in merged-main [run 34008302124](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34008302124); clean Windows 11 ARM64 x64-emulation lifecycle/profile matrix passed in tagged [release run 34009492657](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34009492657) | Independent real Windows controller-to-Windows-worker run with retained logs/artifacts |
 | Linux worker packages | Linux x64 and arm64 Worker Kit archives, native shell/process-group paths, and systemd lifecycle packages | Tagged Linux artifact jobs, Worker Kit native/structural checks, and the preview.83 exact-SHA P1 controller/worker job | Repeat exact-SHA/native validation for each candidate; Issue #3's remaining platform gate is macOS |
 | macOS Worker Kits | x64 and arm64 archives, manifest/checksum/publisher-key contract, macOS capability reporting | Tagged macOS artifact jobs and kit contract checks | Real macOS host, LaunchAgent install/start/stop/restart, managed live run, and round trip |
 | Add Computer and credentials | GUI onboarding model, native credential-vault boundary, host-key fingerprint flow, password/agent/private-key paths | Static contract and local source review | Live authentication and cross-node GUI/MCP acceptance on supported hosts |
-| Desktop UX and localization | One state-aware three-step first-run path with a single contextual setup CTA, compact Add Computer form, collapsed advanced verification, compact first-run Computers empty state, quiet offline top bar, and persistent English/Simplified Chinese/Spanish/Japanese selection across dashboard, tasks, rules, integration evidence, provisioning, errors, and credential recovery | Chrome visual/interaction audit of the local `origin/main` UI plus four-language home/integration/computer checks, `html[lang]` persistence, zero console errors, 96 desktop tests, workspace lint/test/build, and preview.90 candidate checks | Keep the catalog review loop running for newly introduced backend diagnostics and confirm translated wording with native-language reviewers |
+| Desktop UX and localization | One state-aware three-step first-run path with a single contextual setup CTA, compact Add Computer form, collapsed advanced verification, compact first-run Computers empty state, quiet offline top bar, and persistent English/Simplified Chinese/Spanish/Japanese selection across dashboard, tasks, rules, integration evidence, provisioning, errors, and credential recovery | Chrome visual/interaction audit against the preview.90 candidate, four-language home/integration/computer checks, persistent `html[lang]`, and app-origin logs empty after filtering Chrome-extension noise; 96 desktop tests, workspace lint/test/build, and tagged preview.90 checks | Keep the catalog review loop running for newly introduced backend diagnostics and confirm translated wording with native-language reviewers |
 | Hostile-workload isolation | Linux dedicated identity/cgroup reconciliation hardening; Windows/macOS capability reporting and fail-closed scheduling boundary | Linux unit/native probes and static contracts | Windows Job Object + protected external guard, macOS external reconciliation, and a complete three-platform hostile matrix (Issue #5) |
 | Public release pipeline | Version identity, signed-kit metadata, SBOM/provenance/index validation, protected GA workflow | Main CI and preview producer jobs | All applicable issue gates, external evidence, protected production review, and independent post-download verification |
 
@@ -48,7 +46,7 @@ service-manager, credential, or cross-node acceptance gate.
 
 ## Current CI and release state
 
-- Merged-main source `71aa3d70ae5876758f846e5900e9c2ed1c8ac081` has CI run [`34004021556`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34004021556), CodeQL run [`34004021543`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34004021543), and dependency security run [`34004021553`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34004021553); all three completed successfully, including the live Windows controller/worker round trip.
+- Merged-main source `17eec6b6f2c7b81e7333659dff7d9b43ab24c673` (PR [#50](https://github.com/TypeThe0ry/ClusterYourCodex/pull/50)) has CI run [`34008302124`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34008302124), CodeQL run [`34008302110`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34008302110), and dependency security run [`34008302169`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34008302169); all three completed successfully, including the live Windows controller/worker round trip.
 - The tagged [`v0.1.0-preview.84` workflow](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33946635188) completed with one failure: **Clean Windows 11 ARM64 compatibility acceptance (x64 emulation)**. The first `standard-ascii` child timed out after 900 seconds while the elevated helper was cleaning up an auto-started `AtLogOn` task runtime. Producer jobs passed, but publication was skipped, so preview.84 is not a published release.
 - The merged preview.85 repair replaces the unbounded PowerShell task-unregister path with bounded native scheduler operations, binds exact-path validation and termination to one process handle, asks Task Scheduler to end running instances before fallback termination, requires a stable no-process window, reaps runtimes after both registration and rollback restoration, and preserves flattened helper-history evidence. Tagged run [`33968855403`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33968855403) completed successfully, including Windows x64 native lifecycle checks and clean Windows 11 ARM64 x64-emulation fresh deployment, silent Setup, and standard/admin ASCII/non-ASCII profile acceptance.
 - The merged preview.85 source also contains the first Chrome-audited desktop
@@ -95,15 +93,28 @@ service-manager, credential, or cross-node acceptance gate.
   remaining core-flow heartbeat/smoke-check English fallbacks from Spanish and
   Japanese. Desktop tests assert those strings and the 449-key catalog remains
   aligned. The no-ready panel conditional and its compact Chrome verification
-  are introduced and validated on the preview.90 candidate below, not on this
-  merged-main SHA.
-- The preview.90 candidate is the first release candidate built from the
-  merged PR #49 source plus the compact no-ready panel change. Its candidate
-  SHA is `752217dd3ec987df60d4b95dcc670859f374b631`; the Chrome smoke was run
-  against that SHA in English, Simplified Chinese, Spanish, and Japanese with
-  no console warnings/errors. The candidate keeps the public release pipeline
-  on the `prerelease=true` path and its required GitHub checks are recorded
-  against the same SHA before the annotated tag is created.
+  shipped in preview.90 after the candidate was merged and tagged.
+- Preview.90 is the first public release containing the compact no-ready panel
+  and the complete four-language core-flow catalog. It was merged through PR
+  [#50](https://github.com/TypeThe0ry/ClusterYourCodex/pull/50) at
+  `17eec6b6f2c7b81e7333659dff7d9b43ab24c673`, tagged as
+  [`v0.1.0-preview.90`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.90),
+  and published by tagged workflow
+  [`34009492657`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34009492657).
+  The Release is public (`isPrerelease=true`, `isDraft=false`). Its clean
+  Windows 11 ARM64 x64-emulation acceptance job
+  `101437742671` passed: fresh deployment completed at `05:57:45Z`/`06:10:39Z`,
+  silent Setup completed at `06:40:34Z`, the standard/admin/non-ASCII profile
+  matrix completed at `07:31:45Z`, and diagnostics upload completed at
+  `07:31:55Z`.
+- Preview.90 post-download verification was retained under the portable
+  artifact identifier `release-verification/preview.90-20260906-153326`
+  (the absolute verifier path is intentionally omitted). The retained
+  directory contains 23 Release assets, 11 per-file SHA-256 sidecars plus
+  `SHA256SUMS`, 10 release-index artifact records, the CycloneDX 1.6 SBOM, and
+  a provenance attestation with 10 subjects. Every downloaded sidecar and
+  `SHA256SUMS` entry matched its local SHA-256 (`shaErrors` empty); the index
+  binds product version `0.1.0-preview.90`, source tag, and source commit above.
 - The previously published preview.85 candidate was downloaded into a clean directory after publication.
   All 23 assets, 11 SHA-256 sidecars/SHA256SUMS records, 10 release-index
   records, the CycloneDX SBOM, and all 10 GitHub provenance attestations were
@@ -116,18 +127,23 @@ service-manager, credential, or cross-node acceptance gate.
 
 ### [Issue #2 — Windows one-click installer and desktop host](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
 
-The Windows-first implementation and packaging contracts are present. The open
-acceptance items are a clean Windows 11 standard/admin/non-ASCII profile and
-lifecycle matrix (Install → Repair → Upgrade → Rollback → Uninstall), a live
-Windows controller-to-worker round trip, packaged tray/one-click acceptance,
-and production Authenticode evidence.
+The Windows-first implementation and packaging contracts are present. Preview.90
+passed the clean Windows 11 ARM64 x64-emulation fresh deployment, silent Setup,
+and standard/admin/non-ASCII profile matrix in tagged workflow
+[`34009492657`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34009492657)
+(job `101437742671`). The open acceptance items are an independently retained
+Windows 11 standard/admin/non-ASCII Install → Repair → Upgrade → Rollback →
+Uninstall lifecycle, packaged tray/one-click acceptance, production
+Authenticode evidence, and an independent live Windows controller-to-worker
+run with retained logs/artifacts.
 
 ### [Issue #3 — Heterogeneous Linux and macOS worker packages](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3)
 
 Linux x64/arm64 and macOS x64/arm64 packages are built and structurally
-verified. Issue #3 stays open until a real macOS host proves the LaunchAgent
-lifecycle and managed controller round trip; CI archive creation alone is not
-runtime evidence.
+verified in preview.90, with checksums, SBOM, and provenance recorded in the
+release index. Issue #3 stays open until a real macOS host proves the
+LaunchAgent install/start/stop/restart lifecycle and managed controller round
+trip; CI archive creation alone is not runtime evidence.
 
 ### [Issue #5 — Opt-in hostile-workload isolation and external reconciliation](https://github.com/TypeThe0ry/ClusterYourCodex/issues/5)
 
