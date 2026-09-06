@@ -670,7 +670,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
         </div>
       </header>
 
-      {error ? (
+      {error && !showWizard ? (
         <div className="provisioning-error" role="alert">
           <span className="provisioning-error-icon"><span aria-hidden="true">!</span></span>
           <span className="provisioning-error-copy">
@@ -782,6 +782,19 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !operation) resetAndCloseWizard(); }}>
           <form className="computer-wizard" onSubmit={(event) => void start(event)}>
             <header><div><span className="eyebrow">{t("provision.title").toUpperCase()}</span><h2>{t("provision.connectSsh")}</h2><p>{t("provision.subtitle")}</p></div><button aria-label={t("common.close")} className="modal-close" disabled={Boolean(operation)} onClick={resetAndCloseWizard} type="button">×</button></header>
+            {error ? (
+              <div className="provisioning-error wizard-error" role="alert">
+                <span className="provisioning-error-icon"><span aria-hidden="true">!</span></span>
+                <span className="provisioning-error-copy">
+                  <strong>{localizedProvisioningError(error, t)}</strong>
+                  {error.retryable ? <small>{t("common.retryable")}</small> : null}
+                </span>
+                <details className="provisioning-error-details">
+                  <summary>{t("provision.showDetails")}</summary>
+                  <code>{error.code}</code>
+                </details>
+              </div>
+            ) : null}
             <div className="form-grid">
               <label className="wide">{t("provision.host")}<input autoFocus maxLength={1024} onChange={(event) => setForm({ ...form, host: event.target.value })} required value={form.host} /></label>
               <label className="wide">{t("provision.user")}<input maxLength={256} onChange={(event) => setForm({ ...form, username: event.target.value })} required value={form.username} /></label>

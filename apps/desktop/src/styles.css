@@ -569,6 +569,8 @@ button { color: inherit; }
 .provisioning-error-details { justify-self: end; color: #8d514a; font-size: 8px; }
 .provisioning-error-details summary { cursor: pointer; }
 .provisioning-error-details code { display: block; margin-top: 5px; color: #944c45; font-family: ui-monospace, Consolas, monospace; font-size: 7px; }
+.computer-wizard .wizard-error { margin: 14px 0 0; }
+.computer-wizard .wizard-error .provisioning-error-copy strong { white-space: normal; }
 .provisioning-workspace { display: grid; grid-template-columns: 270px minmax(0, 1fr); min-height: 520px; }
 .provisioning-record-list { padding: 9px; border-right: 1px solid #e8ebe7; background: #fafbf9; }
 .provisioning-record-list > button { width: 100%; min-height: 62px; display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 9px 10px; border: 1px solid transparent; border-radius: 9px; background: transparent; text-align: left; cursor: pointer; }

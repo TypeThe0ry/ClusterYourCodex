@@ -107,6 +107,20 @@ service-manager, credential, or cross-node acceptance gate.
   silent Setup completed at `06:40:34Z`, the standard/admin/non-ASCII profile
   matrix completed at `07:31:45Z`, and diagnostics upload completed at
   `07:31:55Z`.
+- The next mainline candidate keeps provisioning bridge/SSH failures visible
+  inside the Add Computer modal as well as in the page-level status panel. This
+  preserves the entered host/user fields for retry and keeps the localized
+  error plus technical-details disclosure in the user's active context; it is
+  not part of the immutable preview.90 assets until a new prerelease tag is
+  published.
+- The same candidate is now PR [#54](https://github.com/TypeThe0ry/ClusterYourCodex/pull/54)
+  at commit `9cb6fdbc3d72a3656e11faf436dec7f340594dfa`. It removes the duplicate
+  error while the wizard is open and shortens protected Windows credential
+  staging names. A same-host Windows live round-trip built all three binaries
+  from that revision and passed pairing, `queued` → `running` → `succeeded`,
+  heartbeat, logs, artifact, cleanup, process cleanup, and secret-scan checks.
+  This evidence does not replace cross-node, clean-VM, macOS, or hostile-workload
+  acceptance gates.
 - Preview.90 post-download verification was retained under the portable
   artifact identifier `release-verification/preview.90-20260906-153326`
   (the absolute verifier path is intentionally omitted). The retained
