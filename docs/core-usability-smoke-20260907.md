@@ -7,8 +7,8 @@ churn. It is source-bound to the current checkout and contains no credentials.
 ## Candidate and runtime
 
 - Repository checkout: `D:\Projects\ClusterYourCodex\ClusterYourCodex`
-- Product candidate: `0.1.0-preview.91`
-- Published tag: `v0.1.0-preview.91`
+- Product candidate: `0.1.0-preview.94` (local source candidate)
+- Published tag: `v0.1.0-preview.91` remains the last immutable public baseline
 - Published channel: GitHub public prerelease (`isPrerelease=true`,
   `isDraft=false`)
 - Local controller health: HTTP 200, API `cyc.dev/v1`, database `ok`
@@ -68,6 +68,16 @@ The Windows controller dependency also opts into the OpenSSL-backed libssh2
 backend so modern Linux workers with curve25519/ECDH-only KEX offers remain
 reachable. Local source tests pass; the Windows CI runner is the authoritative
 build check for the vendored OpenSSL toolchain.
+
+The next source-bound blocker was found by running the current Windows live
+round-trip probe rather than stopping at unit tests: the worker's rustls client
+negotiated HTTP/2 with the controller, but the shared reqwest dependency had
+HTTP/2 disabled, which made hyper-util panic before pairing. Preview.94 enables
+reqwest's `http2` feature. Rebuilding both binaries and rerunning the probe
+then passed pairing, node report, snapshot transfer, queued → running →
+succeeded, heartbeat, logs, artifact verification, cleanup, and process
+reaping; the retained acceptance marker is
+`windows controller/worker live round-trip passed`.
 
 ## Next highest-value action
 

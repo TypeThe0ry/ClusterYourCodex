@@ -7,6 +7,24 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.94] - 2026-09-07
+
+### Fixed
+
+- Enable HTTP/2 in the shared rustls-backed reqwest client. Current OpenSSH
+  controller/worker TLS endpoints can negotiate HTTP/2; without the feature,
+  worker pairing could panic inside hyper-util before the first enrollment
+  request completed.
+
+### Tests
+
+- Rebuilt the preview.94 controller and worker from one source checkout and
+  passed the real Windows controller/worker round trip: pairing, node report,
+  snapshot upload, queued → running → succeeded, heartbeat, stdout/stderr,
+  artifact download, cleanup, and process reaping.
+- `cyc-controller` tests: 127 passed; `cyc-worker` tests: 117 passed, 1
+  ignored; no failures.
+
 ## [0.1.0-preview.93] - 2026-09-07
 
 ### Fixed
@@ -1355,7 +1373,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.93...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.94...HEAD
+[0.1.0-preview.94]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.93...v0.1.0-preview.94
 [0.1.0-preview.93]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.92...v0.1.0-preview.93
 [0.1.0-preview.92]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.91...v0.1.0-preview.92
 [0.1.0-preview.91]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.90...v0.1.0-preview.91

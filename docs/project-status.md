@@ -7,10 +7,10 @@ change.
 
 - **Snapshot date:** 2026-09-07
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
-- **Snapshot baseline:** local candidate `v0.1.0-preview.93` (the immutable public baseline remains `v0.1.0-preview.91` until the tagged workflow completes)
+- **Snapshot baseline:** local candidate `v0.1.0-preview.94` (the immutable public baseline remains `v0.1.0-preview.91` until the tagged workflow completes)
 - **Latest published preview:** [`v0.1.0-preview.91`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.91), published from the annotated tag at the previous snapshot baseline; GitHub reports `isPrerelease=true` and `isDraft=false`. Tagged workflow [`34031465581`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34031465581) completed successfully, including the clean Windows 11 ARM64 profile matrix.
 - **Previous stable-testing exception:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85) remains immutable **stable-testing** (`isPrerelease=false`) for the explicitly authorized test channel. Its embedded product version is still a preview; it is not Certified GA.
-- **Release channels:** preview.93 is the next public prerelease candidate; preview.91 remains the immutable public fallback until its tagged validation completes. Certified GA remains blocked by the open Issue #2, #3, and #5 acceptance gates; no `prerelease=false` Certified GA release has been created.
+- **Release channels:** preview.94 is the next public prerelease candidate; preview.91 remains the immutable public fallback until the tagged validation for preview.93/preview.94 completes. Certified GA remains blocked by the open Issue #2, #3, and #5 acceptance gates; no `prerelease=false` Certified GA release has been created.
 
 ## Current delivery goal: core usability before polish
 
@@ -37,7 +37,7 @@ The priority remains the usable Add Computer → credential → install/pair →
 job/result path; non-blocking defect cleanup and additional PR splitting are
 deliberately lower priority until that path is exercised on the packaged host.
 
-The current working tree contains two core-path repairs found during the first
+The current working tree contains three core-path repairs found during the first
 native Helio attempt: the WebView2 `tauri.localhost` bridge now accepts its
 `undefined` URL-credential representation, and Windows SSH lifecycle commands
 now preserve named PowerShell parameter binding. A direct Helio probe with the
@@ -45,6 +45,14 @@ fixed renderer returned a successful worker-install receipt. The Windows SSH
 transport also selects the OpenSSL-backed libssh2 backend for modern Linux KEX
 compatibility. These changes are staged for the next public prerelease; the
 published `preview.91` binary remains immutable.
+
+The current source also enables HTTP/2 in the shared rustls-backed reqwest
+client. A real Windows preview.94 controller/worker probe initially exposed a
+hyper-util panic when the controller negotiated HTTP/2; after the feature fix,
+the rebuilt binaries passed pairing, node report, snapshot transfer, queued →
+running → succeeded, heartbeat, logs, artifact verification, cleanup, and
+process reaping. This is the highest-value core usability fix; UI polish and
+non-blocking defects remain feedback backlog items.
 
 ## What the product does
 
