@@ -661,7 +661,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
   const actions = selected ? actionsForProvisioning(selected) : [];
   const selectedAutoBusy = selected ? autoInFlight.current.has(selected.id) : false;
   return (
-    <section className="panel page-panel provisioning-panel">
+    <section className={`panel page-panel provisioning-panel${computers.length ? "" : " is-empty"}`}>
       <header className="panel-header with-actions">
         <div><h3>{t("provision.title")}</h3><p>{t("provision.subtitle")}</p></div>
         <div className="provisioning-header-actions">

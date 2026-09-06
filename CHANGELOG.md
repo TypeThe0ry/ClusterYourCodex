@@ -7,6 +7,10 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+No unreleased changes.
+
+## [0.1.0-preview.90] - 2026-09-06
+
 ### Fixed
 
 - Complete the Spanish and Japanese desktop catalogs so controller errors,
@@ -19,6 +23,9 @@ are versioned independently from the product.
 - Bound Windows profile-matrix CIM lookups so a stalled WMI provider cannot
   strand the elevated helper indefinitely; the harness now fails with retained
   diagnostics and lets the release workflow continue to cleanup.
+- Keep the first-run Computers page focused by hiding the empty ready-worker
+  panel until at least one connected node exists; the Add Computer action and
+  its single empty state remain visible in one compact panel.
 
 ### Tests
 
@@ -26,6 +33,8 @@ are versioned independently from the product.
   Chrome; confirm locale persistence, `html[lang]`, collapsed advanced options,
   and a clean browser console.
 - Re-run the desktop TypeScript lint and 96-test suite after the catalog update.
+- Verify the compact first-run Computers layout in Chrome across English,
+  Simplified Chinese, Spanish, and Japanese with no console errors.
 
 ## [0.1.0-preview.89] - 2026-09-06
 
@@ -1292,7 +1301,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.89...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.90...HEAD
+[0.1.0-preview.90]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.89...v0.1.0-preview.90
 [0.1.0-preview.89]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.88...v0.1.0-preview.89
 [0.1.0-preview.88]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.87...v0.1.0-preview.88
 [0.1.0-preview.87]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.86...v0.1.0-preview.87

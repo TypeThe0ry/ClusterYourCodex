@@ -559,6 +559,7 @@ button { color: inherit; }
 .computers-layout { display: grid; gap: 18px; }
 .computers-layout .page-panel { min-height: 0; }
 .provisioning-panel { min-height: 430px; overflow: hidden; }
+.provisioning-panel.is-empty { min-height: 0; }
 .provisioning-header-actions { display: flex; gap: 8px; }
 .provisioning-error { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; margin: 14px 20px 0; padding: 11px 13px; border: 1px solid #ead3cf; border-radius: 9px; background: #fbf3f2; }
 .provisioning-error-icon { width: 22px; height: 22px; display: grid; place-items: center; color: #fff; border-radius: 50%; background: #a65b52; font-size: 11px; font-weight: 750; }
@@ -628,7 +629,7 @@ button { color: inherit; }
 .button-danger { color: #9a4b44; border: 1px solid #ead2cf; background: #fbf2f1; }
 .button-danger:hover { background: #f6e5e3; }
 .record-meta { display: block; margin-top: 12px; color: #9aa19c; font-size: 7px; }
-.provisioning-empty { min-height: 310px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 35px; text-align: center; }
+.provisioning-empty { min-height: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 28px 35px; text-align: center; }
 .provisioning-empty strong { font-size: 12px; }
 .provisioning-empty p { margin: 7px 0 16px; color: #8d958f; font-size: 9px; }
 
