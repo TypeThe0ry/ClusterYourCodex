@@ -114,7 +114,7 @@ service-manager, credential, or cross-node acceptance gate.
   not part of the immutable preview.90 assets until a new prerelease tag is
   published.
 - The same candidate is now PR [#54](https://github.com/TypeThe0ry/ClusterYourCodex/pull/54)
-  at commit `5050a6067d1f080754d8d79e8b28e73f3a521c93`. It removes the duplicate
+  at commit `9cb6fdbc3d72a3656e11faf436dec7f340594dfa`. It removes the duplicate
   error while the wizard is open and shortens protected Windows credential
   staging names. A same-host Windows live round-trip built all three binaries
   from that revision and passed pairing, `queued` → `running` → `succeeded`,
