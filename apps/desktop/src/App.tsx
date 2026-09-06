@@ -410,20 +410,14 @@ function ComputersPage({ fleet, addRequest }: { fleet?: FleetInfo; addRequest: n
   return (
     <div className="computers-layout">
       <ProvisioningComputers addRequest={addRequest} />
-      <section className="panel page-panel">
-        <header className="panel-header">
-          <div><h3>{t("computers.connectedTitle")}</h3><p>{t("computers.connectedDescription")}</p></div>
-        </header>
-        {nodes.length ? (
+      {nodes.length ? (
+        <section className="panel page-panel">
+          <header className="panel-header">
+            <div><h3>{t("computers.connectedTitle")}</h3><p>{t("computers.connectedDescription")}</p></div>
+          </header>
           <div className="node-list full">{nodes.map((node) => <NodeRow key={node.id} node={node} />)}</div>
-        ) : (
-          <EmptyState
-            icon="computer"
-            title={t("computers.noReadyTitle")}
-            copy={t("computers.noReadyDescription")}
-          />
-        )}
-      </section>
+        </section>
+      ) : null}
     </div>
   );
 }
