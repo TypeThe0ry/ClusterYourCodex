@@ -7,10 +7,10 @@ change.
 
 - **Snapshot date:** 2026-09-07
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
-- **Snapshot baseline:** local candidate `v0.1.0-preview.95` (the immutable public baseline remains `v0.1.0-preview.91` until the tagged workflow completes)
-- **Latest published preview:** [`v0.1.0-preview.91`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.91), published from the annotated tag at the previous snapshot baseline; GitHub reports `isPrerelease=true` and `isDraft=false`. Tagged workflow [`34031465581`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34031465581) completed successfully, including the clean Windows 11 ARM64 profile matrix.
+- **Snapshot baseline:** public candidate `v0.1.0-preview.95`, source commit `6d06f84f3c95d6be8d5151a8950065f0602d651b`; the local checkout and GitHub release index resolve to the same tag and commit.
+- **Latest published preview:** [`v0.1.0-preview.95`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.95), published by tagged workflow [`34052588313`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34052588313); GitHub reports `isPrerelease=true` and `isDraft=false`, with 23 release assets. The Windows x64 self-contained and clean Windows 11 ARM64 acceptance jobs completed successfully.
 - **Previous stable-testing exception:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85) remains immutable **stable-testing** (`isPrerelease=false`) for the explicitly authorized test channel. Its embedded product version is still a preview; it is not Certified GA.
-- **Release channels:** preview.95 is the next public prerelease candidate; preview.91 remains the immutable public fallback after the stalled preview.94 workflow was canceled before publication. Certified GA remains blocked by the open Issue #2, #3, and #5 acceptance gates; no `prerelease=false` Certified GA release has been created.
+- **Release channels:** preview.95 is the current public prerelease; preview.91 remains an older immutable fallback after the stalled preview.94 workflow was canceled before publication. Certified GA remains blocked by the open Issue #2, #3, and #5 acceptance gates; no `prerelease=false` Certified GA release has been created.
 
 ## Current delivery goal: core usability before polish
 
@@ -43,8 +43,8 @@ native Helio attempt: the WebView2 `tauri.localhost` bridge now accepts its
 now preserve named PowerShell parameter binding. A direct Helio probe with the
 fixed renderer returned a successful worker-install receipt. The Windows SSH
 transport also selects the OpenSSL-backed libssh2 backend for modern Linux KEX
-compatibility. These changes are staged for the next public prerelease; the
-published `preview.91` binary remains immutable.
+compatibility. These changes are included in the published `preview.95`
+prerelease; the older `preview.91` binary remains immutable.
 
 The current source also enables HTTP/2 in the shared rustls-backed reqwest
 client. A real Windows preview.95 controller/worker probe initially exposed a
@@ -76,7 +76,7 @@ capability until the opt-in isolation contract in Issue #5 is complete.
 | --- | --- | --- | --- |
 | Controller, protocol, scheduler, CLI | Rust controller/worker/protocol/scheduler crates and typed workload placement | Merged-main CI [run 34008302124](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34008302124) passed Rust tests on Ubuntu, macOS, and Windows plus the live Windows controller/worker round trip | Live cross-node GUI/MCP round trip |
 | Windows desktop and tray host | Tauri 2 desktop, native controller proxy, bundled MCP runtime, per-user integration path | Windows packaging/static contracts and preview artifact jobs | Clean Windows 11 VM lifecycle, packaged tray acceptance, production Authenticode |
-| Windows worker path | Current-user controller/worker task and data-directory ACL model; installer repair/rollback plumbing | Windows packaging tests, clean Windows 11 ARM64 x64-emulation lifecycle/profile matrix, and the real preview.91 Helio round-trip recorded in [live-windows-preview91-helio-roundtrip.md](live-windows-preview91-helio-roundtrip.md) | Independent cross-machine Windows controller-to-Windows-worker run with retained logs/artifacts; clean-VM and production-signing gates remain separate |
+| Windows worker path | Current-user controller/worker task and data-directory ACL model; installer repair/rollback plumbing | Windows packaging tests, clean Windows 11 ARM64 x64-emulation lifecycle/profile matrix, and the real preview.91 Helio round-trip recorded in [live-windows-preview91-helio-roundtrip.md](live-windows-preview91-helio-roundtrip.md); preview.95 local controller/worker round-trip is recorded in [live-windows-preview95-local-roundtrip.md](live-windows-preview95-local-roundtrip.md) | Independent cross-machine Windows controller-to-Windows-worker run with retained logs/artifacts; clean-VM and production-signing gates remain separate |
 | Linux worker packages | Linux x64 and arm64 Worker Kit archives, native shell/process-group paths, and systemd lifecycle packages | Tagged Linux artifact jobs, Worker Kit native/structural checks, and the real preview.91 P1 controller/worker round-trip recorded in [live-linux-preview91-p1-roundtrip.md](live-linux-preview91-p1-roundtrip.md) | Repeat exact-SHA/native validation for each candidate; Issue #3's remaining platform gate is macOS |
 | macOS Worker Kits | x64 and arm64 archives, manifest/checksum/publisher-key contract, macOS capability reporting | Tagged macOS artifact jobs and kit contract checks | Real macOS host, LaunchAgent install/start/stop/restart, managed live run, and round trip |
 | Add Computer and credentials | GUI onboarding model, native credential-vault boundary, host-key fingerprint flow, password/agent/private-key paths | Static contract and local source review | Live authentication and cross-node GUI/MCP acceptance on supported hosts |

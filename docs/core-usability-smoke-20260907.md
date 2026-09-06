@@ -8,9 +8,9 @@ churn. It is source-bound to the current checkout and contains no credentials.
 
 - Repository checkout: `D:\Projects\ClusterYourCodex\ClusterYourCodex`
 - Product candidate: `0.1.0-preview.95` (local source candidate)
-- Published tag: `v0.1.0-preview.91` remains the last immutable public baseline
+- Published tag: `v0.1.0-preview.95` is the current immutable public prerelease candidate, bound to source commit `6d06f84f3c95d6be8d5151a8950065f0602d651b`
 - Published channel: GitHub public prerelease (`isPrerelease=true`,
-  `isDraft=false`)
+  `isDraft=false`), tagged workflow `34052588313`
 - Local controller health: HTTP 200, API `cyc.dev/v1`, database `ok`
 - Native desktop host: packaged Windows preview launched and remained
   responsive as `ClusterYourCodex.exe`
@@ -61,8 +61,7 @@ properties are `undefined` rather than empty strings, so the old origin gate
 returned before defining `window.__CLUSTER_YOUR_CODEX__`. The bridge now accepts
 both WebView2 and Chromium empty-credential forms while retaining the existing
 protocol, host, and port checks. The native source build and bridge regression
-test pass; the next public preview must carry this build before claiming the
-GUI Add Computer path is ready.
+test pass; the published preview.95 candidate carries this build.
 
 The Windows controller dependency also opts into the OpenSSL-backed libssh2
 backend so modern Linux workers with curve25519/ECDH-only KEX offers remain
@@ -72,8 +71,8 @@ build check for the vendored OpenSSL toolchain.
 The next source-bound blocker was found by running the current Windows live
 round-trip probe rather than stopping at unit tests: the worker's rustls client
 negotiated HTTP/2 with the controller, but the shared reqwest dependency had
-HTTP/2 disabled, which made hyper-util panic before pairing. Preview.94 enables
-reqwest's `http2` feature. Rebuilding both binaries and rerunning the probe
+HTTP/2 disabled, which made hyper-util panic before pairing. Preview.95 carries
+the `http2` feature fix. Rebuilding both binaries and rerunning the probe
 then passed pairing, node report, snapshot transfer, queued → running →
 succeeded, heartbeat, logs, artifact verification, cleanup, and process
 reaping; the retained acceptance marker is
