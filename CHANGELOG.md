@@ -7,7 +7,7 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
-## [0.1.0-preview.92] - 2026-09-07
+## [0.1.0-preview.93] - 2026-09-07
 
 ### Fixed
 
@@ -32,6 +32,9 @@ are versioned independently from the product.
   Windows worker installer and returned a successful unpaired-install receipt;
   the previous renderer returned `ValidateSet` failure before the installer
   could run.
+- Keep the encoded PowerShell regression test compatible with the release
+  workflow's Rust 1.98 `-D warnings` Clippy profile by decoding UTF-16 with
+  fixed-size chunks.
 
 ## [0.1.0-preview.91] - 2026-09-06
 
@@ -1352,7 +1355,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.92...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.93...HEAD
+[0.1.0-preview.93]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.92...v0.1.0-preview.93
 [0.1.0-preview.92]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.91...v0.1.0-preview.92
 [0.1.0-preview.91]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.90...v0.1.0-preview.91
 [0.1.0-preview.90]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.89...v0.1.0-preview.90

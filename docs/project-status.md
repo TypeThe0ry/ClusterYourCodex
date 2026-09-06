@@ -7,10 +7,10 @@ change.
 
 - **Snapshot date:** 2026-09-07
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
-- **Snapshot baseline:** local candidate `v0.1.0-preview.92` (the immutable public baseline remains `v0.1.0-preview.91` until the tagged workflow completes)
+- **Snapshot baseline:** local candidate `v0.1.0-preview.93` (the immutable public baseline remains `v0.1.0-preview.91` until the tagged workflow completes)
 - **Latest published preview:** [`v0.1.0-preview.91`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.91), published from the annotated tag at the previous snapshot baseline; GitHub reports `isPrerelease=true` and `isDraft=false`. Tagged workflow [`34031465581`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34031465581) completed successfully, including the clean Windows 11 ARM64 profile matrix.
 - **Previous stable-testing exception:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85) remains immutable **stable-testing** (`isPrerelease=false`) for the explicitly authorized test channel. Its embedded product version is still a preview; it is not Certified GA.
-- **Release channels:** preview.92 is the next public prerelease candidate; preview.91 remains the immutable public fallback until its tagged validation completes. Certified GA remains blocked by the open Issue #2, #3, and #5 acceptance gates; no `prerelease=false` Certified GA release has been created.
+- **Release channels:** preview.93 is the next public prerelease candidate; preview.91 remains the immutable public fallback until its tagged validation completes. Certified GA remains blocked by the open Issue #2, #3, and #5 acceptance gates; no `prerelease=false` Certified GA release has been created.
 
 ## Current delivery goal: core usability before polish
 

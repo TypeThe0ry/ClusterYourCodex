@@ -5,7 +5,7 @@ container, GPU, and batch workloads on the best compatible computer in a
 user-owned fleet, then return verified logs and artifacts.
 
 > **Release status:** Windows-first public developer preview
-> `v0.1.0-preview.92` is the next public non-draft GitHub prerelease candidate. The Windows
+> `v0.1.0-preview.93` is the next public non-draft GitHub prerelease candidate. The Windows
 > controller/desktop and trusted-job Windows/Linux worker paths are
 > implemented and CI-verified, but password/agent/private-key live authentication
 > and cross-node GUI/MCP acceptance are still pending. macOS x64/arm64 archives
