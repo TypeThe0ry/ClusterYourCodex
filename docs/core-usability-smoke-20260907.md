@@ -45,6 +45,30 @@ do not by themselves close the remaining native GUI Add Computer and clean-VM
 acceptance gates. Stable GA remains blocked; future public builds stay
 prereleases until those gates are independently satisfied.
 
+## Core-path blockers found and corrected after the smoke
+
+The first native Add Computer attempt against Helio reached
+`host_key_pending` and inventory successfully, then stopped at `kit_staged`
+with the generic `WORKER_LIFECYCLE_FAILED` code. A direct transport probe
+captured the real cause: the Windows PowerShell command renderer array-splatted
+`-Action` as a literal positional value, so `Install-Worker.ps1` rejected it
+before any worker mutation. The renderer now uses an explicit named-parameter
+hashtable; the same Helio installer invocation returns the expected
+`succeeded=true`, `paired=false`, `serviceEnabled=false` receipt.
+
+The packaged WebView2 host exposed the second blocker: its URL credential
+properties are `undefined` rather than empty strings, so the old origin gate
+returned before defining `window.__CLUSTER_YOUR_CODEX__`. The bridge now accepts
+both WebView2 and Chromium empty-credential forms while retaining the existing
+protocol, host, and port checks. The native source build and bridge regression
+test pass; the next public preview must carry this build before claiming the
+GUI Add Computer path is ready.
+
+The Windows controller dependency also opts into the OpenSSL-backed libssh2
+backend so modern Linux workers with curve25519/ECDH-only KEX offers remain
+reachable. Local source tests pass; the Windows CI runner is the authoritative
+build check for the vendored OpenSSL toolchain.
+
 ## Next highest-value action
 
 Use the packaged preview desktop host for one operator-driven Add Computer

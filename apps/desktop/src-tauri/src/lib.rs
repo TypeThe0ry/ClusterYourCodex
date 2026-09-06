@@ -190,7 +190,11 @@ fn show_main_window(app: &tauri::AppHandle) {
 // token path, bearer token, or header injection primitive.
 const BRIDGE_INITIALIZATION_SCRIPT: &str = r#"
 (() => {
-  const noCredentials = location.username === "" && location.password === "";
+  // WebView2 exposes empty URL credentials as `undefined`, while Chromium
+  // browser tabs commonly expose them as an empty string. Treat both forms
+  // as the no-credentials case so the native bridge is available in the
+  // packaged desktop host without widening the trusted-origin check.
+  const noCredentials = !location.username && !location.password;
   const trusted = noCredentials && ((location.protocol === "tauri:" &&
       location.hostname === "localhost" && location.port === "") ||
     ((location.protocol === "http:" || location.protocol === "https:") &&
@@ -1180,6 +1184,11 @@ mod tests {
         ] {
             assert!(!BRIDGE_INITIALIZATION_SCRIPT.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn bridge_script_accepts_webview2_undefined_url_credentials() {
+        assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("!location.username && !location.password"));
     }
 
     #[test]

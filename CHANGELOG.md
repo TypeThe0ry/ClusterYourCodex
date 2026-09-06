@@ -7,7 +7,31 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
-No unreleased changes.
+## [0.1.0-preview.92] - 2026-09-07
+
+### Fixed
+
+- Make the native WebView2 bridge trust gate treat `undefined` URL credentials
+  as the empty-credential case exposed by `tauri.localhost`, so the packaged
+  desktop host can expose the provisioning bridge without widening the origin
+  allowlist.
+- Fix Windows SSH lifecycle invocation: PowerShell named parameters are now
+  passed through a hashtable splat instead of an array splat, so `-Action
+  Install` binds to the installer parameter rather than being treated as a
+  positional value.
+- Use the OpenSSL-backed Windows libssh2 build so the controller advertises
+  curve25519/ECDH key exchange methods accepted by current Linux OpenSSH
+  workers.
+
+### Tests
+
+- `cyc-ssh`: 14 tests passed, including encoded PowerShell named-parameter
+  regression coverage.
+- `cyc-provision`: 36 unit tests and 25 state-machine tests passed.
+- A direct Helio lifecycle probe using the fixed command renderer reached the
+  Windows worker installer and returned a successful unpaired-install receipt;
+  the previous renderer returned `ValidateSet` failure before the installer
+  could run.
 
 ## [0.1.0-preview.91] - 2026-09-06
 
@@ -1328,7 +1352,8 @@ No unreleased changes.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.91...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.92...HEAD
+[0.1.0-preview.92]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.91...v0.1.0-preview.92
 [0.1.0-preview.91]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.90...v0.1.0-preview.91
 [0.1.0-preview.90]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.89...v0.1.0-preview.90
 [0.1.0-preview.89]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.88...v0.1.0-preview.89

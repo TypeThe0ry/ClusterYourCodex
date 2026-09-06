@@ -10,8 +10,16 @@ rust-version.workspace = true
 base64.workspace = true
 cyc-secrets = { path = "../cyc-secrets" }
 sha2.workspace = true
-ssh2.workspace = true
 thiserror.workspace = true
+
+# Current OpenSSH Linux servers advertise curve25519/ECDH KEX methods that
+# the Windows-native libssh2 BCrypt backend omits. Use the OpenSSL backend on
+# Windows so the desktop controller can connect to modern Linux workers.
+[target.'cfg(windows)'.dependencies]
+ssh2 = { version = "0.9", default-features = false, features = ["openssl-on-win32", "vendored-openssl"] }
+
+[target.'cfg(not(windows))'.dependencies]
+ssh2.workspace = true
 
 [dev-dependencies]
 uuid.workspace = true

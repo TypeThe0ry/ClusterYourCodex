@@ -146,6 +146,7 @@ pub enum FixedCommand {
     WindowsPowerShellScript {
         remote_path: RemotePath,
         arguments: Vec<CommandArgument>,
+        named_arguments: bool,
     },
 }
 
@@ -163,6 +164,7 @@ impl fmt::Debug for FixedCommand {
             Self::WindowsPowerShellScript {
                 remote_path,
                 arguments,
+                ..
             } => formatter
                 .debug_struct("WindowsPowerShellScript")
                 .field("remote_path", remote_path)
@@ -190,6 +192,22 @@ impl FixedCommand {
         Self::WindowsPowerShellScript {
             remote_path,
             arguments: arguments.into_iter().collect(),
+            named_arguments: false,
+        }
+    }
+
+    /// Builds a Windows PowerShell invocation whose arguments are alternating
+    /// named-parameter tokens and values (for example `-Action`, `Install`).
+    /// The renderer uses a hashtable splat so script parameter binding remains
+    /// named across the SSH shell boundary.
+    pub fn windows_powershell_script_with_named_arguments(
+        remote_path: RemotePath,
+        arguments: impl IntoIterator<Item = CommandArgument>,
+    ) -> Self {
+        Self::WindowsPowerShellScript {
+            remote_path,
+            arguments: arguments.into_iter().collect(),
+            named_arguments: true,
         }
     }
 
@@ -209,17 +227,53 @@ impl FixedCommand {
             Self::WindowsPowerShellScript {
                 remote_path,
                 arguments,
+                named_arguments,
             } => {
-                let mut script = String::from("$ErrorActionPreference='Stop';$cycArgs=@(");
-                for (index, argument) in arguments.iter().enumerate() {
-                    if index > 0 {
-                        script.push(',');
-                    }
-                    script.push_str(&quote_powershell(argument.as_str()));
-                }
-                script.push_str("); & ");
+                // PowerShell array splatting passes string elements as
+                // positional input to a script, so `@('-Action','Install')`
+                // binds the literal `-Action` to the Action parameter and
+                // fails ValidateSet. Lifecycle callers provide named pairs;
+                // convert those pairs into a hashtable splat so PowerShell
+                // performs real named binding. Discovery/cleanup callers
+                // remain positional and keep independent quoting.
+                let mut script = String::from("$ErrorActionPreference='Stop';& ");
                 script.push_str(&quote_powershell(remote_path.as_str()));
-                script.push_str(" @cycArgs; if($null -ne $LASTEXITCODE){exit $LASTEXITCODE}");
+                let named = *named_arguments;
+                if named {
+                    script = String::from("$ErrorActionPreference='Stop';$cycParams=@{");
+                    let mut index = 0usize;
+                    while index < arguments.len() {
+                        let name = arguments[index].as_str();
+                        let key = name.strip_prefix('-').unwrap_or(name);
+                        script.push_str(&quote_powershell(key));
+                        script.push('=');
+                        if let Some(value) = arguments.get(index + 1) {
+                            if value.as_str().starts_with('-') {
+                                script.push_str("$true");
+                                index += 1;
+                            } else {
+                                script.push_str(&quote_powershell(value.as_str()));
+                                index += 2;
+                            }
+                        } else {
+                            script.push_str("$true");
+                            index += 1;
+                        }
+                        script.push(';');
+                    }
+                    script.push_str("}; & ");
+                    script.push_str(&quote_powershell(remote_path.as_str()));
+                    script.push_str(" @cycParams");
+                } else {
+                    for argument in arguments {
+                        script.push(' ');
+                        script.push_str(&quote_powershell(argument.as_str()));
+                    }
+                    script.push_str("; if($null -ne $LASTEXITCODE){exit $LASTEXITCODE}");
+                }
+                if named {
+                    script.push_str("; if($null -ne $LASTEXITCODE){exit $LASTEXITCODE}");
+                }
                 let utf16le = script
                     .encode_utf16()
                     .flat_map(u16::to_le_bytes)
@@ -1168,6 +1222,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    use base64::Engine as _;
     use cyc_secrets::Secret;
     use uuid::Uuid;
 
@@ -1216,6 +1271,36 @@ mod tests {
         assert!(rendered.starts_with("powershell.exe -NoLogo -NoProfile -NonInteractive"));
         assert!(rendered.contains(" -EncodedCommand "));
         assert!(!rendered.contains("Remove-Item"));
+    }
+
+    #[test]
+    fn powershell_named_arguments_use_parameter_splatting() {
+        let command = FixedCommand::windows_powershell_script_with_named_arguments(
+            RemotePath::new("C:\\CYC Work\\install.ps1").expect("path"),
+            [
+                CommandArgument::new("-Action").unwrap(),
+                CommandArgument::new("Install").unwrap(),
+                CommandArgument::new("-PairOnly").unwrap(),
+            ],
+        );
+        let rendered = command.render();
+        let encoded = rendered
+            .split_once(" -EncodedCommand ")
+            .expect("encoded command")
+            .1;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("base64");
+        let script = String::from_utf16(
+            &bytes
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect::<Vec<_>>(),
+        )
+        .expect("utf16");
+        assert!(script.contains("$cycParams=@{'Action'='Install';'PairOnly'=$true;};"));
+        assert!(script.contains("& 'C:\\CYC Work\\install.ps1' @cycParams"));
+        assert!(!script.contains("'-Action'"));
     }
 
     #[test]
