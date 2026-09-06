@@ -5,7 +5,7 @@ the current checkout and live GitHub state, rather than on chat history. Update
 it in the same pull request as every implementation, CI, packaging, or release
 change.
 
-- **Snapshot date:** 2026-09-06
+- **Snapshot date:** 2026-09-07
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
 - **Snapshot baseline:** `origin/main` at `84260a6b92b3ea12c2b570429883c056e8fdcea5` (tagged `v0.1.0-preview.91` core-usability candidate)
 - **Latest published preview:** [`v0.1.0-preview.91`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.91), published from the annotated tag at the snapshot baseline; GitHub reports `isPrerelease=true` and `isDraft=false`. Tagged workflow [`34031465581`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34031465581) completed successfully, including the clean Windows 11 ARM64 profile matrix.
@@ -28,6 +28,14 @@ controller/worker job round trip with exit code `0`. The browser preview is
 useful for UI inspection, but Add Computer and native integration actions
 require the Tauri desktop bridge; a browser `bridge_unavailable` result is an
 environment boundary, not a successful provisioning run.
+
+The 2026-09-07 core-usability smoke adds 96 renderer tests, 78 native desktop
+host tests, a successful native host compile, a local controller health check,
+and Chrome checks for the four shipped locales. The complete source-bound
+record is [docs/core-usability-smoke-20260907.md](core-usability-smoke-20260907.md).
+The priority remains the usable Add Computer → credential → install/pair →
+job/result path; non-blocking defect cleanup and additional PR splitting are
+deliberately lower priority until that path is exercised on the packaged host.
 
 ## What the product does
 
