@@ -5,8 +5,9 @@ container, GPU, and batch workloads on the best compatible computer in a
 user-owned fleet, then return verified logs and artifacts.
 
 > **Release status:** Windows-first public developer preview `v0.1.0-preview.90`;
-> `v0.1.0-preview.91` is the next CI-verified prerelease candidate and will be
-> public only after its merge and tagged release workflow complete.
+> tagged candidate `v0.1.0-preview.91` is undergoing its tagged release
+> workflow and will become the next public non-draft prerelease only after that
+> workflow completes.
 > The Windows controller/desktop and trusted-job Windows/Linux worker paths are
 > implemented and CI-verified, but password/agent/private-key live authentication
 > and cross-node GUI/MCP acceptance are still pending. macOS x64/arm64 archives

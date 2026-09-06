@@ -7,11 +7,28 @@ change.
 
 - **Snapshot date:** 2026-09-06
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
-- **Snapshot baseline:** `origin/main` at `a103306` (merged PR #54, core usability candidate after Windows round-trip and wizard-error fixes)
+- **Snapshot baseline:** `origin/main` at `84260a6b92b3ea12c2b570429883c056e8fdcea5` (tagged `v0.1.0-preview.91` core-usability candidate)
 - **Latest published preview:** [`v0.1.0-preview.90`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.90), published from the annotated tag at the merged SHA; GitHub reports `isPrerelease=true` and `isDraft=false`
-- **Next public candidate:** `v0.1.0-preview.91` is prepared from merged PR #54 and will be published as a non-draft prerelease after this version-bump PR merges; CI run [`34025408108`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34025408108) passed the full required matrix, including the Windows live round trip.
+- **Current tagged candidate:** [`v0.1.0-preview.91`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.91) is tagged at the snapshot baseline; its release workflow [`34031465581`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34031465581) is still running the clean Windows 11 ARM64 profile matrix, so the public release remains preview.90 until that workflow reaches a publishable terminal state.
 - **Previous stable-testing exception:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85) remains immutable **stable-testing** (`isPrerelease=false`) for the explicitly authorized test channel. Its embedded product version is still a preview; it is not Certified GA.
 - **Release channels:** preview.90 is the current public prerelease. Certified GA remains blocked by the open Issue #2, #3, and #5 acceptance gates; no `prerelease=false` Certified GA release has been created.
+
+## Current delivery goal: core usability before polish
+
+The active delivery goal is deliberately narrower than the full GA checklist:
+prove that a user can start the controller, add a computer, retain the SSH
+credential through the native boundary, install and pair a worker, submit a
+typed job, and receive the result and logs. This gate has priority over
+non-blocking bug cleanup, visual polish, and additional PR splitting. Those
+items move to the feedback backlog after the core path is usable.
+
+Fresh local evidence for the current candidate includes Windows Credential
+Manager round-trip (`1 passed`), provisioning state-machine coverage (`25
+passed`), SSH transport coverage (`13 passed`), and a Windows
+controller/worker job round trip with exit code `0`. The browser preview is
+useful for UI inspection, but Add Computer and native integration actions
+require the Tauri desktop bridge; a browser `bridge_unavailable` result is an
+environment boundary, not a successful provisioning run.
 
 ## What the product does
 
