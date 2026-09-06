@@ -670,7 +670,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
         </div>
       </header>
 
-      {error ? (
+      {error && !showWizard ? (
         <div className="provisioning-error" role="alert">
           <span className="provisioning-error-icon"><span aria-hidden="true">!</span></span>
           <span className="provisioning-error-copy">
