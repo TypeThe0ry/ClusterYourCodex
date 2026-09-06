@@ -7,7 +7,7 @@ churn. It is source-bound to the current checkout and contains no credentials.
 ## Candidate and runtime
 
 - Repository checkout: `D:\Projects\ClusterYourCodex\ClusterYourCodex`
-- Product candidate: `0.1.0-preview.94` (local source candidate)
+- Product candidate: `0.1.0-preview.95` (local source candidate)
 - Published tag: `v0.1.0-preview.91` remains the last immutable public baseline
 - Published channel: GitHub public prerelease (`isPrerelease=true`,
   `isDraft=false`)

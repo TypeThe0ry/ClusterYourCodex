@@ -7,6 +7,20 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.95] - 2026-09-07
+
+### Changed
+
+- Carry the preview.94 core-usability candidate forward as a new public
+  prerelease candidate after its tagged artifact workflow was canceled while
+  stalled. The HTTP/2 transport fix and core-first delivery boundary are
+  unchanged; no stable-GA gate is relaxed.
+
+### Tests
+
+- Rebuilt the controller and worker from the preview.95 checkout and reran the
+  Windows controller/worker round trip before tagging this candidate.
+
 ## [0.1.0-preview.94] - 2026-09-07
 
 ### Fixed
@@ -1373,7 +1387,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.94...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.95...HEAD
+[0.1.0-preview.95]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.94...v0.1.0-preview.95
 [0.1.0-preview.94]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.93...v0.1.0-preview.94
 [0.1.0-preview.93]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.92...v0.1.0-preview.93
 [0.1.0-preview.92]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.91...v0.1.0-preview.92
