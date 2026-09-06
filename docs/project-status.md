@@ -93,13 +93,17 @@ service-manager, credential, or cross-node acceptance gate.
   `71aa3d70ae5876758f846e5900e9c2ed1c8ac081`. It keeps the Computers screen to
   one Add Computer action, localizes the private-key path example, removes the
   remaining core-flow heartbeat/smoke-check English fallbacks from Spanish and
-  Japanese, and hides the redundant no-ready empty panel until a connected node
-  exists. Desktop tests assert those strings and the 449-key catalog remains
-  aligned; Chrome checks cover the compact empty state in all four locales.
+  Japanese. Desktop tests assert those strings and the 449-key catalog remains
+  aligned. The no-ready panel conditional and its compact Chrome verification
+  are introduced and validated on the preview.90 candidate below, not on this
+  merged-main SHA.
 - The preview.90 candidate is the first release candidate built from the
-  merged PR #49 source. It keeps the public release pipeline on the
-  `prerelease=true` path and records the successful merged-main validation
-  runs above before the annotated tag is created.
+  merged PR #49 source plus the compact no-ready panel change. Its candidate
+  SHA is `752217dd3ec987df60d4b95dcc670859f374b631`; the Chrome smoke was run
+  against that SHA in English, Simplified Chinese, Spanish, and Japanese with
+  no console warnings/errors. The candidate keeps the public release pipeline
+  on the `prerelease=true` path and its required GitHub checks are recorded
+  against the same SHA before the annotated tag is created.
 - The previously published preview.85 candidate was downloaded into a clean directory after publication.
   All 23 assets, 11 SHA-256 sidecars/SHA256SUMS records, 10 release-index
   records, the CycloneDX SBOM, and all 10 GitHub provenance attestations were
