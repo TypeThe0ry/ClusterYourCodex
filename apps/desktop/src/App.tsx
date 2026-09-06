@@ -861,7 +861,9 @@ export function App() {
     return t("controller.availableCount", { count: fleet?.nodes.filter((node) => node.status === "online" || node.status === "busy").length ?? 0 });
   }, [accessError, fleet, lastCheckedAt, loading, online, t]);
   const hasSetupHistory = (fleet?.nodes.length ?? 0) > 0 || (fleet?.recentJobs?.length ?? 0) > 0;
-  const showAddComputer = online && (page !== "home" || hasSetupHistory);
+  // The Computers page already owns the provisioning CTA. Keep a single
+  // add action there so the global header does not duplicate the workflow.
+  const showAddComputer = online && page !== "computers" && (page !== "home" || hasSetupHistory);
 
   return (
     <div className="app-shell">

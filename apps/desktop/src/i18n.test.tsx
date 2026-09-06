@@ -71,13 +71,19 @@ describe("i18n", () => {
     expect(translate("es", "rules.gpuTarget")).toBe("Preferir computadoras con NVIDIA");
     expect(translate("ja", "rules.predictableTitle")).toBe("予測可能な設計");
     expect(translate("es", "integration.pluginDescriptionShort")).toContain("puente MCP");
+    expect(translate("es", "provision.privateKeyPathPlaceholder")).toContain("tu_usuario");
+    expect(translate("es", "integration.workerEvidence", { name: "Helio", id: "h1", time: "12:00" })).toContain("latido");
+    expect(translate("es", "computers.connectedDescription")).toContain("prueba de humo");
     expect(translate("ja", "provision.action.retryPassword")).toBe("修正したパスワードで再試行");
+    expect(translate("ja", "provision.privateKeyPathPlaceholder")).toContain("ユーザー名");
+    expect(translate("ja", "integration.workerEvidence", { name: "Helio", id: "h1", time: "12:00" })).toContain("ハートビート");
+    expect(translate("ja", "computers.connectedDescription")).toContain("スモークチェック");
     expectTypeOf<Locale>().toEqualTypeOf<"en" | "zh-CN" | "es" | "ja">();
   });
 
   it("keeps the complete desktop catalog available in every supported locale", () => {
     const englishKeys = Object.keys(translations.en).sort();
-    expect(englishKeys).toHaveLength(448);
+    expect(englishKeys).toHaveLength(449);
     for (const locale of SUPPORTED_LOCALES) {
       expect(Object.keys(translations[locale]).sort()).toEqual(englishKeys);
     }

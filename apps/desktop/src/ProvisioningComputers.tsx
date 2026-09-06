@@ -775,7 +775,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
           ) : null}
         </div>
       ) : !loading ? (
-        <div className="provisioning-empty"><strong>{t("computers.emptyTitle")}</strong><p>{t("computers.emptyDescription")}</p><button className="button button-primary" onClick={() => setShowWizard(true)}>{t("home.addComputer")}</button></div>
+        <div className="provisioning-empty"><strong>{t("computers.emptyTitle")}</strong><p>{t("computers.emptyDescription")}</p></div>
       ) : null}
 
       {showWizard ? (
@@ -798,7 +798,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
               }} value={form.authenticationMethod}><option value="password">{t("provision.password")}</option><option value="agent">{t("provision.nativeAgent")}</option><option value="private_key">{t("provision.privateKey")}</option></select></label>
               {form.authenticationMethod === "password" ? <label className="wide">{t("provision.password")}<input autoComplete="new-password" onChange={(event) => setForm({ ...form, password: event.target.value })} required type="password" value={form.password} /></label> : null}
               {form.authenticationMethod === "private_key" ? <>
-                <label className="wide">{t("provision.privateKeyPath")}<input autoComplete="off" onChange={(event) => setForm({ ...form, privateKeyPath: event.target.value })} placeholder="C:\\Users\\you\\.ssh\\id_ed25519" required value={form.privateKeyPath} /></label>
+                <label className="wide">{t("provision.privateKeyPath")}<input autoComplete="off" onChange={(event) => setForm({ ...form, privateKeyPath: event.target.value })} placeholder={t("provision.privateKeyPathPlaceholder")} required value={form.privateKeyPath} /></label>
                 <label className="wide">{t("provision.passphraseOptional")}<input autoComplete="new-password" onChange={(event) => setForm({ ...form, passphrase: event.target.value })} type="password" value={form.passphrase} /></label>
               </> : null}
               {form.authenticationMethod === "agent" ? <small className="wide auth-method-note">{t("provision.agentNote")}</small> : null}
