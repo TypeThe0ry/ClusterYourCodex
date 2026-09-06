@@ -25,6 +25,24 @@ are versioned independently from the product.
   `queued` → `running` → `succeeded`, heartbeat, logs, artifact, cleanup, and
   secret-scan checks.
 
+## [0.1.0-preview.91] - 2026-09-06
+
+### Fixed
+
+- Promote the core usability candidate from merged PR #54: the Add Computer
+  wizard keeps provisioning failures visible in the active modal without a
+  duplicate page-level alert, and Windows credential staging uses short,
+  same-directory temporary names that survive deeply nested temporary paths.
+
+### Tests
+
+- Pass the merged-main CI matrix on Linux, macOS, and Windows, including the
+  Windows install lifecycle, managed worker-kit validation, Windows
+  controller/worker live round trip, and the full Windows Rust workspace test.
+- Keep this public build on the prerelease channel; stable GA remains gated by
+  the documented clean-host, real-macOS, cross-node, signing, and hostile-tier
+  evidence requirements.
+
 ## [0.1.0-preview.90] - 2026-09-06
 
 ### Fixed
@@ -1317,7 +1335,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.90...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.91...HEAD
+[0.1.0-preview.91]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.90...v0.1.0-preview.91
 [0.1.0-preview.90]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.89...v0.1.0-preview.90
 [0.1.0-preview.89]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.88...v0.1.0-preview.89
 [0.1.0-preview.88]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.87...v0.1.0-preview.88
