@@ -254,12 +254,16 @@ pub(crate) fn ensure_protected_directory(path: &Path) -> Result<()> {
 }
 
 fn sibling_temporary_path(path: &Path) -> Result<PathBuf> {
-    let filename = path
-        .file_name()
+    path.file_name()
         .context("protected output must have a filename")?;
-    let mut temporary = std::ffi::OsString::from(".");
-    temporary.push(filename);
-    temporary.push(format!(".tmp-{}", uuid::Uuid::new_v4()));
+
+    // Keep the staging name independent of the destination basename.  The
+    // worker round-trip can run under a deeply nested temporary workspace,
+    // where repeating a long credential filename pushes the source path over
+    // Win32's legacy MAX_PATH limit even though the final destination fits.
+    // A short UUID-only sibling remains unique, stays in the same protected
+    // directory/volume, and preserves the atomic rename contract.
+    let temporary = format!(".cyc-tmp-{}", uuid::Uuid::new_v4().simple());
     Ok(path.with_file_name(temporary))
 }
 
