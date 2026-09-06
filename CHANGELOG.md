@@ -16,6 +16,9 @@ are versioned independently from the product.
 - Keep the Computers screen to one Add Computer action, localize the private
   key path example, and remove the last core-flow heartbeat/smoke-check English
   fallbacks from the Spanish and Japanese UI.
+- Bound Windows profile-matrix CIM lookups so a stalled WMI provider cannot
+  strand the elevated helper indefinitely; the harness now fails with retained
+  diagnostics and lets the release workflow continue to cleanup.
 
 ### Tests
 

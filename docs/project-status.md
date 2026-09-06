@@ -9,7 +9,7 @@ change.
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
 - **Snapshot baseline:** `origin/main` at `d564f35` (merged PR #48, catalog regression coverage; latest tagged product candidate remains preview.89)
 - **Current candidate version:** `0.1.0-preview.89` (`v0.1.0-preview.89` points to `e8691ac92603da3b883e9312915650fbba68eb35`)
-- **Latest published release:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85), promoted unchanged to **stable-testing** (`isPrerelease=false`); preview.86 and preview.87 are cancelled superseded candidates, preview.88 is superseded, and preview.89 is the active tagged prerelease candidate
+- **Latest published release:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85), promoted unchanged to **stable-testing** (`isPrerelease=false`); preview.86 and preview.87 are cancelled superseded candidates, preview.88 is superseded, and preview.89 was cancelled after its Windows ARM64 profile-matrix helper exceeded the bounded acceptance window; the next preview tag must include the timeout hardening
 - **Release channels:** `v0.1.0-preview.85` is the current immutable
   stable-testing build. Its embedded version remains a preview and Certified GA remains blocked by
   the open Issue #2, #3, and #5 acceptance gates.
@@ -69,10 +69,14 @@ service-manager, credential, or cross-node acceptance gate.
   provisioning, actions, and status labels. PR [#39](https://github.com/TypeThe0ry/ClusterYourCodex/pull/39)
   merged as `f0ca393d910732ece9395245eb6bf659de2fd47d`; local desktop tests,
   workspace lint/test/build, and the Chrome Japanese routing-rules smoke pass.
-- The preview.89 candidate simplifies the offline top-bar state and moves
-  first-run setup to one contextual CTA and moves provisioning error codes
-  behind a localized technical-details disclosure;
-   tagged workflow [`33992231739`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33992231739) is the active prerelease producer and still requires completion plus post-download asset verification before its release status is final.
+- The preview.89 candidate simplified the offline top-bar state and moved
+  first-run setup to one contextual CTA and provisioning error codes behind a
+  localized technical-details disclosure. Its tagged workflow
+  [`33992231739`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33992231739)
+  was cancelled after the Windows 11 ARM64 profile matrix remained inside the
+  elevated helper path past the intended 900-second child boundary; no public
+  preview.89 Release was created. The follow-up adds bounded CIM provider
+  queries before the next tagged candidate is attempted.
 - PR [#42](https://github.com/TypeThe0ry/ClusterYourCodex/pull/42) then removed the
   duplicate top-bar **Add computer** button on a true first-run Home screen;
   the contextual **Start** action remains the only primary onboarding entry,
