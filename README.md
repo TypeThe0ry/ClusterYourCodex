@@ -4,7 +4,9 @@
 container, GPU, and batch workloads on the best compatible computer in a
 user-owned fleet, then return verified logs and artifacts.
 
-> **Release status:** Windows-first public developer preview `v0.1.0-preview.91`.
+> **Release status:** Windows-first public developer preview `v0.1.0-preview.90`;
+> `v0.1.0-preview.91` is the next CI-verified prerelease candidate and will be
+> public only after its merge and tagged release workflow complete.
 > The Windows controller/desktop and trusted-job Windows/Linux worker paths are
 > implemented and CI-verified, but password/agent/private-key live authentication
 > and cross-node GUI/MCP acceptance are still pending. macOS x64/arm64 archives
@@ -12,8 +14,8 @@ user-owned fleet, then return verified logs and artifacts.
 > `runtimeGated=true`, `containmentReady=false`, and `liveReady=false`.
 > Prerelease installers remain code-unsigned. Verify the published SHA-256
 > sidecar before running one. The older `v0.1.0-preview.85` Release is an
-> explicitly authorized immutable `stable-testing` promotion; preview.91 remains
-> `isPrerelease=true`, and neither channel is Certified GA. Release notes retain
+> explicitly authorized immutable `stable-testing` promotion; preview releases
+> remain `isPrerelease=true`, and neither channel is Certified GA. Release notes retain
 > the embedded preview version, source SHA, signing state, and remaining gates.
 
 The exact implementation matrix, verified evidence, open Issue #2/#3/#5 gates,
