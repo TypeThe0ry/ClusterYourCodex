@@ -107,6 +107,12 @@ service-manager, credential, or cross-node acceptance gate.
   silent Setup completed at `06:40:34Z`, the standard/admin/non-ASCII profile
   matrix completed at `07:31:45Z`, and diagnostics upload completed at
   `07:31:55Z`.
+- The next mainline candidate keeps provisioning bridge/SSH failures visible
+  inside the Add Computer modal as well as in the page-level status panel. This
+  preserves the entered host/user fields for retry and keeps the localized
+  error plus technical-details disclosure in the user's active context; it is
+  not part of the immutable preview.90 assets until a new prerelease tag is
+  published.
 - Preview.90 post-download verification was retained under the portable
   artifact identifier `release-verification/preview.90-20260906-153326`
   (the absolute verifier path is intentionally omitted). The retained

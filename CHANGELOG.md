@@ -7,7 +7,16 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
-No unreleased changes.
+### Fixed
+
+- Keep native provisioning and SSH bridge errors inside the Add Computer modal
+  so a failed browser/desktop bridge attempt remains visible without exposing
+  the form's technical state behind the modal backdrop.
+
+### Tests
+
+- Re-run the desktop 96-test suite, TypeScript lint, and production renderer
+  build; exercise the modal error path and localized copy in Chrome.
 
 ## [0.1.0-preview.90] - 2026-09-06
 
