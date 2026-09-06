@@ -20,6 +20,33 @@ Status vocabulary:
 | Codex Skill and MCP bridge | implemented, CI verified |
 | Desktop dashboard | implemented, CI verified |
 
+## Milestone 0.5: core usability first (active goal)
+
+This milestone is the current delivery priority. It deliberately values a
+working end-to-end path over polishing non-blocking defects or splitting
+additional pull requests. Once the exit criteria below are met on the
+packaged desktop host, new UI wording and edge-case issues move to the user
+feedback backlog and are handled in priority order.
+
+| Capability | Status |
+|---|---|
+| Add Computer form and host-key approval | implemented; renderer and native bridge tests pass, packaged-host acceptance remains the final operator check |
+| SSH password retention through the native boundary | implemented; Windows Credential Manager round-trip passes; secrets stay out of renderer/controller logs |
+| Worker install, pairing, heartbeat, and smoke check | implemented; Windows preview.95 local path and Helio/P1 evidence are retained |
+| Typed job placement and dynamic capacity selection | implemented; controller selects from current telemetry and reservations |
+| Result, log, artifact, exit-code, and cleanup return | implemented; Windows preview.95 round-trip passed `queued → running → succeeded` with verification evidence |
+| Controller/worker platform boundary | Windows and Linux trusted-worker paths are usable; macOS kits are packaged but managed runtime remains explicitly gated |
+
+**Exit criteria:** a packaged Windows desktop session can add one reachable
+computer, retain its credential in the native vault, complete install/pair,
+submit a meaningful build or test, and show the verified result and logs. The
+current public candidate for this check is
+[`v0.1.0-preview.95`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.95).
+
+**Following goal:** after the core path is exercised, collect user feedback
+from the same build, record each reproducible issue with environment and
+evidence, and only then spend time on non-blocking UI polish and edge cases.
+
 ## Milestone 1: Windows prerelease
 
 | Capability | Status |
