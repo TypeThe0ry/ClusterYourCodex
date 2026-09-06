@@ -7,8 +7,9 @@ change.
 
 - **Snapshot date:** 2026-09-06
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
-- **Snapshot baseline:** `origin/main` at `17eec6b` (merged PR #50, compact UI/localization release candidate and public preview.90 source)
+- **Snapshot baseline:** `origin/main` at `a103306` (merged PR #54, core usability candidate after Windows round-trip and wizard-error fixes)
 - **Latest published preview:** [`v0.1.0-preview.90`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.90), published from the annotated tag at the merged SHA; GitHub reports `isPrerelease=true` and `isDraft=false`
+- **Next public candidate:** `v0.1.0-preview.91` is prepared from merged PR #54 and will be published as a non-draft prerelease after this version-bump PR merges; CI run [`34025408108`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34025408108) passed the full required matrix, including the Windows live round trip.
 - **Previous stable-testing exception:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85) remains immutable **stable-testing** (`isPrerelease=false`) for the explicitly authorized test channel. Its embedded product version is still a preview; it is not Certified GA.
 - **Release channels:** preview.90 is the current public prerelease. Certified GA remains blocked by the open Issue #2, #3, and #5 acceptance gates; no `prerelease=false` Certified GA release has been created.
 
@@ -45,6 +46,8 @@ packaged archive or hosted smoke test does not substitute for a real host,
 service-manager, credential, or cross-node acceptance gate.
 
 ## Current CI and release state
+
+- The core-usability candidate merged as PR [#54](https://github.com/TypeThe0ry/ClusterYourCodex/pull/54) at `a103306ec7b2ba8a7b3571fc24317a4876928bf2`. The CI run [`34027758058`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34027758058) passed Windows desktop lifecycle and managed worker kits, the Windows controller/worker live round trip, Rust workspace tests on Windows/Ubuntu/macOS, native worker kits, and MSRV. The separate CodeQL run [`34027758039`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34027758039) and Dependency security run [`34027758028`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34027758028) also passed. The candidate's local evidence also passed the same-host Windows `queued` → `running` → `succeeded` path with heartbeat, logs, artifact, cleanup, and secret scanning.
 
 - Merged-main source `17eec6b6f2c7b81e7333659dff7d9b43ab24c673` (PR [#50](https://github.com/TypeThe0ry/ClusterYourCodex/pull/50)) has CI run [`34008302124`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34008302124), CodeQL run [`34008302110`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34008302110), and dependency security run [`34008302169`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34008302169); all three completed successfully, including the live Windows controller/worker round trip.
 - The tagged [`v0.1.0-preview.84` workflow](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/33946635188) completed with one failure: **Clean Windows 11 ARM64 compatibility acceptance (x64 emulation)**. The first `standard-ascii` child timed out after 900 seconds while the elevated helper was cleaning up an auto-started `AtLogOn` task runtime. Producer jobs passed, but publication was skipped, so preview.84 is not a published release.

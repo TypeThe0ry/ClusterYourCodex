@@ -7,23 +7,34 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+No unreleased changes.
+
+## [0.1.0-preview.91] - 2026-09-06
+
 ### Fixed
 
+- Promote the core usability candidate from merged PR #54: the Add Computer
+  wizard keeps provisioning failures visible in the active modal without a
+  duplicate page-level alert, and Windows credential staging uses short,
+  same-directory temporary names that survive deeply nested temporary paths.
 - Keep native provisioning and SSH bridge errors inside the Add Computer modal
   so a failed browser/desktop bridge attempt remains visible without exposing
   the form's technical state behind the modal backdrop.
-- Avoid duplicating that error behind the modal while the Add Computer wizard
-  is open, and keep protected worker-credential staging filenames short enough
-  for deeply nested Windows temporary workspaces.
 
 ### Tests
 
+- Pass the merged-main CI matrix on Linux, macOS, and Windows, including the
+  Windows install lifecycle, managed worker-kit validation, Windows
+  controller/worker live round trip, and the full Windows Rust workspace test.
 - Re-run the desktop 96-test suite, TypeScript lint, and production renderer
   build; exercise the modal error path and localized copy in Chrome.
 - Rebuild `cyc`, `cyc-controller`, and `cyc-worker` from one source revision,
   then pass the live Windows controller/worker round trip through pairing,
   `queued` → `running` → `succeeded`, heartbeat, logs, artifact, cleanup, and
   secret-scan checks.
+- Keep this public build on the prerelease channel; stable GA remains gated by
+  the documented clean-host, real-macOS, cross-node, signing, and hostile-tier
+  evidence requirements.
 
 ## [0.1.0-preview.90] - 2026-09-06
 
@@ -1317,7 +1328,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.90...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.91...HEAD
+[0.1.0-preview.91]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.90...v0.1.0-preview.91
 [0.1.0-preview.90]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.89...v0.1.0-preview.90
 [0.1.0-preview.89]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.88...v0.1.0-preview.89
 [0.1.0-preview.88]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.87...v0.1.0-preview.88
