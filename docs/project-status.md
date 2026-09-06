@@ -107,9 +107,10 @@ service-manager, credential, or cross-node acceptance gate.
   silent Setup completed at `06:40:34Z`, the standard/admin/non-ASCII profile
   matrix completed at `07:31:45Z`, and diagnostics upload completed at
   `07:31:55Z`.
-- Preview.90 post-download verification was performed in
-  `D:\Projects\ClusterYourCodex\release-verification\preview.90-20260906-153326`.
-  The directory contains 23 Release assets, 11 per-file SHA-256 sidecars plus
+- Preview.90 post-download verification was retained under the portable
+  artifact identifier `release-verification/preview.90-20260906-153326`
+  (the absolute verifier path is intentionally omitted). The retained
+  directory contains 23 Release assets, 11 per-file SHA-256 sidecars plus
   `SHA256SUMS`, 10 release-index artifact records, the CycloneDX 1.6 SBOM, and
   a provenance attestation with 10 subjects. Every downloaded sidecar and
   `SHA256SUMS` entry matched its local SHA-256 (`shaErrors` empty); the index
