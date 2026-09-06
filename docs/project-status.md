@@ -54,6 +54,8 @@ running → succeeded, heartbeat, logs, artifact verification, cleanup, and
 process reaping. Preview.95 carries this source-bound core fix forward after
 the previous tagged artifact workflow was canceled before publication; UI polish and
 non-blocking defects remain feedback backlog items.
+The committed preview.95 acceptance record is
+[live-windows-preview95-local-roundtrip.md](live-windows-preview95-local-roundtrip.md).
 
 ## What the product does
 

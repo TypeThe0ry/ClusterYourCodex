@@ -26,7 +26,7 @@ churn. It is source-bound to the current checkout and contains no credentials.
 | Credential vault round-trip | passed | `cyc-secrets` Windows Credential Manager test — 1 passed |
 | Provisioning state machine | passed | `cyc-provision` state-machine suite — 25 passed |
 | SSH transport | passed | `cyc-ssh` suite — 13 passed |
-| Real Windows worker run | passed | [Helio preview.91 round-trip](live-windows-preview91-helio-roundtrip.md) |
+| Real Windows worker run | passed | [preview.95 local round-trip](live-windows-preview95-local-roundtrip.md); prior [Helio preview.91 round-trip](live-windows-preview91-helio-roundtrip.md) |
 | Real Linux worker run | passed | [P1 preview.91 round-trip](live-linux-preview91-p1-roundtrip.md) |
 | Chrome preview navigation/locales | passed | Home, Computers, Add Computer modal, English, Simplified Chinese, Spanish, and Japanese were inspected in the local preview |
 
