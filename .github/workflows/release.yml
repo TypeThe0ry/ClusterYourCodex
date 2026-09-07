@@ -895,8 +895,10 @@ jobs:
     name: Windows x64 self-contained preview
     needs: [release-identity, rust-artifacts, linux-arm64-worker-kit]
     # Keep packaging and its disposable lifecycle checks bounded even when a
-    # runner-side process refuses to exit.
-    timeout-minutes: 120
+    # runner-side process refuses to exit. The lifecycle scripts keep their
+    # own 900-second per-attempt ceiling; the larger job budget covers the
+    # complete self-contained build plus both bounded archive smoke paths.
+    timeout-minutes: 180
     env:
       CYC_PRODUCT_VERSION: ${{ needs.release-identity.outputs.product_version }}
     runs-on: windows-latest
@@ -1420,7 +1422,9 @@ jobs:
     runs-on: windows-11-arm
     # A hung disposable lifecycle must never hold a hosted ARM runner
     # indefinitely or block downstream release gates without a terminal result.
-    timeout-minutes: 120
+    # The profile matrix still enforces its 900-second child ceiling inside
+    # this larger job budget.
+    timeout-minutes: 180
     env:
       CYC_PRODUCT_VERSION: ${{ needs.release-identity.outputs.product_version }}
       CYC_DISPOSABLE_WINDOWS: "1"
