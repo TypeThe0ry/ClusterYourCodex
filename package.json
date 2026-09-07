@@ -1,6 +1,6 @@
 {
   "name": "clusteryourcodex-workspace",
-  "version": "0.1.0-preview.96",
+  "version": "0.1.0-preview.97",
   "private": true,
   "packageManager": "pnpm@11.0.8",
   "scripts": {

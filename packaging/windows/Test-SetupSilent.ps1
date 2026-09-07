@@ -712,6 +712,87 @@ public static class CycSetupSilentNativeMethods {
     return [PSCustomObject]$record
 }
 
+function Get-SetupSilentProcessTreeEvidence {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    try {
+        $processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+        $childrenByParent = @{}
+        foreach ($candidate in $processes) {
+            $parentId = [int]$candidate.ParentProcessId
+            if (-not $childrenByParent.ContainsKey($parentId)) {
+                $childrenByParent[$parentId] = New-Object System.Collections.Generic.List[object]
+            }
+            [void]$childrenByParent[$parentId].Add($candidate)
+        }
+        $queue = New-Object System.Collections.Generic.Queue[int]
+        $seen = New-Object 'System.Collections.Generic.HashSet[int]'
+        $result = New-Object System.Collections.Generic.List[object]
+        $queue.Enqueue($ProcessId)
+        [void]$seen.Add($ProcessId)
+        while ($queue.Count -gt 0 -and $result.Count -lt 128) {
+            $parentId = $queue.Dequeue()
+            if (-not $childrenByParent.ContainsKey($parentId)) { continue }
+            foreach ($child in $childrenByParent[$parentId]) {
+                $childId = [int]$child.ProcessId
+                if (-not $seen.Add($childId)) { continue }
+                [void]$result.Add([PSCustomObject][ordered]@{
+                    pid = $childId
+                    parentPid = $parentId
+                    name = [string]$child.Name
+                    executablePath = [string]$child.ExecutablePath
+                    commandLine = [string]$child.CommandLine
+                })
+                $queue.Enqueue($childId)
+            }
+        }
+        return ,$result.ToArray()
+    } catch {
+        return ,([PSCustomObject][ordered]@{ error = $_.Exception.Message })
+    }
+}
+
+function Write-SetupSilentProgress {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$State,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$StartedAt,
+        [AllowNull()][string]$Deadline,
+        [int]$ProcessId = 0,
+        [int]$VisiblePowerShellPid = 0,
+        [Nullable[int]]$ExitCode,
+        [string]$Detail
+    )
+
+    $now = [DateTimeOffset]::UtcNow
+    $record = [ordered]@{
+        schemaVersion = 'cyc.dev/setup-silent-progress/v1'
+        label = $Label
+        state = $State
+        pid = $ProcessId
+        startedAtUtc = $StartedAt.ToString('o')
+        deadlineUtc = $Deadline
+        updatedAtUtc = $now.ToString('o')
+        elapsedSeconds = [Math]::Round(($now - $StartedAt).TotalSeconds, 3)
+        visiblePowerShellPid = if ($VisiblePowerShellPid -gt 0) { $VisiblePowerShellPid } else { $null }
+        exitCode = $ExitCode
+        detail = $Detail
+        process = if ($ProcessId -gt 0) { Get-SetupSilentProcessEvidence -ProcessId $ProcessId } else { $null }
+        processTree = if ($ProcessId -gt 0) { @(Get-SetupSilentProcessTreeEvidence -ProcessId $ProcessId) } else { @() }
+    }
+    $temporary = $Path + '.tmp-' + [Guid]::NewGuid().ToString('N')
+    try {
+        $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList $false
+        [System.IO.File]::WriteAllText($temporary, ($record | ConvertTo-Json -Depth 12), $utf8)
+        [void](Move-Item -LiteralPath $temporary -Destination $Path -Force)
+    } catch {
+        try {
+            if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+        } catch { }
+    }
+}
+
 function Invoke-SetupSilentBoundedProcess {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
@@ -730,14 +811,22 @@ function Invoke-SetupSilentBoundedProcess {
     [void](New-Item -ItemType Directory -Path $LogRoot -Force)
     $stdoutPath = Join-Path $LogRoot ($Label + '.stdout.log')
     $stderrPath = Join-Path $LogRoot ($Label + '.stderr.log')
+    $progressPath = Join-Path $LogRoot ($Label + '.progress.json')
     $start = [DateTimeOffset]::UtcNow
     $process = $null
+    $deadline = $null
     $powerShellPidsBefore = New-Object 'System.Collections.Generic.HashSet[int]'
     if ($AssertNoNewVisiblePowerShellWindow) {
         foreach ($existingPowerShell in @(Get-Process -Name powershell -ErrorAction SilentlyContinue)) {
             [void]$powerShellPidsBefore.Add([int]$existingPowerShell.Id)
         }
     }
+    Write-SetupSilentProgress `
+        -Path $progressPath `
+        -Label $Label `
+        -State 'starting' `
+        -StartedAt $start `
+        -Deadline $null
     try {
         $startInfo = New-Object System.Diagnostics.ProcessStartInfo
         $startInfo.FileName = $resolvedExecutable
@@ -770,9 +859,28 @@ function Invoke-SetupSilentBoundedProcess {
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
         $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+        $nextProgressAt = [DateTimeOffset]::UtcNow
+        Write-SetupSilentProgress `
+            -Path $progressPath `
+            -Label $Label `
+            -State 'running' `
+            -StartedAt $start `
+            -Deadline $deadline.ToString('o') `
+            -ProcessId $process.Id
         $visiblePowerShellPid = $null
         $timedOut = $false
         while (-not $process.WaitForExit(100)) {
+            if ([DateTimeOffset]::UtcNow -ge $nextProgressAt) {
+                Write-SetupSilentProgress `
+                    -Path $progressPath `
+                    -Label $Label `
+                    -State 'running' `
+                    -StartedAt $start `
+                    -Deadline $deadline.ToString('o') `
+                    -ProcessId $process.Id `
+                    -VisiblePowerShellPid $(if ($null -ne $visiblePowerShellPid) { [int]$visiblePowerShellPid } else { 0 })
+                $nextProgressAt = [DateTimeOffset]::UtcNow.AddSeconds(5)
+            }
             if ($AssertNoNewVisiblePowerShellWindow) {
                 foreach ($candidate in @(Get-Process -Name powershell -ErrorAction SilentlyContinue)) {
                     if (-not $powerShellPidsBefore.Contains([int]$candidate.Id) -and
@@ -789,6 +897,15 @@ function Invoke-SetupSilentBoundedProcess {
             }
         }
         if ($timedOut -or $null -ne $visiblePowerShellPid) {
+            Write-SetupSilentProgress `
+                -Path $progressPath `
+                -Label $Label `
+                -State $(if ($null -ne $visiblePowerShellPid) { 'visible-powershell' } else { 'timeout' }) `
+                -StartedAt $start `
+                -Deadline $deadline.ToString('o') `
+                -ProcessId $process.Id `
+                -VisiblePowerShellPid $(if ($null -ne $visiblePowerShellPid) { [int]$visiblePowerShellPid } else { 0 }) `
+                -Detail $(if ($null -ne $visiblePowerShellPid) { 'a new visible Windows PowerShell process was observed' } else { "bounded timeout after $TimeoutSeconds seconds" })
             if ($null -ne $visiblePowerShellPid) {
                 try {
                     $evidence = Get-SetupSilentProcessEvidence -ProcessId $visiblePowerShellPid
@@ -828,6 +945,14 @@ function Invoke-SetupSilentBoundedProcess {
         [System.IO.File]::WriteAllText($stderrPath, $stderr, $utf8)
         $exitCode = [int]$process.ExitCode
         $elapsed = ([DateTimeOffset]::UtcNow - $start).TotalSeconds
+        Write-SetupSilentProgress `
+            -Path $progressPath `
+            -Label $Label `
+            -State 'completed' `
+            -StartedAt $start `
+            -Deadline $(if ($deadline) { $deadline.ToString('o') } else { $null }) `
+            -ProcessId $process.Id `
+            -ExitCode $exitCode
         if ($exitCode -ne 0) {
             $tail = if ([string]::IsNullOrWhiteSpace($stderr)) { '' } else {
                 ([string]::Join(' ', @($stderr -split "`r?`n" | Select-Object -Last 20))).Trim()

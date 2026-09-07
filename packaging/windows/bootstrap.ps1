@@ -104,7 +104,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
-$script:ProductVersion = '0.1.0-preview.96'
+$script:ProductVersion = '0.1.0-preview.97'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
@@ -5060,13 +5060,49 @@ function Invoke-CycBoundedCodexProcess {
     }
     $extension = [System.IO.Path]::GetExtension($path)
     $start = [System.Diagnostics.ProcessStartInfo]::new()
+    function ConvertTo-CycNativeArgument {
+        param([AllowEmptyString()][string]$Argument)
+        if ($null -eq $Argument -or $Argument.Length -eq 0) { return '""' }
+        if ($Argument -notmatch '[\s"]') { return $Argument }
+
+        $builder = New-Object System.Text.StringBuilder
+        [void]$builder.Append('"')
+        $slashes = 0
+        foreach ($character in $Argument.ToCharArray()) {
+            if ($character -eq '\') {
+                $slashes++
+                continue
+            }
+            if ($character -eq '"') {
+                [void]$builder.Append(('\' * (($slashes * 2) + 1)))
+                [void]$builder.Append('"')
+                $slashes = 0
+                continue
+            }
+            if ($slashes -gt 0) {
+                [void]$builder.Append(('\' * $slashes))
+                $slashes = 0
+            }
+            [void]$builder.Append($character)
+        }
+        if ($slashes -gt 0) { [void]$builder.Append(('\' * ($slashes * 2))) }
+        [void]$builder.Append('"')
+        return $builder.ToString()
+    }
+
+    $quotedArguments = [string]::Join(' ', @($Arguments | ForEach-Object {
+        ConvertTo-CycNativeArgument -Argument ([string]$_)
+    }))
     if ($extension -ieq '.cmd' -or $extension -ieq '.bat') {
         if ($path -match '[%!]') { throw 'Test CLI script path contains unsupported expansion characters.' }
         $start.FileName = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
-        $start.Arguments = '/d /s /c ""' + $path + '" ' + ([string]::Join(' ', $Arguments)) + '"'
+        if ($quotedArguments -match '[%!]') {
+            throw 'Test CLI arguments contain unsupported expansion characters for a command script.'
+        }
+        $start.Arguments = '/d /s /c ""' + $path + '" ' + $quotedArguments + '"'
     } else {
         $start.FileName = $path
-        $start.Arguments = [string]::Join(' ', $Arguments)
+        $start.Arguments = $quotedArguments
     }
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
@@ -5079,6 +5115,10 @@ function Invoke-CycBoundedCodexProcess {
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+            try {
+                $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+                & $taskKill /PID $process.Id /T /F *> $null
+            } catch { }
             try { $process.Kill() } catch { }
             try { $process.WaitForExit() } catch { }
             throw 'Codex CLI process exceeded its bounded verification timeout.'
@@ -5325,7 +5365,8 @@ function Invoke-CodexIntegration {
     param(
         [Parameter(Mandatory = $true)]$Plan,
         [ValidateSet('Install', 'Uninstall')][string]$Operation,
-        [scriptblock]$CleanupCheckpoint
+        [scriptblock]$CleanupCheckpoint,
+        [ValidateRange(1, 90)][int]$TimeoutSeconds = 60
     )
     if (-not $Plan.codexIntegration.enabled) {
         return [PSCustomObject]@{
@@ -5415,17 +5456,49 @@ function Invoke-CodexIntegration {
         $expectedPlugin = Get-CycCodexPluginExpectation `
             -MarketplaceRoot $Plan.codexIntegration.marketplaceRoot `
             -PluginId $Plan.codexIntegration.plugin
+        $codexTimeoutMilliseconds = [Math]::Min(90000, [Math]::Max(1000, $TimeoutSeconds * 1000))
+        $existingVerification = Test-CycCodexPluginActive `
+            -Codex $codex `
+            -ExpectedPlugin $expectedPlugin `
+            -TimeoutMilliseconds $codexTimeoutMilliseconds
+        if ($existingVerification.active) {
+            return [PSCustomObject]@{
+                operation = $Operation
+                required = $true
+                attempted = $false
+                cliFound = $true
+                succeeded = $true
+                marketplaceAdded = $true
+                pluginAdded = $true
+                pluginVerified = $true
+                pluginVerificationExitCode = $existingVerification.exitCode
+                pluginVerificationReason = 'already-active'
+                pluginVersion = $existingVerification.pluginVersion
+                pluginSourceType = $existingVerification.sourceType
+                pluginSourcePath = $existingVerification.sourcePath
+                pluginRemoved = $false
+                marketplaceRemoved = $false
+                pluginExitCode = $existingVerification.exitCode
+                marketplaceExitCode = $existingVerification.exitCode
+            }
+        }
         try {
-            & $codex.Source plugin marketplace add $Plan.codexIntegration.marketplaceRoot *> $null
-            $marketplaceExitCode = $LASTEXITCODE
+            $marketplaceResult = Invoke-CycBoundedCodexProcess `
+                -Executable ([string]$codex.Source) `
+                -Arguments @('plugin', 'marketplace', 'add', [string]$Plan.codexIntegration.marketplaceRoot) `
+                -TimeoutMilliseconds $codexTimeoutMilliseconds
+            $marketplaceExitCode = [int]$marketplaceResult.exitCode
             $marketplaceAdded = ($marketplaceExitCode -eq 0)
         } catch {
             $marketplaceExitCode = -1
         }
         if ($marketplaceAdded) {
             try {
-            & $codex.Source plugin add $Plan.codexIntegration.plugin *> $null
-                $pluginExitCode = $LASTEXITCODE
+                $pluginResult = Invoke-CycBoundedCodexProcess `
+                    -Executable ([string]$codex.Source) `
+                    -Arguments @('plugin', 'add', [string]$Plan.codexIntegration.plugin) `
+                    -TimeoutMilliseconds $codexTimeoutMilliseconds
+                $pluginExitCode = [int]$pluginResult.exitCode
                 $pluginAdded = ($pluginExitCode -eq 0)
             } catch {
                 $pluginExitCode = -1
@@ -5466,8 +5539,11 @@ function Invoke-CodexIntegration {
 
     if (-not $pluginRemoved) {
         try {
-            & $codex.Source plugin remove $Plan.codexIntegration.plugin *> $null
-            $pluginExitCode = $LASTEXITCODE
+            $pluginResult = Invoke-CycBoundedCodexProcess `
+                -Executable ([string]$codex.Source) `
+                -Arguments @('plugin', 'remove', [string]$Plan.codexIntegration.plugin) `
+                -TimeoutMilliseconds ([Math]::Min(90000, [Math]::Max(1000, $TimeoutSeconds * 1000)))
+            $pluginExitCode = [int]$pluginResult.exitCode
             $pluginRemoved = ($pluginExitCode -eq 0)
         } catch {
             $pluginExitCode = -1
@@ -5491,8 +5567,11 @@ function Invoke-CodexIntegration {
     }
     if (-not $marketplaceRemoved) {
         try {
-            & $codex.Source plugin marketplace remove clusteryourcodex *> $null
-            $marketplaceExitCode = $LASTEXITCODE
+            $marketplaceResult = Invoke-CycBoundedCodexProcess `
+                -Executable ([string]$codex.Source) `
+                -Arguments @('plugin', 'marketplace', 'remove', 'clusteryourcodex') `
+                -TimeoutMilliseconds ([Math]::Min(90000, [Math]::Max(1000, $TimeoutSeconds * 1000)))
+            $marketplaceExitCode = [int]$marketplaceResult.exitCode
             $marketplaceRemoved = ($marketplaceExitCode -eq 0)
         } catch {
             $marketplaceExitCode = -1
@@ -6568,7 +6647,10 @@ function Invoke-InstallOrRepairCore {
                 -ExpectedSid $Plan.initiator.sid
         }
 
-        $codexResult = Invoke-CodexIntegration -Plan $Plan -Operation Install
+        $codexResult = Invoke-CodexIntegration `
+            -Plan $Plan `
+            -Operation Install `
+            -TimeoutSeconds $ActionTimeoutSeconds
         $oldAgentsInstalled = [bool]($oldManifest -and
             $oldManifest.PSObject.Properties['agentsIntegration'] -and
             (Get-CycObjectProperty -Object $oldManifest.agentsIntegration -Name 'installed' -Default $false))
@@ -6655,7 +6737,8 @@ function Invoke-InstallOrRepairCore {
                 [void](Invoke-CodexIntegration `
                     -Plan $rollbackPlan `
                     -Operation Uninstall `
-                    -CleanupCheckpoint $rollbackCheckpoint)
+                    -CleanupCheckpoint $rollbackCheckpoint `
+                    -TimeoutSeconds $ActionTimeoutSeconds)
             } catch { [void]$rollbackFailures.Add('Codex integration') }
         }
         if ($uninstallRegistrationSnapshot) {
@@ -6875,7 +6958,8 @@ function Invoke-UninstallCore {
             $codexResult = Invoke-CodexIntegration `
                 -Plan $plan `
                 -Operation Uninstall `
-                -CleanupCheckpoint $checkpoint
+                -CleanupCheckpoint $checkpoint `
+                -TimeoutSeconds $ActionTimeoutSeconds
             Write-CodexCleanupState -Manifest $manifest -ManifestPath $manifestPath -Result $codexResult
             if (-not $codexResult.succeeded) {
                 throw 'Codex integration cleanup failed; installation was left intact and uninstall can be retried.'

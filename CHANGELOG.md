@@ -16,6 +16,28 @@ are versioned independently from the product.
   template so operator reports capture the exact preview, platform pair,
   failing stage, and redacted evidence.
 
+## [0.1.0-preview.97] - 2026-09-07
+
+### Fixed
+
+- Make Codex plugin registration and cleanup use the same bounded child-process
+  runner as verification. Repeated Windows Repair now reuses an already active
+  plugin instead of invoking an unbounded duplicate marketplace registration,
+  and any CLI child tree is terminated at the action timeout.
+
+### Changed
+
+- Add a live, atomically updated silent-Setup progress receipt with the current
+  lifecycle label, process evidence, child-process tree, visible PowerShell
+  detection, and bounded deadline. A canceled runner now retains useful
+  in-flight evidence instead of only empty stdout/stderr files.
+
+### Tests
+
+- Keep the public candidate channel prerelease and require the complete tagged
+  Windows portable/self-contained workflow, including the repeated Repair,
+  uninstall, and fresh-deployment gates, before publishing preview.97.
+
 ## [0.1.0-preview.96] - 2026-09-07
 
 ### Fixed
@@ -1420,7 +1442,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.96...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.97...HEAD
+[0.1.0-preview.97]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.96...v0.1.0-preview.97
 [0.1.0-preview.96]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.95...v0.1.0-preview.96
 [0.1.0-preview.95]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.94...v0.1.0-preview.95
 [0.1.0-preview.94]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.93...v0.1.0-preview.94
