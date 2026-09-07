@@ -5,13 +5,63 @@ the current checkout and live GitHub state, rather than on chat history. Update
 it in the same pull request as every implementation, CI, packaging, or release
 change.
 
-- **Snapshot date:** 2026-09-06
+- **Snapshot date:** 2026-09-07
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
-- **Snapshot baseline:** `origin/main` at `a103306` (merged PR #54, core usability candidate after Windows round-trip and wizard-error fixes)
-- **Latest published preview:** [`v0.1.0-preview.90`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.90), published from the annotated tag at the merged SHA; GitHub reports `isPrerelease=true` and `isDraft=false`
-- **Next public candidate:** `v0.1.0-preview.91` is prepared from merged PR #54 and will be published as a non-draft prerelease after this version-bump PR merges; CI run [`34025408108`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34025408108) passed the full required matrix, including the Windows live round trip.
+- **Snapshot baseline:** public candidate `v0.1.0-preview.95`, source commit `6d06f84f3c95d6be8d5151a8950065f0602d651b`; the local checkout and GitHub release index resolve to the same tag and commit.
+- **Latest published preview:** [`v0.1.0-preview.95`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.95), published by tagged workflow [`34052588313`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34052588313); GitHub reports `isPrerelease=true` and `isDraft=false`, with 23 release assets. The Windows x64 self-contained and clean Windows 11 ARM64 acceptance jobs completed successfully.
 - **Previous stable-testing exception:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85) remains immutable **stable-testing** (`isPrerelease=false`) for the explicitly authorized test channel. Its embedded product version is still a preview; it is not Certified GA.
-- **Release channels:** preview.90 is the current public prerelease. Certified GA remains blocked by the open Issue #2, #3, and #5 acceptance gates; no `prerelease=false` Certified GA release has been created.
+- **Release channels:** preview.95 is the current public prerelease; preview.91 remains an older immutable fallback after the stalled preview.94 workflow was canceled before publication. Certified GA remains blocked by the open Issue #2, #3, and #5 acceptance gates; no `prerelease=false` Certified GA release has been created.
+
+## Current delivery goal: core usability before polish
+
+The active delivery goal is deliberately narrower than the full GA checklist:
+prove that a user can start the controller, add a computer, retain the SSH
+credential through the native boundary, install and pair a worker, submit a
+typed job, and receive the result and logs. This gate has priority over
+non-blocking bug cleanup, visual polish, and additional PR splitting. Those
+items move to the feedback backlog after the core path is usable.
+
+The goal was revised on 2026-09-07 to make the order explicit: ship a runnable
+prerelease, let the operator exercise the packaged flow, capture the exact
+failing stage and redacted receipt, then promote only core-path blockers. The
+next-stage feedback loop is [docs/goals/user-feedback-loop.md](goals/user-feedback-loop.md)
+and the repository now exposes a preview-feedback issue template.
+
+Fresh local evidence for the current candidate includes Windows Credential
+Manager round-trip (`1 passed`), provisioning state-machine coverage (`25
+passed`), SSH transport coverage (`13 passed`), and a Windows
+controller/worker job round trip with exit code `0`. The browser preview is
+useful for UI inspection, but Add Computer and native integration actions
+require the Tauri desktop bridge; a browser `bridge_unavailable` result is an
+environment boundary, not a successful provisioning run.
+
+The 2026-09-07 core-usability smoke adds 96 renderer tests, 78 native desktop
+host tests, a successful native host compile, a local controller health check,
+and Chrome checks for the four shipped locales. The complete source-bound
+record is [docs/core-usability-smoke-20260907.md](core-usability-smoke-20260907.md).
+The priority remains the usable Add Computer → credential → install/pair →
+job/result path; non-blocking defect cleanup and additional PR splitting are
+deliberately lower priority until that path is exercised on the packaged host.
+
+The current working tree contains three core-path repairs found during the first
+native Helio attempt: the WebView2 `tauri.localhost` bridge now accepts its
+`undefined` URL-credential representation, and Windows SSH lifecycle commands
+now preserve named PowerShell parameter binding. A direct Helio probe with the
+fixed renderer returned a successful worker-install receipt. The Windows SSH
+transport also selects the OpenSSL-backed libssh2 backend for modern Linux KEX
+compatibility. These changes are included in the published `preview.95`
+prerelease; the older `preview.91` binary remains immutable.
+
+The current source also enables HTTP/2 in the shared rustls-backed reqwest
+client. A real Windows preview.95 controller/worker probe initially exposed a
+hyper-util panic when the controller negotiated HTTP/2; after the feature fix,
+the rebuilt binaries passed pairing, node report, snapshot transfer, queued →
+running → succeeded, heartbeat, logs, artifact verification, cleanup, and
+process reaping. Preview.95 carries this source-bound core fix forward after
+the previous tagged artifact workflow was canceled before publication; UI polish and
+non-blocking defects remain feedback backlog items.
+The committed preview.95 acceptance record is
+[live-windows-preview95-local-roundtrip.md](live-windows-preview95-local-roundtrip.md).
 
 ## What the product does
 
@@ -32,8 +82,8 @@ capability until the opt-in isolation contract in Issue #5 is complete.
 | --- | --- | --- | --- |
 | Controller, protocol, scheduler, CLI | Rust controller/worker/protocol/scheduler crates and typed workload placement | Merged-main CI [run 34008302124](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34008302124) passed Rust tests on Ubuntu, macOS, and Windows plus the live Windows controller/worker round trip | Live cross-node GUI/MCP round trip |
 | Windows desktop and tray host | Tauri 2 desktop, native controller proxy, bundled MCP runtime, per-user integration path | Windows packaging/static contracts and preview artifact jobs | Clean Windows 11 VM lifecycle, packaged tray acceptance, production Authenticode |
-| Windows worker path | Current-user controller/worker task and data-directory ACL model; installer repair/rollback plumbing | Windows packaging tests plus live controller/worker round trip in merged-main [run 34008302124](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34008302124); clean Windows 11 ARM64 x64-emulation lifecycle/profile matrix passed in tagged [release run 34009492657](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34009492657) | Independent real Windows controller-to-Windows-worker run with retained logs/artifacts |
-| Linux worker packages | Linux x64 and arm64 Worker Kit archives, native shell/process-group paths, and systemd lifecycle packages | Tagged Linux artifact jobs, Worker Kit native/structural checks, and the preview.83 exact-SHA P1 controller/worker job | Repeat exact-SHA/native validation for each candidate; Issue #3's remaining platform gate is macOS |
+| Windows worker path | Current-user controller/worker task and data-directory ACL model; installer repair/rollback plumbing | Windows packaging tests, clean Windows 11 ARM64 x64-emulation lifecycle/profile matrix, and the real preview.91 Helio round-trip recorded in [live-windows-preview91-helio-roundtrip.md](live-windows-preview91-helio-roundtrip.md); preview.95 local controller/worker round-trip is recorded in [live-windows-preview95-local-roundtrip.md](live-windows-preview95-local-roundtrip.md) | Independent cross-machine Windows controller-to-Windows-worker run with retained logs/artifacts; clean-VM and production-signing gates remain separate |
+| Linux worker packages | Linux x64 and arm64 Worker Kit archives, native shell/process-group paths, and systemd lifecycle packages | Tagged Linux artifact jobs, Worker Kit native/structural checks, and the real preview.91 P1 controller/worker round-trip recorded in [live-linux-preview91-p1-roundtrip.md](live-linux-preview91-p1-roundtrip.md) | Repeat exact-SHA/native validation for each candidate; Issue #3's remaining platform gate is macOS |
 | macOS Worker Kits | x64 and arm64 archives, manifest/checksum/publisher-key contract, macOS capability reporting | Tagged macOS artifact jobs and kit contract checks | Real macOS host, LaunchAgent install/start/stop/restart, managed live run, and round trip |
 | Add Computer and credentials | GUI onboarding model, native credential-vault boundary, host-key fingerprint flow, password/agent/private-key paths | Static contract and local source review | Live authentication and cross-node GUI/MCP acceptance on supported hosts |
 | Desktop UX and localization | One state-aware three-step first-run path with a single contextual setup CTA, compact Add Computer form, collapsed advanced verification, compact first-run Computers empty state, quiet offline top bar, and persistent English/Simplified Chinese/Spanish/Japanese selection across dashboard, tasks, rules, integration evidence, provisioning, errors, and credential recovery | Chrome visual/interaction audit against the preview.90 candidate, four-language home/integration/computer checks, persistent `html[lang]`, and app-origin logs empty after filtering Chrome-extension noise; 96 desktop tests, workspace lint/test/build, and tagged preview.90 checks | Keep the catalog review loop running for newly introduced backend diagnostics and confirm translated wording with native-language reviewers |

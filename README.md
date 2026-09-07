@@ -4,10 +4,10 @@
 container, GPU, and batch workloads on the best compatible computer in a
 user-owned fleet, then return verified logs and artifacts.
 
-> **Release status:** Windows-first public developer preview `v0.1.0-preview.90`;
-> `v0.1.0-preview.91` is the next CI-verified prerelease candidate and will be
-> public only after its merge and tagged release workflow complete.
-> The Windows controller/desktop and trusted-job Windows/Linux worker paths are
+> **Release status:** Windows-first public developer preview
+> [`v0.1.0-preview.95`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.95)
+> is the current public non-draft GitHub prerelease candidate. The Windows
+> controller/desktop and trusted-job Windows/Linux worker paths are
 > implemented and CI-verified, but password/agent/private-key live authentication
 > and cross-node GUI/MCP acceptance are still pending. macOS x64/arm64 archives
 > and signed Worker Kits are packaged, but managed execution remains
@@ -22,6 +22,14 @@ The exact implementation matrix, verified evidence, open Issue #2/#3/#5 gates,
 and the current release blocker are maintained in
 [docs/project-status.md](docs/project-status.md). That file is updated in the
 same pull request as every feature, CI, or release change.
+
+The active delivery priority is recorded in
+[docs/goals/core-usability-first.md](docs/goals/core-usability-first.md): get
+the packaged Add Computer → credential vault → worker pairing → job/result
+loop working first, then use operator feedback for non-blocking polish.
+The follow-up feedback workflow is documented in
+[docs/goals/user-feedback-loop.md](docs/goals/user-feedback-loop.md), with a
+direct [preview feedback issue template](https://github.com/TypeThe0ry/ClusterYourCodex/issues/new?template=preview-feedback.md).
 
 The desktop UI now starts with one three-step path: **Add a computer → Connect
 Codex → Run the check**. The primary action is state-aware: when the local

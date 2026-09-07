@@ -7,7 +7,135 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
-No unreleased changes.
+### Changed
+
+- Revise the active delivery goal to prioritize a usable Add Computer →
+  credential vault → worker pairing → job/result loop before non-blocking bug
+  cleanup, visual polish, or additional PR splitting.
+- Add the queued user-feedback goal and a GitHub preview-feedback issue
+  template so operator reports capture the exact preview, platform pair,
+  failing stage, and redacted evidence.
+
+## [0.1.0-preview.98] - 2026-09-07
+
+### Fixed
+
+- Align the Codex plugin-list verification timeout contract with the bounded
+  child-process runner. A 60-second Windows install/repair action no longer
+  fails parameter binding against an accidental 30-second validation ceiling.
+
+### Tests
+
+- Keep the failed preview.97 candidate unpublished and require the complete
+  tagged Windows portable/self-contained workflow to pass before publishing
+  preview.98.
+
+## [0.1.0-preview.97] - 2026-09-07
+
+### Fixed
+
+- Make Codex plugin registration and cleanup use the same bounded child-process
+  runner as verification. Repeated Windows Repair now reuses an already active
+  plugin instead of invoking an unbounded duplicate marketplace registration,
+  and any CLI child tree is terminated at the action timeout.
+
+### Changed
+
+- Add a live, atomically updated silent-Setup progress receipt with the current
+  lifecycle label, process evidence, child-process tree, visible PowerShell
+  detection, and bounded deadline. A canceled runner now retains useful
+  in-flight evidence instead of only empty stdout/stderr files.
+
+### Tests
+
+- Keep the public candidate channel prerelease and require the complete tagged
+  Windows portable/self-contained workflow, including the repeated Repair,
+  uninstall, and fresh-deployment gates, before publishing preview.97.
+
+## [0.1.0-preview.96] - 2026-09-07
+
+### Fixed
+
+- Harden the Windows worker active-run guard for long local and UNC workspace
+  paths by using the extended-length Win32 namespace during the atomic rename.
+  A current-source live controller/worker round trip now completes the full
+  queued → running → succeeded path with 14/14 checks passing.
+
+### Changed
+
+- Make the core-usability goal explicit in the repository: the packaged
+  Add Computer → credential vault → worker pairing → job/result path takes
+  priority over non-blocking polish and release-process churn. Public builds
+  remain prereleases while the operator exercises this path.
+
+### Tests
+
+- Rebuilt `cyc`, `cyc-controller`, and `cyc-worker` from one checkout and
+  passed the Windows controller/worker live round trip with a deliberately
+  long work root (14/14 checks, `queued → running → succeeded`).
+- Passed the worker library suite (118 passed, 1 ignored), desktop renderer
+  suite (96 passed), native desktop host suite (79 passed), and renderer build.
+
+## [0.1.0-preview.95] - 2026-09-07
+
+### Changed
+
+- Carry the preview.94 core-usability candidate forward as a new public
+  prerelease candidate after its tagged artifact workflow was canceled while
+  stalled. The HTTP/2 transport fix and core-first delivery boundary are
+  unchanged; no stable-GA gate is relaxed.
+
+### Tests
+
+- Rebuilt the controller and worker from the preview.95 checkout and reran the
+  Windows controller/worker round trip before tagging this candidate.
+
+## [0.1.0-preview.94] - 2026-09-07
+
+### Fixed
+
+- Enable HTTP/2 in the shared rustls-backed reqwest client. Current OpenSSH
+  controller/worker TLS endpoints can negotiate HTTP/2; without the feature,
+  worker pairing could panic inside hyper-util before the first enrollment
+  request completed.
+
+### Tests
+
+- Rebuilt the preview.94 controller and worker from one source checkout and
+  passed the real Windows controller/worker round trip: pairing, node report,
+  snapshot upload, queued → running → succeeded, heartbeat, stdout/stderr,
+  artifact download, cleanup, and process reaping.
+- `cyc-controller` tests: 127 passed; `cyc-worker` tests: 117 passed, 1
+  ignored; no failures.
+
+## [0.1.0-preview.93] - 2026-09-07
+
+### Fixed
+
+- Make the native WebView2 bridge trust gate treat `undefined` URL credentials
+  as the empty-credential case exposed by `tauri.localhost`, so the packaged
+  desktop host can expose the provisioning bridge without widening the origin
+  allowlist.
+- Fix Windows SSH lifecycle invocation: PowerShell named parameters are now
+  passed through a hashtable splat instead of an array splat, so `-Action
+  Install` binds to the installer parameter rather than being treated as a
+  positional value.
+- Use the OpenSSL-backed Windows libssh2 build so the controller advertises
+  curve25519/ECDH key exchange methods accepted by current Linux OpenSSH
+  workers.
+
+### Tests
+
+- `cyc-ssh`: 14 tests passed, including encoded PowerShell named-parameter
+  regression coverage.
+- `cyc-provision`: 36 unit tests and 25 state-machine tests passed.
+- A direct Helio lifecycle probe using the fixed command renderer reached the
+  Windows worker installer and returned a successful unpaired-install receipt;
+  the previous renderer returned `ValidateSet` failure before the installer
+  could run.
+- Keep the encoded PowerShell regression test compatible with the release
+  workflow's Rust 1.98 `-D warnings` Clippy profile by decoding UTF-16 with
+  fixed-size chunks.
 
 ## [0.1.0-preview.91] - 2026-09-06
 
@@ -1328,7 +1456,14 @@ No unreleased changes.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.91...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.98...HEAD
+[0.1.0-preview.98]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.97...v0.1.0-preview.98
+[0.1.0-preview.97]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.96...v0.1.0-preview.97
+[0.1.0-preview.96]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.95...v0.1.0-preview.96
+[0.1.0-preview.95]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.94...v0.1.0-preview.95
+[0.1.0-preview.94]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.93...v0.1.0-preview.94
+[0.1.0-preview.93]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.92...v0.1.0-preview.93
+[0.1.0-preview.92]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.91...v0.1.0-preview.92
 [0.1.0-preview.91]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.90...v0.1.0-preview.91
 [0.1.0-preview.90]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.89...v0.1.0-preview.90
 [0.1.0-preview.89]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.88...v0.1.0-preview.89

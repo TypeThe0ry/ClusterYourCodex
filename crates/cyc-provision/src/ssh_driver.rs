@@ -737,7 +737,10 @@ impl SshProvisioningDriver {
                 FixedCommand::posix_script(lifecycle_path, arguments)
             }
             RemotePlatform::Windows => {
-                FixedCommand::windows_powershell_script(lifecycle_path, arguments)
+                FixedCommand::windows_powershell_script_with_named_arguments(
+                    lifecycle_path,
+                    arguments,
+                )
             }
         };
         let output = session.exec_fixed(&command).map_err(map_ssh_error)?;
@@ -2989,6 +2992,7 @@ mod tests {
                 | FixedCommand::WindowsPowerShellScript {
                     remote_path,
                     arguments,
+                    ..
                 } => (remote_path.as_str(), arguments),
             };
             if path.ends_with("cyc-discovery.sh") || path.ends_with("cyc-discovery.ps1") {
