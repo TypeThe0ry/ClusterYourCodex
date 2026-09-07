@@ -7,6 +7,30 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.96] - 2026-09-07
+
+### Fixed
+
+- Harden the Windows worker active-run guard for long local and UNC workspace
+  paths by using the extended-length Win32 namespace during the atomic rename.
+  A current-source live controller/worker round trip now completes the full
+  queued → running → succeeded path with 14/14 checks passing.
+
+### Changed
+
+- Make the core-usability goal explicit in the repository: the packaged
+  Add Computer → credential vault → worker pairing → job/result path takes
+  priority over non-blocking polish and release-process churn. Public builds
+  remain prereleases while the operator exercises this path.
+
+### Tests
+
+- Rebuilt `cyc`, `cyc-controller`, and `cyc-worker` from one checkout and
+  passed the Windows controller/worker live round trip with a deliberately
+  long work root (14/14 checks, `queued → running → succeeded`).
+- Passed the worker library suite (118 passed, 1 ignored), desktop renderer
+  suite (96 passed), native desktop host suite (79 passed), and renderer build.
+
 ## [0.1.0-preview.95] - 2026-09-07
 
 ### Changed
@@ -1387,7 +1411,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.95...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.96...HEAD
+[0.1.0-preview.96]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.95...v0.1.0-preview.96
 [0.1.0-preview.95]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.94...v0.1.0-preview.95
 [0.1.0-preview.94]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.93...v0.1.0-preview.94
 [0.1.0-preview.93]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.92...v0.1.0-preview.93

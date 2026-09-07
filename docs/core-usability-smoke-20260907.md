@@ -2,7 +2,8 @@
 
 This record follows the active delivery goal: prove the shortest usable path
 before spending time on non-blocking defect cleanup, visual polish, or PR
-churn. It is source-bound to the current checkout and contains no credentials.
+churn. The durable goal is [core-usability-first.md](goals/core-usability-first.md).
+It is source-bound to the current checkout and contains no credentials.
 
 ## Candidate and runtime
 
@@ -26,7 +27,7 @@ churn. It is source-bound to the current checkout and contains no credentials.
 | Credential vault round-trip | passed | `cyc-secrets` Windows Credential Manager test — 1 passed |
 | Provisioning state machine | passed | `cyc-provision` state-machine suite — 25 passed |
 | SSH transport | passed | `cyc-ssh` suite — 13 passed |
-| Real Windows worker run | passed | [preview.95 local round-trip](live-windows-preview95-local-roundtrip.md); prior [Helio preview.91 round-trip](live-windows-preview91-helio-roundtrip.md) |
+| Real Windows worker run | passed | [current HEAD long-path round-trip](live-windows-head-roundtrip-20260907.md); prior [preview.95 local round-trip](live-windows-preview95-local-roundtrip.md) and [Helio preview.91 round-trip](live-windows-preview91-helio-roundtrip.md) |
 | Real Linux worker run | passed | [P1 preview.91 round-trip](live-linux-preview91-p1-roundtrip.md) |
 | Chrome preview navigation/locales | passed | Home, Computers, Add Computer modal, English, Simplified Chinese, Spanish, and Japanese were inspected in the local preview |
 
@@ -77,6 +78,13 @@ then passed pairing, node report, snapshot transfer, queued → running →
 succeeded, heartbeat, logs, artifact verification, cleanup, and process
 reaping; the retained acceptance marker is
 `windows controller/worker live round-trip passed`.
+
+The current HEAD rerun used a deliberately long temporary work root and found
+one additional Windows-only path issue: the active-run guard's atomic
+`MoveFileExW` install exceeded the legacy `MAX_PATH` boundary even though the
+Rust file creation succeeded. The guard now uses the extended-length Win32
+namespace for local and UNC paths; the [current HEAD evidence record](live-windows-head-roundtrip-20260907.md)
+passes the same full 14-check loop after that fix.
 
 ## Next highest-value action
 

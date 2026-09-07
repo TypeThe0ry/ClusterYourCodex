@@ -23,6 +23,11 @@ and the current release blocker are maintained in
 [docs/project-status.md](docs/project-status.md). That file is updated in the
 same pull request as every feature, CI, or release change.
 
+The active delivery priority is recorded in
+[docs/goals/core-usability-first.md](docs/goals/core-usability-first.md): get
+the packaged Add Computer → credential vault → worker pairing → job/result
+loop working first, then use operator feedback for non-blocking polish.
+
 The desktop UI now starts with one three-step path: **Add a computer → Connect
 Codex → Run the check**. The primary action is state-aware: when the local
 controller is offline it opens setup, when the controller is ready it starts

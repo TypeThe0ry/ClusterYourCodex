@@ -2769,6 +2769,16 @@ fn atomic_install_active_run_guard_windows(source: &Path, destination: &Path) ->
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
 
+    // `MoveFileExW` still applies the legacy MAX_PATH limit unless callers
+    // opt into the extended-length namespace.  The worker normally runs
+    // under a short `%LOCALAPPDATA%` root, but CI/profile fixtures and user
+    // workspaces can legitimately push the temporary guard name past 260
+    // characters.  Rust's file APIs may create that file successfully while
+    // the unprefixed Win32 rename then returns ERROR_PATH_NOT_FOUND.  Convert
+    // absolute local paths to the `\\?\` namespace before the atomic install;
+    // the namespace preserves the same volume and does not follow links.
+    let source = windows_extended_path(source);
+    let destination = windows_extended_path(destination);
     let source_wide = source
         .as_os_str()
         .encode_wide()
@@ -2798,6 +2808,21 @@ fn atomic_install_active_run_guard_windows(source: &Path, destination: &Path) ->
         });
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn windows_extended_path(path: &Path) -> PathBuf {
+    let text = path.as_os_str().to_string_lossy();
+    if text.starts_with(r"\\?\") {
+        return path.to_owned();
+    }
+    if let Some(unc) = text.strip_prefix(r"\\") {
+        return PathBuf::from(format!(r"\\?\UNC\{unc}"));
+    }
+    if path.is_absolute() {
+        return PathBuf::from(format!(r"\\?\{text}"));
+    }
+    path.to_owned()
 }
 
 async fn handle_guarded_assignment_error(error: anyhow::Error) -> Result<()> {
@@ -4866,6 +4891,26 @@ mod tests {
         assert!(!path_entry_exists(&containment_quarantine_path(&config)).unwrap());
 
         fs::remove_dir(&junction).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn active_run_guard_windows_path_conversion_handles_long_and_unc_paths() {
+        let local = Path::new(r"C:\workspace\").join("a".repeat(280));
+        let extended_local = windows_extended_path(&local);
+        assert_eq!(
+            extended_local.to_string_lossy(),
+            format!(r"\\?\{}", local.display())
+        );
+
+        let unc = Path::new(r"\\server\share\workspace\guard.tmp");
+        assert_eq!(
+            windows_extended_path(unc).to_string_lossy(),
+            r"\\?\UNC\server\share\workspace\guard.tmp"
+        );
+
+        let already_extended = Path::new(r"\\?\C:\workspace\guard.tmp");
+        assert_eq!(windows_extended_path(already_extended), already_extended);
     }
 
     #[tokio::test]
