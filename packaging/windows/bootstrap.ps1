@@ -104,7 +104,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
-$script:ProductVersion = '0.1.0-preview.97'
+$script:ProductVersion = '0.1.0-preview.98'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
@@ -5269,7 +5269,7 @@ function Test-CycCodexPluginActive {
     param(
         [Parameter(Mandatory = $true)]$Codex,
         [Parameter(Mandatory = $true)]$ExpectedPlugin,
-        [ValidateRange(100, 30000)][int]$TimeoutMilliseconds = 20000
+        [ValidateRange(100, 90000)][int]$TimeoutMilliseconds = 20000
     )
     try {
         $result = Invoke-CycBoundedCodexProcess `

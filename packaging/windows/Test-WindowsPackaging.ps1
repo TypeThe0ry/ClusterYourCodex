@@ -926,6 +926,7 @@ try {
     Assert-True ($source -match 'Resolve-CodexCli') 'Codex integration probes executable candidates instead of trusting Get-Command'
     Assert-True ($source -match 'Test-CycCodexPluginActive') 'Codex registration is verified against the active plugin list'
     Assert-True ($source -match 'Invoke-CycBoundedCodexProcess') 'Codex registration and cleanup use a bounded child-process runner'
+    Assert-True ($source -match '\[ValidateRange\(100, 90000\)\]\[int\]\$TimeoutMilliseconds = 20000') 'Codex plugin verification accepts the same bounded 90-second ceiling as its child runner'
     Assert-True ($source -notmatch '& \$codex\.Source plugin') 'Codex lifecycle has no unbounded direct CLI invocation'
     Assert-True ($source -match "pluginVerificationReason = 'already-active'") 'repeated Repair reuses an already active Codex plugin without re-registering it'
     Assert-True ($source -match 'TimeoutSeconds \$ActionTimeoutSeconds') 'Codex lifecycle child commands inherit the bounded action timeout'
