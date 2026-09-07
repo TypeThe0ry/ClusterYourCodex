@@ -16,6 +16,22 @@ are versioned independently from the product.
   template so operator reports capture the exact preview, platform pair,
   failing stage, and redacted evidence.
 
+## [0.1.0-preview.100] - 2026-09-07
+
+### Fixed
+
+- Keep the Windows packaging contract aligned with the bounded 180-minute
+  hosted-runner budget used by the self-contained and clean ARM64 preview
+  jobs. The `.99` run failed closed on this stale exact-`120` assertion before
+  any installer lifecycle assertion executed; the production workflow and its
+  per-attempt 900-second ceilings remain unchanged.
+
+### Tests
+
+- Preserve preview.99 as unpublished after its tagged workflow stopped at the
+  stale packaging contract, then rerun the complete prerelease-only matrix
+  under the new preview.100 tag.
+
 ## [0.1.0-preview.99] - 2026-09-07
 
 ### Fixed
@@ -1474,7 +1490,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.99...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.100...HEAD
+[0.1.0-preview.100]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.99...v0.1.0-preview.100
 [0.1.0-preview.99]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.98...v0.1.0-preview.99
 [0.1.0-preview.98]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.97...v0.1.0-preview.98
 [0.1.0-preview.97]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.96...v0.1.0-preview.97
