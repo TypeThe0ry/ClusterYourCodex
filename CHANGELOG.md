@@ -7,6 +7,15 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+### Changed
+
+- Revise the active delivery goal to prioritize a usable Add Computer →
+  credential vault → worker pairing → job/result loop before non-blocking bug
+  cleanup, visual polish, or additional PR splitting.
+- Add the queued user-feedback goal and a GitHub preview-feedback issue
+  template so operator reports capture the exact preview, platform pair,
+  failing stage, and redacted evidence.
+
 ## [0.1.0-preview.96] - 2026-09-07
 
 ### Fixed

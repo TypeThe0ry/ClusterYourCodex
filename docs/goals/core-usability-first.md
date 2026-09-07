@@ -1,5 +1,7 @@
 # Goal: core usability before polish
 
+Status: active (revised 2026-09-07)
+
 ## Priority
 
 The current delivery priority is the smallest end-to-end path that a user can
@@ -15,6 +17,25 @@ actually run:
 This goal deliberately puts non-blocking defect cleanup, visual polish, and
 additional PR splitting after the usable path. Those items are collected from
 operator feedback once the core flow is exercised on a packaged build.
+
+## Delivery mode
+
+This is an outcome-first milestone, not a promise that every edge-case defect
+is already closed. Work stays focused on the shortest path that proves the
+product can be used: connect one worker, keep its credential inside the native
+vault, pair it, run one typed job, and return its evidence. A defect that does
+not block that path is recorded for the follow-up feedback goal instead of
+displacing the usable path.
+
+The operator-facing order is therefore:
+
+1. ship a runnable prerelease candidate;
+2. let the operator exercise the packaged flow;
+3. capture the exact stage, version, and redacted diagnostics for each report;
+4. promote only reproducible blockers into the core work queue.
+
+The next-stage feedback plan is tracked in
+[`user-feedback-loop.md`](user-feedback-loop.md).
 
 ## Acceptance signal
 

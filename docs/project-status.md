@@ -21,6 +21,12 @@ typed job, and receive the result and logs. This gate has priority over
 non-blocking bug cleanup, visual polish, and additional PR splitting. Those
 items move to the feedback backlog after the core path is usable.
 
+The goal was revised on 2026-09-07 to make the order explicit: ship a runnable
+prerelease, let the operator exercise the packaged flow, capture the exact
+failing stage and redacted receipt, then promote only core-path blockers. The
+next-stage feedback loop is [docs/goals/user-feedback-loop.md](goals/user-feedback-loop.md)
+and the repository now exposes a preview-feedback issue template.
+
 Fresh local evidence for the current candidate includes Windows Credential
 Manager round-trip (`1 passed`), provisioning state-machine coverage (`25
 passed`), SSH transport coverage (`13 passed`), and a Windows

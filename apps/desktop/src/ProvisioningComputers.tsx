@@ -265,6 +265,24 @@ function optionalPositive(value: string): number | undefined {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+/** Keep the primary Add Computer action honest: a user should never be able
+ * to submit an obviously incomplete connection and only discover the native
+ * validation boundary after clicking Continue. The native bridge still
+ * validates the same fields independently. */
+export function canSubmitProvisioningForm(form: AddForm): boolean {
+  const port = Number(form.port);
+  const priority = Number(form.priority);
+  return form.host.trim().length > 0
+    && form.username.trim().length > 0
+    && Number.isSafeInteger(port)
+    && port >= 1
+    && port <= 65535
+    && Number.isSafeInteger(priority)
+    && form.allowedJobKinds.length > 0
+    && (form.authenticationMethod !== "password" || form.password.length > 0)
+    && (form.authenticationMethod !== "private_key" || form.privateKeyPath.trim().length > 0);
+}
+
 export function buildStartComputerInput(
   form: AddForm,
   recordId: string,
@@ -556,17 +574,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
 
   const start = useCallback(async (event: FormEvent) => {
     event.preventDefault();
-    const port = Number(form.port);
-    const priority = Number(form.priority);
-    if (
-      !Number.isSafeInteger(port) ||
-      port < 1 ||
-      port > 65535 ||
-      !Number.isSafeInteger(priority) ||
-      form.allowedJobKinds.length === 0 ||
-      (form.authenticationMethod === "password" && !form.password) ||
-      (form.authenticationMethod === "private_key" && !form.privateKeyPath.trim())
-    ) {
+    if (!canSubmitProvisioningForm(form)) {
       setError(new ProvisioningClientError("invalid_request"));
       return;
     }
@@ -835,7 +843,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
               <small>{t("provision.advancedDescription")}</small>
             </details>
 
-            <footer><button className="button button-secondary" disabled={Boolean(operation)} onClick={resetAndCloseWizard} type="button">{t("common.cancel")}</button><button className="button button-primary" disabled={Boolean(operation) || form.allowedJobKinds.length === 0 || (form.authenticationMethod === "password" && !form.password) || (form.authenticationMethod === "private_key" && !form.privateKeyPath.trim())} type="submit">{operation === "start" ? t("status.connecting") : t("common.continue")}</button></footer>
+            <footer><button className="button button-secondary" disabled={Boolean(operation)} onClick={resetAndCloseWizard} type="button">{t("common.cancel")}</button><button className="button button-primary" disabled={Boolean(operation) || !canSubmitProvisioningForm(form)} type="submit">{operation === "start" ? t("status.connecting") : t("common.continue")}</button></footer>
           </form>
         </div>
       ) : null}

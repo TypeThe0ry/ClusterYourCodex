@@ -27,6 +27,9 @@ The active delivery priority is recorded in
 [docs/goals/core-usability-first.md](docs/goals/core-usability-first.md): get
 the packaged Add Computer → credential vault → worker pairing → job/result
 loop working first, then use operator feedback for non-blocking polish.
+The follow-up feedback workflow is documented in
+[docs/goals/user-feedback-loop.md](docs/goals/user-feedback-loop.md), with a
+direct [preview feedback issue template](https://github.com/TypeThe0ry/ClusterYourCodex/issues/new?template=preview-feedback.md).
 
 The desktop UI now starts with one three-step path: **Add a computer → Connect
 Codex → Run the check**. The primary action is state-aware: when the local

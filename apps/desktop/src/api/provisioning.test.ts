@@ -8,7 +8,7 @@ import {
   type ProvisioningComputer,
   type StartComputerInput,
 } from "./provisioning";
-import { buildStartComputerInput, reconcileComputerList, resetProvisioningModal, upsertComputer } from "../ProvisioningComputers";
+import { buildStartComputerInput, canSubmitProvisioningForm, reconcileComputerList, resetProvisioningModal, upsertComputer } from "../ProvisioningComputers";
 
 const PASSWORD = "super-secret-ssh-password";
 const PASSPHRASE = "private-key-passphrase-must-not-leak";
@@ -192,6 +192,27 @@ describe("provisioning client secret boundary", () => {
 });
 
 describe("durable provisioning recovery and actions", () => {
+  it("keeps Continue disabled until the connection identity and auth input are complete", () => {
+    const session = resetProvisioningModal(() => "11111111-1111-4111-8111-111111111111");
+    expect(canSubmitProvisioningForm(session.form)).toBe(false);
+
+    const common = {
+      ...session.form,
+      host: "worker.example.test",
+      username: "builder",
+      password: PASSWORD,
+    };
+    expect(canSubmitProvisioningForm(common)).toBe(true);
+    expect(canSubmitProvisioningForm({ ...common, host: "  " })).toBe(false);
+    expect(canSubmitProvisioningForm({ ...common, username: "" })).toBe(false);
+    expect(canSubmitProvisioningForm({ ...common, port: "0" })).toBe(false);
+    expect(canSubmitProvisioningForm({ ...common, port: "70000" })).toBe(false);
+    expect(canSubmitProvisioningForm({ ...common, allowedJobKinds: [] })).toBe(false);
+    expect(canSubmitProvisioningForm({ ...common, authenticationMethod: "password", password: "" })).toBe(false);
+    expect(canSubmitProvisioningForm({ ...common, authenticationMethod: "private_key", privateKeyPath: " " })).toBe(false);
+    expect(canSubmitProvisioningForm({ ...common, authenticationMethod: "agent", password: "", privateKeyPath: "" })).toBe(true);
+  });
+
   it("resets every modal-owned secret/trust bit and rotates retry identities only on reset", () => {
     const ids = [
       "11111111-1111-4111-8111-111111111111",
