@@ -8,7 +8,7 @@ It is source-bound to the current checkout and contains no credentials.
 ## Candidate and runtime
 
 - Repository checkout: `D:\Projects\ClusterYourCodex\ClusterYourCodex`
-- Product candidate: `0.1.0-preview.95` (local source candidate)
+- Product candidate: `0.1.0-preview.96` (local source candidate, commit `038ad26`)
 - Published tag: `v0.1.0-preview.95` is the current immutable public prerelease candidate, bound to source commit `6d06f84f3c95d6be8d5151a8950065f0602d651b`
 - Published channel: GitHub public prerelease (`isPrerelease=true`,
   `isDraft=false`), tagged workflow `34052588313`
@@ -27,7 +27,7 @@ It is source-bound to the current checkout and contains no credentials.
 | Credential vault round-trip | passed | `cyc-secrets` Windows Credential Manager test — 1 passed |
 | Provisioning state machine | passed | `cyc-provision` state-machine suite — 25 passed |
 | SSH transport | passed | `cyc-ssh` suite — 13 passed |
-| Real Windows worker run | passed | [current HEAD long-path round-trip](live-windows-head-roundtrip-20260907.md); prior [preview.95 local round-trip](live-windows-preview95-local-roundtrip.md) and [Helio preview.91 round-trip](live-windows-preview91-helio-roundtrip.md) |
+| Real Windows worker run | passed | current-source preview.96 long-path round-trip (`queued → running → succeeded`, 14/14); prior [preview.95 local round-trip](live-windows-preview95-local-roundtrip.md) and [Helio preview.91 round-trip](live-windows-preview91-helio-roundtrip.md) |
 | Real Linux worker run | passed | [P1 preview.91 round-trip](live-linux-preview91-p1-roundtrip.md) |
 | Chrome preview navigation/locales | passed | Home, Computers, Add Computer modal, English, Simplified Chinese, Spanish, and Japanese were inspected in the local preview |
 
@@ -79,16 +79,17 @@ succeeded, heartbeat, logs, artifact verification, cleanup, and process
 reaping; the retained acceptance marker is
 `windows controller/worker live round-trip passed`.
 
-The current HEAD rerun used a deliberately long temporary work root and found
+The current preview.96 rerun used a deliberately long temporary work root and found
 one additional Windows-only path issue: the active-run guard's atomic
 `MoveFileExW` install exceeded the legacy `MAX_PATH` boundary even though the
 Rust file creation succeeded. The guard now uses the extended-length Win32
-namespace for local and UNC paths; the [current HEAD evidence record](live-windows-head-roundtrip-20260907.md)
+namespace for local and UNC paths; the retained local evidence record at
+`%TEMP%\ClusterYourCodex-core-roundtrip-preview96-long-path-41cbfee97dd24306a3a41dd3f476648e\cyc-windows-controller-worker-roundtrip.30b8cc29227e4178b0db466d3108178e\result.json`
 passes the same full 14-check loop after that fix.
 
 ## Next highest-value action
 
-Use the packaged preview desktop host for one operator-driven Add Computer
+Use the packaged preview.96 desktop host for one operator-driven Add Computer
 session against a reachable Windows or Linux worker. Preserve the resulting
 host-key, credential-vault, install, pairing, heartbeat, smoke, and cleanup
 receipt. Non-blocking UI wording and follow-up defects go to the feedback
