@@ -300,9 +300,6 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
       {isFirstRun ? (
         <details className="panel first-run-panel">
           <summary>{t("home.quickStartTitle")}</summary>
-          <div className="first-run-copy">
-            <p>{t("home.quickStartDescription")}</p>
-          </div>
           <ol className="first-run-steps">
             <li><span>1</span><strong>{t("home.stepAdd")}</strong>{online ? <button className="text-button small" onClick={primaryAction.onClick}>{t("home.stepStart")} <Icon name="arrow" size={14} /></button> : <small>{t("controller.offline")}</small>}</li>
             <li><span>2</span><strong>{t("home.stepConnect")}</strong><button className="text-button small" onClick={() => openPage("integration")}>{t("home.stepOpen")} <Icon name="arrow" size={14} /></button></li>
@@ -418,7 +415,7 @@ function TasksPage({ fleet }: { fleet?: FleetInfo }) {
             </div>
           ))}
         </div>
-      ) : <EmptyState icon="tasks" title={t("tasks.emptyTitle")} />}
+      ) : <EmptyState icon="tasks" title={t(filter === "all" ? "tasks.emptyTitle" : "tasks.noMatches")} />}
     </section>
   );
 }

@@ -14,6 +14,106 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 concise UI follow-up
+
+Confirmed the discarded promotional home/task headings are absent from the
+current desktop source. Removed the repeated quick-start description above the
+action steps. Task filters now distinguish an empty history from no matching
+tasks, with equivalent messages in English, Chinese, Spanish, and Japanese.
+This frontend-only change does not alter worker lifecycle or release status.
+
+### 2026-09-08 SYSTEM lifecycle dispatcher implementation
+
+Native SYSTEM ACL acceptance now passed on Helio (remote exit 0), using exact
+private-ACL functions extracted from the current installer, not mocked identity
+or scheduler calls. A real temporary SYSTEM task created/protected/revalidated
+a directory and file and read its known non-secret content. Receipt: runtime
+SID and owner `S-1-5-18`, protected DACL, exactly one rule. Independent follow-up
+found zero native-probe tasks; the original worker task stayed Ready/result 1.
+Evidence retained remotely at
+`C:\ProgramData\ClusterYourCodex-native-acl-9676d563a0ff4f47afc86bbb70464b66`.
+Reproducer: `packaging/worker-kits/windows/Test-SystemPrivateAclNative.ps1`.
+Installer SHA256:
+`FE4E42584B1EC8C424CBF117F44F1FBA64FB50262953167EDDC4C44F3B362DDC`;
+probe SHA256:
+`4833EF4D3F807118F52033927653108B233BA362DA7893FB37964B87D40BDBA5`.
+This proves the native ACL primitive only, not signed-kit dispatch, pairing,
+worker startup, service restart, or full task round-trip acceptance. The probe
+retains a tiny protected evidence tree and never edits existing worker data.
+
+Latest read-only Helio recheck: SSH has an elevated administrator token; the
+`ClusterYourCodex Worker` task exists with SYSTEM principal, Ready state, and
+LastTaskResult 1. No `cyc-worker` process is currently present. The earlier
+foreground proof remains historical execution evidence, not current availability.
+The controller shell is not elevated. Helio C: free space was 1,309,270,016 bytes;
+avoid a full remote debug build or unrelated cleanup. These probes changed no
+remote task, process, ACL, pairing, or worker data.
+
+The Windows installer now delegates the entire System-scope lifecycle to a
+bounded SYSTEM helper task before accessing worker-owned state. System defaults
+use Program Files/ProgramData; User behavior remains logon-scoped. The helper
+uses a per-data-root mutex, private request/result files, and the copied verified
+five-file kit. The parent waits for actual helper completion and a successful
+exit/receipt; failed/timed-out operations retain evidence, while successful
+handoffs delete only their exact known files. WhatIf stops before dispatch.
+
+The dispatcher fixture passed under PowerShell 7 and Windows PowerShell 5.1,
+covering successful receipt/cleanup, failure evidence retention, timeout stop,
+non-admin rejection, SYSTEM task principal, copied kit shape, and generated
+helper syntax. Scheduler operations are mocked; private filesystem/ACL actions
+are real. No actual SYSTEM process, live migration, or remote persistent worker
+acceptance is claimed by these tests. The existing Helio foreground worker and
+user-owned data were not modified. Existing task/root conflicts remain explicit;
+there is no automatic ownership takeover. The full worker-kit regression failed
+at its 600-second `linux-worker-lifecycle` watchdog on Windows/Git Bash. Retained
+evidence is in local temp directory
+`cyc-worker-kit-test-c007be50b0de40dc93349b5398966b43`: child stderr reached
+the expected `before-manifest-write` failure injection, while top-level logs
+were empty. This does not establish whether rollback or a later assertion was
+still executing. Added fixed phase/elapsed-time markers around repair injection
+and path-binding checks without logging secrets or changing the watchdog limit.
+No native Linux pass or complete packaging-gate pass is claimed.
+The instrumented rerun also exited 1 at 600 seconds; evidence directory:
+`cyc-worker-kit-test-13e7b159cfb0492d9f1df890165d453b`. Its phase log now proves
+repair-after-pair started at 510s, returned expected failure at 584s, and passed
+rollback assertions at 586s. The next injection began at 586s and was killed
+by the suite deadline. Thus that rollback completed, and cumulative suite
+runtime exhausted the budget; the next injection is still unverified. Do not
+diagnose this as a confirmed lifecycle deadlock or mark the suite passed.
+The Linux fixture now uses ordered setup/repair/binding/uninstall time budgets
+within the same shell, preserving transaction state and every assertion. Each
+phase has a 600-second limit; total time is bounded to 2400 seconds. Only the
+next declared marker grants a fresh budget; repeats/unknown markers cannot
+extend it. Successful early exits that omit required phases are rejected.
+PowerShell 7 and Windows PowerShell 5.1 watchdog self-tests passed: ordinary success, exit 23, timeout,
+valid phase transition exceeding the old whole-run budget, repeated markers
+still timing out, and missing required markers failing. Full lifecycle and
+complete platform acceptance remain pending for this watchdog revision.
+Independent review found an unfinished-log-line race; the reader now consumes
+only newline-terminated records and revisits an incomplete tail. The first
+retest exposed a Windows sharing violation from ReadAllText against redirected
+stdout (retained helper evidence `3bd6d9d6115f4c7ebaae1f80c0e0c594`); live log
+reads now explicitly use FileShare.ReadWrite. Added split-marker regression,
+deadline-before-success handling, and persistent failure classification so a
+missing phase cannot disappear from the final watchdog evidence.
+The corrected shared-reader/split-marker revision passed both PowerShell 7
+and Windows PowerShell 5.1 self-tests (native process exit 0), with evidence
+directories `cyc-worker-kit-bash-helper-f367f717bb3346bfac0a1aca0701a627` and
+`cyc-worker-kit-bash-helper-fe3dd5e7745c4e299b656e1a3d0cb77c`. Generated Linux
+shell syntax and git diff whitespace checks also passed. The next full run
+must be evaluated separately; these helper checks are not lifecycle acceptance.
+The dispatcher now detects a recorded nonzero helper exit without a receipt
+instead of waiting the full five minutes. It checks LastRunTime to avoid
+mistaking a newly registered, not-yet-started Ready task for a failed execution.
+Regression fixtures cover missing-receipt failure and Ready-before-first-run;
+this remains fixture evidence, not live SYSTEM installation acceptance.
+Independent review identified and fixed Windows PowerShell 5.1's default ANSI
+decoding of BOM-less UTF-8 requests and the mismatch between a silent helper
+wait and the SSH transport's 15-second inactivity limit. Requests now use
+explicit UTF-8, with Chinese-path decoding exercised in real Windows PowerShell
+5.1. The parent emits a fixed non-secret stderr marker every five seconds;
+the transport source refreshes its progress timer on either stdout or stderr.
+
 ### 2026-09-08 completion timestamp reconciliation
 
 Explicit Retry is now offered for the retained JOB_PROGRESS_REGRESSED smoke

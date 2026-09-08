@@ -821,6 +821,144 @@ function Resolve-ServiceScope {
     return $RequestedScope
 }
 
+function Invoke-SystemWorkerLifecycle {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Parameters,
+        [string]$HandoffParent = $env:ProgramData,
+        [ValidateRange(1, 300)][int]$TimeoutSeconds = 300
+    )
+    if (-not (Test-IsAdministrator)) { throw 'System lifecycle requires an elevated administrator.' }
+    # Verify before copying anything into an elevated execution path. The child
+    # verifies the copied kit again through the normal installer entry point.
+    $null = Read-KitManifest -Root $Parameters.BundleRoot
+    $handoffRoot = Join-Path $HandoffParent ('ClusterYourCodex-lifecycle-' + [Guid]::NewGuid().ToString('N'))
+    Protect-Directory -Path $handoffRoot
+    $kitRoot = Join-Path $handoffRoot 'kit'
+    Protect-Directory -Path $kitRoot
+    foreach ($name in @('Install-Worker.ps1', 'cyc-worker.exe', 'worker-kit.json', 'worker-kit.sig', 'SHA256SUMS')) {
+        $destination = Join-Path $kitRoot $name
+        Copy-Item -LiteralPath (Join-Path $Parameters.BundleRoot $name) -Destination $destination
+        Protect-File -Path $destination -NewlyCreated
+    }
+    $Parameters.BundleRoot = $kitRoot
+    $requestPath = Join-Path $handoffRoot 'request.json'
+    $resultPath = Join-Path $handoffRoot 'result.json'
+    $helperPath = Join-Path $handoffRoot 'lifecycle.ps1'
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($requestPath, ($Parameters | ConvertTo-Json -Depth 8), $utf8)
+    Protect-File -Path $requestPath -NewlyCreated
+    $helper = @'
+#requires -Version 5.1
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+if ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') {
+    exit 1
+}
+$result = @{ succeeded = $false; output = ''; code = 'SYSTEM_LIFECYCLE_FAILED'; line = 0 }
+$mutex = $null
+$ownsMutex = $false
+try {
+    $request = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'request.json'), [System.Text.UTF8Encoding]::new($false, $true)) | ConvertFrom-Json
+    $parameters = @{}
+    foreach ($property in $request.PSObject.Properties) { $parameters[$property.Name] = $property.Value }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes(([string]$parameters.DataRoot).ToLowerInvariant())) }
+    finally { $sha.Dispose() }
+    $mutexName = 'Global\ClusterYourCodex-Lifecycle-' + ([BitConverter]::ToString($digest).Replace('-', ''))
+    $mutex = [System.Threading.Mutex]::new($false, $mutexName)
+    try { $ownsMutex = $mutex.WaitOne(0) }
+    catch [System.Threading.AbandonedMutexException] { $ownsMutex = $true }
+    if (-not $ownsMutex) { $result.code = 'SYSTEM_LIFECYCLE_BUSY'; throw 'Lifecycle already running' }
+    $output = & (Join-Path $PSScriptRoot 'kit\Install-Worker.ps1') @parameters
+    $result = @{ succeeded = $true; output = ($output | Out-String); code = ''; line = 0 }
+} catch {
+    # Do not serialize arbitrary exceptions or enrollment contents into receipts.
+    $result.line = $_.InvocationInfo.ScriptLineNumber
+} finally {
+    if ($ownsMutex) { $mutex.ReleaseMutex() }
+    if ($null -ne $mutex) { $mutex.Dispose() }
+}
+[System.IO.File]::WriteAllText((Join-Path $PSScriptRoot 'result.json'), ($result | ConvertTo-Json -Depth 4), (New-Object System.Text.UTF8Encoding($false)))
+if (-not $result.succeeded) { exit 1 }
+'@
+    [System.IO.File]::WriteAllText($helperPath, $helper, $utf8)
+    Protect-File -Path $helperPath -NewlyCreated
+    $taskName = 'ClusterYourCodex Lifecycle ' + [Guid]::NewGuid().ToString('N')
+    $action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
+        -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $helperPath + '"') -WorkingDirectory $handoffRoot
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    $registered = $false
+    $finished = $false
+    $succeeded = $false
+    try {
+        Register-ScheduledTask -TaskName $taskName -TaskPath '\' -Action $action -Principal $principal -Settings $settings | Out-Null
+        $registered = $true
+        $startedAfter = [DateTime]::Now.AddSeconds(-1)
+        Start-ScheduledTask -TaskName $taskName -TaskPath '\'
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        $nextProgress = [DateTime]::UtcNow.AddSeconds(5)
+        do {
+            Start-Sleep -Milliseconds 250
+            if ([DateTime]::UtcNow -ge $nextProgress) {
+                # Keep the SSH output-inactivity watchdog alive, without paths,
+                # enrollment material, credentials, or arbitrary child output.
+                [Console]::Error.WriteLine('CYC_SYSTEM_LIFECYCLE_WAIT')
+                $nextProgress = [DateTime]::UtcNow.AddSeconds(5)
+            }
+            $task = Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop
+            if ((Test-Path -LiteralPath $resultPath -PathType Leaf) -and $task.State -notin @('Running', 'Queued')) {
+                $finished = $true
+                break
+            }
+            if ($task.State -notin @('Running', 'Queued')) {
+                $observedRun = Get-ScheduledTaskInfo -TaskName $taskName -TaskPath '\'
+                # A newly registered task can still be Ready before its first
+                # launch. Only treat a recorded execution as a failed helper.
+                if ($observedRun.LastRunTime -ge $startedAfter -and $observedRun.LastTaskResult -ne 0) {
+                    $finished = $true
+                    throw "System lifecycle helper exited without a receipt (task result $($observedRun.LastTaskResult)); protected recovery evidence retained at $handoffRoot"
+                }
+            }
+        } while ([DateTime]::UtcNow -lt $deadline)
+        if (-not $finished) { throw "System lifecycle timed out; protected recovery evidence retained at $handoffRoot" }
+        Assert-PathChainNoReparse -Path $resultPath
+        $receipt = Read-WorkerUtf8Json -Path $resultPath -Label 'System lifecycle result' -MaximumBytes 1MB
+        $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -TaskPath '\'
+        if ($receipt.succeeded -ne $true -or $taskInfo.LastTaskResult -ne 0) {
+            throw "System lifecycle failed at installer line $($receipt.line); protected recovery evidence retained at $handoffRoot"
+        }
+        $succeeded = $true
+        Write-Output ([string]$receipt.output)
+    } finally {
+        if ($registered) {
+            if (-not $finished) { Stop-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction SilentlyContinue }
+            $finalTask = Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction SilentlyContinue
+            if ($finalTask -and $finalTask.State -notin @('Running', 'Queued')) {
+                Unregister-ScheduledTask -TaskName $taskName -TaskPath '\' -Confirm:$false
+            }
+        }
+        # Retain the protected request/result and verified kit on failure or
+        # timeout; never erase evidence or an uncertain live helper's inputs.
+        if ($succeeded -and $finished) {
+            # Delete only the exact files we created, with no recursive traversal.
+            foreach ($name in @('Install-Worker.ps1', 'cyc-worker.exe', 'worker-kit.json', 'worker-kit.sig', 'SHA256SUMS')) {
+                $ownedPath = Join-Path $kitRoot $name
+                Assert-PathChainNoReparse -Path $ownedPath
+                Remove-Item -LiteralPath $ownedPath -Force
+            }
+            Assert-PathChainNoReparse -Path $kitRoot
+            if (@(Get-ChildItem -LiteralPath $kitRoot -Force).Count -eq 0) { Remove-Item -LiteralPath $kitRoot }
+            foreach ($ownedPath in @($requestPath, $helperPath, $resultPath)) {
+                Assert-PathChainNoReparse -Path $ownedPath
+                Remove-Item -LiteralPath $ownedPath -Force
+            }
+            if (@(Get-ChildItem -LiteralPath $handoffRoot -Force).Count -eq 0) { Remove-Item -LiteralPath $handoffRoot }
+        }
+    }
+}
+
 function Resolve-AccountSid {
     param([Parameter(Mandatory = $true)][string]$Account)
     if ([string]::IsNullOrWhiteSpace($Account)) { return $null }
@@ -1191,8 +1329,12 @@ function Invoke-FailureInjection {
 }
 
 function Assert-DefaultDataPurgeTarget {
-    param([Parameter(Mandatory = $true)][string]$Path)
-    $expected = Resolve-NormalizedPath (Join-Path $env:LOCALAPPDATA 'ClusterYourCodex\worker')
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][ValidateSet('User', 'System')][string]$ResolvedScope
+    )
+    $base = if ($ResolvedScope -eq 'System') { $env:ProgramData } else { $env:LOCALAPPDATA }
+    $expected = Resolve-NormalizedPath (Join-Path $base 'ClusterYourCodex\worker')
     $actual = Resolve-NormalizedPath $Path
     if (-not [string]::Equals($expected, $actual, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw 'PurgeData is limited to the default installer-owned worker data root.'
@@ -1205,6 +1347,27 @@ function Assert-DefaultDataPurgeTarget {
     }
 }
 
+$resolvedScope = Resolve-ServiceScope -RequestedScope $Scope
+if ($resolvedScope -eq 'System') {
+    if (-not $PSBoundParameters.ContainsKey('InstallRoot')) { $InstallRoot = Join-Path $env:ProgramFiles 'ClusterYourCodexWorker' }
+    if (-not $PSBoundParameters.ContainsKey('DataRoot')) { $DataRoot = Join-Path $env:ProgramData 'ClusterYourCodex\worker' }
+    if (-not $PSBoundParameters.ContainsKey('WorkspaceRoot')) { $WorkspaceRoot = Join-Path $DataRoot 'workspace' }
+}
+if (-not $PSCmdlet.ShouldProcess($DataRoot, "$Action $resolvedScope worker")) { return }
+if ($resolvedScope -eq 'System') {
+    if ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') {
+        $parameters = @{
+            Action = $Action; BundleRoot = (Resolve-NormalizedPath $BundleRoot)
+            InstallRoot = (Resolve-NormalizedPath $InstallRoot); DataRoot = (Resolve-NormalizedPath $DataRoot)
+            WorkspaceRoot = (Resolve-NormalizedPath $WorkspaceRoot); Scope = 'System'
+            AllowOnBattery = [bool]$AllowOnBattery; PairOnly = [bool]$PairOnly
+            PurgeData = [bool]$PurgeData; FailureInjection = $FailureInjection
+        }
+        if ($EnrollmentFile) { $parameters.EnrollmentFile = Resolve-NormalizedPath $EnrollmentFile }
+        Invoke-SystemWorkerLifecycle -Parameters $parameters
+        return
+    }
+}
 $bundle = Resolve-NormalizedPath $BundleRoot
 $install = Resolve-NormalizedPath $InstallRoot
 $data = Resolve-NormalizedPath $DataRoot
@@ -1232,7 +1395,6 @@ if (Test-Path -LiteralPath $data -PathType Container) {
         Assert-PrivateStateTree -Root $transactionPath
     }
 }
-$resolvedScope = Resolve-ServiceScope -RequestedScope $Scope
 $ownedInstallation = $false
 $recordedManifest = $null
 if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
@@ -1302,7 +1464,7 @@ if ($Action -eq 'Uninstall') {
         if ($remaining.Count -eq 0) { Remove-Item -LiteralPath $install -Force }
     }
     if ($PurgeData) {
-        Assert-DefaultDataPurgeTarget -Path $data
+        Assert-DefaultDataPurgeTarget -Path $data -ResolvedScope $resolvedScope
         Remove-Item -LiteralPath $data -Recurse -Force
     }
     [PSCustomObject]@{ schemaVersion = $script:Schema; action = 'uninstall'; succeeded = $true; dataPreserved = (-not $PurgeData) } | ConvertTo-Json

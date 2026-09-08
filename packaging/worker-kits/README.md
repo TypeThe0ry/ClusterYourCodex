@@ -15,6 +15,29 @@ credential, or private key. A short-lived enrollment document is created only
 after the kit has been staged and verified, transferred separately with private
 permissions, consumed once, and deleted.
 
+## Windows lifecycle identity
+
+`-Scope User` runs pairing and the worker as the installing user, with a logon
+trigger. `-Scope System` (also selected by Auto in an elevated session) delegates
+the complete lifecycle to a bounded, one-shot SYSTEM scheduled task. Pairing,
+private-file creation, repair, uninstall, and the persistent worker therefore
+share an identity. The default System roots are `%ProgramFiles%\ClusterYourCodexWorker`
+and `%ProgramData%\ClusterYourCodex\worker`; explicit roots remain supported.
+
+The dispatcher copies the verified five-file kit into a private per-operation
+directory and passes only a script path in task arguments. Enrollment remains
+a file reference, never task arguments. A per-data-root SYSTEM mutex rejects
+overlapping lifecycle operations. The parent requires a completed helper task,
+exit code zero, and a success receipt. Successful handoffs remove their exact
+known files; failures/timeouts retain protected recovery evidence. `-WhatIf`
+returns before creating any task or lifecycle files.
+
+Existing user-owned installations are not automatically taken over or recursively
+re-ACLed. A task pointing at old roots is a conflict, not permission to overwrite
+it. Such installations still require a verified rollback/migration before using
+System scope. Dispatcher fixture tests are not proof of a native SYSTEM worker
+run or persistence across reboot.
+
 ## Build a kit
 
 ```powershell
