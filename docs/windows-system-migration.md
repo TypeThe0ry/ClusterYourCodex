@@ -48,6 +48,14 @@ verified installation metadata; this primitive does not establish quiescence,
 acquire pairing/run locks, or switch tasks. Linux/macOS have no equivalent
 migration-source API yet and must not silently inherit Windows acceptance.
 
+`migration::LockedMigrationInputs::open(...).stage()` now connects the pinned
+source files to protected staging. It reads config, ledger and generation under
+the explicit old-owner contract, retains handles for all present referenced
+credentials, and keeps them alive through target verification. Credential buffers
+are cleared when the snapshot is dropped, including error paths. The coordinator
+must still stop/verify the original task and reconcile pending work first; this
+API alone does not authorize activation or implement rollback of a task switch.
+
 ## Why ordinary Repair is insufficient
 
 The legacy failure mode has a SYSTEM task pointing at user-owned worker state.

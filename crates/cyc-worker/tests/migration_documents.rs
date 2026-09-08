@@ -5,6 +5,73 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use uuid::Uuid;
 
+#[cfg(windows)]
+#[test]
+fn locked_source_stages_identity_without_touching_original_files() {
+    use cyc_worker::{
+        migration::{inspect_migration_stage, LockedMigrationInputs},
+        security::write_secret_file,
+    };
+    use sha2::{Digest, Sha256};
+    let temporary = tempfile::tempdir().unwrap();
+    let (config, ledger, original, _) = fixture();
+    let old = temporary.path().join("source/config.json");
+    let new = temporary
+        .path()
+        .join("target-private/destination/config.json");
+    let config = config
+        .relocated(&original, &old, &old.parent().unwrap().join("workspace"))
+        .unwrap();
+    let mut ledger: Value = serde_json::from_slice(
+        &relocate_pairing_ledger(&serde_json::to_vec(&ledger).unwrap(), &original, &old).unwrap(),
+    )
+    .unwrap();
+    ledger["records"][0]["credentialSha256"] =
+        json!(hex::encode(Sha256::digest(b"source-fixture-token")));
+    config.write(&old).unwrap();
+    write_secret_file(
+        &old.with_extension("pairing-state.json"),
+        &serde_json::to_string(&ledger).unwrap(),
+    )
+    .unwrap();
+    write_secret_file(
+        &old.with_extension("boot-generation.json"),
+        r#"{"apiVersion":"cyc.dev/worker-boot-generation/v1","generation":29}"#,
+    )
+    .unwrap();
+    write_secret_file(&config.credential_file, "source-fixture-token").unwrap();
+    let before = std::fs::read(&old).unwrap();
+    let output = std::process::Command::new("whoami.exe")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let identity = String::from_utf8(output.stdout).unwrap();
+    let sid = identity
+        .split([',', '"'])
+        .find(|part| part.starts_with("S-1-"))
+        .unwrap();
+    let inputs =
+        LockedMigrationInputs::open(&old, &new, &new.parent().unwrap().join("workspace"), sid)
+            .unwrap();
+    assert!(std::fs::write(&old, b"changed").is_err());
+    assert!(std::fs::write(&config.credential_file, b"changed").is_err());
+    inputs.stage().unwrap();
+    assert_eq!(inspect_migration_stage(&new).unwrap().files_verified, 4);
+    assert_eq!(std::fs::read(&old).unwrap(), before);
+    assert_eq!(
+        std::fs::read(&config.credential_file).unwrap(),
+        b"source-fixture-token"
+    );
+    let converted: WorkerConfig = serde_json::from_slice(&std::fs::read(&new).unwrap()).unwrap();
+    assert_eq!(converted.node_id, config.node_id);
+    assert_eq!(converted.controller_id, config.controller_id);
+    assert_eq!(
+        std::fs::read(&converted.credential_file).unwrap(),
+        b"source-fixture-token"
+    );
+}
+
 #[test]
 fn migration_staging_validates_before_writes_and_preserves_exact_bytes() {
     use cyc_worker::migration::stage_identity_documents;

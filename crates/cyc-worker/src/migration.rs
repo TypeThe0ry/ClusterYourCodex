@@ -6,6 +6,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
+#[cfg(windows)]
+#[path = "migration_windows.rs"]
+mod windows;
+#[cfg(windows)]
+pub use windows::LockedMigrationInputs;
+
 use crate::config::{validate_boot_generation_document, WorkerConfig};
 use crate::runtime::{
     migration_credential_inventory, relocate_pairing_ledger, validate_migration_identity_binding,

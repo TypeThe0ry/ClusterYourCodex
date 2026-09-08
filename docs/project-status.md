@@ -14,6 +14,27 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 full worker-kit regression completed
+
+The fixed-script run started at `90f21b7` completed with native exit 0 and
+`worker-kit packaging tests passed`. Linux and the newly phased macOS lifecycle
+fixtures both completed. The test's success cleanup removed its temporary tree
+`cyc-worker-kit-test-65ff591954e14688be4b8c66aa39b438`; its Linux watchdog had
+already been inspected as exit 0/no timeout. Earlier failed-run evidence remains
+separate and retained. This is fixture coverage, not native Linux/macOS service
+acceptance or acceptance of all subsequent Rust migration changes.
+
+Windows `LockedMigrationInputs` now joins old-owner-verified, pinned source reads
+with protected target staging while retaining all source handles through the
+copy. It clears captured credential buffers on completion/error. Source task
+quiescence, installation metadata ownership, interrupted transaction recovery
+and live task switching still need the migration coordinator.
+The native local source-to-stage test passed (exit 0, 39.21s): config and
+credential writes were blocked while captured, target inspection verified four
+files, and original bytes plus node/controller identity remained unchanged.
+Scoped Clippy passed. The initial fixture correctly rejected a non-private
+temporary parent; the rerun used a newly provisioned private destination parent.
+
 ### 2026-09-08 Windows stable migration-source reads
 
 `LockedMigrationSource` now opens source files with read-only Windows sharing
