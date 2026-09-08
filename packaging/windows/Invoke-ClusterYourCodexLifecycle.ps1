@@ -103,6 +103,13 @@ function Write-CycLifecycleDiagnostic {
     )
 
     $requestedPath = [string]$env:CYC_SETUP_DIAGNOSTIC_LOG
+    if ([string]::IsNullOrWhiteSpace($requestedPath)) {
+        # The lifecycle has already secured this directory before core changes.
+        # Do not create a new or less-protected diagnostics location on failure.
+        $privateState = Join-Path $DataRoot '.installer'
+        if (-not (Test-Path -LiteralPath $privateState -PathType Container)) { return }
+        $requestedPath = Join-Path $privateState 'last-lifecycle-diagnostic.json'
+    }
     if ([string]::IsNullOrWhiteSpace($requestedPath) -or $requestedPath.Length -gt 4096 -or
         $requestedPath.Contains('"') -or $requestedPath.Contains("`r") -or $requestedPath.Contains("`n") -or
         $requestedPath -match '[\x00-\x1f\x7f]') {
@@ -1823,6 +1830,39 @@ function Invoke-CycBootstrapProcess {
     }
 }
 
+function Assert-CycControllerStoragePreflight {
+    param([Parameter(Mandatory = $true)][string]$RequestedDataRoot)
+    Assert-CycCreationPathNoReparse -Path $RequestedDataRoot
+    $database = Join-Path $RequestedDataRoot 'controller.db'
+    Assert-CycCreationPathNoReparse -Path $database
+    if (Test-Path -LiteralPath $database -PathType Leaf) { return }
+    foreach ($name in @('jobs', 'controller.db-wal', 'controller.db-shm')) {
+        $candidate = Join-Path $RequestedDataRoot $name
+        Assert-CycCreationPathNoReparse -Path $candidate
+        if (Test-Path -LiteralPath $candidate) {
+            throw "Controller storage '$name' exists without controller.db. Restore the matching database or preserve the orphaned storage separately before retrying Setup. No data was changed."
+        }
+    }
+    # The controller still performs its authoritative ACL and layout validation
+    # at startup. This read-only check only catches known orphaned layouts early.
+}
+
+function Assert-CycFreshInstallPortsAvailable {
+    param([Parameter(Mandatory = $true)]$Plan, [AllowNull()]$ExistingManifest)
+    # Repair stops the verified installed runtime inside the core rollback
+    # boundary. Only a fresh install can reject listeners before elevation.
+    if ($null -ne $ExistingManifest) { return }
+    $ports = @(47831)
+    if ($Plan.managedWorker.enabled) { $ports += [int]$Plan.managedWorker.listenPort }
+    foreach ($port in @($ports | Sort-Object -Unique)) {
+        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
+        if ($listeners.Count -gt 0) {
+            $owners = @($listeners | ForEach-Object { [int]$_.OwningProcess } | Sort-Object -Unique)
+            throw "TCP port $port is already listening (PID $($owners -join ',')). Close the conflicting application and retry Setup. No process was stopped."
+        }
+    }
+}
+
 function Get-CycValidatedInstallPlan {
     param(
         [Parameter(Mandatory = $true)][string]$BootstrapFile,
@@ -2384,6 +2424,8 @@ function Invoke-ClusterYourCodexLifecycleCore {
             -TransactionId $transactionId `
             -ExistingManifest $oldManifest
         if (-not $plan) { throw 'Core planner returned no install plan.' }
+        Assert-CycControllerStoragePreflight -RequestedDataRoot $plan.dataRoot
+        Assert-CycFreshInstallPortsAvailable -Plan $plan -ExistingManifest $oldManifest
         $controllerRecord = @($plan.files | Where-Object { [string]$_.relativePath -ceq 'cyc-controller.exe' })
         if ($controllerRecord.Count -ne 1) { throw 'Install plan has no unique controller executable.' }
         $programSha = [string]$controllerRecord[0].sha256

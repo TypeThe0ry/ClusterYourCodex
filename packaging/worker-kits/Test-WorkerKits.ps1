@@ -71,6 +71,8 @@ foreach ($scriptPath in @($windowsInstaller, $builder)) {
     }
 }
 
+& (Join-Path $PSScriptRoot 'windows\Test-PrivatePrincipalSids.ps1')
+
 $gitBash = 'C:\Program Files\Git\bin\bash.exe'
 $bashPath = if (Test-Path -LiteralPath $gitBash -PathType Leaf) {
     $gitBash

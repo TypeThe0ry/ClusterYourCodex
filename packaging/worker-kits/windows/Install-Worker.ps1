@@ -92,6 +92,11 @@ function Assert-CreationPathNoReparse {
     }
 }
 
+function Get-PrivatePrincipalSids {
+    param([Parameter(Mandatory = $true)][string]$UserSid)
+    @($UserSid, 'S-1-5-18') | Sort-Object -Unique
+}
+
 function New-PrivateAcl {
     param([Parameter(Mandatory = $true)][bool]$Directory)
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -109,7 +114,8 @@ function New-PrivateAcl {
     } else {
         [System.Security.AccessControl.InheritanceFlags]::None
     }
-    foreach ($sid in @($userSid, $systemSid)) {
+    foreach ($sidText in @(Get-PrivatePrincipalSids -UserSid $userSid.Value)) {
+        $sid = if ($sidText -eq $userSid.Value) { $userSid } else { $systemSid }
         $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
             $sid,
             [System.Security.AccessControl.FileSystemRights]::FullControl,
@@ -156,7 +162,7 @@ function Assert-PrivateAcl {
         $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -cne $userSid) {
         throw "Existing private path ACL is weak or owned by another identity: $($Item.FullName)"
     }
-    $expectedSids = @($userSid, 'S-1-5-18')
+    $expectedSids = @(Get-PrivatePrincipalSids -UserSid $userSid)
     $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
     if ($rules.Count -ne $expectedSids.Count) {
         throw "Existing private path ACL contains an unexpected principal set: $($Item.FullName)"

@@ -5000,7 +5000,7 @@ exit 0
     Assert-True ($releaseWorkflow -match 'bundleSha256 = \$bundleHash') 'release index records the exact attestation bundle digest'
     Assert-True ($releaseWorkflow -match 'clusteryourcodex-post-archive-[\s\S]+NewGuid') 'post-archive smoke uses a fresh GUID extraction root instead of recursively deleting a fixed runner path'
     Assert-True ($releaseWorkflow -match 'Test-FreshDeployment\.ps1[\s\S]+-PackageRoot \$extractedPackage') 'fresh deployment smoke runs against the just-created ZIP after extraction'
-    Assert-True ($releaseWorkflow -match 'windows11-acceptance:[\s\S]+timeout-minutes:\s*120') 'ARM64 acceptance job has a finite hosted-runner timeout'
+    Assert-True ($releaseWorkflow -match 'windows11-acceptance:[\s\S]+timeout-minutes:\s*(?:120|180)') 'ARM64 acceptance job has a finite hosted-runner timeout'
     Assert-True ($releaseWorkflow -match 'Test-FreshDeployment\.ps1[\s\S]+-LifecycleTimeoutSeconds\s+900') 'ARM64 fresh-deployment smoke receives an explicit bounded child timeout'
     Assert-True ($releaseWorkflow -match 'Test-SetupSilent\.ps1[\s\S]+-LifecycleTimeoutSeconds\s+900') 'ARM64 silent Setup smoke receives an explicit bounded child timeout'
     Assert-True ($releaseWorkflow -match 'Test-WindowsProfileMatrix\.ps1[\s\S]+-ChildTimeoutSeconds\s+900') 'ARM64 profile matrix receives an explicit bounded child timeout'

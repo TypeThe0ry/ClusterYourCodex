@@ -222,10 +222,13 @@ impl SshProvisioningDriver {
 
     fn probe_host_key(&self, record: &ComputerRecord) -> Result<StepCompletion, DriverFailure> {
         let endpoint = ssh_endpoint(record)?;
-        let host_key = self
-            .transport
-            .probe_host_key(&endpoint)
-            .map_err(map_ssh_error)?;
+        let host_key = if let Some(pin) = &record.host_key {
+            let pin = HostKey::try_from(pin).map_err(|_| failure("HOST_KEY_INVALID", false))?;
+            self.transport.probe_host_key_with_pin(&endpoint, &pin)
+        } else {
+            self.transport.probe_host_key(&endpoint)
+        }
+        .map_err(map_ssh_error)?;
         Ok(StepCompletion::HostKeyObserved(PinnedHostKeyRecord::from(
             &host_key,
         )))
@@ -363,6 +366,10 @@ impl SshProvisioningDriver {
         };
         ensure_lifecycle_expectation_supported(kit.target(), expectation)?;
         let mut session = self.authenticated_session(record)?;
+        // Replay verified staging for pre-upgrade checkpoints whose kit files
+        // shared the discovery directory. The dedicated bundle remains exact.
+        let layout = RemoteLayout::new(record, platform_for_target(kit.target()))?;
+        upload_kit_to_session(session.as_mut(), &layout, &kit)?;
         self.run_lifecycle(record, session.as_mut(), &kit, action, None, expectation)?;
         Ok(StepCompletion::WorkerInstalled)
     }
@@ -671,7 +678,7 @@ impl SshProvisioningDriver {
     ) -> Result<(), DriverFailure> {
         ensure_lifecycle_expectation_supported(kit.target(), expectation)?;
         let platform = platform_for_target(kit.target());
-        let layout = RemoteLayout::new(record, platform)?;
+        let layout = RemoteLayout::new(record, platform)?.kit_layout()?;
         let lifecycle_path = layout.join(kit.lifecycle_name())?;
         let mut arguments = Vec::new();
         match platform {
@@ -1158,6 +1165,13 @@ impl RemoteLayout {
     fn enrollment_path(&self, pairing_id: Uuid) -> Result<RemotePath, DriverFailure> {
         self.join(&format!("enrollment-{}.json", pairing_id.simple()))
     }
+
+    fn kit_layout(&self) -> Result<Self, DriverFailure> {
+        Ok(Self {
+            platform: self.platform,
+            staging_dir: self.join("kit")?,
+        })
+    }
 }
 
 fn cleanup_script_path(
@@ -1233,6 +1247,10 @@ fn upload_kit_to_session(
     layout: &RemoteLayout,
     kit: &WorkerKit,
 ) -> Result<(), DriverFailure> {
+    session
+        .create_dir(&layout.staging_dir, 0o700)
+        .map_err(map_ssh_error)?;
+    let layout = layout.kit_layout()?;
     session
         .create_dir(&layout.staging_dir, 0o700)
         .map_err(map_ssh_error)?;
@@ -1321,13 +1339,16 @@ fn validate_lifecycle_receipt(
     }
     let text =
         std::str::from_utf8(content).map_err(|_| failure("LIFECYCLE_RECEIPT_INVALID", false))?;
-    let line = text
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
+    let lines: Vec<_> = text.lines().collect();
+    // PowerShell ConvertTo-Json emits a multiline object by default. Preserve
+    // the complete final receipt, while allowing earlier lifecycle log lines.
+    let start = lines
+        .iter()
+        .rposition(|line| line.trim_start().starts_with('{'))
         .ok_or_else(|| failure("LIFECYCLE_RECEIPT_INVALID", false))?;
+    let receipt = lines[start..].join("\n");
     let value: serde_json::Value =
-        serde_json::from_str(line).map_err(|_| failure("LIFECYCLE_RECEIPT_INVALID", false))?;
+        serde_json::from_str(&receipt).map_err(|_| failure("LIFECYCLE_RECEIPT_INVALID", false))?;
     let object = value
         .as_object()
         .ok_or_else(|| failure("LIFECYCLE_RECEIPT_INVALID", false))?;
@@ -1625,6 +1646,37 @@ mod tests {
     const PAIRING_FAILED: u8 = 3;
 
     #[test]
+    fn powershell_multiline_receipt_preserves_strict_validation() {
+        let receipt = serde_json::json!({
+            "schemaVersion": "cyc.dev/windows-worker-install/v1",
+            "action": "install", "succeeded": true, "paired": false,
+            "service": "not_enabled", "serviceEnabled": false
+        });
+        let pretty = format!(
+            "Staging complete\r\n{}\r\n",
+            serde_json::to_string_pretty(&receipt).unwrap()
+        );
+        validate_lifecycle_receipt(
+            pretty.as_bytes(),
+            "install",
+            LifecycleReceiptExpectation::UnpairedPreinstall,
+        )
+        .unwrap();
+        assert!(validate_lifecycle_receipt(
+            pretty.as_bytes(),
+            "install",
+            LifecycleReceiptExpectation::PairedService
+        )
+        .is_err());
+        assert!(validate_lifecycle_receipt(
+            format!("{pretty}unexpected trailing output").as_bytes(),
+            "install",
+            LifecycleReceiptExpectation::UnpairedPreinstall
+        )
+        .is_err());
+    }
+
+    #[test]
     fn lifecycle_receipts_enforce_preinstall_and_activation_boundaries() {
         let preinstall = br#"{"schemaVersion":"cyc.dev/linux-worker-install/v1","action":"install","succeeded":true,"paired":false,"service":"not_enabled"}
 "#;
@@ -1738,6 +1790,31 @@ mod tests {
     }
 
     #[test]
+    fn signed_bundle_is_separate_from_discovery_and_enrollment() {
+        let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
+        let record = engine.create(new_computer(true)).unwrap();
+        for platform in [
+            RemotePlatform::Windows,
+            RemotePlatform::Linux,
+            RemotePlatform::Macos,
+        ] {
+            let layout = RemoteLayout::new(&record, platform).unwrap();
+            let kit = layout.kit_layout().unwrap();
+            assert_ne!(kit.staging_dir, layout.staging_dir);
+            assert!(!layout
+                .join(platform.discovery_file_name())
+                .unwrap()
+                .as_str()
+                .starts_with(kit.staging_dir.as_str()));
+            assert!(!layout
+                .enrollment_path(Uuid::new_v4())
+                .unwrap()
+                .as_str()
+                .starts_with(kit.staging_dir.as_str()));
+        }
+    }
+
+    #[test]
     fn macos_remote_layout_and_cleanup_are_confined_to_private_tmp() {
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
         let record = engine.create(new_computer(true)).unwrap();
@@ -1819,6 +1896,18 @@ mod tests {
                 },
             )
         }
+    }
+
+    #[test]
+    fn existing_identity_is_passed_to_probe_without_authentication() {
+        let harness = Harness::new(good_password());
+        let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
+        let mut record = engine.create(new_computer(true)).unwrap();
+        record.host_key = Some(crate::PinnedHostKeyRecord::from(&harness.ssh.host_key));
+        harness.driver().probe_host_key(&record).unwrap();
+        let events = &harness.ssh.inner.lock().unwrap().events;
+        assert!(events.iter().any(|event| event == "probe_with_pin"));
+        assert!(!events.iter().any(|event| event.starts_with("authenticate")));
     }
 
     #[test]
@@ -2883,6 +2972,20 @@ mod tests {
     }
 
     impl SshTransport for FakeSshTransport {
+        fn probe_host_key_with_pin(
+            &self,
+            endpoint: &SshEndpoint,
+            pin: &HostKey,
+        ) -> Result<HostKey, SshError> {
+            assert_eq!(pin, &self.host_key);
+            self.inner
+                .lock()
+                .unwrap()
+                .events
+                .push("probe_with_pin".to_owned());
+            self.probe_host_key(endpoint)
+        }
+
         fn probe_host_key(&self, _endpoint: &SshEndpoint) -> Result<HostKey, SshError> {
             self.inner
                 .lock()
@@ -3038,6 +3141,21 @@ mod tests {
                 });
             }
             if path.ends_with("install-worker.sh") || path.ends_with("Install-Worker.ps1") {
+                let separator = if path.contains('\\') { '\\' } else { '/' };
+                let bundle = path.rsplit_once(separator).unwrap().0;
+                let prefix = format!("{bundle}{separator}");
+                let files = self
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .files
+                    .keys()
+                    .filter(|file| file.starts_with(&prefix))
+                    .count();
+                assert_eq!(
+                    files, 5,
+                    "lifecycle must receive only the signed kit file set"
+                );
                 let action = if path.ends_with("install-worker.sh") {
                     arguments.first().map(|value| value.as_str()).unwrap_or("")
                 } else {

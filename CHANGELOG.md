@@ -9,12 +9,101 @@ are versioned independently from the product.
 
 ### Changed
 
+- Remove promotional page subtitles and duplicate headers. Keep the global
+  bar limited to language, connection state, and refresh; computer actions
+  stay in the overview and Computers page rather than unrelated task pages.
+
+- Simplify the desktop workspace with neutral surfaces, compact navigation,
+  graphite actions, and a single overview statistics strip. Replace the
+  decorative home hero with a direct primary action; keep first-run guidance
+  collapsible and show fleet/task information from the first launch.
+- Preserve all four interface languages and existing provisioning flows in the
+  refreshed layout, with narrow-window navigation and visible keyboard focus.
+
+### Diagnostics
+
+- Keep the last installer lifecycle result in the existing private installer
+  state directory by default, including failed stage and error, so double-click
+  Setup attempts do not require a diagnostic environment variable. Early
+  failures do not create a new diagnostic directory; explicit paths still work.
+
+### Fixed
+
+- Reuse an existing SSH identity's algorithm preference during host-key probes
+  after rollback, not only authentication reconnects; retain full key checks.
+
+- Parse complete multiline Windows lifecycle JSON receipts instead of only
+  their closing line; retain strict state/field checks and reject trailing
+  non-JSON output.
+
+- Stage signed worker bundles in a dedicated `kit` directory, separate from
+  discovery scripts and enrollment files. Retrying an older install checkpoint
+  re-stages the verified bundle without weakening its exact-file-set checks.
+
+- Allow an explicit retry of a host-key mismatch when an approved pin already
+  exists, without clearing or replacing that pin. A repeated mismatch still
+  stops provisioning; no automatic mismatch retry is enabled.
+
+- Keep SSH reconnect negotiation bound to the approved host-key type across
+  password, agent, and private-key authentication. RSA pins use SHA-2 signature
+  algorithms; full public-key verification still precedes authentication.
+
+- Detect orphaned controller object storage and SQLite sidecars before installer
+  elevation. Explain the missing database without deleting or adopting old
+  data; controller startup remains the authoritative storage security check.
+
+- Detect fresh-install controller/worker port conflicts before requesting
+  firewall elevation. Report the owning PID without stopping unrelated
+  processes; Repair retains its existing rollback-bound runtime checks.
+
+- Preserve owner/group when hardening the Windows live-probe fixture DACL,
+  avoiding an unnecessary ownership privilege request in desktop sessions.
+  Current-user ownership and current-user/SYSTEM-only access remain required.
+  Published preview.100 binaries passed the repaired local live probe, with
+  all 14 checks true; nine harness contract tests also passed.
+
+### Changed
+
 - Revise the active delivery goal to prioritize a usable Add Computer →
   credential vault → worker pairing → job/result loop before non-blocking bug
   cleanup, visual polish, or additional PR splitting.
 - Add the queued user-feedback goal and a GitHub preview-feedback issue
   template so operator reports capture the exact preview, platform pair,
   failing stage, and redacted evidence.
+
+## [0.1.0-preview.100] - 2026-09-07
+
+### Fixed
+
+- Keep the Windows packaging contract aligned with the bounded 180-minute
+  hosted-runner budget used by the self-contained and clean ARM64 preview
+  jobs. The `.99` run failed closed on this stale exact-`120` assertion before
+  packaged archive and Setup acceptance ran; the production workflow and its
+  per-attempt 900-second ceilings remain unchanged.
+
+### Tests
+
+- Preserve preview.99 as unpublished after its tagged workflow stopped at the
+  stale packaging contract, then rerun the complete prerelease-only matrix
+  under the new preview.100 tag.
+
+## [0.1.0-preview.99] - 2026-09-07
+
+### Fixed
+
+- Increase the hosted Windows self-contained and clean Windows 11 acceptance
+  job budgets from 120 to 180 minutes. The per-attempt lifecycle scripts keep
+  their 900-second ceilings; the larger outer budget prevents a complete
+  build plus bounded archive smoke run from being canceled before silent Setup
+  and profile acceptance finish.
+
+### Tests
+
+- Preserve preview.98 as unpublished after its Windows self-contained job
+  passed source, desktop, packaging, archive fresh-deployment, and managed
+  Worker Kit checks but reached the two-hour outer job timeout during silent
+  Setup. Preview.99 reruns the same prerelease-only gates with the corrected
+  bounded job budget.
 
 ## [0.1.0-preview.98] - 2026-09-07
 
@@ -1456,7 +1545,9 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.98...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.100...HEAD
+[0.1.0-preview.100]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.99...v0.1.0-preview.100
+[0.1.0-preview.99]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.98...v0.1.0-preview.99
 [0.1.0-preview.98]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.97...v0.1.0-preview.98
 [0.1.0-preview.97]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.96...v0.1.0-preview.97
 [0.1.0-preview.96]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.95...v0.1.0-preview.96

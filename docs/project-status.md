@@ -5,14 +5,241 @@ the current checkout and live GitHub state, rather than on chat history. Update
 it in the same pull request as every implementation, CI, packaging, or release
 change.
 
-- **Snapshot date:** 2026-09-07
+- **Snapshot date:** 2026-09-08
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
-- **Snapshot baseline:** public candidate `v0.1.0-preview.95`, source commit `6d06f84f3c95d6be8d5151a8950065f0602d651b`; the local checkout and GitHub release index resolve to the same tag and commit.
-- **Latest published preview:** [`v0.1.0-preview.95`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.95), published by tagged workflow [`34052588313`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34052588313); GitHub reports `isPrerelease=true` and `isDraft=false`, with 23 release assets. The Windows x64 self-contained and clean Windows 11 ARM64 acceptance jobs completed successfully.
+- **Snapshot baseline:** published `v0.1.0-preview.100`, source commit `2c269842dbc15934b5cfcf6a4cb3e0844cec3ed5`. Documentation and merge reconciliation may advance beyond this immutable release SHA.
+- **Latest published preview:** [`v0.1.0-preview.100`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.100), published 2026-09-07 17:42:22 UTC by successful tagged workflow [`34128668756`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34128668756). GitHub reports `isPrerelease=true`, `isDraft=false`, and 23 assets. Windows self-contained and clean Windows 11 ARM64 compatibility acceptance both passed.
 - **Previous stable-testing exception:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85) remains immutable **stable-testing** (`isPrerelease=false`) for the explicitly authorized test channel. Its embedded product version is still a preview; it is not Certified GA.
-- **Release channels:** preview.95 is the current public prerelease; preview.91 remains an older immutable fallback after the stalled preview.94 workflow was canceled before publication. Certified GA remains blocked by the open Issue #2, #3, and #5 acceptance gates; no `prerelease=false` Certified GA release has been created.
+- **Release channels:** preview.100 is the current public prerelease; preview.95 remains an immutable fallback. Certified GA remains separate from operator testing; open Issues #2, #3, and #5 retain their unverified platform, signing, and isolation gates.
 
 ## Current delivery goal: core usability before polish
+
+### 2026-09-08 completion timestamp reconciliation
+
+Explicit Retry is now offered for the retained JOB_PROGRESS_REGRESSED smoke
+failure. The engine requires an existing durable smoke binding and rechecks
+that same job/run; it does not rotate enrollment, reinstall, or automatically
+retry repeated failures. All 26 provisioning state-machine tests and 103
+frontend tests passed, including repeated-terminal-failure/binding reuse and
+checkpoint-scoped UI action tests; the frontend production build passed.
+
+Read-only Helio inspection confirmed the separate persistence blocker:
+the registered worker task runs as SYSTEM (ServiceAccount, Highest), while
+the protected data directory and credential file are owned by the SSH user.
+The installed task's last result is 1; the diagnostic foreground worker was
+still present as PID 28140. The worker requires owner=current runtime SID.
+No ACLs or remote service identity were changed during this check. The exact
+task startup stderr has not been captured. Fixing System scope requires the
+pairing/lifecycle operations and persistent process to share an identity;
+merely switching the run principal or weakening owner checks is insufficient.
+The installer now deduplicates its private principal SID set, including the
+SYSTEM-only case, with a pure-helper test wired into the worker-kit gate.
+Both SYSTEM/user helper cases passed; a real SYSTEM lifecycle is still pending.
+The worker's matching ACL creation/verifier also uses a unique principal set.
+All eight worker security tests passed: real ordinary-user protected-file
+round trips and in-memory Windows ACL cases for SYSTEM/ordinary acceptance,
+extra/duplicate/inherited/weak rules, wrong owner, and unprotected DACL rejection.
+This does not claim execution under a real SYSTEM process. Installer helper
+tests passed in both PowerShell 7 and Windows PowerShell 5.1. The rebuilt native
+desktop test suite passed all 80 tests after the recovery change.
+
+Source inspection found a mismatch in the smoke poll validator: the controller
+sets `started_at` when entering Running, while `complete_managed_run` applies
+the worker's execution timestamps from its validated completion receipt. The
+desktop previously rejected this terminal clock handoff as JOB_PROGRESS_REGRESSED.
+The validator now permits a changed start timestamp only on a higher-version
+nonterminal-to-terminal transition with a present start and a valid run receipt.
+Same-version mutations, creation-time changes, live timestamp changes, terminal
+rewrites, and invalid time ordering still fail. All 21 full-run tests passed,
+including a new clock-handoff regression; formatting passed. Native installation
+reconciliation against the retained live job and persistent scheduled-worker
+startup remain unverified by this source-only fix. No public build was issued.
+
+### 2026-09-08 minimal workspace UI
+
+The follow-up copy cleanup deletes the six unused promotional page heading /
+subtitle keys from all four locale catalogs (24 entries), rather than retaining
+hidden copy. A regression test prevents these retired keys from returning.
+The task page's previously decorative All / Running / Failed controls now filter
+the current task snapshot and expose their selected state to assistive tools.
+Running includes preparing, running, and verifying; queued and terminal jobs
+remain in All. No controller or execution behavior changes.
+
+Verification: all 102 frontend tests across six suites, TypeScript checks, Vite
+production build, and `git diff --check` passed. The in-app browser at localhost
+verified the Chinese home/task pages without the removed copy, filtering the
+existing successful task out with Failed and restoring it with All. This change
+updates source and browser preview; no installer or public release was rebuilt.
+
+Follow-up simplification removes the visible global page-title/subtitle block,
+repeated home-card descriptions, and redundant SSH wizard introductions.
+Navigation names remain available as screen-reader headings. The global bar
+contains only language, connection status, and refresh; Add Computer is scoped
+to overview/Computers instead of appearing on unrelated task pages. Home and
+task layouts were inspected in Chrome, with the 97 frontend tests passing.
+
+The source UI now uses neutral white/gray surfaces, compact navigation,
+graphite primary actions, and an overview statistics strip. The decorative
+home hero is removed. First-run guidance is collapsible; fleet and task
+information remains visible before the first computer is connected.
+
+Desktop frontend build and all 97 tests (five suites) passed. A live Chrome
+preview at `http://127.0.0.1:1420/` verified the home layout, expanding the
+three-step guide, opening/closing Add Computer, and switching Chinese to
+English. The browser correctly disables provisioning without the secure
+native bridge. This is frontend verification, not SSH provisioning acceptance.
+The installed preview.100 executable has not been replaced by this UI change.
+
+### 2026-09-08 installed GUI provisioning resume
+
+The multiline-receipt build completed and native rollback succeeded, returning
+the retained record to draft at revision 23. Resume reached revision 27 but
+failed `HOST_KEY_CHANGED` in `ssh_connecting`: the discovery probe still used
+default negotiation even though authentication reconnects were pinned. The
+transport now exposes a pin-aware unauthenticated probe, used for existing
+records; the state machine still compares the complete key. All 39 library
+tests passed, including a probe-routing test proving no authentication call.
+Live retry of this follow-up remains pending. No database checkpoint was edited
+manually, and the existing record and trust identity were retained.
+
+The isolated-kit native retry reached revision 20 with
+`LIFECYCLE_RECEIPT_INVALID`. Remote inspection verified exactly five kit files
+and a 9,440,256-byte installed worker executable. The lifecycle command exited
+successfully, but Windows emits multiline `ConvertTo-Json` while the driver
+parsed only the last line. The parser now accepts the complete final JSON
+object, retains strict receipt expectations, and rejects trailing garbage.
+All 38 library tests pass. This proves binary installation, not pairing,
+service readiness, or job execution; native recovery with the parser fix
+remains pending.
+
+Remote diagnosis identified the lifecycle failure: Windows `Install-Worker.ps1`
+line 586 rejects the staging root because it contains six files (the five kit
+files plus `cyc-discovery.ps1`). The explicit PairOnly diagnostic returned exit
+1 before installation. The driver now stages bundles in a dedicated `kit`
+child, keeping discovery and enrollment outside the signed file set. Existing
+install checkpoints re-stage the verified kit into the new location. All 37
+library tests pass, including a strict five-file assertion in the fake remote
+lifecycle and layout separation checks for Windows/Linux/macOS. Real remote
+acceptance of this fix remains pending. The read-only Helio probe also reported
+approximately 1 GB free disk; no unrelated files were removed.
+
+The rebuilt native GUI was launched successfully with the simplified layout
+and the existing controller and provisioning records. The retained mismatch
+record exposed only rollback/remove, so an explicit retry path now permits
+rechecking an already approved host key without deleting the record or changing
+trust. All 25 provisioning state-machine tests and 98 frontend tests passed,
+including repeated-mismatch rejection and original-key recovery. Live remote
+acceptance of this follow-up change advanced the retained Windows record from
+revision 11 to 14 (`KIT_IO`) and then 17 (`WORKER_LIFECYCLE_FAILED`, retryable,
+at `kit_staged`). The debug executable initially lacked its sibling
+`worker-kits` directory; copying the installed preview.100 kits into the debug
+output resolved that local packaging omission. The next remote lifecycle call
+failed and still needs diagnosis. No host pin was replaced, and no worker is
+yet claimed paired or ready. The product MCP `fleet_info` returned controller
+and database healthy with an empty fleet before this retry.
+
+The installed native Computers page retained both previous provisioning
+records. Retrying the Windows worker checkpoint advanced its revision from 9
+to 11 and failed with `HOST_KEY_CHANGED` before authentication. A read-only
+SSH host-key advertisement probe found that the saved RSA fingerprint still
+matches the server's advertised RSA key; the server also advertises ECDSA and
+ED25519. Advertisement is not a substitute for authenticated identity proof.
+The source transport now constrains reconnect negotiation to the approved key
+type, then retains the exact-key comparison before authentication. RSA uses
+SHA-2 signature methods, not SHA-1 fallback. This avoids treating a change in
+client default algorithm preference as permission to accept a new key. Native
+reconnect with the rebuilt desktop remains to be verified; the installed
+preview.100 still contains the old negotiation behavior. No host-key record
+was cleared or replaced and no paired worker is claimed yet.
+
+Local verification of the reconnect change: `cargo test -p cyc-ssh --lib
+--locked` completed with exit code 0, all 15 tests passed. This includes
+approved-key negotiation and verification-before-authentication coverage.
+The vendored OpenSSL linker emitted missing debug-PDB warnings, not test
+failures. `cargo build --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
+also completed with exit code 0. The new debug desktop binary includes the
+reconnect change; live reconnect remains unverified and is the next acceptance
+step. The installed executable has not been overwritten.
+
+### 2026-09-08 installation succeeded after local recovery
+
+Following the user's explicit continuing installation authorization, the
+hash-verified preview.100 Setup was retried with `/S` and a process-scoped
+`CYC_SETUP_DIAGNOSTIC_LOG` pointing into the existing private installer directory.
+Setup PID 29692 completed; `retry-20260908-diagnostic.json` reports
+`status=succeeded`, `lastStage=complete`, `error=null`, and the install manifest
+is retained. The installed controller PID 50188 runs from the default per-user
+Programs directory. Its authenticated health API reports preview.100,
+`database=ok`, `status=ok`. The installed native GUI was opened and visibly
+reports the controller online with the Simplified Chinese three-step home.
+The nodes API returns an empty fleet: remote pairing and a cross-node job are
+still pending. This is local existing-profile installation evidence, not a
+clean-machine or cross-platform GA result. The previous failed attempts below
+remain historical evidence; the old development runtime was not restarted.
+
+### 2026-09-08 authorized preview.100 installer retry
+
+The follow-up source fix now checks for `jobs`, `controller.db-wal`, and
+`controller.db-shm` without `controller.db` before elevation and core changes.
+It reports a recovery action without modifying storage or relaxing the
+controller's validation. Five added storage cases and the existing port and
+diagnostic tests pass together (12 total); the recovered local data directory
+also passes this read-only preflight. The suite is already wired into CI.
+This source change is not present in immutable preview.100, and successful
+preflight does not establish successful installation or pairing.
+
+Follow-up reproduced a concrete startup failure using the published preview.100
+controller with the installer's default database/token paths: native exit 1,
+`database security preflight failed`, caused by `refusing pre-existing object
+storage without a database`. The default `controller.db` was absent while the
+old development object directory `jobs` existed. Windows TaskScheduler
+Operational logging was disabled, so no historical task event was available.
+The object directory was verified empty (including hidden entries), regular,
+and at the exact expected path before being renamed to
+`jobs.preinstall-backup-20260908` in the same data directory. No contents were
+deleted and no database was fabricated. Restore that directory name only while
+the controller is stopped and no new `jobs`/database has been created. This
+removes the reproduced startup blocker; installation still needs a successful
+retry, and no remaining failures are assumed absent.
+
+After explicit user confirmation, the live controller returned `jobs: []` and
+the path-verified development GUI/controller were stopped (PIDs 2368/76204).
+Port 47831 was free before launching the hash-verified preview.100 Setup.
+Setup PID 17848 started at 16:19:54 local time. Files and an install manifest
+briefly appeared, but the transaction ultimately returned `rolledBack` and
+the native dialog reported `installation failed (exit 1)`. The final private
+installer directory retained the firewall journal/receipts, not an install
+manifest. This disproves port conflict as the sole installation blocker.
+No successful install or GUI onboarding is claimed. The old development
+runtime remains stopped; its binaries and user data were not deleted by the
+operator. A diagnostic-enabled retry is needed to recover the core exception;
+the immutable preview.100 installer lacks the newer default diagnostic fix.
+
+The installer port-preflight and lifecycle-diagnostic Pester suites are now
+included in the Windows CI identity job, using its pinned Pester 3.4 runner.
+The combined local invocation passes all seven tests. A live authenticated
+`cyc jobs` query to the existing development controller returned `jobs: []`
+on 2026-09-08, so no queued/running job was observed at that instant. Recheck
+before runtime handover; an empty queue is not an installation receipt.
+
+On 2026-09-08 a live read-only listener check confirmed port 47831 is owned by
+the development preview.95 controller (PID 76204, started 2026-09-07), outside
+the default installation root. Fresh Setup cannot claim that port. The current
+source now detects this conflict before firewall elevation; five focused
+Pester tests pass, and invoking the preflight against the real listener returns
+the expected conflict without stopping it. This is a confirmed present blocker,
+not proof of the lost original preview.100 error. Close the development runtime
+before a real installation retry; the immutable preview.100 package does not
+contain this new preflight. Repair still stops only its verified owned runtime
+inside the existing rollback boundary.
+
+The 2026-09-08 [execution path reassessment](goals/execution-path-reassessment.md)
+checks the current SSH and worker interfaces rather than treating the original
+architecture as mandatory. SSH-direct is not yet a replacement backend: the
+current SSH interface lacks durable job/reconnect/cancel semantics that the
+worker protocol already supplies. The immediate delivery path retains that
+protocol while isolating installation from runtime acceptance; no additional
+platform or GUI completion is claimed by this assessment.
 
 The active delivery goal is deliberately narrower than the full GA checklist:
 prove that a user can start the controller, add a computer, retain the SSH
@@ -96,6 +323,58 @@ packaged archive or hosted smoke test does not substitute for a real host,
 service-manager, credential, or cross-node acceptance gate.
 
 ## Current CI and release state
+
+### 2026-09-08: preview.100 available for operator testing
+
+- Local GUI Setup attempt has ended without an installed desktop. Its durable
+  lifecycle journal remains at `firewallApplied`, and the matching helper
+  response is `rolledBack`. This narrows the failed attempt to the core-apply
+  region or its commit validation; it is not evidence of an unresolved firewall
+  permission wait. The original core error was not retained, so its exact cause
+  remains unknown. Source now defaults lifecycle diagnostics to the existing
+  private `.installer/last-lifecycle-diagnostic.json`; it creates no fallback
+  directory on an early failure. Two targeted diagnostics tests passed.
+  This change is not in the immutable preview.100 installer yet.
+- PR run `34178620334` failed during Windows round-trip initialization before
+  evidence directories were created; the other jobs passed. The fixture now
+  handles newly created Administrators-owned directories on elevated runners
+  while preserving current-user-owned directories without ownership writes.
+  Unexpected owners remain rejected and the final private ACL is still checked.
+  This addresses a likely runner-only regression; hosted rerun is required to
+  confirm the cause because the failed run did not retain its original error.
+- Native UI/state inspection found the running development desktop is still
+  preview.95. Its provisioning journal has two incomplete historical attempts:
+  Helio has a stored credential reference and approved host key, but failed at
+  `kit_staged` with `WORKER_LIFECYCLE_FAILED` before pairing; P1 failed at
+  `ssh_connecting` with `SSH_IO`, without a stored credential or approved key.
+  These are not preview.100 outcomes. Resume the existing records rather than
+  create duplicate computers. Native UI input was blocked by `PickerHost.exe`
+  after activation and one refreshed retry; no provisioning action was submitted.
+- Published preview.100 binaries passed a real local Windows controller/worker
+  round trip: all 14 checks true, job `queued -> running -> succeeded`, native
+  probe exit `0`, and cleanup confirmed. The harness required a DACL-only
+  fixture correction for a standard desktop token; the product binaries were
+  unchanged. See [source-bound evidence](live-windows-preview100-local-roundtrip.md).
+- Tagged workflow `34128668756` completed successfully, including Windows
+  self-contained packaging, clean Windows 11 ARM64 x64-emulation fresh
+  deployment, silent Setup, and standard/admin/non-ASCII profile acceptance.
+- Preview.98 stopped at the outer Windows job timeout; preview.99 stopped at
+  a stale static timeout assertion. Neither was published. Preview.100 carries
+  the bounded budget and matching contract fix; per-attempt ceilings remain.
+- Independent release download verified all 11 SHA-256 sidecars and all 10
+  provenance subject hashes in `release-index.json`. The index binds the
+  product version and tag to source `2c269842dbc15934b5cfcf6a4cb3e0844cec3ed5`.
+  Installer SHA-256:
+  `8bf4ed52e8021fef888bb7acecaafcc5d099f4b2a5e87f11bfc6955ee071c9bf`.
+  These checks establish artifact consistency, not Authenticode signing.
+- PR #56 merged the earlier candidate. PR #57 reconciles its squash merge with
+  the preview.100 branch and updates the current download/status documentation.
+- Next acceptance action: launch the installed desktop, add one reachable
+  worker, save its credential, install/pair, connect Codex, then return a real
+  job result and logs. Browser-only UI checks do not satisfy that native path.
+  Non-blocking UI polish remains in the feedback backlog.
+
+### Earlier source and release evidence (historical)
 
 - The core-usability candidate merged as PR [#54](https://github.com/TypeThe0ry/ClusterYourCodex/pull/54) at `a103306ec7b2ba8a7b3571fc24317a4876928bf2`. The CI run [`34027758058`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34027758058) passed Windows desktop lifecycle and managed worker kits, the Windows controller/worker live round trip, Rust workspace tests on Windows/Ubuntu/macOS, native worker kits, and MSRV. The separate CodeQL run [`34027758039`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34027758039) and Dependency security run [`34027758028`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34027758028) also passed. The candidate's local evidence also passed the same-host Windows `queued` → `running` → `succeeded` path with heartbeat, logs, artifact, cleanup, and secret scanning.
 

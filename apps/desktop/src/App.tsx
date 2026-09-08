@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ControllerApiError, controllerClient, preferNewerFleetSnapshot } from "./api/client";
 import { ProvisioningComputers } from "./ProvisioningComputers";
+import { matchesTaskFilter, type TaskFilter } from "./taskFilters";
 import {
   INTEGRATION_STATUS_MAX_AGE_MS,
   integrationClient,
@@ -52,29 +53,6 @@ const statusAriaKeys: Record<NodeStatus | "connected" | "disconnected", Translat
   unknown: "status.unknown",
   connected: "status.online",
   disconnected: "status.offline",
-};
-
-const pageTitles: Record<Page, { titleKey: TranslationKey; subtitleKey: TranslationKey }> = {
-  home: {
-    titleKey: "home.pageTitle",
-    subtitleKey: "home.pageSubtitle",
-  },
-  computers: {
-    titleKey: "computers.title",
-    subtitleKey: "computers.pageSubtitle",
-  },
-  tasks: {
-    titleKey: "tasks.title",
-    subtitleKey: "tasks.pageSubtitle",
-  },
-  rules: {
-    titleKey: "nav.routingRules",
-    subtitleKey: "rules.pageSubtitle",
-  },
-  integration: {
-    titleKey: "nav.integration",
-    subtitleKey: "integration.pageSubtitle",
-  },
 };
 
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
@@ -138,14 +116,14 @@ function EmptyState({
 }: {
   icon: IconName;
   title: string;
-  copy: string;
+  copy?: string;
   action?: ReactNode;
 }) {
   return (
     <div className="empty-state">
       <div className="empty-icon"><Icon name={icon} size={24} /></div>
       <h3>{title}</h3>
-      <p>{copy}</p>
+      {copy ? <p>{copy}</p> : null}
       {action}
     </div>
   );
@@ -314,28 +292,15 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
 
   return (
     <>
-      <section className="hero-card">
-        <div className="hero-glow" />
-        <div className="hero-copy">
-          <span className="eyebrow"><Icon name="spark" size={15} /> {t("home.eyebrow")}</span>
-          <h2>{t("home.title")}</h2>
-          <p>{t("home.description")}</p>
-          {!isFirstRun ? <div className="hero-actions">
-            <button className="button button-dark" onClick={primaryAction.onClick}><Icon name={primaryAction.icon} /> {primaryAction.label}</button>
-          </div> : null}
-        </div>
-        <div className="hero-visual" aria-hidden="true">
-          <div className="orbit orbit-large"><span className="orbit-node node-a"><Icon name="computer" /></span><span className="orbit-node node-b"><Icon name="gpu" /></span></div>
-          <div className="orbit orbit-small"><span className="orbit-node node-c"><Icon name="terminal" /></span></div>
-          <div className="codex-core"><Icon name="codex" size={34} /><small>CODEX</small></div>
-        </div>
+      <section className="workspace-toolbar">
+        <h2>{t("home.fleetOverview")}</h2>
+        <button className="button button-primary" onClick={primaryAction.onClick}><Icon name={primaryAction.icon} size={16} /> {primaryAction.label}</button>
       </section>
 
-      {nodes.length === 0 && recentJobs.length === 0 ? (
-        <section className="panel first-run-panel" aria-labelledby="first-run-title">
+      {isFirstRun ? (
+        <details className="panel first-run-panel">
+          <summary>{t("home.quickStartTitle")}</summary>
           <div className="first-run-copy">
-            <span className="eyebrow">{t("home.quickStart")}</span>
-            <h3 id="first-run-title">{t("home.quickStartTitle")}</h3>
             <p>{t("home.quickStartDescription")}</p>
           </div>
           <ol className="first-run-steps">
@@ -343,8 +308,8 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
             <li><span>2</span><strong>{t("home.stepConnect")}</strong><button className="text-button small" onClick={() => openPage("integration")}>{t("home.stepOpen")} <Icon name="arrow" size={14} /></button></li>
             <li><span>3</span><strong>{t("home.stepCheck")}</strong><small>{t("home.stepPending")}</small></li>
           </ol>
-        </section>
-      ) : <>
+        </details>
+      ) : null}
       <section className="stat-grid">
         <article className="stat-card">
           <div className="stat-icon mint"><Icon name="computer" /></div>
@@ -366,14 +331,13 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
       <section className="dashboard-grid">
         <article className="panel fleet-panel">
           <header className="panel-header">
-            <div><h3>{t("home.fleetOverview")}</h3><p>{t("home.liveCapacity")}</p></div>
+            <h3>{t("nav.computers")}</h3>
             <button className="text-button small" onClick={() => openPage("computers")}>{t("home.manage")} <Icon name="arrow" size={14} /></button>
           </header>
           {nodes.length > 0 ? <div className="node-list">{nodes.slice(0, 4).map((node) => <NodeRow key={node.id} node={node} />)}</div> : (
             <EmptyState
               icon="computer"
               title={t("home.noComputersConnected")}
-              copy={t("home.addMachineDescription")}
               action={<button className="button button-primary" onClick={openAddComputer}><Icon name="plus" /> {t("computers.add")}</button>}
             />
           )}
@@ -381,7 +345,7 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
 
         <article className="panel activity-panel">
           <header className="panel-header">
-            <div><h3>{t("home.recentTasks")}</h3><p>{t("home.delegatedByCodex")}</p></div>
+            <h3>{t("home.recentTasks")}</h3>
             <button className="text-button small" onClick={() => openPage("tasks")}>{t("home.viewAll")} <Icon name="arrow" size={14} /></button>
           </header>
           {recentJobs.length > 0 ? (
@@ -395,11 +359,10 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
               ))}
             </div>
           ) : (
-            <EmptyState icon="tasks" title={t("home.noDelegatedTasks")} copy={t("home.taskWillAppear")} />
+            <EmptyState icon="tasks" title={t("tasks.emptyTitle")} />
           )}
         </article>
       </section>
-      </>}
     </>
   );
 }
@@ -424,12 +387,21 @@ function ComputersPage({ fleet, addRequest }: { fleet?: FleetInfo; addRequest: n
 
 function TasksPage({ fleet }: { fleet?: FleetInfo }) {
   const { t } = useI18n();
-  const jobs = fleet?.recentJobs ?? [];
+  const [filter, setFilter] = useState<TaskFilter>("all");
+  const jobs = (fleet?.recentJobs ?? []).filter((job) => matchesTaskFilter(job.status, filter));
   return (
     <section className="panel page-panel">
       <header className="panel-header">
-        <div><h3>{t("tasks.historyTitle")}</h3><p>{t("tasks.historyDescription")}</p></div>
-        <div className="filter-group"><button className="chip active">{t("tasks.filterAll")}</button><button className="chip">{t("tasks.filterRunning")}</button><button className="chip">{t("tasks.filterFailed")}</button></div>
+        <h3>{t("tasks.historyTitle")}</h3>
+        <div className="filter-group">
+          {([
+            ["all", "tasks.filterAll"],
+            ["running", "tasks.filterRunning"],
+            ["failed", "tasks.filterFailed"],
+          ] as const).map(([value, label]) => (
+            <button key={value} className={`chip${filter === value ? " active" : ""}`} aria-pressed={filter === value} onClick={() => setFilter(value)}>{t(label)}</button>
+          ))}
+        </div>
       </header>
       {jobs.length ? (
         <div className="task-table">
@@ -446,7 +418,7 @@ function TasksPage({ fleet }: { fleet?: FleetInfo }) {
             </div>
           ))}
         </div>
-      ) : <EmptyState icon="tasks" title={t("tasks.emptyTitle")} copy={t("tasks.emptyDescription")} />}
+      ) : <EmptyState icon="tasks" title={t("tasks.emptyTitle")} />}
     </section>
   );
 }
@@ -847,17 +819,14 @@ export function App() {
     return () => window.clearInterval(interval);
   }, [refresh]);
 
-  const heading = pageTitles[page];
   const statusCopy = useMemo(() => {
     if (loading && !lastCheckedAt) return t("controller.checking");
     if (accessError) return t("controller.proxyUnavailable");
     if (!online) return t("controller.offline");
     return t("controller.availableCount", { count: fleet?.nodes.filter((node) => node.status === "online" || node.status === "busy").length ?? 0 });
   }, [accessError, fleet, lastCheckedAt, loading, online, t]);
-  const hasSetupHistory = (fleet?.nodes.length ?? 0) > 0 || (fleet?.recentJobs?.length ?? 0) > 0;
   // The Computers page already owns the provisioning CTA. Keep a single
   // add action there so the global header does not duplicate the workflow.
-  const showAddComputer = online && page !== "computers" && (page !== "home" || hasSetupHistory);
 
   return (
     <div className="app-shell">
@@ -887,12 +856,11 @@ export function App() {
 
       <main className="main-content">
         <header className="topbar">
-          <div><h1>{t(heading.titleKey)}</h1><p>{t(heading.subtitleKey)}</p></div>
+          <h1 className="screen-reader-only">{t(navigation.find((item) => item.id === page)!.labelKey)}</h1>
           <div className="topbar-actions">
             <label className="language-picker"><span>{t("language.label")}</span><select aria-label={t("language.label")} onChange={(event) => setLocale(event.target.value as typeof locale)} value={locale}>{localeOptions.map((option) => <option key={option.locale} value={option.locale}>{t(option.labelKey)}</option>)}</select></label>
             <span className={`live-status ${online ? "is-online" : ""}`}><StatusDot status={online ? "connected" : "disconnected"} />{statusCopy}</span>
             <button className={`icon-button refresh-button ${loading ? "spinning" : ""}`} onClick={() => void refresh()} aria-label={t("controller.refreshStatus")}><Icon name="refresh" /></button>
-            {showAddComputer ? <button className="button button-primary" onClick={openAddComputer}><Icon name="plus" /> {t("computers.add")}</button> : null}
           </div>
         </header>
 

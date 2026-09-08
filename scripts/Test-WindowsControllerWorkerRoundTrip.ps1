@@ -180,9 +180,19 @@ function Protect-PrivateDirectory {
     $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
     $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
         [Security.AccessControl.InheritanceFlags]::ObjectInherit
-    $replacement = [Security.AccessControl.DirectorySecurity]::new()
-    $replacement.SetOwner($user)
+    # Preserve group and avoid requesting ownership when it is already right.
+    # Elevated Windows runners can create directories owned by Administrators.
+    $replacement = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    if ($replacement.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user.Value) {
+        if ($replacement.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544') {
+            Fail-RoundTrip 'new job root has an unexpected owner'
+        }
+        $replacement.SetOwner($user)
+    }
     $replacement.SetAccessRuleProtection($true, $false)
+    foreach ($existingRule in @($replacement.Access)) {
+        $replacement.RemoveAccessRuleSpecific($existingRule)
+    }
     foreach ($principal in @($user, $system)) {
         $rule = [Security.AccessControl.FileSystemAccessRule]::new(
             $principal,
@@ -889,6 +899,7 @@ function Invoke-SelfTest {
     $root = Join-Path ([IO.Path]::GetTempPath()) ("cyc-windows-roundtrip-selftest." + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $root -Force | Out-Null
     try {
+        Protect-PrivateDirectory -Path $root
         $path = Join-Path $root 'fixture.json'
         Write-Utf8NoBom -Path $path -Content '{"status":"ok"}'
         [void](Get-JsonDocument -Path $path)

@@ -416,6 +416,27 @@ describe("durable provisioning recovery and actions", () => {
     });
   });
 
+  it("offers explicit host-key recheck only with an approved pin", () => {
+    for (const approved of [false, true]) {
+      const computer = record({
+        state: "failed", step: "kit_staged", attention: "intent",
+        failure: { code: "HOST_KEY_CHANGED", retryable: false },
+        hostKey: { ...record().hostKey, approved },
+      }) as unknown as ProvisioningComputer;
+      expect(actionsForProvisioning(computer).includes("retry")).toBe(approved);
+    }
+  });
+
+  it("offers receipt recheck only at the failed smoke checkpoint", () => {
+    for (const step of ["smoke_check", "enrollment_issued"]) {
+      const computer = record({
+        state: "failed", step, attention: "intent",
+        failure: { code: "JOB_PROGRESS_REGRESSED", retryable: false },
+      }) as unknown as ProvisioningComputer;
+      expect(actionsForProvisioning(computer).includes("retry")).toBe(step === "smoke_check");
+    }
+  });
+
   it("rejects malformed or injected native failure fields", async () => {
     for (const code of ["lowercase", "PAIRING FAILED", "PAIRING/FAILED", "故障", "X".repeat(65)]) {
       const provisioningList = vi.fn(async () => [record({

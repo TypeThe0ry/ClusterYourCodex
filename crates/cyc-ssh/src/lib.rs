@@ -17,7 +17,7 @@ use std::{
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use cyc_secrets::Secret;
 use sha2::{Digest, Sha256};
-use ssh2::{Channel, HostKeyType, OpenFlags, OpenType, RenameFlags, Session};
+use ssh2::{Channel, HostKeyType, MethodType, OpenFlags, OpenType, RenameFlags, Session};
 use thiserror::Error;
 
 const DEFAULT_PORT: u16 = 22;
@@ -121,6 +121,14 @@ impl HostKey {
     #[must_use]
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    fn negotiation_methods(&self) -> &str {
+        match self.algorithm() {
+            // RSA key blobs keep the ssh-rsa name even with SHA-2 signatures.
+            "ssh-rsa" => "rsa-sha2-512,rsa-sha2-256",
+            algorithm => algorithm,
+        }
     }
 }
 
@@ -465,6 +473,16 @@ impl fmt::Debug for SshAuthentication<'_> {
 pub trait SshTransport: Send + Sync {
     fn probe_host_key(&self, endpoint: &SshEndpoint) -> Result<HostKey, SshError>;
 
+    /// Probe without authentication using an existing identity's algorithm
+    /// preference. Callers still compare the complete returned public key.
+    fn probe_host_key_with_pin(
+        &self,
+        endpoint: &SshEndpoint,
+        _pinned_host_key: &HostKey,
+    ) -> Result<HostKey, SshError> {
+        self.probe_host_key(endpoint)
+    }
+
     /// Reconnects, verifies the full pinned host key, then performs password
     /// authentication. Authentication is never attempted before verification.
     fn connect_password(
@@ -602,11 +620,22 @@ impl Ssh2Transport {
     }
 
     fn handshake(&self, endpoint: &SshEndpoint) -> Result<(Session, HostKey), SshError> {
+        self.handshake_pinned(endpoint, None)
+    }
+
+    fn handshake_pinned(
+        &self,
+        endpoint: &SshEndpoint,
+        pinned_host_key: Option<&HostKey>,
+    ) -> Result<(Session, HostKey), SshError> {
         let tcp = connect_tcp(endpoint, self.connect_timeout)?;
         tcp.set_read_timeout(Some(self.io_timeout))?;
         tcp.set_write_timeout(Some(self.io_timeout))?;
 
         let mut session = Session::new()?;
+        if let Some(key) = pinned_host_key {
+            session.method_pref(MethodType::HostKey, key.negotiation_methods())?;
+        }
         session.set_timeout(duration_millis(self.io_timeout));
         session.set_tcp_stream(tcp);
         session.handshake()?;
@@ -630,6 +659,15 @@ impl SshTransport for Ssh2Transport {
         self.handshake(endpoint).map(|(_, host_key)| host_key)
     }
 
+    fn probe_host_key_with_pin(
+        &self,
+        endpoint: &SshEndpoint,
+        pinned_host_key: &HostKey,
+    ) -> Result<HostKey, SshError> {
+        self.handshake_pinned(endpoint, Some(pinned_host_key))
+            .map(|(_, host_key)| host_key)
+    }
+
     fn connect_password(
         &self,
         endpoint: &SshEndpoint,
@@ -639,7 +677,7 @@ impl SshTransport for Ssh2Transport {
     ) -> Result<Box<dyn RemoteSession>, SshError> {
         validate_username(username)?;
 
-        let (session, actual_host_key) = self.handshake(endpoint)?;
+        let (session, actual_host_key) = self.handshake_pinned(endpoint, Some(pinned_host_key))?;
         authenticate_after_host_key(&actual_host_key, pinned_host_key, || {
             let password = password
                 .expose_utf8()
@@ -662,7 +700,7 @@ impl SshTransport for Ssh2Transport {
     ) -> Result<Box<dyn RemoteSession>, SshError> {
         validate_username(username)?;
 
-        let (session, actual_host_key) = self.handshake(endpoint)?;
+        let (session, actual_host_key) = self.handshake_pinned(endpoint, Some(pinned_host_key))?;
         authenticate_after_host_key(&actual_host_key, pinned_host_key, || {
             let authenticated = {
                 let mut agent = session.agent().map_err(|_| SshError::AgentUnavailable)?;
@@ -705,7 +743,7 @@ impl SshTransport for Ssh2Transport {
     ) -> Result<Box<dyn RemoteSession>, SshError> {
         validate_username(username)?;
 
-        let (session, actual_host_key) = self.handshake(endpoint)?;
+        let (session, actual_host_key) = self.handshake_pinned(endpoint, Some(pinned_host_key))?;
         authenticate_after_host_key(&actual_host_key, pinned_host_key, || {
             // Recheck after the network identity is pinned. A caller may keep a
             // validated path for a long-lived GUI form, but auth never trusts
@@ -1238,6 +1276,21 @@ mod tests {
         assert_eq!(key.algorithm(), "ssh-ed25519");
         assert!(key.fingerprint().starts_with("SHA256:"));
         assert!(!key.fingerprint().ends_with('='));
+    }
+
+    #[test]
+    fn pinned_key_negotiation_preserves_identity_and_rsa_sha2() {
+        let rsa = HostKey::from_parts("ssh-rsa", b"rsa-public-key".to_vec()).unwrap();
+        assert_eq!(rsa.negotiation_methods(), "rsa-sha2-512,rsa-sha2-256");
+        for algorithm in [
+            "ssh-ed25519",
+            "ecdsa-sha2-nistp256",
+            "ecdsa-sha2-nistp384",
+            "ecdsa-sha2-nistp521",
+        ] {
+            let key = HostKey::from_parts(algorithm, b"public-key".to_vec()).unwrap();
+            assert_eq!(key.negotiation_methods(), algorithm);
+        }
     }
 
     #[test]

@@ -696,7 +696,7 @@ fn changed_host_key_fails_closed_after_rollback() {
             .drive_once(connecting.id, connecting.revision, &mut driver)
             .expect("observe changed host key"),
     );
-    match failed.state {
+    match &failed.state {
         ProvisioningState::Failed {
             code, retryable, ..
         } => {
@@ -705,6 +705,44 @@ fn changed_host_key_fails_closed_after_rollback() {
         }
         state => panic!("unexpected state: {state:?}"),
     }
+    let pinned = failed.host_key.clone();
+    let approved_at = failed.host_key_approved_at;
+    let retry = engine
+        .request_intent(failed.id, failed.revision, ProvisioningIntent::Retry)
+        .expect("explicit retry with the original pin");
+    let checkpoint = outcome_record(
+        engine
+            .drive_once(retry.id, retry.revision, &mut driver)
+            .expect("retry checkpoint"),
+    );
+    let rejected = outcome_record(
+        engine
+            .drive_once(checkpoint.id, checkpoint.revision, &mut driver)
+            .expect("recheck changed key"),
+    );
+    assert!(
+        matches!(&rejected.state, ProvisioningState::Failed { code, retryable: false, .. } if code.as_str() == "HOST_KEY_CHANGED")
+    );
+    assert_eq!(rejected.host_key, pinned);
+    assert_eq!(rejected.host_key_approved_at, approved_at);
+
+    driver.alternate_host_key = false;
+    let retry = engine
+        .request_intent(rejected.id, rejected.revision, ProvisioningIntent::Retry)
+        .expect("retry recovered server");
+    let checkpoint = outcome_record(
+        engine
+            .drive_once(retry.id, retry.revision, &mut driver)
+            .expect("retry checkpoint"),
+    );
+    let recovered = outcome_record(
+        engine
+            .drive_once(checkpoint.id, checkpoint.revision, &mut driver)
+            .expect("recheck original key"),
+    );
+    assert!(!matches!(recovered.state, ProvisioningState::Failed { .. }));
+    assert_eq!(recovered.host_key, pinned);
+    assert_eq!(recovered.host_key_approved_at, approved_at);
 }
 
 #[test]
@@ -773,6 +811,56 @@ fn begin_smoke_response_loss_reuses_the_same_operation_job_plan_and_run() {
         operations[0],
         &canonical_smoke_operation_id(smoke.id, smoke.cycle)
     );
+}
+
+#[test]
+fn explicit_smoke_recheck_preserves_binding_and_repeated_failure_remains_terminal() {
+    let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
+    let created = engine.create(new_computer()).unwrap();
+    let mut driver = FakeDriver::default();
+    let prepared = drive_until(
+        &engine,
+        created.id,
+        &mut driver,
+        ProvisioningStep::SmokeCheck,
+    );
+    let binding = prepared.smoke_run_binding.clone().unwrap();
+    driver.smoke_progress_regressed = true;
+    let mut current = prepared;
+    for _ in 0..2 {
+        let failed = outcome_record(
+            engine
+                .drive_once(current.id, current.revision, &mut driver)
+                .unwrap(),
+        );
+        assert!(matches!(
+            &failed.state,
+            ProvisioningState::Failed {
+                retryable: false,
+                ..
+            }
+        ));
+        assert_eq!(failed.smoke_run_binding.as_ref(), Some(&binding));
+        let retry = engine
+            .request_intent(failed.id, failed.revision, ProvisioningIntent::Retry)
+            .unwrap();
+        current = outcome_record(
+            engine
+                .drive_once(retry.id, retry.revision, &mut driver)
+                .unwrap(),
+        );
+        assert_eq!(current.state, ProvisioningState::SmokeCheck);
+    }
+    driver.smoke_progress_regressed = false;
+    let checked = outcome_record(
+        engine
+            .drive_once(current.id, current.revision, &mut driver)
+            .unwrap(),
+    );
+    assert!(checked.smoke_check_completed_at.is_some());
+    assert_eq!(checked.smoke_run_binding.as_ref(), Some(&binding));
+    assert_eq!(driver.observed_run_bindings, vec![binding]);
+    assert_eq!(driver.smoke_bindings.len(), 1);
 }
 
 #[test]
@@ -1265,6 +1353,7 @@ fn assert_file_does_not_contain(path: &Path, needle: &[u8]) {
 
 #[derive(Default)]
 struct FakeDriver {
+    smoke_progress_regressed: bool,
     fail_once: Option<ProvisioningAction>,
     alternate_host_key: bool,
     ephemeral_password: Option<Secret>,
@@ -1366,6 +1455,9 @@ impl ProvisioningDriver for FakeDriver {
                 StepCompletion::SmokeCheckPrepared { binding }
             }
             ProvisioningAction::RunSmokeCheck => {
+                if self.smoke_progress_regressed {
+                    return Err(DriverFailure::new("JOB_PROGRESS_REGRESSED", false).unwrap());
+                }
                 self.observed_run_bindings.push(
                     request
                         .computer
