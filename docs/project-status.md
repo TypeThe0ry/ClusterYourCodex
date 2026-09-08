@@ -48,8 +48,10 @@ Local verification of the reconnect change: `cargo test -p cyc-ssh --lib
 --locked` completed with exit code 0, all 15 tests passed. This includes
 approved-key negotiation and verification-before-authentication coverage.
 The vendored OpenSSL linker emitted missing debug-PDB warnings, not test
-failures. A new native desktop build is in progress; live reconnect remains
-unverified and is the next acceptance step.
+failures. `cargo build --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
+also completed with exit code 0. The new debug desktop binary includes the
+reconnect change; live reconnect remains unverified and is the next acceptance
+step. The installed executable has not been overwritten.
 
 ### 2026-09-08 installation succeeded after local recovery
 
