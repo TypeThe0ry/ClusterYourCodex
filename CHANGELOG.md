@@ -9,6 +9,10 @@ are versioned independently from the product.
 
 ### Changed
 
+- Remove promotional page subtitles and duplicate headers. Keep the global
+  bar limited to language, connection state, and refresh; computer actions
+  stay in the overview and Computers page rather than unrelated task pages.
+
 - Simplify the desktop workspace with neutral surfaces, compact navigation,
   graphite actions, and a single overview statistics strip. Replace the
   decorative home hero with a direct primary action; keep first-run guidance

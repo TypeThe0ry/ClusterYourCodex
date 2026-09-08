@@ -16,6 +16,13 @@ change.
 
 ### 2026-09-08 minimal workspace UI
 
+Follow-up simplification removes the visible global page-title/subtitle block,
+repeated home-card descriptions, and redundant SSH wizard introductions.
+Navigation names remain available as screen-reader headings. The global bar
+contains only language, connection status, and refresh; Add Computer is scoped
+to overview/Computers instead of appearing on unrelated task pages. Home and
+task layouts were inspected in Chrome, with the 97 frontend tests passing.
+
 The source UI now uses neutral white/gray surfaces, compact navigation,
 graphite primary actions, and an overview statistics strip. The decorative
 home hero is removed. First-run guidance is collapsible; fleet and task

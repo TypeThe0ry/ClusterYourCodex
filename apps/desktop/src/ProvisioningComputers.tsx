@@ -671,7 +671,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
   return (
     <section className={`panel page-panel provisioning-panel${computers.length ? "" : " is-empty"}`}>
       <header className="panel-header with-actions">
-        <div><h3>{t("provision.title")}</h3><p>{t("provision.subtitle")}</p></div>
+        <h3>{t("nav.computers")}</h3>
         <div className="provisioning-header-actions">
           <button className="button button-secondary" disabled={loading || Boolean(operation)} onClick={() => void refresh()}>{loading ? t("common.loading") : t("common.refresh")}</button>
           <button className="button button-primary" disabled={Boolean(operation)} onClick={() => setShowWizard(true)}>＋ {t("computers.add")}</button>
@@ -789,7 +789,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
       {showWizard ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !operation) resetAndCloseWizard(); }}>
           <form className="computer-wizard" onSubmit={(event) => void start(event)}>
-            <header><div><span className="eyebrow">{t("provision.title").toUpperCase()}</span><h2>{t("provision.connectSsh")}</h2><p>{t("provision.subtitle")}</p></div><button aria-label={t("common.close")} className="modal-close" disabled={Boolean(operation)} onClick={resetAndCloseWizard} type="button">×</button></header>
+            <header><h2>{t("provision.connectSsh")}</h2><button aria-label={t("common.close")} className="modal-close" disabled={Boolean(operation)} onClick={resetAndCloseWizard} type="button">×</button></header>
             {error ? (
               <div className="provisioning-error wizard-error" role="alert">
                 <span className="provisioning-error-icon"><span aria-hidden="true">!</span></span>

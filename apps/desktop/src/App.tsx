@@ -54,29 +54,6 @@ const statusAriaKeys: Record<NodeStatus | "connected" | "disconnected", Translat
   disconnected: "status.offline",
 };
 
-const pageTitles: Record<Page, { titleKey: TranslationKey; subtitleKey: TranslationKey }> = {
-  home: {
-    titleKey: "home.pageTitle",
-    subtitleKey: "home.pageSubtitle",
-  },
-  computers: {
-    titleKey: "computers.title",
-    subtitleKey: "computers.pageSubtitle",
-  },
-  tasks: {
-    titleKey: "tasks.title",
-    subtitleKey: "tasks.pageSubtitle",
-  },
-  rules: {
-    titleKey: "nav.routingRules",
-    subtitleKey: "rules.pageSubtitle",
-  },
-  integration: {
-    titleKey: "nav.integration",
-    subtitleKey: "integration.pageSubtitle",
-  },
-};
-
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
   const paths: Record<IconName, ReactNode> = {
     home: <><path d="m3 10 9-7 9 7" /><path d="M5 9v11h14V9" /><path d="M9 20v-6h6v6" /></>,
@@ -138,14 +115,14 @@ function EmptyState({
 }: {
   icon: IconName;
   title: string;
-  copy: string;
+  copy?: string;
   action?: ReactNode;
 }) {
   return (
     <div className="empty-state">
       <div className="empty-icon"><Icon name={icon} size={24} /></div>
       <h3>{title}</h3>
-      <p>{copy}</p>
+      {copy ? <p>{copy}</p> : null}
       {action}
     </div>
   );
@@ -315,7 +292,7 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
   return (
     <>
       <section className="workspace-toolbar">
-        <div><h2>{t("home.fleetOverview")}</h2><p>{t("home.liveCapacity")}</p></div>
+        <h2>{t("home.fleetOverview")}</h2>
         <button className="button button-primary" onClick={primaryAction.onClick}><Icon name={primaryAction.icon} size={16} /> {primaryAction.label}</button>
       </section>
 
@@ -353,14 +330,13 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
       <section className="dashboard-grid">
         <article className="panel fleet-panel">
           <header className="panel-header">
-            <div><h3>{t("home.fleetOverview")}</h3><p>{t("home.liveCapacity")}</p></div>
+            <h3>{t("nav.computers")}</h3>
             <button className="text-button small" onClick={() => openPage("computers")}>{t("home.manage")} <Icon name="arrow" size={14} /></button>
           </header>
           {nodes.length > 0 ? <div className="node-list">{nodes.slice(0, 4).map((node) => <NodeRow key={node.id} node={node} />)}</div> : (
             <EmptyState
               icon="computer"
               title={t("home.noComputersConnected")}
-              copy={t("home.addMachineDescription")}
               action={<button className="button button-primary" onClick={openAddComputer}><Icon name="plus" /> {t("computers.add")}</button>}
             />
           )}
@@ -368,7 +344,7 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
 
         <article className="panel activity-panel">
           <header className="panel-header">
-            <div><h3>{t("home.recentTasks")}</h3><p>{t("home.delegatedByCodex")}</p></div>
+            <h3>{t("home.recentTasks")}</h3>
             <button className="text-button small" onClick={() => openPage("tasks")}>{t("home.viewAll")} <Icon name="arrow" size={14} /></button>
           </header>
           {recentJobs.length > 0 ? (
@@ -382,7 +358,7 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
               ))}
             </div>
           ) : (
-            <EmptyState icon="tasks" title={t("home.noDelegatedTasks")} copy={t("home.taskWillAppear")} />
+            <EmptyState icon="tasks" title={t("tasks.emptyTitle")} />
           )}
         </article>
       </section>
@@ -414,7 +390,7 @@ function TasksPage({ fleet }: { fleet?: FleetInfo }) {
   return (
     <section className="panel page-panel">
       <header className="panel-header">
-        <div><h3>{t("tasks.historyTitle")}</h3><p>{t("tasks.historyDescription")}</p></div>
+        <h3>{t("tasks.historyTitle")}</h3>
         <div className="filter-group"><button className="chip active">{t("tasks.filterAll")}</button><button className="chip">{t("tasks.filterRunning")}</button><button className="chip">{t("tasks.filterFailed")}</button></div>
       </header>
       {jobs.length ? (
@@ -432,7 +408,7 @@ function TasksPage({ fleet }: { fleet?: FleetInfo }) {
             </div>
           ))}
         </div>
-      ) : <EmptyState icon="tasks" title={t("tasks.emptyTitle")} copy={t("tasks.emptyDescription")} />}
+      ) : <EmptyState icon="tasks" title={t("tasks.emptyTitle")} />}
     </section>
   );
 }
@@ -833,17 +809,14 @@ export function App() {
     return () => window.clearInterval(interval);
   }, [refresh]);
 
-  const heading = pageTitles[page];
   const statusCopy = useMemo(() => {
     if (loading && !lastCheckedAt) return t("controller.checking");
     if (accessError) return t("controller.proxyUnavailable");
     if (!online) return t("controller.offline");
     return t("controller.availableCount", { count: fleet?.nodes.filter((node) => node.status === "online" || node.status === "busy").length ?? 0 });
   }, [accessError, fleet, lastCheckedAt, loading, online, t]);
-  const hasSetupHistory = (fleet?.nodes.length ?? 0) > 0 || (fleet?.recentJobs?.length ?? 0) > 0;
   // The Computers page already owns the provisioning CTA. Keep a single
   // add action there so the global header does not duplicate the workflow.
-  const showAddComputer = online && page !== "computers" && (page !== "home" || hasSetupHistory);
 
   return (
     <div className="app-shell">
@@ -873,12 +846,11 @@ export function App() {
 
       <main className="main-content">
         <header className="topbar">
-          <div><h1>{t(heading.titleKey)}</h1><p>{t(heading.subtitleKey)}</p></div>
+          <h1 className="screen-reader-only">{t(navigation.find((item) => item.id === page)!.labelKey)}</h1>
           <div className="topbar-actions">
             <label className="language-picker"><span>{t("language.label")}</span><select aria-label={t("language.label")} onChange={(event) => setLocale(event.target.value as typeof locale)} value={locale}>{localeOptions.map((option) => <option key={option.locale} value={option.locale}>{t(option.labelKey)}</option>)}</select></label>
             <span className={`live-status ${online ? "is-online" : ""}`}><StatusDot status={online ? "connected" : "disconnected"} />{statusCopy}</span>
             <button className={`icon-button refresh-button ${loading ? "spinning" : ""}`} onClick={() => void refresh()} aria-label={t("controller.refreshStatus")}><Icon name="refresh" /></button>
-            {showAddComputer ? <button className="button button-primary" onClick={openAddComputer}><Icon name="plus" /> {t("computers.add")}</button> : null}
           </div>
         </header>
 
