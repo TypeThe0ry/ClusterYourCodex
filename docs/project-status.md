@@ -14,6 +14,13 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+The installer port-preflight and lifecycle-diagnostic Pester suites are now
+included in the Windows CI identity job, using its pinned Pester 3.4 runner.
+The combined local invocation passes all seven tests. A live authenticated
+`cyc jobs` query to the existing development controller returned `jobs: []`
+on 2026-09-08, so no queued/running job was observed at that instant. Recheck
+before runtime handover; an empty queue is not an installation receipt.
+
 On 2026-09-08 a live read-only listener check confirmed port 47831 is owned by
 the development preview.95 controller (PID 76204, started 2026-09-07), outside
 the default installation root. Fresh Setup cannot claim that port. The current

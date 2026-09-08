@@ -60,6 +60,15 @@ jobs:
           -Script .\scripts\Test-WindowsControllerWorkerRoundTrip.Tests.ps1
           -EnableExit
 
+      - name: Run Windows installer preflight and diagnostic regression tests
+        shell: powershell
+        run: |
+          Import-Module Pester -RequiredVersion 3.4.0 -Force
+          Invoke-Pester -Script @(
+            '.\packaging\windows\Test-LifecyclePortPreflight.Tests.ps1',
+            '.\packaging\windows\Test-LifecycleDiagnostics.Tests.ps1'
+          ) -EnableExit
+
   msrv:
     name: Minimum supported Rust 1.88.0 (${{ matrix.graph }})
     needs: [version-identity]
