@@ -6,6 +6,60 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 #[test]
+fn migration_staging_validates_before_writes_and_preserves_exact_bytes() {
+    use cyc_worker::migration::stage_identity_documents;
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeMap;
+    let temporary = tempfile::tempdir().unwrap();
+    let (config, mut ledger, old, _) = fixture();
+    let new = temporary.path().join("private/staged/config.json");
+    let secret = b"fixture-migration-token\n".to_vec();
+    ledger["records"][0]["credentialSha256"] =
+        json!(hex::encode(Sha256::digest(b"fixture-migration-token")));
+    let boot = br#"{"apiVersion":"cyc.dev/worker-boot-generation/v1","generation":17}"#;
+    let documents = relocate_identity_documents(
+        &serde_json::to_vec(&config).unwrap(),
+        &serde_json::to_vec(&ledger).unwrap(),
+        boot,
+        &old,
+        &new,
+        &new.parent().unwrap().join("workspace"),
+    )
+    .unwrap();
+    assert!(stage_identity_documents(&new, &documents, &BTreeMap::new()).is_err());
+    assert!(!new.parent().unwrap().exists());
+    let mut credentials = BTreeMap::from([(config.credential_file.clone(), b"incorrect".to_vec())]);
+    assert!(stage_identity_documents(&new, &documents, &credentials).is_err());
+    assert!(!new.parent().unwrap().exists());
+    credentials.insert(config.credential_file.clone(), secret.clone());
+    stage_identity_documents(&new, &documents, &credentials).unwrap();
+    assert_eq!(std::fs::read(&new).unwrap(), documents.config_json);
+    assert_eq!(
+        std::fs::read(new.with_extension("boot-generation.json")).unwrap(),
+        boot
+    );
+    let current = documents
+        .credentials
+        .iter()
+        .find(|entry| entry.required)
+        .unwrap();
+    assert_eq!(std::fs::read(&current.target).unwrap(), secret);
+    cyc_worker::security::ensure_protected_input(&current.target).unwrap();
+    let journal_path = new.parent().unwrap().join(".migration-stage.json");
+    cyc_worker::security::ensure_protected_input(&journal_path).unwrap();
+    let journal = std::fs::read(&journal_path).unwrap();
+    let receipt: Value = serde_json::from_slice(&journal).unwrap();
+    assert_eq!(receipt["phase"], "staged");
+    assert_eq!(receipt["activationAllowed"], false);
+    assert_eq!(receipt["files"].as_array().unwrap().len(), 4);
+    assert!(!String::from_utf8(journal)
+        .unwrap()
+        .contains("fixture-migration-token"));
+    assert!(stage_identity_documents(&new, &documents, &credentials).is_err());
+    assert_eq!(std::fs::read(&current.target).unwrap(), secret);
+}
+
+#[test]
 fn migration_preserves_generation_bytes_without_incrementing() {
     let (config, ledger, old, new) = fixture();
     let boot =

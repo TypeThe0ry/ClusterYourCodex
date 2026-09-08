@@ -1,9 +1,10 @@
-//! In-memory identity documents for the future journaled migration operation.
-//! No function here reads credentials, creates files, or authorizes task switching.
+//! Identity conversion and protected staging. Staging never authorizes task
+//! switching: source ownership, quiescence and live acceptance remain external.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 
 use crate::config::{validate_boot_generation_document, WorkerConfig};
 use crate::runtime::{
@@ -28,6 +29,114 @@ pub struct RelocatedIdentityDocuments {
     pub boot_generation_json: Vec<u8>,
     pub boot_generation: u64,
     pub credentials: Vec<MigrationCredential>,
+}
+
+/// Stage prevalidated documents and caller-held credential bytes in a fresh
+/// target directory. Source handles/ACLs and quiescence must be checked by the
+/// migration coordinator. Never reads source files, deletes data, or starts a
+/// worker. An interrupted directory is retained and must not be adopted by retry.
+/// The receipt explicitly distinguishes staging from a completed migration.
+pub fn stage_identity_documents(
+    new_config: &Path,
+    documents: &RelocatedIdentityDocuments,
+    credentials: &std::collections::BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<()> {
+    use crate::security::{
+        create_private_directory_new, ensure_protected_input, replace_protected_file,
+        write_protected_file, SecretString,
+    };
+    let root = new_config
+        .parent()
+        .context("migration target has no parent")?;
+    if !new_config.is_absolute()
+        || new_config
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+        || std::fs::symlink_metadata(root).is_ok()
+    {
+        bail!("migration staging requires a fresh absolute target directory");
+    }
+    let config: WorkerConfig = serde_json::from_slice(&documents.config_json)?;
+    config.validate()?;
+    validate_migration_identity_binding(&documents.pairing_ledger_json, &config)?;
+    let expected = migration_credential_inventory(
+        &documents.pairing_ledger_json,
+        &config,
+        new_config,
+        new_config,
+    )?;
+    if expected.len() != documents.credentials.len()
+        || validate_boot_generation_document(&documents.boot_generation_json)?
+            != documents.boot_generation
+    {
+        bail!("migration staging document inventory mismatch");
+    }
+    let mut writes = std::collections::BTreeMap::<PathBuf, &[u8]>::new();
+    writes.insert(new_config.to_path_buf(), &documents.config_json);
+    writes.insert(
+        new_config.with_extension("pairing-state.json"),
+        &documents.pairing_ledger_json,
+    );
+    writes.insert(
+        new_config.with_extension("boot-generation.json"),
+        &documents.boot_generation_json,
+    );
+    let mut used = std::collections::BTreeSet::new();
+    let mut targets = std::collections::BTreeSet::new();
+    for entry in &documents.credentials {
+        if !expected.iter().any(|candidate| {
+            candidate.target == entry.target
+                && candidate.sha256 == entry.sha256
+                && candidate.required == entry.required
+        }) || entry.target.parent() != Some(root)
+            || !targets.insert(entry.target.clone())
+        {
+            bail!("migration staging credential binding mismatch");
+        }
+        match credentials.get(&entry.source) {
+            Some(bytes) => {
+                if bytes.len() > 16 * 1024 {
+                    bail!("migration credential is unexpectedly large");
+                }
+                let value = SecretString::new(std::str::from_utf8(bytes)?.to_owned())?;
+                if hex::encode(Sha256::digest(value.expose().as_bytes())) != entry.sha256 {
+                    bail!("migration credential digest mismatch");
+                }
+                if !used.insert(entry.source.clone())
+                    || writes.insert(entry.target.clone(), bytes).is_some()
+                {
+                    bail!("migration staging has a duplicate credential binding");
+                }
+            }
+            None if entry.required => bail!("migration current credential is missing"),
+            None => {}
+        }
+    }
+    if used.len() != credentials.len() {
+        bail!("migration received an unreferenced credential");
+    }
+    // Finish all content validation before creating any output.
+    create_private_directory_new(root)?;
+    let journal = root.join(".migration-stage.json");
+    let receipt = |phase: &str| {
+        serde_json::to_vec(&serde_json::json!({
+            "apiVersion": "cyc.dev/worker-migration-stage/v1",
+            "phase": phase, "activationAllowed": false,
+            "files": writes.iter().map(|(path, bytes)| serde_json::json!({
+                "name": path.file_name(), "sha256": hex::encode(Sha256::digest(bytes))
+            })).collect::<Vec<_>>()
+        }))
+    };
+    write_protected_file(&journal, &receipt("copying")?)?;
+    for (path, bytes) in &writes {
+        write_protected_file(path, bytes)?;
+        ensure_protected_input(path)?;
+        if Sha256::digest(std::fs::read(path)?) != Sha256::digest(bytes) {
+            bail!("migration staged file verification failed");
+        }
+    }
+    replace_protected_file(&journal, &receipt("staged")?)?;
+    Ok(())
 }
 
 /// Validate all documents before returning any target document. Preserve the

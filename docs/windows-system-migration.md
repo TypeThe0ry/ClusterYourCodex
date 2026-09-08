@@ -13,6 +13,16 @@ the boot-generation document byte-for-byte. No target documents are returned
 when any input is invalid. Durable boot-generation copying, source ACL verification,
 quiescence, task switching, recovery, and live acceptance remain to implement.
 
+`stage_identity_documents` can now write caller-supplied, digest-validated bytes
+into an exclusively created private target. It revalidates target documents and
+inventory, requires the current credential, rejects unreferenced inputs, and
+preserves exact bytes. A protected `.migration-stage.json` records file hashes
+and copying/staged status with `activationAllowed=false`. It rejects retries
+against any existing root and retains partial output for recovery inspection.
+It does not read old files: the coordinator still must establish stable source
+handles, old-owner ACL verification, quiescence, and recovery before exposing
+this through a migration command. Staging is not a service migration receipt.
+
 ## Why ordinary Repair is insufficient
 
 The legacy failure mode has a SYSTEM task pointing at user-owned worker state.

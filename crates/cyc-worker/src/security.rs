@@ -253,6 +253,19 @@ pub(crate) fn ensure_protected_directory(path: &Path) -> Result<()> {
     verify_private_directory(path)
 }
 
+/// Create a transaction root exclusively; a concurrent creator is never adopted.
+pub(crate) fn create_private_directory_new(path: &Path) -> Result<()> {
+    let absolute = absolute_path_without_following_links(path)?;
+    let parent = absolute
+        .parent()
+        .context("private transaction root has no parent")?;
+    prepare_private_directory(parent)?;
+    ensure_no_links_or_reparse_points(&absolute)?;
+    fs::create_dir(&absolute).context("exclusively create private transaction root")?;
+    harden_private_directory(&absolute)?;
+    verify_private_directory(&absolute)
+}
+
 fn sibling_temporary_path(path: &Path) -> Result<PathBuf> {
     path.file_name()
         .context("protected output must have a filename")?;

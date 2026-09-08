@@ -14,6 +14,18 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 protected migration staging
+
+The new staging function validates all caller-supplied credential bytes before
+output, exclusively creates a private destination, writes protected files,
+re-reads and verifies their hashes, and records copying/staged phases in a
+protected receipt. Existing target directories are never adopted or overwritten.
+The receipt explicitly has `activationAllowed=false`; no old file is read or
+removed, and no task switches. A native local filesystem/ACL integration test
+passed for missing/wrong credentials causing no output, exact-byte preservation,
+private output, secret-free receipt, and retry refusing an existing target.
+This is not a completed source-ACL-aware SYSTEM migration or recovery CLI.
+
 ### 2026-09-08 migration credential inventory
 
 Identity document conversion now returns exact credential source/target paths,
