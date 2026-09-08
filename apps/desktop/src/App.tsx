@@ -257,10 +257,14 @@ function NodeRow({ node }: { node: NodeSummary }) {
       <div className="node-main">
         <div className="node-title"><StatusDot status={node.status} /><strong>{node.name}</strong></div>
         <span>{node.os} · {node.arch} · {node.address}</span>
-        <span>{node.availability ? t("home.availability", { value: node.availability }) : t("home.statusValue", { value: t(nodeStatusKeys[node.status]) })}</span>
-        {node.slots && <span>{t("home.executionSlots", { available: node.slots.available, effective: node.slots.effective })}</span>}
-        {node.availabilityReasons?.[0] && <span className="capacity-reason">{node.availabilityReasons[0]}</span>}
-        {node.telemetry && <span className="capacity-reason">{t("home.telemetry", { sequence: node.telemetry.sequence, bootGeneration: node.telemetry.bootGeneration, time: new Date(node.telemetry.receivedAt).toLocaleTimeString() })}</span>}
+        <span>{t(nodeStatusKeys[node.status])}</span>
+        <details className="node-details">
+          <summary>{t("provision.showDetails")}</summary>
+          {node.availability && <span>{t("home.availability", { value: node.availability })}</span>}
+          {node.slots && <span>{t("home.executionSlots", { available: node.slots.available, effective: node.slots.effective })}</span>}
+          {node.availabilityReasons?.map((reason) => <span key={reason}>{reason}</span>)}
+          {node.telemetry && <span>{t("home.telemetry", { sequence: node.telemetry.sequence, bootGeneration: node.telemetry.bootGeneration, time: new Date(node.telemetry.receivedAt).toLocaleTimeString() })}</span>}
+        </details>
       </div>
       <div className="node-capabilities">
         {node.capabilities.slice(0, 3).map((capability) => <span key={capability}>{capability}</span>)}
