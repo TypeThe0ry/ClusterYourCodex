@@ -7,6 +7,15 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+### Changed
+
+- Simplify the desktop workspace with neutral surfaces, compact navigation,
+  graphite actions, and a single overview statistics strip. Replace the
+  decorative home hero with a direct primary action; keep first-run guidance
+  collapsible and show fleet/task information from the first launch.
+- Preserve all four interface languages and existing provisioning flows in the
+  refreshed layout, with narrow-window navigation and visible keyboard focus.
+
 ### Diagnostics
 
 - Keep the last installer lifecycle result in the existing private installer

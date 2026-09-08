@@ -314,28 +314,15 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
 
   return (
     <>
-      <section className="hero-card">
-        <div className="hero-glow" />
-        <div className="hero-copy">
-          <span className="eyebrow"><Icon name="spark" size={15} /> {t("home.eyebrow")}</span>
-          <h2>{t("home.title")}</h2>
-          <p>{t("home.description")}</p>
-          {!isFirstRun ? <div className="hero-actions">
-            <button className="button button-dark" onClick={primaryAction.onClick}><Icon name={primaryAction.icon} /> {primaryAction.label}</button>
-          </div> : null}
-        </div>
-        <div className="hero-visual" aria-hidden="true">
-          <div className="orbit orbit-large"><span className="orbit-node node-a"><Icon name="computer" /></span><span className="orbit-node node-b"><Icon name="gpu" /></span></div>
-          <div className="orbit orbit-small"><span className="orbit-node node-c"><Icon name="terminal" /></span></div>
-          <div className="codex-core"><Icon name="codex" size={34} /><small>CODEX</small></div>
-        </div>
+      <section className="workspace-toolbar">
+        <div><h2>{t("home.fleetOverview")}</h2><p>{t("home.liveCapacity")}</p></div>
+        <button className="button button-primary" onClick={primaryAction.onClick}><Icon name={primaryAction.icon} size={16} /> {primaryAction.label}</button>
       </section>
 
-      {nodes.length === 0 && recentJobs.length === 0 ? (
-        <section className="panel first-run-panel" aria-labelledby="first-run-title">
+      {isFirstRun ? (
+        <details className="panel first-run-panel">
+          <summary>{t("home.quickStartTitle")}</summary>
           <div className="first-run-copy">
-            <span className="eyebrow">{t("home.quickStart")}</span>
-            <h3 id="first-run-title">{t("home.quickStartTitle")}</h3>
             <p>{t("home.quickStartDescription")}</p>
           </div>
           <ol className="first-run-steps">
@@ -343,8 +330,8 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
             <li><span>2</span><strong>{t("home.stepConnect")}</strong><button className="text-button small" onClick={() => openPage("integration")}>{t("home.stepOpen")} <Icon name="arrow" size={14} /></button></li>
             <li><span>3</span><strong>{t("home.stepCheck")}</strong><small>{t("home.stepPending")}</small></li>
           </ol>
-        </section>
-      ) : <>
+        </details>
+      ) : null}
       <section className="stat-grid">
         <article className="stat-card">
           <div className="stat-icon mint"><Icon name="computer" /></div>
@@ -399,7 +386,6 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
           )}
         </article>
       </section>
-      </>}
     </>
   );
 }

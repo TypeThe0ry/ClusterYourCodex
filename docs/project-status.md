@@ -14,6 +14,20 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 minimal workspace UI
+
+The source UI now uses neutral white/gray surfaces, compact navigation,
+graphite primary actions, and an overview statistics strip. The decorative
+home hero is removed. First-run guidance is collapsible; fleet and task
+information remains visible before the first computer is connected.
+
+Desktop frontend build and all 97 tests (five suites) passed. A live Chrome
+preview at `http://127.0.0.1:1420/` verified the home layout, expanding the
+three-step guide, opening/closing Add Computer, and switching Chinese to
+English. The browser correctly disables provisioning without the secure
+native bridge. This is frontend verification, not SSH provisioning acceptance.
+The installed preview.100 executable has not been replaced by this UI change.
+
 ### 2026-09-08 installed GUI provisioning resume
 
 The installed native Computers page retained both previous provisioning
