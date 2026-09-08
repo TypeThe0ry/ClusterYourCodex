@@ -31,6 +31,152 @@ pub struct RelocatedIdentityDocuments {
     pub credentials: Vec<MigrationCredential>,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StageReceipt {
+    api_version: String,
+    phase: String,
+    activation_allowed: bool,
+    files: Vec<StageFile>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StageFile {
+    name: String,
+    sha256: String,
+}
+
+/// Public inspection contains no identities, paths, hashes or credential bytes.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationStageStatus {
+    pub phase: String,
+    pub files_verified: usize,
+    pub activation_allowed: bool,
+}
+
+fn read_stage_file(path: &Path, limit: usize) -> Result<Vec<u8>> {
+    use std::io::Read;
+    crate::security::ensure_protected_input(path)?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take((limit + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        bytes.fill(0);
+        bail!("migration staged file exceeds size bound");
+    }
+    Ok(bytes)
+}
+
+/// Inspect an interrupted or finished staging directory without mutating it.
+/// A copying receipt is never accepted as complete. A staged receipt requires
+/// all hashes, strict identity documents and the exact allowed file inventory.
+pub fn inspect_migration_stage(new_config: &Path) -> Result<MigrationStageStatus> {
+    use std::collections::{BTreeMap, BTreeSet};
+    if !new_config.is_absolute()
+        || new_config
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        bail!("migration inspection requires an absolute config path");
+    }
+    let root = new_config
+        .parent()
+        .context("migration target has no parent")?;
+    let receipt: StageReceipt = serde_json::from_slice(&read_stage_file(
+        &root.join(".migration-stage.json"),
+        64 * 1024,
+    )?)?;
+    if receipt.api_version != "cyc.dev/worker-migration-stage/v1"
+        || receipt.activation_allowed
+        || !matches!(receipt.phase.as_str(), "copying" | "staged")
+        || receipt.files.len() > 67
+    {
+        bail!("unsupported migration staging receipt");
+    }
+    let mut declared = BTreeMap::new();
+    for file in receipt.files {
+        if file.name.is_empty()
+            || file.name == "."
+            || file.name == ".."
+            || file.name.contains(['/', '\\', ':'])
+            || file.name.chars().any(char::is_control)
+            || file.sha256.len() != 64
+            || !file
+                .sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || declared.insert(root.join(file.name), file.sha256).is_some()
+        {
+            bail!("invalid migration staging file entry");
+        }
+    }
+    if receipt.phase == "copying" {
+        return Ok(MigrationStageStatus {
+            phase: receipt.phase,
+            files_verified: 0,
+            activation_allowed: false,
+        });
+    }
+    let config: WorkerConfig = serde_json::from_slice(&read_stage_file(new_config, 256 * 1024)?)?;
+    config.validate()?;
+    let ledger_path = new_config.with_extension("pairing-state.json");
+    let ledger = read_stage_file(&ledger_path, 256 * 1024)?;
+    let inventory = migration_credential_inventory(&ledger, &config, new_config, new_config)?;
+    let boot_path = new_config.with_extension("boot-generation.json");
+    validate_boot_generation_document(&read_stage_file(&boot_path, 16 * 1024)?)?;
+    let mut allowed = BTreeSet::from([new_config.to_path_buf(), ledger_path, boot_path]);
+    for path in &allowed {
+        if !declared.contains_key(path) {
+            bail!("migration receipt omits a required identity document");
+        }
+    }
+    for entry in inventory {
+        let included = declared.contains_key(&entry.target);
+        if entry.required && !included {
+            bail!("migration receipt omits the current credential");
+        }
+        if included {
+            let mut bytes = read_stage_file(&entry.target, 16 * 1024)?;
+            let check = (|| -> Result<()> {
+                let value =
+                    crate::security::SecretString::new(std::str::from_utf8(&bytes)?.to_owned())?;
+                if hex::encode(Sha256::digest(value.expose().as_bytes())) != entry.sha256 {
+                    bail!("migration staged credential does not match its ledger");
+                }
+                Ok(())
+            })();
+            bytes.fill(0);
+            check?;
+            allowed.insert(entry.target);
+        }
+    }
+    if declared.keys().cloned().collect::<BTreeSet<_>>() != allowed {
+        bail!("migration receipt contains an unexpected file");
+    }
+    for (path, digest) in &declared {
+        let mut bytes = read_stage_file(path, 256 * 1024)?;
+        let matches = hex::encode(Sha256::digest(&bytes)) == *digest;
+        bytes.fill(0);
+        if !matches {
+            bail!("migration staged file digest mismatch");
+        }
+    }
+    allowed.insert(root.join(".migration-stage.json"));
+    for entry in std::fs::read_dir(root)? {
+        if !allowed.contains(&entry?.path()) {
+            bail!("migration staging directory contains an unexpected entry");
+        }
+    }
+    Ok(MigrationStageStatus {
+        phase: receipt.phase,
+        files_verified: declared.len(),
+        activation_allowed: false,
+    })
+}
+
 /// Stage prevalidated documents and caller-held credential bytes in a fresh
 /// target directory. Source handles/ACLs and quiescence must be checked by the
 /// migration coordinator. Never reads source files, deletes data, or starts a
@@ -115,6 +261,12 @@ pub fn stage_identity_documents(
     if used.len() != credentials.len() {
         bail!("migration received an unreferenced credential");
     }
+    if writes
+        .keys()
+        .any(|path| path.file_name().and_then(|name| name.to_str()).is_none())
+    {
+        bail!("migration staging filenames must be valid Unicode");
+    }
     // Finish all content validation before creating any output.
     create_private_directory_new(root)?;
     let journal = root.join(".migration-stage.json");
@@ -123,7 +275,7 @@ pub fn stage_identity_documents(
             "apiVersion": "cyc.dev/worker-migration-stage/v1",
             "phase": phase, "activationAllowed": false,
             "files": writes.iter().map(|(path, bytes)| serde_json::json!({
-                "name": path.file_name(), "sha256": hex::encode(Sha256::digest(bytes))
+                "name": path.file_name().and_then(|name| name.to_str()), "sha256": hex::encode(Sha256::digest(bytes))
             })).collect::<Vec<_>>()
         }))
     };

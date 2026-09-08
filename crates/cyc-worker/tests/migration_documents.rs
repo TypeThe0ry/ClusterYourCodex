@@ -48,7 +48,7 @@ fn migration_staging_validates_before_writes_and_preserves_exact_bytes() {
     let journal_path = new.parent().unwrap().join(".migration-stage.json");
     cyc_worker::security::ensure_protected_input(&journal_path).unwrap();
     let journal = std::fs::read(&journal_path).unwrap();
-    let receipt: Value = serde_json::from_slice(&journal).unwrap();
+    let mut receipt: Value = serde_json::from_slice(&journal).unwrap();
     assert_eq!(receipt["phase"], "staged");
     assert_eq!(receipt["activationAllowed"], false);
     assert_eq!(receipt["files"].as_array().unwrap().len(), 4);
@@ -57,6 +57,36 @@ fn migration_staging_validates_before_writes_and_preserves_exact_bytes() {
         .contains("fixture-migration-token"));
     assert!(stage_identity_documents(&new, &documents, &credentials).is_err());
     assert_eq!(std::fs::read(&current.target).unwrap(), secret);
+    let inspected = cyc_worker::migration::inspect_migration_stage(&new).unwrap();
+    assert_eq!(inspected.files_verified, 4);
+    assert!(!inspected.activation_allowed);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cyc-worker"))
+        .args(["migration-status", "--config"])
+        .arg(&new)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let public: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(public["phase"], "staged");
+    assert_eq!(public["activationAllowed"], false);
+    assert!(!String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("fixture-migration-token"));
+    std::fs::write(&current.target, b"changed").unwrap();
+    assert!(cyc_worker::migration::inspect_migration_stage(&new).is_err());
+    std::fs::write(&current.target, &secret).unwrap();
+    receipt["files"][0]["name"] = json!("../outside");
+    std::fs::write(&journal_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    assert!(cyc_worker::migration::inspect_migration_stage(&new).is_err());
+    let mut receipt: Value =
+        serde_json::from_slice(&std::fs::read(&journal_path).unwrap()).unwrap();
+    receipt["files"] = json!([]);
+    receipt["phase"] = json!("copying");
+    std::fs::write(&journal_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let interrupted = cyc_worker::migration::inspect_migration_stage(&new).unwrap();
+    assert_eq!(interrupted.phase, "copying");
+    assert_eq!(interrupted.files_verified, 0);
+    assert!(!interrupted.activation_allowed);
 }
 
 #[test]

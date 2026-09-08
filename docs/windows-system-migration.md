@@ -23,6 +23,21 @@ It does not read old files: the coordinator still must establish stable source
 handles, old-owner ACL verification, quiescence, and recovery before exposing
 this through a migration command. Staging is not a service migration receipt.
 
+Inspect a protected staging directory as its owning identity:
+
+```powershell
+cyc-worker migration-status --config C:\ProgramData\ClusterYourCodex\worker\config.json --pretty
+```
+
+This command is read-only. A `copying` receipt reports zero verified files and
+never implies completion. A `staged` receipt is accepted only after bounded
+reads, private ACL checks, strict schemas, current credential/ledger binding,
+exact file inventory and all recorded SHA-256 checks. Extra entries, missing
+files, path traversal and changed contents fail with a nonzero exit. Public
+output contains only phase, verified-file count and `activationAllowed=false`;
+no credentials or identity documents. This is an inspection command, not the
+unfinished migration/rollback coordinator or evidence of controller authentication.
+
 ## Why ordinary Repair is insufficient
 
 The legacy failure mode has a SYSTEM task pointing at user-owned worker state.

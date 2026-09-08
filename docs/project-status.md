@@ -14,6 +14,23 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 migration staging inspection CLI
+
+`cyc-worker migration-status --config <absolute config> [--pretty]` now provides
+read-only staging inspection. It distinguishes incomplete copying from verified
+staging, enforces bounded strict receipts and documents, checks protected files,
+validates credential/ledger binding, and verifies every digest and the directory
+inventory. It never authorizes activation. Source-owner-aware migration and
+task-switch/rollback coordination remain unfinished.
+All eight migration tests passed, including a real CLI child invocation,
+changed-credential rejection, receipt path-traversal rejection and incomplete
+copying inspection. The initial inspection test exposed Windows OsStr being
+serialized as a platform object; staging now validates Unicode names and writes
+plain JSON strings. The rerun passed in 50.64 seconds. Scoped Clippy passed.
+The full packaging run `cyc-worker-kit-test-65ff591954e14688be4b8c66aa39b438`
+finished its Linux fixture with exit 0/no timeout/no remaining PIDs and is now
+executing the phased macOS fixture. This is not native service acceptance.
+
 ### 2026-09-08 protected migration staging
 
 The new staging function validates all caller-supplied credential bytes before
