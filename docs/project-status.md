@@ -16,6 +16,14 @@ change.
 
 ### 2026-09-08 native desktop Linux onboarding resumed
 
+The corresponding durable retry regression now closes/reopens SQLite twice:
+after a simulated SSH probe failure, and again at host-key approval. It verifies
+the same computer/node/cycle and probe operation ID, one retained record, no
+credential reference before authentication, and no authentication/install calls
+while awaiting approval. The targeted test and all 27 provisioning state-machine
+tests passed on Windows; formatting/diff checks passed. This uses a fake SSH
+driver and proves recovery semantics, not native password storage or installation.
+
 The running preview.100 native desktop retained a Linux provisioning record
 that had failed at SSH connection with `SSH_IO` (revision 3, cycle 0).
 An explicit Retry advanced it to the host-key approval checkpoint (revision 6,
