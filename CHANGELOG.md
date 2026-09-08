@@ -16,6 +16,10 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Detect orphaned controller object storage and SQLite sidecars before installer
+  elevation. Explain the missing database without deleting or adopting old
+  data; controller startup remains the authoritative storage security check.
+
 - Detect fresh-install controller/worker port conflicts before requesting
   firewall elevation. Report the owning PID without stopping unrelated
   processes; Repair retains its existing rollback-bound runtime checks.

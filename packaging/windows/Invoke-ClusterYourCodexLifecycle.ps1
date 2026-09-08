@@ -1830,6 +1830,23 @@ function Invoke-CycBootstrapProcess {
     }
 }
 
+function Assert-CycControllerStoragePreflight {
+    param([Parameter(Mandatory = $true)][string]$RequestedDataRoot)
+    Assert-CycCreationPathNoReparse -Path $RequestedDataRoot
+    $database = Join-Path $RequestedDataRoot 'controller.db'
+    Assert-CycCreationPathNoReparse -Path $database
+    if (Test-Path -LiteralPath $database -PathType Leaf) { return }
+    foreach ($name in @('jobs', 'controller.db-wal', 'controller.db-shm')) {
+        $candidate = Join-Path $RequestedDataRoot $name
+        Assert-CycCreationPathNoReparse -Path $candidate
+        if (Test-Path -LiteralPath $candidate) {
+            throw "Controller storage '$name' exists without controller.db. Restore the matching database or preserve the orphaned storage separately before retrying Setup. No data was changed."
+        }
+    }
+    # The controller still performs its authoritative ACL and layout validation
+    # at startup. This read-only check only catches known orphaned layouts early.
+}
+
 function Assert-CycFreshInstallPortsAvailable {
     param([Parameter(Mandatory = $true)]$Plan, [AllowNull()]$ExistingManifest)
     # Repair stops the verified installed runtime inside the core rollback
@@ -2407,6 +2424,7 @@ function Invoke-ClusterYourCodexLifecycleCore {
             -TransactionId $transactionId `
             -ExistingManifest $oldManifest
         if (-not $plan) { throw 'Core planner returned no install plan.' }
+        Assert-CycControllerStoragePreflight -RequestedDataRoot $plan.dataRoot
         Assert-CycFreshInstallPortsAvailable -Plan $plan -ExistingManifest $oldManifest
         $controllerRecord = @($plan.files | Where-Object { [string]$_.relativePath -ceq 'cyc-controller.exe' })
         if ($controllerRecord.Count -ne 1) { throw 'Install plan has no unique controller executable.' }

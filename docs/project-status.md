@@ -16,6 +16,15 @@ change.
 
 ### 2026-09-08 authorized preview.100 installer retry
 
+The follow-up source fix now checks for `jobs`, `controller.db-wal`, and
+`controller.db-shm` without `controller.db` before elevation and core changes.
+It reports a recovery action without modifying storage or relaxing the
+controller's validation. Five added storage cases and the existing port and
+diagnostic tests pass together (12 total); the recovered local data directory
+also passes this read-only preflight. The suite is already wired into CI.
+This source change is not present in immutable preview.100, and successful
+preflight does not establish successful installation or pairing.
+
 Follow-up reproduced a concrete startup failure using the published preview.100
 controller with the installer's default database/token paths: native exit 1,
 `database security preflight failed`, caused by `refusing pre-existing object
