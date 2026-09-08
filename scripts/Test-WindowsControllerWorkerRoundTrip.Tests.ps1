@@ -33,11 +33,12 @@ Describe 'Windows controller/worker live round-trip probe contract' {
         $LASTEXITCODE | Should Be 0
     }
 
-    It 'hardens only the DACL of a current-user-owned job root' {
-        $probeSource | Should Match 'new job root is not owned by the current user'
+    It 'preserves a current-user owner and handles Administrators-owned runner roots' {
+        $probeSource | Should Match 'new job root has an unexpected owner'
         $probeSource | Should Match 'Get-Acl -LiteralPath \$Path'
         $probeSource | Should Match 'RemoveAccessRuleSpecific'
-        $probeSource | Should Not Match '\$replacement\.SetOwner'
+        $probeSource | Should Match "S-1-5-32-544"
+        $probeSource | Should Match '\$replacement\.SetOwner\(\$user\)'
     }
 
     It 'keeps credentials in files and scans before removing them' {

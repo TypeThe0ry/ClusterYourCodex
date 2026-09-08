@@ -99,6 +99,13 @@ service-manager, credential, or cross-node acceptance gate.
 
 ### 2026-09-08: preview.100 available for operator testing
 
+- PR run `34178620334` failed during Windows round-trip initialization before
+  evidence directories were created; the other jobs passed. The fixture now
+  handles newly created Administrators-owned directories on elevated runners
+  while preserving current-user-owned directories without ownership writes.
+  Unexpected owners remain rejected and the final private ACL is still checked.
+  This addresses a likely runner-only regression; hosted rerun is required to
+  confirm the cause because the failed run did not retain its original error.
 - Native UI/state inspection found the running development desktop is still
   preview.95. Its provisioning journal has two incomplete historical attempts:
   Helio has a stored credential reference and approved host key, but failed at
