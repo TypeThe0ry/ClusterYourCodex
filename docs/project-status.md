@@ -16,6 +16,15 @@ change.
 
 ### 2026-09-08 Linux discovery capacity formatting
 
+Latest follow-up for exact head `90bf4ae`: Windows Rust job `102060693675`
+in run `34226042054` also completed successfully. Its completed log reports
+121 worker library tests passed (one ignored; 993.29s) at 12:50:43 UTC and
+all nine migration-document tests passed (84.52s) at 12:52:08 UTC. The desktop
+job `102060693531` remained active in `Validate managed worker kits`, entered
+at 12:52:22 UTC. PR #58 was still open with squash auto-merge enabled; this
+observation does not establish whole-run success or a completed merge.
+These CI tests do not establish live worker pairing or service persistence.
+
 Linux disk discovery now uses explicit `awk printf "%.0f"` integer formatting,
 matching macOS, instead of default numeric printing followed by decimal-point
 truncation. This avoids implementation-dependent scientific notation being
@@ -25,6 +34,20 @@ repair, not a reproduced P1 root cause. Five Windows discovery tests passed;
 executing the exact updated awk expression with local Git awk returned exact
 0-byte, 1-KiB, 100-GiB and 1-TiB fixture values. A Unix-only native awk regression
 is included for Linux/macOS CI; its execution is not claimed from Windows.
+
+Subsequent exact-source CI `34226042054` at `90bf4ae` completed both Rust
+workspace platform jobs successfully. Completed job logs explicitly report
+`native_awk_disk_probe_preserves_large_capacity ... ok` on Linux (job
+`102060693779`, 12:28:16 UTC) and macOS (job `102060693571`, 12:28:25 UTC).
+This verifies the probe expression on both native CI platforms. Windows,
+desktop and Worker Kit jobs were still running at this observation; neither
+full CI success nor deployed worker acceptance is implied.
+
+The earlier Windows workspace job `102054930277` in run `34224323417`
+completed successfully at 12:30:43 UTC for `51a1c51`. Its completed log reports
+all nine migration-document tests passing (91.61s). This is independent Windows
+CI evidence for the migration implementation present at that ancestor, not
+validation of subsequent commits or live migration of the existing worker.
 
 ### 2026-09-08 validation queue deduplication
 

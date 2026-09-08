@@ -83,7 +83,7 @@ describe("i18n", () => {
 
   it("keeps the complete desktop catalog available in every supported locale", () => {
     const englishKeys = Object.keys(translations.en).sort();
-    expect(englishKeys).toHaveLength(444);
+    expect(englishKeys).toHaveLength(441);
     for (const locale of SUPPORTED_LOCALES) {
       expect(Object.keys(translations[locale]).sort()).toEqual(englishKeys);
     }
@@ -92,7 +92,7 @@ describe("i18n", () => {
   it("does not retain discarded promotional page headings in any locale", () => {
     for (const locale of SUPPORTED_LOCALES) {
       expect(Object.keys(translations[locale]).filter((key) =>
-        key.endsWith(".pageSubtitle") || key === "home.pageTitle",
+        key.endsWith(".pageSubtitle") || ["home.pageTitle", "app.tagline", "tasks.historyDescription", "tasks.emptyDescription"].includes(key),
       )).toEqual([]);
     }
   });

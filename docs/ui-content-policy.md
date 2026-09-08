@@ -9,6 +9,9 @@ The desktop is an operational workspace, not a landing page.
   execution slots and telemetry generation/sequence inside a closed technical-details disclosure.
 - Preserve diagnostic evidence; simplify its presentation rather than deleting it.
 - Reuse translated controls across English, Chinese, Spanish and Japanese.
+- Remove unused promotional strings from the locale catalogs as well as the view.
+- Label the expandable task routing explanation as placement details, not a rhetorical question.
+- Keep locale parity and discarded-copy regression checks when changing UI text.
 
 ## Verification on 2026-09-08
 
