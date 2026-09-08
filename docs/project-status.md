@@ -37,6 +37,16 @@ The installed preview.100 executable has not been replaced by this UI change.
 
 ### 2026-09-08 installed GUI provisioning resume
 
+The isolated-kit native retry reached revision 20 with
+`LIFECYCLE_RECEIPT_INVALID`. Remote inspection verified exactly five kit files
+and a 9,440,256-byte installed worker executable. The lifecycle command exited
+successfully, but Windows emits multiline `ConvertTo-Json` while the driver
+parsed only the last line. The parser now accepts the complete final JSON
+object, retains strict receipt expectations, and rejects trailing garbage.
+All 38 library tests pass. This proves binary installation, not pairing,
+service readiness, or job execution; native recovery with the parser fix
+remains pending.
+
 Remote diagnosis identified the lifecycle failure: Windows `Install-Worker.ps1`
 line 586 rejects the staging root because it contains six files (the five kit
 files plus `cyc-discovery.ps1`). The explicit PairOnly diagnostic returned exit

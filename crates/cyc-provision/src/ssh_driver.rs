@@ -1336,13 +1336,16 @@ fn validate_lifecycle_receipt(
     }
     let text =
         std::str::from_utf8(content).map_err(|_| failure("LIFECYCLE_RECEIPT_INVALID", false))?;
-    let line = text
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
+    let lines: Vec<_> = text.lines().collect();
+    // PowerShell ConvertTo-Json emits a multiline object by default. Preserve
+    // the complete final receipt, while allowing earlier lifecycle log lines.
+    let start = lines
+        .iter()
+        .rposition(|line| line.trim_start().starts_with('{'))
         .ok_or_else(|| failure("LIFECYCLE_RECEIPT_INVALID", false))?;
+    let receipt = lines[start..].join("\n");
     let value: serde_json::Value =
-        serde_json::from_str(line).map_err(|_| failure("LIFECYCLE_RECEIPT_INVALID", false))?;
+        serde_json::from_str(&receipt).map_err(|_| failure("LIFECYCLE_RECEIPT_INVALID", false))?;
     let object = value
         .as_object()
         .ok_or_else(|| failure("LIFECYCLE_RECEIPT_INVALID", false))?;
@@ -1638,6 +1641,37 @@ mod tests {
     const PAIRING_CONSUMED: u8 = 1;
     const PAIRING_READY: u8 = 2;
     const PAIRING_FAILED: u8 = 3;
+
+    #[test]
+    fn powershell_multiline_receipt_preserves_strict_validation() {
+        let receipt = serde_json::json!({
+            "schemaVersion": "cyc.dev/windows-worker-install/v1",
+            "action": "install", "succeeded": true, "paired": false,
+            "service": "not_enabled", "serviceEnabled": false
+        });
+        let pretty = format!(
+            "Staging complete\r\n{}\r\n",
+            serde_json::to_string_pretty(&receipt).unwrap()
+        );
+        validate_lifecycle_receipt(
+            pretty.as_bytes(),
+            "install",
+            LifecycleReceiptExpectation::UnpairedPreinstall,
+        )
+        .unwrap();
+        assert!(validate_lifecycle_receipt(
+            pretty.as_bytes(),
+            "install",
+            LifecycleReceiptExpectation::PairedService
+        )
+        .is_err());
+        assert!(validate_lifecycle_receipt(
+            format!("{pretty}unexpected trailing output").as_bytes(),
+            "install",
+            LifecycleReceiptExpectation::UnpairedPreinstall
+        )
+        .is_err());
+    }
 
     #[test]
     fn lifecycle_receipts_enforce_preinstall_and_activation_boundaries() {

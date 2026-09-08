@@ -29,6 +29,10 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Parse complete multiline Windows lifecycle JSON receipts instead of only
+  their closing line; retain strict state/field checks and reject trailing
+  non-JSON output.
+
 - Stage signed worker bundles in a dedicated `kit` directory, separate from
   discovery scripts and enrollment files. Retrying an older install checkpoint
   re-stages the verified bundle without weakening its exact-file-set checks.
