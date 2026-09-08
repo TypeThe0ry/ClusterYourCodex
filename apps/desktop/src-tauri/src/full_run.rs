@@ -2783,12 +2783,21 @@ fn validate_polled_job_with_placement(
 }
 
 fn validate_job_progress(previous: &JobView, current: &JobView) -> Result<(), BackendFailure> {
+    validate_run_receipt(&current.run)
+        .map_err(|_| BackendFailure::new("job_progress_regressed", false))?;
+    // Running timestamps come from the controller's transition clock. The
+    // managed completion replaces them with validated worker execution evidence.
+    // Allow that one clock handoff, never a mutation of an existing terminal run.
+    let completing = current.version > previous.version
+        && !previous.run.state.is_terminal()
+        && current.run.state.is_terminal()
+        && current.run.started_at.is_some();
     if current.version < previous.version
         || current.run.created_at != previous.run.created_at
         || previous
             .run
             .started_at
-            .is_some_and(|started| current.run.started_at != Some(started))
+            .is_some_and(|started| current.run.started_at != Some(started) && !completing)
         || previous
             .run
             .finished_at
@@ -4058,6 +4067,46 @@ mod tests {
         let mut regressed = queued;
         regressed.version = terminal.version + 1;
         assert!(validate_job_progress(&terminal, &regressed).is_err());
+    }
+
+    #[test]
+    fn completion_accepts_worker_clock_handoff_but_not_live_or_terminal_mutations() {
+        let backend = FakeBackend::new();
+        let snapshot = build_snapshot().unwrap();
+        let job = build_portable_job(&snapshot).unwrap();
+        let plan = backend.plan(&job).unwrap();
+        backend.submit(&job, plan.plan_id).unwrap();
+        let mut running = backend.job_view(true);
+        running.run.state = JobState::Running;
+        running.run.started_at = Some(running.run.created_at + chrono::Duration::seconds(1));
+        running.run.finished_at = None;
+        running.run.exit_code = None;
+        running.run.artifact_ids.clear();
+        let mut completed = running.clone();
+        completed.version += 1;
+        completed.run.state = JobState::Succeeded;
+        completed.run.started_at =
+            Some(running.run.created_at + chrono::Duration::milliseconds(900));
+        completed.run.finished_at = Some(running.run.created_at + chrono::Duration::seconds(2));
+        completed.run.exit_code = Some(0);
+        assert!(validate_job_progress(&running, &completed).is_ok());
+
+        let mut live_mutation = running.clone();
+        live_mutation.version += 1;
+        live_mutation.run.state = JobState::Verifying;
+        live_mutation.run.started_at = completed.run.started_at;
+        assert!(validate_job_progress(&running, &live_mutation).is_err());
+
+        let mut terminal_mutation = completed.clone();
+        terminal_mutation.version += 1;
+        terminal_mutation.run.started_at = running.run.started_at;
+        assert!(validate_job_progress(&completed, &terminal_mutation).is_err());
+
+        let mut missing_start = completed.clone();
+        missing_start.run.started_at = None;
+        assert!(validate_job_progress(&running, &missing_start).is_err());
+        completed.run.finished_at = Some(completed.run.created_at);
+        assert!(validate_job_progress(&running, &completed).is_err());
     }
 
     #[test]

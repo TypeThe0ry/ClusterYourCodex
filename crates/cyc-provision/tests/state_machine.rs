@@ -814,6 +814,56 @@ fn begin_smoke_response_loss_reuses_the_same_operation_job_plan_and_run() {
 }
 
 #[test]
+fn explicit_smoke_recheck_preserves_binding_and_repeated_failure_remains_terminal() {
+    let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
+    let created = engine.create(new_computer()).unwrap();
+    let mut driver = FakeDriver::default();
+    let prepared = drive_until(
+        &engine,
+        created.id,
+        &mut driver,
+        ProvisioningStep::SmokeCheck,
+    );
+    let binding = prepared.smoke_run_binding.clone().unwrap();
+    driver.smoke_progress_regressed = true;
+    let mut current = prepared;
+    for _ in 0..2 {
+        let failed = outcome_record(
+            engine
+                .drive_once(current.id, current.revision, &mut driver)
+                .unwrap(),
+        );
+        assert!(matches!(
+            &failed.state,
+            ProvisioningState::Failed {
+                retryable: false,
+                ..
+            }
+        ));
+        assert_eq!(failed.smoke_run_binding.as_ref(), Some(&binding));
+        let retry = engine
+            .request_intent(failed.id, failed.revision, ProvisioningIntent::Retry)
+            .unwrap();
+        current = outcome_record(
+            engine
+                .drive_once(retry.id, retry.revision, &mut driver)
+                .unwrap(),
+        );
+        assert_eq!(current.state, ProvisioningState::SmokeCheck);
+    }
+    driver.smoke_progress_regressed = false;
+    let checked = outcome_record(
+        engine
+            .drive_once(current.id, current.revision, &mut driver)
+            .unwrap(),
+    );
+    assert!(checked.smoke_check_completed_at.is_some());
+    assert_eq!(checked.smoke_run_binding.as_ref(), Some(&binding));
+    assert_eq!(driver.observed_run_bindings, vec![binding]);
+    assert_eq!(driver.smoke_bindings.len(), 1);
+}
+
+#[test]
 fn run_timeout_and_restart_poll_the_exact_expired_durable_binding_without_replanning() {
     let temp = TempDir::new().expect("tempdir");
     let database = temp.path().join("smoke-restart.db");
@@ -1303,6 +1353,7 @@ fn assert_file_does_not_contain(path: &Path, needle: &[u8]) {
 
 #[derive(Default)]
 struct FakeDriver {
+    smoke_progress_regressed: bool,
     fail_once: Option<ProvisioningAction>,
     alternate_host_key: bool,
     ephemeral_password: Option<Secret>,
@@ -1404,6 +1455,9 @@ impl ProvisioningDriver for FakeDriver {
                 StepCompletion::SmokeCheckPrepared { binding }
             }
             ProvisioningAction::RunSmokeCheck => {
+                if self.smoke_progress_regressed {
+                    return Err(DriverFailure::new("JOB_PROGRESS_REGRESSED", false).unwrap());
+                }
                 self.observed_run_bindings.push(
                     request
                         .computer

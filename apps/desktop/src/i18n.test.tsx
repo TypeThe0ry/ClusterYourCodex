@@ -83,9 +83,17 @@ describe("i18n", () => {
 
   it("keeps the complete desktop catalog available in every supported locale", () => {
     const englishKeys = Object.keys(translations.en).sort();
-    expect(englishKeys).toHaveLength(449);
+    expect(englishKeys).toHaveLength(443);
     for (const locale of SUPPORTED_LOCALES) {
       expect(Object.keys(translations[locale]).sort()).toEqual(englishKeys);
+    }
+  });
+
+  it("does not retain discarded promotional page headings in any locale", () => {
+    for (const locale of SUPPORTED_LOCALES) {
+      expect(Object.keys(translations[locale]).filter((key) =>
+        key.endsWith(".pageSubtitle") || key === "home.pageTitle",
+      )).toEqual([]);
     }
   });
 

@@ -444,7 +444,10 @@ export function actionsForProvisioning(computer: ProvisioningComputer): Provisio
   }
   if (computer.state === "failed") {
     return [
-      ...(computer.failure?.retryable || (computer.failure?.code === "HOST_KEY_CHANGED" && computer.hostKey?.approved) ? ["retry" as const] : []),
+      ...(computer.failure?.retryable
+        || (computer.failure?.code === "HOST_KEY_CHANGED" && computer.hostKey?.approved)
+        || (computer.step === "smoke_check" && computer.failure?.code === "JOB_PROGRESS_REGRESSED")
+        ? ["retry" as const] : []),
       "rollback",
       "remove",
     ];

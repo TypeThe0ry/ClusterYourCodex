@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ControllerApiError, controllerClient, preferNewerFleetSnapshot } from "./api/client";
 import { ProvisioningComputers } from "./ProvisioningComputers";
+import { matchesTaskFilter, type TaskFilter } from "./taskFilters";
 import {
   INTEGRATION_STATUS_MAX_AGE_MS,
   integrationClient,
@@ -386,12 +387,21 @@ function ComputersPage({ fleet, addRequest }: { fleet?: FleetInfo; addRequest: n
 
 function TasksPage({ fleet }: { fleet?: FleetInfo }) {
   const { t } = useI18n();
-  const jobs = fleet?.recentJobs ?? [];
+  const [filter, setFilter] = useState<TaskFilter>("all");
+  const jobs = (fleet?.recentJobs ?? []).filter((job) => matchesTaskFilter(job.status, filter));
   return (
     <section className="panel page-panel">
       <header className="panel-header">
         <h3>{t("tasks.historyTitle")}</h3>
-        <div className="filter-group"><button className="chip active">{t("tasks.filterAll")}</button><button className="chip">{t("tasks.filterRunning")}</button><button className="chip">{t("tasks.filterFailed")}</button></div>
+        <div className="filter-group">
+          {([
+            ["all", "tasks.filterAll"],
+            ["running", "tasks.filterRunning"],
+            ["failed", "tasks.filterFailed"],
+          ] as const).map(([value, label]) => (
+            <button key={value} className={`chip${filter === value ? " active" : ""}`} aria-pressed={filter === value} onClick={() => setFilter(value)}>{t(label)}</button>
+          ))}
+        </div>
       </header>
       {jobs.length ? (
         <div className="task-table">

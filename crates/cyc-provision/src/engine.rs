@@ -302,6 +302,20 @@ impl ProvisioningEngine {
             ));
         }
         let mut record = self.load_expected(id, expected_revision)?;
+        // A desktop update can fix the smoke receipt validator. An explicit
+        // recheck must reuse the durable run, not reinstall or pair again.
+        if intent == ProvisioningIntent::Retry && record.smoke_run_binding.is_some() {
+            if let ProvisioningState::Failed {
+                step: ProvisioningStep::SmokeCheck,
+                code,
+                retryable,
+            } = &mut record.state
+            {
+                if code.as_str() == "JOB_PROGRESS_REGRESSED" {
+                    *retryable = true;
+                }
+            }
+        }
         // An explicit retry may recheck the previously approved identity after
         // a transport change or server recovery. Never replace the pin, and
         // keep subsequent mismatches terminal rather than automatically looping.

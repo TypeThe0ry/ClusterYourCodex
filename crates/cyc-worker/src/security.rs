@@ -695,6 +695,8 @@ try {
     $diagnostic = 'stage=parse-principals'
     $user = [System.Security.Principal.SecurityIdentifier]::new($sidText)
     $system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $principals = @($user)
+    if ($user.Value -ne $system.Value) { $principals += $system }
     $expectedInheritance = if ($isDirectory) {
         [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
             [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
@@ -711,7 +713,7 @@ try {
         }
         $replacement.SetOwner($user)
         $replacement.SetAccessRuleProtection($true, $false)
-        foreach ($principal in @($user, $system)) {
+        foreach ($principal in $principals) {
             $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
                 $principal,
                 [System.Security.AccessControl.FileSystemRights]::FullControl,
@@ -779,11 +781,12 @@ try {
     }
     $rules = @($acl.GetAccessRules(
         $true, $true, [System.Security.Principal.SecurityIdentifier]))
-    if ($rules.Count -ne 2) {
+    if ($rules.Count -ne $principals.Count) {
         $diagnostic = 'code=ace-count,count=' + [string]$rules.Count
         throw 'ACL contract violation'
     }
-    $expected = @{$sidText = $false; 'S-1-5-18' = $false}
+    $expected = @{}
+    foreach ($principal in $principals) { $expected[$principal.Value] = $false }
     $ruleIndex = 0
     foreach ($rule in $rules) {
         $ruleSid = $rule.IdentityReference.Value
@@ -973,6 +976,91 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
             assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_acl_system_identity_uses_one_principal_and_remains_strict() {
+        // Exercise the production verifier against in-memory Windows ACLs so
+        // SYSTEM coverage does not require changing the test process identity.
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("acl-fixture");
+        fs::write(&path, b"fixture").unwrap();
+        let read_start = WINDOWS_CREDENTIAL_ACL_SCRIPT
+            .find("    $acl = if (")
+            .unwrap();
+        let read_end = WINDOWS_CREDENTIAL_ACL_SCRIPT
+            .find("    if (-not $acl.AreAccessRulesProtected)")
+            .unwrap();
+        let script = format!(
+            "{}\n$acl = [System.Security.AccessControl.FileSecurity]::new()\n$acl.SetSecurityDescriptorSddlForm($env:CYC_TEST_ACL_SDDL)\n{}",
+            &WINDOWS_CREDENTIAL_ACL_SCRIPT[..read_start],
+            &WINDOWS_CREDENTIAL_ACL_SCRIPT[read_end..]
+        )
+        // FileSecurity coalesces identical SDDL ACEs. Inject the duplicate at
+        // enumeration to verify that the checker rejects duplicate rule input.
+        .replace(
+            "    if ($rules.Count -ne $principals.Count)",
+            "    if ($env:CYC_TEST_DUPLICATE -eq '1') { $rules = @($rules[0], $rules[0]) }\n    if ($rules.Count -ne $principals.Count)",
+        );
+        let ordinary_sid = "S-1-5-21-1-2-3-1001";
+        let cases = [
+            ("S-1-5-18", "O:SYD:P(A;;FA;;;SY)".to_owned(), true),
+            (
+                ordinary_sid,
+                format!("O:{ordinary_sid}D:P(A;;FA;;;{ordinary_sid})(A;;FA;;;SY)"),
+                true,
+            ),
+            (
+                "S-1-5-18",
+                "O:SYD:P(A;;FA;;;SY)(A;;FA;;;WD)".to_owned(),
+                false,
+            ),
+            (
+                "S-1-5-18",
+                "O:SYD:P(A;;FA;;;SY)(A;;FA;;;SY)".to_owned(),
+                false,
+            ),
+            ("S-1-5-18", "O:SYD:P(A;ID;FA;;;SY)".to_owned(), false),
+            ("S-1-5-18", "O:SYD:(A;;FA;;;SY)".to_owned(), false),
+            ("S-1-5-18", "O:BAD:P(A;;FA;;;SY)".to_owned(), false),
+            ("S-1-5-18", "O:SYD:P(A;;FR;;;SY)".to_owned(), false),
+            (
+                ordinary_sid,
+                format!("O:{ordinary_sid}D:P(A;;FA;;;{ordinary_sid})"),
+                false,
+            ),
+        ];
+        for (sid, sddl, accepted) in cases {
+            let output = Command::new("powershell.exe")
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    &script,
+                ])
+                .env("CYC_WORKER_ACL_ACTION", "verify")
+                .env("CYC_WORKER_ACL_PATH", &path)
+                .env("CYC_WORKER_ACL_SID", sid)
+                .env("CYC_TEST_ACL_SDDL", &sddl)
+                .env(
+                    "CYC_TEST_DUPLICATE",
+                    if sddl == "O:SYD:P(A;;FA;;;SY)(A;;FA;;;SY)" {
+                        "1"
+                    } else {
+                        "0"
+                    },
+                )
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                accepted,
+                "SID {sid}, ACL {sddl}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 

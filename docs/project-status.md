@@ -14,7 +14,62 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 completion timestamp reconciliation
+
+Explicit Retry is now offered for the retained JOB_PROGRESS_REGRESSED smoke
+failure. The engine requires an existing durable smoke binding and rechecks
+that same job/run; it does not rotate enrollment, reinstall, or automatically
+retry repeated failures. All 26 provisioning state-machine tests and 103
+frontend tests passed, including repeated-terminal-failure/binding reuse and
+checkpoint-scoped UI action tests; the frontend production build passed.
+
+Read-only Helio inspection confirmed the separate persistence blocker:
+the registered worker task runs as SYSTEM (ServiceAccount, Highest), while
+the protected data directory and credential file are owned by the SSH user.
+The installed task's last result is 1; the diagnostic foreground worker was
+still present as PID 28140. The worker requires owner=current runtime SID.
+No ACLs or remote service identity were changed during this check. The exact
+task startup stderr has not been captured. Fixing System scope requires the
+pairing/lifecycle operations and persistent process to share an identity;
+merely switching the run principal or weakening owner checks is insufficient.
+The installer now deduplicates its private principal SID set, including the
+SYSTEM-only case, with a pure-helper test wired into the worker-kit gate.
+Both SYSTEM/user helper cases passed; a real SYSTEM lifecycle is still pending.
+The worker's matching ACL creation/verifier also uses a unique principal set.
+All eight worker security tests passed: real ordinary-user protected-file
+round trips and in-memory Windows ACL cases for SYSTEM/ordinary acceptance,
+extra/duplicate/inherited/weak rules, wrong owner, and unprotected DACL rejection.
+This does not claim execution under a real SYSTEM process. Installer helper
+tests passed in both PowerShell 7 and Windows PowerShell 5.1. The rebuilt native
+desktop test suite passed all 80 tests after the recovery change.
+
+Source inspection found a mismatch in the smoke poll validator: the controller
+sets `started_at` when entering Running, while `complete_managed_run` applies
+the worker's execution timestamps from its validated completion receipt. The
+desktop previously rejected this terminal clock handoff as JOB_PROGRESS_REGRESSED.
+The validator now permits a changed start timestamp only on a higher-version
+nonterminal-to-terminal transition with a present start and a valid run receipt.
+Same-version mutations, creation-time changes, live timestamp changes, terminal
+rewrites, and invalid time ordering still fail. All 21 full-run tests passed,
+including a new clock-handoff regression; formatting passed. Native installation
+reconciliation against the retained live job and persistent scheduled-worker
+startup remain unverified by this source-only fix. No public build was issued.
+
 ### 2026-09-08 minimal workspace UI
+
+The follow-up copy cleanup deletes the six unused promotional page heading /
+subtitle keys from all four locale catalogs (24 entries), rather than retaining
+hidden copy. A regression test prevents these retired keys from returning.
+The task page's previously decorative All / Running / Failed controls now filter
+the current task snapshot and expose their selected state to assistive tools.
+Running includes preparing, running, and verifying; queued and terminal jobs
+remain in All. No controller or execution behavior changes.
+
+Verification: all 102 frontend tests across six suites, TypeScript checks, Vite
+production build, and `git diff --check` passed. The in-app browser at localhost
+verified the Chinese home/task pages without the removed copy, filtering the
+existing successful task out with Failed and restoring it with All. This change
+updates source and browser preview; no installer or public release was rebuilt.
 
 Follow-up simplification removes the visible global page-title/subtitle block,
 repeated home-card descriptions, and redundant SSH wizard introductions.
