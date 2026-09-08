@@ -17,6 +17,13 @@ change.
 Local candidate metadata is prepared as `0.1.0-preview.101`; no tag or release
 has been created. Published preview.100 remains unchanged. The candidate must
 pass exact-version checks and CI before a signed prerelease build is published.
+Candidate commit `e0d58b9` passed local native library tests (81), provisioning
+library tests (43), desktop tests (105), MCP tests (44), and both JS builds.
+Version consistency including negative tests, changelog consistency, release
+signing boundary, 63 pinned Actions references, and worker-kit signing-key
+private-file protection checks also passed. The private-file check ran under
+PowerShell 7 as required; its initial PowerShell 5.1 invocation was rejected
+before execution. These results do not replace exact-candidate CI or deployment.
 
 Named-instance implementation commit `f3c199a` is pushed to PR #58, with squash
 auto-merge still enabled. Its CI run `34234534065` is active across Windows,
