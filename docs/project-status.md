@@ -37,6 +37,21 @@ The installed preview.100 executable has not been replaced by this UI change.
 
 ### 2026-09-08 installed GUI provisioning resume
 
+The rebuilt native GUI was launched successfully with the simplified layout
+and the existing controller and provisioning records. The retained mismatch
+record exposed only rollback/remove, so an explicit retry path now permits
+rechecking an already approved host key without deleting the record or changing
+trust. All 25 provisioning state-machine tests and 98 frontend tests passed,
+including repeated-mismatch rejection and original-key recovery. Live remote
+acceptance of this follow-up change advanced the retained Windows record from
+revision 11 to 14 (`KIT_IO`) and then 17 (`WORKER_LIFECYCLE_FAILED`, retryable,
+at `kit_staged`). The debug executable initially lacked its sibling
+`worker-kits` directory; copying the installed preview.100 kits into the debug
+output resolved that local packaging omission. The next remote lifecycle call
+failed and still needs diagnosis. No host pin was replaced, and no worker is
+yet claimed paired or ready. The product MCP `fleet_info` returned controller
+and database healthy with an empty fleet before this retry.
+
 The installed native Computers page retained both previous provisioning
 records. Retrying the Windows worker checkpoint advanced its revision from 9
 to 11 and failed with `HOST_KEY_CHANGED` before authentication. A read-only

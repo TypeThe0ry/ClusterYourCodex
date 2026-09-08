@@ -302,6 +302,22 @@ impl ProvisioningEngine {
             ));
         }
         let mut record = self.load_expected(id, expected_revision)?;
+        // An explicit retry may recheck the previously approved identity after
+        // a transport change or server recovery. Never replace the pin, and
+        // keep subsequent mismatches terminal rather than automatically looping.
+        if intent == ProvisioningIntent::Retry
+            && record.host_key.is_some()
+            && record.host_key_approved_at.is_some()
+        {
+            if let ProvisioningState::Failed {
+                code, retryable, ..
+            } = &mut record.state
+            {
+                if code.as_str() == "HOST_KEY_CHANGED" {
+                    *retryable = true;
+                }
+            }
+        }
         if matches!(
             intent,
             ProvisioningIntent::Rollback | ProvisioningIntent::Remove

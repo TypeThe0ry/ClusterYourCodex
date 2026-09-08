@@ -29,6 +29,10 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Allow an explicit retry of a host-key mismatch when an approved pin already
+  exists, without clearing or replacing that pin. A repeated mismatch still
+  stops provisioning; no automatic mismatch retry is enabled.
+
 - Keep SSH reconnect negotiation bound to the approved host-key type across
   password, agent, and private-key authentication. RSA pins use SHA-2 signature
   algorithms; full public-key verification still precedes authentication.

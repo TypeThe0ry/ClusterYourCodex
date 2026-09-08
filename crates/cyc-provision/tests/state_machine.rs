@@ -696,7 +696,7 @@ fn changed_host_key_fails_closed_after_rollback() {
             .drive_once(connecting.id, connecting.revision, &mut driver)
             .expect("observe changed host key"),
     );
-    match failed.state {
+    match &failed.state {
         ProvisioningState::Failed {
             code, retryable, ..
         } => {
@@ -705,6 +705,44 @@ fn changed_host_key_fails_closed_after_rollback() {
         }
         state => panic!("unexpected state: {state:?}"),
     }
+    let pinned = failed.host_key.clone();
+    let approved_at = failed.host_key_approved_at;
+    let retry = engine
+        .request_intent(failed.id, failed.revision, ProvisioningIntent::Retry)
+        .expect("explicit retry with the original pin");
+    let checkpoint = outcome_record(
+        engine
+            .drive_once(retry.id, retry.revision, &mut driver)
+            .expect("retry checkpoint"),
+    );
+    let rejected = outcome_record(
+        engine
+            .drive_once(checkpoint.id, checkpoint.revision, &mut driver)
+            .expect("recheck changed key"),
+    );
+    assert!(
+        matches!(&rejected.state, ProvisioningState::Failed { code, retryable: false, .. } if code.as_str() == "HOST_KEY_CHANGED")
+    );
+    assert_eq!(rejected.host_key, pinned);
+    assert_eq!(rejected.host_key_approved_at, approved_at);
+
+    driver.alternate_host_key = false;
+    let retry = engine
+        .request_intent(rejected.id, rejected.revision, ProvisioningIntent::Retry)
+        .expect("retry recovered server");
+    let checkpoint = outcome_record(
+        engine
+            .drive_once(retry.id, retry.revision, &mut driver)
+            .expect("retry checkpoint"),
+    );
+    let recovered = outcome_record(
+        engine
+            .drive_once(checkpoint.id, checkpoint.revision, &mut driver)
+            .expect("recheck original key"),
+    );
+    assert!(!matches!(recovered.state, ProvisioningState::Failed { .. }));
+    assert_eq!(recovered.host_key, pinned);
+    assert_eq!(recovered.host_key_approved_at, approved_at);
 }
 
 #[test]
