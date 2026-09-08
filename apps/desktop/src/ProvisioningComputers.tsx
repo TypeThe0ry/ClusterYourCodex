@@ -199,6 +199,7 @@ export interface AddForm {
   rememberPassword: boolean;
   serviceScope: "auto" | "user" | "system";
   workspace: string;
+  windowsInstanceName: string;
   priority: string;
   maximumParallelJobs: string;
   cpuLimitPercent: string;
@@ -220,6 +221,7 @@ function initialForm(): AddForm {
     rememberPassword: true,
     serviceScope: "auto",
     workspace: "",
+    windowsInstanceName: "",
     priority: "0",
     maximumParallelJobs: "",
     cpuLimitPercent: "",
@@ -272,7 +274,9 @@ function optionalPositive(value: string): number | undefined {
 export function canSubmitProvisioningForm(form: AddForm): boolean {
   const port = Number(form.port);
   const priority = Number(form.priority);
+  const instanceName = form.windowsInstanceName.trim();
   return form.host.trim().length > 0
+    && (!instanceName || (/^[a-z0-9][a-z0-9-]{0,31}$/.test(instanceName) && !form.workspace.trim()))
     && form.username.trim().length > 0
     && Number.isSafeInteger(port)
     && port >= 1
@@ -305,6 +309,7 @@ export function buildStartComputerInput(
     advanced: {
       serviceScope: form.serviceScope,
       workspace: form.workspace.trim() || undefined,
+      windowsInstanceName: form.windowsInstanceName.trim() || undefined,
       priority: Number(form.priority),
       maximumParallelJobs: optionalPositive(form.maximumParallelJobs),
       cpuLimitPercent: optionalPositive(form.cpuLimitPercent),
@@ -833,7 +838,8 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
                 <label>{t("provision.sshPort")}<input max={65535} min={1} onChange={(event) => setForm({ ...form, port: event.target.value })} required type="number" value={form.port} /></label>
                 <label>{t("provision.serviceScope")}<select onChange={(event) => setForm({ ...form, serviceScope: event.target.value as AddForm["serviceScope"] })} value={form.serviceScope}><option value="auto">{t("provision.scope.auto")}</option><option value="user">{t("provision.scope.user")}</option><option value="system">{t("provision.scope.system")}</option></select></label>
                 <label>{t("provision.routingPriority")}<input max={10000} min={-10000} onChange={(event) => setForm({ ...form, priority: event.target.value })} type="number" value={form.priority} /></label>
-                <label className="wide">{t("provision.workerWorkspace")}<input onChange={(event) => setForm({ ...form, workspace: event.target.value })} placeholder={t("provision.workerWorkspacePlaceholder")} value={form.workspace} /></label>
+                <label className="wide">{t("provision.windowsInstanceName")}<input maxLength={32} pattern="[a-z0-9][a-z0-9-]{0,31}" onChange={(event) => setForm({ ...form, windowsInstanceName: event.target.value, workspace: event.target.value ? "" : form.workspace })} value={form.windowsInstanceName} /></label>
+                <label className="wide">{t("provision.workerWorkspace")}<input disabled={Boolean(form.windowsInstanceName)} onChange={(event) => setForm({ ...form, workspace: event.target.value })} placeholder={t("provision.workerWorkspacePlaceholder")} value={form.workspace} /></label>
                 <label>{t("provision.maxParallelJobs")}<input min={1} onChange={(event) => setForm({ ...form, maximumParallelJobs: event.target.value })} type="number" value={form.maximumParallelJobs} /></label>
                 <label>{t("provision.cpuLimit")}<input max={100} min={1} onChange={(event) => setForm({ ...form, cpuLimitPercent: event.target.value })} type="number" value={form.cpuLimitPercent} /></label>
                 <label>{t("provision.memoryLimit")}<input min={1} onChange={(event) => setForm({ ...form, memoryLimitMiB: event.target.value })} type="number" value={form.memoryLimitMiB} /></label>

@@ -72,6 +72,45 @@ external hostile-isolation reconciliation; those are coordinator responsibilitie
 
 ## Why ordinary Repair is insufficient
 
+### Fresh named instance alternative (implementation in progress)
+
+The Windows installer now accepts `-InstanceName <name>` (1-32 ASCII lowercase
+letters/digits/hyphens, first character alphanumeric). Named instances derive
+separate install/data/workspace roots and use `ClusterYourCodex Worker - <name>`
+as the task name. System roots are below Program Files/ProgramData; user roots
+are below LocalAppData. An instance-specific ownership marker rejects a root
+belonging to another instance before transaction recovery. The SYSTEM handoff
+preserves the instance parameter. Omitting it retains the legacy default task,
+roots and marker.
+
+New repair journals bind the task name. Named instances reject missing or
+foreign journal bindings before stopping a task or restoring files; legacy
+unbound journals remain valid only for the default task. Mock task-selection
+tests execute the real snapshot/removal/restoration functions with legacy,
+alpha and beta tasks, confirming that alpha operations leave both other tasks
+unchanged. These mocks do not establish Task Scheduler or process persistence.
+
+Always supply the same instance name and scope for Install, Repair and
+Uninstall. Arbitrary custom roots and PurgeData are rejected for named
+instances. Uninstall preserves data. This is a fresh identity path, not an
+identity-preserving migration and not permission to stop/remove an old task.
+
+Layout/name validation and WhatIf entry tests pass on Windows PowerShell 5.1,
+as does the existing SYSTEM dispatch fixture. Full Worker Kit regression,
+native bridge compilation, signed-kit publication, remote enrollment transfer and native
+persistent-service acceptance remain pending. No named instance has been
+deployed by this change.
+
+The source GUI advanced form, native request/view DTOs, durable computer
+configuration and Windows SSH lifecycle arguments now carry windowsInstanceName.
+The field is optional for old records. Named configurations reject custom
+workspaces; non-Windows lifecycle use is rejected. Four locale labels and the
+frontend's 103 tests/type checks/production build pass. The running desktop
+has not been replaced, so this is source integration, not live GUI acceptance.
+The three provisioning model tests pass, including legacy-record decoding,
+named-instance serialization round trip, invalid names and workspace conflict
+rejection. Full provisioning tests and native bridge checking are in progress.
+
 The legacy failure mode has a SYSTEM task pointing at user-owned worker state.
 The new installer correctly creates SYSTEM-owned state, but ordinary Repair
 binds one owner, one data root, and one task action. Neither relaxing its ACL

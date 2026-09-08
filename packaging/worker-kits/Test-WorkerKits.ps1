@@ -73,6 +73,7 @@ foreach ($scriptPath in @($windowsInstaller, $builder)) {
 
 & (Join-Path $PSScriptRoot 'windows\Test-PrivatePrincipalSids.ps1')
 if ($env:OS -eq 'Windows_NT') {
+    & (Join-Path $PSScriptRoot 'windows\Test-WorkerInstances.ps1')
     & (Join-Path $PSScriptRoot 'windows\Test-SystemLifecycleDispatch.ps1')
 }
 

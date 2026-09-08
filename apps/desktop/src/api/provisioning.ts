@@ -35,6 +35,7 @@ export type AllowedJobKind =
   | "render";
 
 export interface ProvisioningAdvancedOptions {
+  windowsInstanceName?: string;
   serviceScope: ServiceScope;
   workspace?: string;
   priority: number;
@@ -258,6 +259,7 @@ function parseAdvanced(value: unknown): ProvisioningAdvancedOptions {
   return {
     serviceScope,
     workspace: optionalString(value, "workspace"),
+    windowsInstanceName: optionalString(value, "windowsInstanceName"),
     priority: integerField(value, "priority"),
     maximumParallelJobs: optionalNumber("maximumParallelJobs"),
     cpuLimitPercent: optionalNumber("cpuLimitPercent"),

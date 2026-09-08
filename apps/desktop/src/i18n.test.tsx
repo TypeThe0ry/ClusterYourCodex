@@ -83,7 +83,7 @@ describe("i18n", () => {
 
   it("keeps the complete desktop catalog available in every supported locale", () => {
     const englishKeys = Object.keys(translations.en).sort();
-    expect(englishKeys).toHaveLength(441);
+    expect(englishKeys).toHaveLength(442);
     for (const locale of SUPPORTED_LOCALES) {
       expect(Object.keys(translations[locale]).sort()).toEqual(englishKeys);
     }

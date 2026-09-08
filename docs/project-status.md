@@ -14,6 +14,38 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 concise desktop copy verification
+
+Verified the running UI at `http://127.0.0.1:1420/`: Home shows fleet
+counts, computers and recent tasks without the former promotional heading or
+subtitle. Tasks shows filters and task rows without the tracking-description
+paragraph. Task records and expandable placement details remain available.
+The four locale catalogs already exclude the discarded page-copy keys.
+A rendered-home regression test now checks the three removed Chinese phrases
+and retains status/action content. Desktop tests: 105 passed. This is a UI
+content check, not worker installation or release acceptance.
+
+Windows installer named-instance support is now in development as an
+alternative to blocking first usability on legacy identity migration. See
+[scope and pending checks](windows-system-migration.md#fresh-named-instance-alternative-implementation-in-progress).
+The provisioning driver now rejects a Windows instance name on a non-Windows
+kit before SSH authentication or kit upload. A Linux fixture regression checks
+that no transport events, uploaded files or transient-secret reads occur.
+All 43 provisioning library tests now pass, including this regression.
+The driver fixture also includes a signed Windows kit and asserts that Install,
+Repair and Uninstall preserve the selected instance name, while the default
+instance omits that argument. These simulated transport checks pass; they are
+not evidence of a live Windows service installation.
+Windows instance layout, journal binding and task-selection tests passed again
+on the current scripts (mock tasks; no live Scheduled Task changes).
+GUI/native bridge configuration propagation is implemented in source but not
+deployed. All 105 frontend tests and the frontend build pass. Native cargo
+check and cargo check --tests pass. The SYSTEM lifecycle dispatch fixture
+passes. The earlier full worker-kit test process remains active and has not
+returned a final result; it is not final-tree acceptance. Original worker state
+is unchanged. Live named-instance installation/pairing/service/job acceptance
+remains required.
+
 ### Completed CI for PR head 90bf4ae
 
 Run `34226042054` is now successful, including the Windows desktop job and

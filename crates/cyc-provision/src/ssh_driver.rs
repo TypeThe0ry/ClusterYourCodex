@@ -332,14 +332,7 @@ impl SshProvisioningDriver {
     }
 
     fn stage_kit(&self, record: &ComputerRecord) -> Result<StepCompletion, DriverFailure> {
-        let inventory = record
-            .inventory
-            .as_ref()
-            .ok_or_else(|| failure("INVENTORY_MISSING", false))?;
-        let kit = self
-            .catalog
-            .load_for_inventory(inventory)
-            .map_err(map_worker_kit_error)?;
+        let kit = self.load_record_kit(record)?;
         let platform = platform_for_target(kit.target());
         let layout = RemoteLayout::new(record, platform)?;
         let mut session = self.authenticated_session(record)?;
@@ -657,14 +650,21 @@ impl SshProvisioningDriver {
     }
 
     fn load_record_kit(&self, record: &ComputerRecord) -> Result<WorkerKit, DriverFailure> {
-        self.catalog
+        let kit = self
+            .catalog
             .load_for_inventory(
                 record
                     .inventory
                     .as_ref()
                     .ok_or_else(|| failure("INVENTORY_MISSING", false))?,
             )
-            .map_err(map_worker_kit_error)
+            .map_err(map_worker_kit_error)?;
+        if record.configuration.windows_instance_name.is_some()
+            && platform_for_target(kit.target()) != RemotePlatform::Windows
+        {
+            return Err(failure("WINDOWS_INSTANCE_REQUIRES_WINDOWS", false));
+        }
+        Ok(kit)
     }
 
     fn run_lifecycle(
@@ -678,6 +678,11 @@ impl SshProvisioningDriver {
     ) -> Result<(), DriverFailure> {
         ensure_lifecycle_expectation_supported(kit.target(), expectation)?;
         let platform = platform_for_target(kit.target());
+        if record.configuration.windows_instance_name.is_some()
+            && platform != RemotePlatform::Windows
+        {
+            return Err(failure("WINDOWS_INSTANCE_REQUIRES_WINDOWS", false));
+        }
         let layout = RemoteLayout::new(record, platform)?.kit_layout()?;
         let lifecycle_path = layout.join(kit.lifecycle_name())?;
         let mut arguments = Vec::new();
@@ -717,6 +722,10 @@ impl SshProvisioningDriver {
                 })?);
                 arguments.push(argument("-BundleRoot")?);
                 arguments.push(argument(layout.staging_dir.as_str())?);
+                if let Some(name) = &record.configuration.windows_instance_name {
+                    arguments.push(argument("-InstanceName")?);
+                    arguments.push(argument(name)?);
+                }
                 if let Some(workspace) = &record.configuration.workspace {
                     arguments.push(argument("-WorkspaceRoot")?);
                     arguments.push(argument(workspace)?);
@@ -1589,12 +1598,13 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        cleanup_script_path, ensure_lifecycle_expectation_supported, map_lifecycle_command_failure,
-        map_ssh_error, platform_for_target, sha256_hex, validate_lifecycle_receipt,
-        ControllerBoundary, ControllerBoundaryFailure, LifecycleReceiptExpectation,
-        PairingObservation, RemoteLayout, RemotePlatform, SshDriverOptions, SshProvisioningDriver,
-        TransientSecretError, TransientSecretProvider, WorkerKitCatalog, WorkerKitTarget,
-        MACOS_CLEANUP_SCRIPT, MACOS_CONTAINMENT_FAILURE_CODE,
+        cleanup_script_path, ensure_lifecycle_expectation_supported, failure,
+        map_lifecycle_command_failure, map_ssh_error, parse_discovery, platform_for_target,
+        sha256_hex, upload_kit_to_session, validate_lifecycle_receipt, ControllerBoundary,
+        ControllerBoundaryFailure, LifecycleReceiptExpectation, PairingObservation, RemoteLayout,
+        RemotePlatform, SshDriverOptions, SshProvisioningDriver, TransientSecretError,
+        TransientSecretProvider, WorkerKitCatalog, WorkerKitTarget, MACOS_CLEANUP_SCRIPT,
+        MACOS_CONTAINMENT_FAILURE_CODE,
     };
     use crate::{
         ComputerEndpoint, CredentialState, DriveOutcome, DriverRequest, NewComputer,
@@ -1896,6 +1906,77 @@ mod tests {
                 },
             )
         }
+    }
+
+    #[test]
+    fn windows_lifecycle_preserves_instance_selection_for_each_action() {
+        for name in [None, Some("alpha-1")] {
+            let harness = Harness::new(good_password());
+            let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
+            let mut record = engine.create(new_computer(true)).unwrap();
+            record.configuration.windows_instance_name = name.map(str::to_owned);
+            let kit = harness
+                .catalog
+                .load_target(WorkerKitTarget::WindowsX86_64)
+                .unwrap();
+            let mut session = FakeSession {
+                inner: harness.ssh.inner.clone(),
+                pairing_phase: harness.ssh.pairing_phase.clone(),
+            };
+            let layout = RemoteLayout::new(&record, RemotePlatform::Windows).unwrap();
+            upload_kit_to_session(&mut session, &layout, &kit).unwrap();
+            for (action, expectation) in [
+                ("install", LifecycleReceiptExpectation::UnpairedPreinstall),
+                ("repair", LifecycleReceiptExpectation::DormantInstalled),
+                ("uninstall", LifecycleReceiptExpectation::Uninstall),
+            ] {
+                harness
+                    .driver()
+                    .run_lifecycle(&record, &mut session, &kit, action, None, expectation)
+                    .unwrap();
+            }
+            let state = harness.ssh.inner.lock().unwrap();
+            assert_eq!(state.lifecycle_arguments.len(), 3);
+            for (arguments, action) in
+                state
+                    .lifecycle_arguments
+                    .iter()
+                    .zip(["Install", "Repair", "Uninstall"])
+            {
+                assert_eq!(arguments[0], "-Action");
+                assert_eq!(arguments[1], action);
+                let instance = arguments
+                    .iter()
+                    .position(|argument| argument == "-InstanceName");
+                match name {
+                    Some(name) => assert_eq!(arguments[instance.unwrap() + 1], name),
+                    None => assert!(instance.is_none()),
+                }
+                assert!(!arguments
+                    .iter()
+                    .any(|argument| argument == "-WorkspaceRoot"));
+            }
+        }
+    }
+
+    #[test]
+    fn windows_instance_on_linux_is_rejected_before_staging_or_authentication() {
+        let harness = Harness::new(good_password());
+        let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
+        let mut record = engine.create(new_computer(true)).unwrap();
+        record.inventory =
+            Some(parse_discovery(&discovery_payload(), RemotePlatform::Linux).unwrap());
+        record.configuration.windows_instance_name = Some("alpha-1".to_owned());
+
+        let result = harness.driver().stage_kit(&record);
+        assert_eq!(
+            result.unwrap_err(),
+            failure("WINDOWS_INSTANCE_REQUIRES_WINDOWS", false)
+        );
+        let state = harness.ssh.inner.lock().unwrap();
+        assert!(state.events.is_empty());
+        assert!(state.files.is_empty());
+        assert_eq!(harness.transient.retrieval_count(), 0);
     }
 
     #[test]
@@ -2840,52 +2921,65 @@ mod tests {
 
     fn kit_fixture() -> TempDir {
         let root = TempDir::new().unwrap();
-        let directory = root.path().join("linux-x86_64");
-        fs::create_dir(&directory).unwrap();
-        let worker = b"fixture-worker";
-        let lifecycle = b"#!/bin/sh\nexit 0\n";
-        fs::write(directory.join("cyc-worker"), worker).unwrap();
-        fs::write(directory.join("install-worker.sh"), lifecycle).unwrap();
-        let manifest_bytes = format!(
+        for (target, os, worker_name, lifecycle_name) in [
+            ("linux-x86_64", "linux", "cyc-worker", "install-worker.sh"),
+            (
+                "windows-x86_64",
+                "windows",
+                "cyc-worker.exe",
+                "Install-Worker.ps1",
+            ),
+        ] {
+            let directory = root.path().join(target);
+            fs::create_dir(&directory).unwrap();
+            let worker = b"fixture-worker";
+            let lifecycle = b"#!/bin/sh\nexit 0\n";
+            fs::write(directory.join(worker_name), worker).unwrap();
+            fs::write(directory.join(lifecycle_name), lifecycle).unwrap();
+            let manifest_bytes = format!(
             concat!(
                 "{{\"schemaVersion\":\"cyc.dev/worker-kit/v1\",",
                 "\"product\":\"ClusterYourCodex Managed Worker\",",
                 "\"version\":\"0.1.0-test.1\",",
-                "\"target\":\"linux-x86_64\",",
-                "\"os\":\"linux\",",
+                "\"target\":\"{target}\",",
+                "\"os\":\"{os}\",",
                 "\"architecture\":\"x86_64\",",
                 "\"files\":[",
-                "{{\"path\":\"cyc-worker\",\"sizeBytes\":{},\"sha256\":\"{}\",\"role\":\"worker\"}},",
-                "{{\"path\":\"install-worker.sh\",\"sizeBytes\":{},\"sha256\":\"{}\",\"role\":\"lifecycle\"}}",
+                "{{\"path\":\"{worker_name}\",\"sizeBytes\":{},\"sha256\":\"{}\",\"role\":\"worker\"}},",
+                "{{\"path\":\"{lifecycle_name}\",\"sizeBytes\":{},\"sha256\":\"{}\",\"role\":\"lifecycle\"}}",
                 "]}}\n"
             ),
             worker.len(),
             sha256_hex(worker),
             lifecycle.len(),
-            sha256_hex(lifecycle)
+            sha256_hex(lifecycle),
+            target = target,
+            os = os,
+            worker_name = worker_name,
+            lifecycle_name = lifecycle_name,
         )
         .into_bytes();
-        fs::write(directory.join("worker-kit.json"), &manifest_bytes).unwrap();
-        let signing_key = SigningKey::from_bytes(&FIXTURE_SIGNING_SEED);
-        let signature = signing_key.sign(&manifest_bytes);
-        let signature_bytes = format!(
-            concat!(
-                "{{\"schemaVersion\":\"cyc.dev/worker-kit-signature/v1\",",
-                "\"algorithm\":\"Ed25519\",",
-                "\"keyId\":\"cyc-test-fixture-rfc8032-1\",",
-                "\"signedObject\":\"worker-kit.json\",",
-                "\"manifestSha256\":\"{}\",",
-                "\"signature\":\"{}\"}}\n"
-            ),
-            sha256_hex(&manifest_bytes),
-            STANDARD.encode(signature.to_bytes())
-        )
-        .into_bytes();
-        fs::write(directory.join("worker-kit.sig"), &signature_bytes).unwrap();
-        fs::write(
+            fs::write(directory.join("worker-kit.json"), &manifest_bytes).unwrap();
+            let signing_key = SigningKey::from_bytes(&FIXTURE_SIGNING_SEED);
+            let signature = signing_key.sign(&manifest_bytes);
+            let signature_bytes = format!(
+                concat!(
+                    "{{\"schemaVersion\":\"cyc.dev/worker-kit-signature/v1\",",
+                    "\"algorithm\":\"Ed25519\",",
+                    "\"keyId\":\"cyc-test-fixture-rfc8032-1\",",
+                    "\"signedObject\":\"worker-kit.json\",",
+                    "\"manifestSha256\":\"{}\",",
+                    "\"signature\":\"{}\"}}\n"
+                ),
+                sha256_hex(&manifest_bytes),
+                STANDARD.encode(signature.to_bytes())
+            )
+            .into_bytes();
+            fs::write(directory.join("worker-kit.sig"), &signature_bytes).unwrap();
+            fs::write(
             directory.join("SHA256SUMS"),
             format!(
-                "{}  cyc-worker\n{}  install-worker.sh\n{}  worker-kit.json\n{}  worker-kit.sig\n",
+                "{}  {worker_name}\n{}  {lifecycle_name}\n{}  worker-kit.json\n{}  worker-kit.sig\n",
                 sha256_hex(worker),
                 sha256_hex(lifecycle),
                 sha256_hex(&manifest_bytes),
@@ -2893,6 +2987,7 @@ mod tests {
             ),
         )
         .unwrap();
+        }
         root
     }
 
@@ -2906,6 +3001,7 @@ mod tests {
     #[derive(Default)]
     struct FakeSshState {
         events: Vec<String>,
+        lifecycle_arguments: Vec<Vec<String>>,
         files: HashMap<String, Vec<u8>>,
         private_directory_modes: Vec<i32>,
         enrollment_paths: Vec<String>,
@@ -3141,6 +3237,17 @@ mod tests {
                 });
             }
             if path.ends_with("install-worker.sh") || path.ends_with("Install-Worker.ps1") {
+                let receipt_platform = if path.ends_with("Install-Worker.ps1") {
+                    "windows"
+                } else {
+                    "linux"
+                };
+                self.inner.lock().unwrap().lifecycle_arguments.push(
+                    arguments
+                        .iter()
+                        .map(|value| value.as_str().to_owned())
+                        .collect(),
+                );
                 let separator = if path.contains('\\') { '\\' } else { '/' };
                 let bundle = path.rsplit_once(separator).unwrap().0;
                 let prefix = format!("{bundle}{separator}");
@@ -3186,8 +3293,12 @@ mod tests {
                     ",\"paired\":true,\"service\":\"not_enabled\",\"serviceEnabled\":false"
                         .to_owned()
                 } else if paired {
-                    ",\"paired\":true,\"service\":\"systemd-user\",\"serviceEnabled\":true"
-                        .to_owned()
+                    let service = if receipt_platform == "windows" {
+                        "scheduled-task"
+                    } else {
+                        "systemd-user"
+                    };
+                    format!(",\"paired\":true,\"service\":\"{service}\",\"serviceEnabled\":true")
                 } else {
                     ",\"paired\":false,\"service\":\"not_enabled\",\"serviceEnabled\":false"
                         .to_owned()
@@ -3195,7 +3306,7 @@ mod tests {
                 return Ok(CommandOutput {
                     exit_code: 0,
                     stdout: format!(
-                        "{{\"schemaVersion\":\"cyc.dev/linux-worker-install/v1\",\"action\":\"{action}\",\"succeeded\":true{state_fields}}}\n"
+                        "{{\"schemaVersion\":\"cyc.dev/{receipt_platform}-worker-install/v1\",\"action\":\"{action}\",\"succeeded\":true{state_fields}}}\n"
                     )
                     .into_bytes(),
                     stderr: Vec::new(),

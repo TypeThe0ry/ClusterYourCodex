@@ -14,6 +14,9 @@ param(
 
     [string]$EnrollmentFile,
 
+    [ValidatePattern('^$|^[a-z0-9][a-z0-9-]{0,31}$', Options = 'None')]
+    [string]$InstanceName = '',
+
     [ValidateSet('Auto', 'User', 'System')]
     [string]$Scope = 'Auto',
 
@@ -35,9 +38,40 @@ $script:SignatureSchema = 'cyc.dev/worker-kit-signature/v1'
 $script:PublisherKeyId = 'cyc-release-2026-02'
 $script:PublisherPublicKeyBase64 = '__CYC_PUBLISHER_PUBLIC_KEY_BASE64__'
 $script:TaskName = 'ClusterYourCodex Worker'
+if ($InstanceName) { $script:TaskName += ' - ' + $InstanceName }
+$script:OwnerMarkerValue = $script:Schema
+if ($InstanceName) { $script:OwnerMarkerValue += ':' + $InstanceName }
 $script:MarkerName = '.clusteryourcodex-worker-owned'
 $script:TransactionName = '.repair-transaction'
 $script:TransactionSchema = 'cyc.dev/windows-worker-repair-transaction/v1'
+
+function Get-WorkerInstanceLayout {
+    param(
+        [Parameter(Mandatory = $true)][ValidatePattern('^[a-z0-9][a-z0-9-]{0,31}$', Options = 'None')][string]$Name,
+        [Parameter(Mandatory = $true)][string]$InstallBase,
+        [Parameter(Mandatory = $true)][string]$DataBase
+    )
+    $instanceData = Join-Path (Join-Path $DataBase 'ClusterYourCodex\worker-instances') $Name
+    return @{
+        InstallRoot = Join-Path (Join-Path $InstallBase 'ClusterYourCodexWorker-instances') $Name
+        DataRoot = $instanceData
+        WorkspaceRoot = Join-Path $instanceData 'workspace'
+    }
+}
+
+function Assert-WorkerTransactionInstance {
+    param([Parameter(Mandatory = $true)]$State, [Parameter(Mandatory = $true)][string]$ExpectedTaskName)
+    $binding = $State.PSObject.Properties['taskName']
+    if ($null -eq $binding) {
+        if ($ExpectedTaskName -cne 'ClusterYourCodex Worker') {
+            throw 'Named worker transaction is missing its instance binding.'
+        }
+        return
+    }
+    if ($binding.Value -isnot [string] -or $binding.Value -cne $ExpectedTaskName) {
+        throw 'Worker transaction belongs to a different instance.'
+    }
+}
 
 function Resolve-NormalizedPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -1221,6 +1255,7 @@ function New-WorkerTransaction {
         }
         Write-JsonAtomic -Path (Join-Path $stagingRoot 'state.json') -Value ([ordered]@{
             schemaVersion = $script:TransactionSchema
+            taskName = $script:TaskName
             binaryExisted = [bool]$binaryExisted
             manifestExisted = [bool]$manifestExisted
             taskExisted = [bool]$taskExisted
@@ -1253,6 +1288,7 @@ function Restore-WorkerTransaction {
     }
     $state = Read-WorkerUtf8Json -Path $statePath -Label 'Worker repair transaction state' -MaximumBytes 64KB
     if ($state.schemaVersion -ne $script:TransactionSchema) { throw 'Unsupported worker repair transaction state.' }
+    Assert-WorkerTransactionInstance -State $state -ExpectedTaskName $script:TaskName
 
     Stop-AndRemoveTask `
         -Executable $WorkerBinaryPath `
@@ -1348,7 +1384,22 @@ function Assert-DefaultDataPurgeTarget {
 }
 
 $resolvedScope = Resolve-ServiceScope -RequestedScope $Scope
-if ($resolvedScope -eq 'System') {
+if ($InstanceName) {
+    $installBase = if ($resolvedScope -eq 'System') { $env:ProgramFiles } else { Join-Path $env:LOCALAPPDATA 'Programs' }
+    $dataBase = if ($resolvedScope -eq 'System') { $env:ProgramData } else { $env:LOCALAPPDATA }
+    $instanceLayout = Get-WorkerInstanceLayout -Name $InstanceName -InstallBase $installBase -DataBase $dataBase
+    foreach ($rootName in @('InstallRoot', 'DataRoot', 'WorkspaceRoot')) {
+        if ($PSBoundParameters.ContainsKey($rootName) -and
+            -not [string]::Equals((Resolve-NormalizedPath $PSBoundParameters[$rootName]), (Resolve-NormalizedPath $instanceLayout[$rootName]), [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Named worker instances require their dedicated default roots.'
+        }
+    }
+    $InstallRoot = $instanceLayout.InstallRoot
+    $DataRoot = $instanceLayout.DataRoot
+    $WorkspaceRoot = $instanceLayout.WorkspaceRoot
+    if ($PurgeData) { throw 'Named instance uninstall preserves data; PurgeData is not supported.' }
+}
+if ($resolvedScope -eq 'System' -and -not $InstanceName) {
     if (-not $PSBoundParameters.ContainsKey('InstallRoot')) { $InstallRoot = Join-Path $env:ProgramFiles 'ClusterYourCodexWorker' }
     if (-not $PSBoundParameters.ContainsKey('DataRoot')) { $DataRoot = Join-Path $env:ProgramData 'ClusterYourCodex\worker' }
     if (-not $PSBoundParameters.ContainsKey('WorkspaceRoot')) { $WorkspaceRoot = Join-Path $DataRoot 'workspace' }
@@ -1361,7 +1412,7 @@ if ($resolvedScope -eq 'System') {
             InstallRoot = (Resolve-NormalizedPath $InstallRoot); DataRoot = (Resolve-NormalizedPath $DataRoot)
             WorkspaceRoot = (Resolve-NormalizedPath $WorkspaceRoot); Scope = 'System'
             AllowOnBattery = [bool]$AllowOnBattery; PairOnly = [bool]$PairOnly
-            PurgeData = [bool]$PurgeData; FailureInjection = $FailureInjection
+            PurgeData = [bool]$PurgeData; FailureInjection = $FailureInjection; InstanceName = $InstanceName
         }
         if ($EnrollmentFile) { $parameters.EnrollmentFile = Resolve-NormalizedPath $EnrollmentFile }
         Invoke-SystemWorkerLifecycle -Parameters $parameters
@@ -1400,7 +1451,8 @@ $recordedManifest = $null
 if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
     $markerItem = Get-Item -LiteralPath $markerPath -Force
     if (-not (Test-ReparsePoint $markerItem)) {
-        $ownedInstallation = ((Get-Content -LiteralPath $markerPath -Raw).Trim() -eq $script:Schema)
+        $ownedInstallation = ((Get-Content -LiteralPath $markerPath -Raw).Trim() -ceq $script:OwnerMarkerValue)
+        if (-not $ownedInstallation) { throw 'Worker ownership marker does not match this instance.' }
     }
 }
 if (Test-Path -LiteralPath $data -PathType Container) {
@@ -1489,7 +1541,7 @@ Protect-Directory -Path $install
 Protect-Directory -Path $data
 Protect-Directory -Path $workspace
 if (-not (Test-Path -LiteralPath $markerPath)) {
-    [System.IO.File]::WriteAllText($markerPath, "cyc.dev/windows-worker-install/v1`n", (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText($markerPath, ($script:OwnerMarkerValue + "`n"), (New-Object System.Text.UTF8Encoding($false)))
     Protect-File -Path $markerPath -NewlyCreated
 }
 
