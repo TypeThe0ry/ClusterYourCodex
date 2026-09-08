@@ -615,6 +615,7 @@ async fn pair_with_transport(
     transport: &dyn PairingTransport,
 ) -> Result<WorkerConfig> {
     let config_path = absolute_clean_path(config_path, "worker config")?;
+    crate::config::reject_pending_migration(&config_path)?;
     // This guard is intentionally kept across network awaits. Pairing is a
     // rare control-plane transaction; serializing it prevents two processes
     // from staging different secrets and last-writer-wins replacing config.

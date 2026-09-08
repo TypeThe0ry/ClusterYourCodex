@@ -127,6 +127,23 @@ fn migration_staging_validates_before_writes_and_preserves_exact_bytes() {
     let inspected = cyc_worker::migration::inspect_migration_stage(&new).unwrap();
     assert_eq!(inspected.files_verified, 4);
     assert!(!inspected.activation_allowed);
+    assert!(WorkerConfig::load(&new).is_err());
+    for command in ["status", "run", "pair"] {
+        let mut process = std::process::Command::new(env!("CARGO_BIN_EXE_cyc-worker"));
+        process.args([command, "--config"]).arg(&new);
+        if command == "pair" {
+            process
+                .arg("--enrollment-file")
+                .arg(new.parent().unwrap().join("absent-enrollment.json"));
+        }
+        let rejected = process.output().unwrap();
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8(rejected.stderr)
+            .unwrap()
+            .contains("worker migration is pending"));
+    }
+    assert!(!new.with_extension("pair.lock").exists());
+    assert!(!new.with_extension("boot-generation.lock").exists());
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_cyc-worker"))
         .args(["migration-status", "--config"])
         .arg(&new)

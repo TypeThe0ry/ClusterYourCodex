@@ -56,6 +56,13 @@ are cleared when the snapshot is dropped, including error paths. The coordinator
 must still stop/verify the original task and reconcile pending work first; this
 API alone does not authorize activation or implement rollback of a task switch.
 
+Normal config load/write and pair entry now reject any `.migration-stage.json`
+entry (including malformed files or links). Consequently `run`, `status`, and
+`pair` cannot consume an unfinished staging directory. `migration-status` uses
+its dedicated read-only parser and remains available. The future coordinator
+must retire staging explicitly as part of its durable activation/rollback
+sequence; changing the receipt's phase alone does not enable the worker.
+
 ## Why ordinary Repair is insufficient
 
 The legacy failure mode has a SYSTEM task pointing at user-owned worker state.

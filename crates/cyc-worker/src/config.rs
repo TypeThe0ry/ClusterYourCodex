@@ -16,6 +16,22 @@ use crate::security::{
 };
 
 pub const WORKER_CONFIG_VERSION: &str = "cyc.dev/worker-config/v1";
+
+/// A staging receipt is not authorization to run or re-pair the target. Only
+/// the migration coordinator may retire it after completing activation checks.
+pub(crate) fn reject_pending_migration(config_path: &Path) -> Result<()> {
+    let marker = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".migration-stage.json");
+    match fs::symlink_metadata(marker) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("inspect migration staging boundary"),
+        Ok(_) => {
+            bail!("worker migration is pending; inspect with migration-status before activation")
+        }
+    }
+}
 const BOOT_GENERATION_STATE_VERSION: &str = "cyc.dev/worker-boot-generation/v1";
 // Allocating a generation replaces an ACL-protected state file while holding
 // this lock. On Windows, every contender must complete several native DACL
@@ -324,6 +340,7 @@ impl WorkerConfig {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
+        reject_pending_migration(path)?;
         ensure_protected_input(path)
             .with_context(|| format!("refuse unprotected worker config {}", path.display()))?;
         let raw = fs::read(path).with_context(|| format!("read config {}", path.display()))?;
@@ -385,6 +402,7 @@ impl WorkerConfig {
     }
 
     fn persist(&self, path: &Path, replace: bool) -> Result<()> {
+        reject_pending_migration(path)?;
         self.validate()?;
         let mut bytes = serde_json::to_vec_pretty(self).context("serialize worker config")?;
         bytes.push(b'\n');

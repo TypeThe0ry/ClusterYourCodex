@@ -14,6 +14,18 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 staging activation boundary
+
+Normal worker config load/write and pairing now reject any migration-stage
+entry. This closes the gap where `activationAllowed=false` was only descriptive:
+`run`/`status`/`pair` cannot use the staging directory until a future coordinator
+explicitly retires it. Dedicated read-only `migration-status` remains available.
+The change does not implement task switching or declare the worker available.
+All nine migration tests passed (46.95s), including real CLI rejection of run,
+status and pair before creation of pairing/generation locks, while inspection
+still succeeds. Normal protected config publishing/loading regression passed
+separately (8.15s). Scoped Clippy and diff checks passed.
+
 ### 2026-09-08 full worker-kit regression completed
 
 The fixed-script run started at `90f21b7` completed with native exit 0 and
