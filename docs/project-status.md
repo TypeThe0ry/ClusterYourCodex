@@ -99,6 +99,14 @@ service-manager, credential, or cross-node acceptance gate.
 
 ### 2026-09-08: preview.100 available for operator testing
 
+- Native UI/state inspection found the running development desktop is still
+  preview.95. Its provisioning journal has two incomplete historical attempts:
+  Helio has a stored credential reference and approved host key, but failed at
+  `kit_staged` with `WORKER_LIFECYCLE_FAILED` before pairing; P1 failed at
+  `ssh_connecting` with `SSH_IO`, without a stored credential or approved key.
+  These are not preview.100 outcomes. Resume the existing records rather than
+  create duplicate computers. Native UI input was blocked by `PickerHost.exe`
+  after activation and one refreshed retry; no provisioning action was submitted.
 - Published preview.100 binaries passed a real local Windows controller/worker
   round trip: all 14 checks true, job `queued -> running -> succeeded`, native
   probe exit `0`, and cleanup confirmed. The harness required a DACL-only
