@@ -14,6 +14,14 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+The 2026-09-08 [execution path reassessment](goals/execution-path-reassessment.md)
+checks the current SSH and worker interfaces rather than treating the original
+architecture as mandatory. SSH-direct is not yet a replacement backend: the
+current SSH interface lacks durable job/reconnect/cancel semantics that the
+worker protocol already supplies. The immediate delivery path retains that
+protocol while isolating installation from runtime acceptance; no additional
+platform or GUI completion is claimed by this assessment.
+
 The active delivery goal is deliberately narrower than the full GA checklist:
 prove that a user can start the controller, add a computer, retain the SSH
 credential through the native boundary, install and pair a worker, submit a

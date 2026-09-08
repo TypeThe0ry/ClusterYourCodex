@@ -20,6 +20,12 @@ operator feedback once the core flow is exercised on a packaged build.
 
 ## Delivery mode
 
+Architecture choices are revisable, not hard constraints. The source-backed
+[execution path reassessment](execution-path-reassessment.md) compares managed
+workers with SSH-direct and optional per-job runners. Preserve the required
+job/result semantics while evaluating a simpler implementation; do not equate
+a successful SSH command with durable distributed execution.
+
 This is an outcome-first milestone, not a promise that every edge-case defect
 is already closed. Work stays focused on the shortest path that proves the
 product can be used: connect one worker, keep its credential inside the native
