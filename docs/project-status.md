@@ -44,6 +44,13 @@ reconnect with the rebuilt desktop remains to be verified; the installed
 preview.100 still contains the old negotiation behavior. No host-key record
 was cleared or replaced and no paired worker is claimed yet.
 
+Local verification of the reconnect change: `cargo test -p cyc-ssh --lib
+--locked` completed with exit code 0, all 15 tests passed. This includes
+approved-key negotiation and verification-before-authentication coverage.
+The vendored OpenSSL linker emitted missing debug-PDB warnings, not test
+failures. A new native desktop build is in progress; live reconnect remains
+unverified and is the next acceptance step.
+
 ### 2026-09-08 installation succeeded after local recovery
 
 Following the user's explicit continuing installation authorization, the
