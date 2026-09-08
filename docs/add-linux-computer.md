@@ -7,6 +7,11 @@
 > tier remains deliberately unavailable while issue #5's escape, identity,
 > resource, and reconciliation proofs are completed.
 
+A native unpaired preview.100 install/repair/uninstall run has now passed on
+Linux x86_64; see [exact evidence and remaining gates](linux-native-preview100-acceptance.md).
+It did not store product SSH credentials, enroll a worker, enable systemd, or
+complete a controller job, so those live acceptance gates remain pending.
+
 ## Worker prerequisites
 
 - x86_64 or aarch64 Linux with Bash and OpenSSH server.

@@ -14,6 +14,17 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 native Linux public-kit acceptance
+
+P1 completed a native signed preview.100 Worker Kit install → repair → uninstall
+with isolated roots and no enrollment. All lifecycle commands succeeded;
+independent final assertions/version execution exited 0. The worker remained
+unpaired and no service was enabled. Source archive hash, native receipts,
+the combined probe's final systemctl exit 1, disk limits and retained artifacts
+are recorded in [the native Linux acceptance report](linux-native-preview100-acceptance.md).
+This advances native packaging acceptance, not GUI/credential/heartbeat/job E2E.
+NUC SSH was unavailable; the controller still reports only stale/offline Helio.
+
 ### 2026-09-08 migration residual checks
 
 Locked migration inputs now inspect residuals both at source acquisition and
