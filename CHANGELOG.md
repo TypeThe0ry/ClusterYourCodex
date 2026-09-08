@@ -16,6 +16,10 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Detect fresh-install controller/worker port conflicts before requesting
+  firewall elevation. Report the owning PID without stopping unrelated
+  processes; Repair retains its existing rollback-bound runtime checks.
+
 - Preserve owner/group when hardening the Windows live-probe fixture DACL,
   avoiding an unnecessary ownership privilege request in desktop sessions.
   Current-user ownership and current-user/SYSTEM-only access remain required.

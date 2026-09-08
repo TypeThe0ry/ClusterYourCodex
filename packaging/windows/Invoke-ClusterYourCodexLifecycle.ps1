@@ -1830,6 +1830,22 @@ function Invoke-CycBootstrapProcess {
     }
 }
 
+function Assert-CycFreshInstallPortsAvailable {
+    param([Parameter(Mandatory = $true)]$Plan, [AllowNull()]$ExistingManifest)
+    # Repair stops the verified installed runtime inside the core rollback
+    # boundary. Only a fresh install can reject listeners before elevation.
+    if ($null -ne $ExistingManifest) { return }
+    $ports = @(47831)
+    if ($Plan.managedWorker.enabled) { $ports += [int]$Plan.managedWorker.listenPort }
+    foreach ($port in @($ports | Sort-Object -Unique)) {
+        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
+        if ($listeners.Count -gt 0) {
+            $owners = @($listeners | ForEach-Object { [int]$_.OwningProcess } | Sort-Object -Unique)
+            throw "TCP port $port is already listening (PID $($owners -join ',')). Close the conflicting application and retry Setup. No process was stopped."
+        }
+    }
+}
+
 function Get-CycValidatedInstallPlan {
     param(
         [Parameter(Mandatory = $true)][string]$BootstrapFile,
@@ -2391,6 +2407,7 @@ function Invoke-ClusterYourCodexLifecycleCore {
             -TransactionId $transactionId `
             -ExistingManifest $oldManifest
         if (-not $plan) { throw 'Core planner returned no install plan.' }
+        Assert-CycFreshInstallPortsAvailable -Plan $plan -ExistingManifest $oldManifest
         $controllerRecord = @($plan.files | Where-Object { [string]$_.relativePath -ceq 'cyc-controller.exe' })
         if ($controllerRecord.Count -ne 1) { throw 'Install plan has no unique controller executable.' }
         $programSha = [string]$controllerRecord[0].sha256

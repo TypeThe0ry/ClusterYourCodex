@@ -14,6 +14,17 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+On 2026-09-08 a live read-only listener check confirmed port 47831 is owned by
+the development preview.95 controller (PID 76204, started 2026-09-07), outside
+the default installation root. Fresh Setup cannot claim that port. The current
+source now detects this conflict before firewall elevation; five focused
+Pester tests pass, and invoking the preflight against the real listener returns
+the expected conflict without stopping it. This is a confirmed present blocker,
+not proof of the lost original preview.100 error. Close the development runtime
+before a real installation retry; the immutable preview.100 package does not
+contain this new preflight. Repair still stops only its verified owned runtime
+inside the existing rollback boundary.
+
 The 2026-09-08 [execution path reassessment](goals/execution-path-reassessment.md)
 checks the current SSH and worker interfaces rather than treating the original
 architecture as mandatory. SSH-direct is not yet a replacement backend: the
