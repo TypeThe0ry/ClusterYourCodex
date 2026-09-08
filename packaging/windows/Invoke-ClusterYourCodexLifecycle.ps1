@@ -103,6 +103,13 @@ function Write-CycLifecycleDiagnostic {
     )
 
     $requestedPath = [string]$env:CYC_SETUP_DIAGNOSTIC_LOG
+    if ([string]::IsNullOrWhiteSpace($requestedPath)) {
+        # The lifecycle has already secured this directory before core changes.
+        # Do not create a new or less-protected diagnostics location on failure.
+        $privateState = Join-Path $DataRoot '.installer'
+        if (-not (Test-Path -LiteralPath $privateState -PathType Container)) { return }
+        $requestedPath = Join-Path $privateState 'last-lifecycle-diagnostic.json'
+    }
     if ([string]::IsNullOrWhiteSpace($requestedPath) -or $requestedPath.Length -gt 4096 -or
         $requestedPath.Contains('"') -or $requestedPath.Contains("`r") -or $requestedPath.Contains("`n") -or
         $requestedPath -match '[\x00-\x1f\x7f]') {

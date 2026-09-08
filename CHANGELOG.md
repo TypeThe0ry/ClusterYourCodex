@@ -7,6 +7,13 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+### Diagnostics
+
+- Keep the last installer lifecycle result in the existing private installer
+  state directory by default, including failed stage and error, so double-click
+  Setup attempts do not require a diagnostic environment variable. Early
+  failures do not create a new diagnostic directory; explicit paths still work.
+
 ### Fixed
 
 - Preserve owner/group when hardening the Windows live-probe fixture DACL,

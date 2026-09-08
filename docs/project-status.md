@@ -99,6 +99,15 @@ service-manager, credential, or cross-node acceptance gate.
 
 ### 2026-09-08: preview.100 available for operator testing
 
+- Local GUI Setup attempt has ended without an installed desktop. Its durable
+  lifecycle journal remains at `firewallApplied`, and the matching helper
+  response is `rolledBack`. This narrows the failed attempt to the core-apply
+  region or its commit validation; it is not evidence of an unresolved firewall
+  permission wait. The original core error was not retained, so its exact cause
+  remains unknown. Source now defaults lifecycle diagnostics to the existing
+  private `.installer/last-lifecycle-diagnostic.json`; it creates no fallback
+  directory on an early failure. Two targeted diagnostics tests passed.
+  This change is not in the immutable preview.100 installer yet.
 - PR run `34178620334` failed during Windows round-trip initialization before
   evidence directories were created; the other jobs passed. The fixture now
   handles newly created Administrators-owned directories on elevated runners
