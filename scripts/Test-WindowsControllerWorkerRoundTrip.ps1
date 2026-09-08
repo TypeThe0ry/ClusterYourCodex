@@ -180,9 +180,16 @@ function Protect-PrivateDirectory {
     $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
     $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
         [Security.AccessControl.InheritanceFlags]::ObjectInherit
-    $replacement = [Security.AccessControl.DirectorySecurity]::new()
-    $replacement.SetOwner($user)
+    # Preserve the existing owner/group. Replacing the whole descriptor can
+    # request ownership privileges unavailable to a normal desktop session.
+    $replacement = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    if ($replacement.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user.Value) {
+        Fail-RoundTrip 'new job root is not owned by the current user'
+    }
     $replacement.SetAccessRuleProtection($true, $false)
+    foreach ($existingRule in @($replacement.Access)) {
+        $replacement.RemoveAccessRuleSpecific($existingRule)
+    }
     foreach ($principal in @($user, $system)) {
         $rule = [Security.AccessControl.FileSystemAccessRule]::new(
             $principal,

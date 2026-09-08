@@ -7,6 +7,14 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve owner/group when hardening the Windows live-probe fixture DACL,
+  avoiding an unnecessary ownership privilege request in desktop sessions.
+  Current-user ownership and current-user/SYSTEM-only access remain required.
+  Published preview.100 binaries passed the repaired local live probe, with
+  all 14 checks true; nine harness contract tests also passed.
+
 ### Changed
 
 - Revise the active delivery goal to prioritize a usable Add Computer →

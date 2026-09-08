@@ -99,6 +99,11 @@ service-manager, credential, or cross-node acceptance gate.
 
 ### 2026-09-08: preview.100 available for operator testing
 
+- Published preview.100 binaries passed a real local Windows controller/worker
+  round trip: all 14 checks true, job `queued -> running -> succeeded`, native
+  probe exit `0`, and cleanup confirmed. The harness required a DACL-only
+  fixture correction for a standard desktop token; the product binaries were
+  unchanged. See [source-bound evidence](live-windows-preview100-local-roundtrip.md).
 - Tagged workflow `34128668756` completed successfully, including Windows
   self-contained packaging, clean Windows 11 ARM64 x64-emulation fresh
   deployment, silent Setup, and standard/admin/non-ASCII profile acceptance.
