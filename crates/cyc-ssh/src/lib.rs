@@ -473,6 +473,16 @@ impl fmt::Debug for SshAuthentication<'_> {
 pub trait SshTransport: Send + Sync {
     fn probe_host_key(&self, endpoint: &SshEndpoint) -> Result<HostKey, SshError>;
 
+    /// Probe without authentication using an existing identity's algorithm
+    /// preference. Callers still compare the complete returned public key.
+    fn probe_host_key_with_pin(
+        &self,
+        endpoint: &SshEndpoint,
+        _pinned_host_key: &HostKey,
+    ) -> Result<HostKey, SshError> {
+        self.probe_host_key(endpoint)
+    }
+
     /// Reconnects, verifies the full pinned host key, then performs password
     /// authentication. Authentication is never attempted before verification.
     fn connect_password(
@@ -647,6 +657,15 @@ impl Ssh2Transport {
 impl SshTransport for Ssh2Transport {
     fn probe_host_key(&self, endpoint: &SshEndpoint) -> Result<HostKey, SshError> {
         self.handshake(endpoint).map(|(_, host_key)| host_key)
+    }
+
+    fn probe_host_key_with_pin(
+        &self,
+        endpoint: &SshEndpoint,
+        pinned_host_key: &HostKey,
+    ) -> Result<HostKey, SshError> {
+        self.handshake_pinned(endpoint, Some(pinned_host_key))
+            .map(|(_, host_key)| host_key)
     }
 
     fn connect_password(

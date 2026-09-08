@@ -37,6 +37,16 @@ The installed preview.100 executable has not been replaced by this UI change.
 
 ### 2026-09-08 installed GUI provisioning resume
 
+The multiline-receipt build completed and native rollback succeeded, returning
+the retained record to draft at revision 23. Resume reached revision 27 but
+failed `HOST_KEY_CHANGED` in `ssh_connecting`: the discovery probe still used
+default negotiation even though authentication reconnects were pinned. The
+transport now exposes a pin-aware unauthenticated probe, used for existing
+records; the state machine still compares the complete key. All 39 library
+tests passed, including a probe-routing test proving no authentication call.
+Live retry of this follow-up remains pending. No database checkpoint was edited
+manually, and the existing record and trust identity were retained.
+
 The isolated-kit native retry reached revision 20 with
 `LIFECYCLE_RECEIPT_INVALID`. Remote inspection verified exactly five kit files
 and a 9,440,256-byte installed worker executable. The lifecycle command exited

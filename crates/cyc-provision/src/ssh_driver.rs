@@ -222,10 +222,13 @@ impl SshProvisioningDriver {
 
     fn probe_host_key(&self, record: &ComputerRecord) -> Result<StepCompletion, DriverFailure> {
         let endpoint = ssh_endpoint(record)?;
-        let host_key = self
-            .transport
-            .probe_host_key(&endpoint)
-            .map_err(map_ssh_error)?;
+        let host_key = if let Some(pin) = &record.host_key {
+            let pin = HostKey::try_from(pin).map_err(|_| failure("HOST_KEY_INVALID", false))?;
+            self.transport.probe_host_key_with_pin(&endpoint, &pin)
+        } else {
+            self.transport.probe_host_key(&endpoint)
+        }
+        .map_err(map_ssh_error)?;
         Ok(StepCompletion::HostKeyObserved(PinnedHostKeyRecord::from(
             &host_key,
         )))
@@ -1896,6 +1899,18 @@ mod tests {
     }
 
     #[test]
+    fn existing_identity_is_passed_to_probe_without_authentication() {
+        let harness = Harness::new(good_password());
+        let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
+        let mut record = engine.create(new_computer(true)).unwrap();
+        record.host_key = Some(crate::PinnedHostKeyRecord::from(&harness.ssh.host_key));
+        harness.driver().probe_host_key(&record).unwrap();
+        let events = &harness.ssh.inner.lock().unwrap().events;
+        assert!(events.iter().any(|event| event == "probe_with_pin"));
+        assert!(!events.iter().any(|event| event.starts_with("authenticate")));
+    }
+
+    #[test]
     fn full_real_driver_sequence_is_ordered_idempotent_and_redacted() {
         let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
@@ -2957,6 +2972,20 @@ mod tests {
     }
 
     impl SshTransport for FakeSshTransport {
+        fn probe_host_key_with_pin(
+            &self,
+            endpoint: &SshEndpoint,
+            pin: &HostKey,
+        ) -> Result<HostKey, SshError> {
+            assert_eq!(pin, &self.host_key);
+            self.inner
+                .lock()
+                .unwrap()
+                .events
+                .push("probe_with_pin".to_owned());
+            self.probe_host_key(endpoint)
+        }
+
         fn probe_host_key(&self, _endpoint: &SshEndpoint) -> Result<HostKey, SshError> {
             self.inner
                 .lock()

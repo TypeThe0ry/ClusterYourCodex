@@ -29,6 +29,9 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Reuse an existing SSH identity's algorithm preference during host-key probes
+  after rollback, not only authentication reconnects; retain full key checks.
+
 - Parse complete multiline Windows lifecycle JSON receipts instead of only
   their closing line; retain strict state/field checks and reject trailing
   non-JSON output.
