@@ -14,6 +14,18 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 Linux discovery capacity formatting
+
+Linux disk discovery now uses explicit `awk printf "%.0f"` integer formatting,
+matching macOS, instead of default numeric printing followed by decimal-point
+truncation. This avoids implementation-dependent scientific notation being
+truncated or rejected by the integer-only discovery protocol. The available
+local Git awk printed the old 100-GiB fixture correctly, so this is a portability
+repair, not a reproduced P1 root cause. Five Windows discovery tests passed;
+executing the exact updated awk expression with local Git awk returned exact
+0-byte, 1-KiB, 100-GiB and 1-TiB fixture values. A Unix-only native awk regression
+is included for Linux/macOS CI; its execution is not claimed from Windows.
+
 ### 2026-09-08 validation queue deduplication
 
 Live GitHub inspection found several superseded PR #58 CI runs still executing

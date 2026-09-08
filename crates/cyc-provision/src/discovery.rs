@@ -238,7 +238,7 @@ logical_cpu_count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')"
 memory_kib="$(awk '/^MemTotal:/{print $2;exit}' /proc/meminfo 2>/dev/null || printf '0')"
 case "$memory_kib" in ''|*[!0-9]*) memory_kib=0 ;; esac
 memory_bytes=$((memory_kib * 1024))
-workspace_free_bytes="$(df -Pk -- "$workspace" 2>/dev/null | awk 'NR==2{print $4 * 1024}' | cut -d. -f1 || true)"
+workspace_free_bytes="$(df -Pk -- "$workspace" 2>/dev/null | awk 'NR==2{printf "%.0f", $4 * 1024}' || true)"
 case "$workspace_free_bytes" in ''|*[!0-9]*) workspace_free_bytes=0 ;; esac
 printf 'CYC_DISCOVERY_V1\n'
 printf 'hostname=%s\n' "$(b64 "$(one_line "$hostname_value")")"
@@ -442,6 +442,52 @@ mod tests {
         assert!(macos.contains("operating_system=macos"));
         assert!(macos.contains("sysctl -n hw.memsize"));
         assert!(macos.contains("df -Pk \"$workspace\""));
+    }
+
+    #[test]
+    fn disk_probe_uses_decimal_integer_output_on_both_unix_platforms() {
+        for platform in [RemotePlatform::Linux, RemotePlatform::Macos] {
+            let script = std::str::from_utf8(platform.discovery_script()).unwrap();
+            assert!(script.contains("awk 'NR==2{printf \"%.0f\", $4 * 1024}'"));
+            assert!(!script.contains("cut -d. -f1"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_awk_disk_probe_preserves_large_capacity() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let script = std::str::from_utf8(RemotePlatform::Linux.discovery_script()).unwrap();
+        let disk_line = script
+            .lines()
+            .find(|line| line.starts_with("workspace_free_bytes="))
+            .unwrap();
+        let program = disk_line
+            .split("awk '")
+            .nth(1)
+            .unwrap()
+            .split('\'')
+            .next()
+            .unwrap();
+        for kib in [0_u64, 1, 104_857_600, 1_073_741_824] {
+            let mut child = Command::new("awk")
+                .arg(program)
+                .env("LC_ALL", "C")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("native awk");
+            writeln!(child.stdin.take().unwrap(),
+                "Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/fixture 2000000000 1 {kib} 1% /")
+                .expect("df fixture");
+            let output = child.wait_with_output().expect("awk result");
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                (kib * 1024).to_string()
+            );
+        }
     }
 
     #[test]
