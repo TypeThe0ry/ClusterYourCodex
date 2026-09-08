@@ -16,6 +16,10 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Keep SSH reconnect negotiation bound to the approved host-key type across
+  password, agent, and private-key authentication. RSA pins use SHA-2 signature
+  algorithms; full public-key verification still precedes authentication.
+
 - Detect orphaned controller object storage and SQLite sidecars before installer
   elevation. Explain the missing database without deleting or adopting old
   data; controller startup remains the authoritative storage security check.

@@ -14,6 +14,22 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 installed GUI provisioning resume
+
+The installed native Computers page retained both previous provisioning
+records. Retrying the Windows worker checkpoint advanced its revision from 9
+to 11 and failed with `HOST_KEY_CHANGED` before authentication. A read-only
+SSH host-key advertisement probe found that the saved RSA fingerprint still
+matches the server's advertised RSA key; the server also advertises ECDSA and
+ED25519. Advertisement is not a substitute for authenticated identity proof.
+The source transport now constrains reconnect negotiation to the approved key
+type, then retains the exact-key comparison before authentication. RSA uses
+SHA-2 signature methods, not SHA-1 fallback. This avoids treating a change in
+client default algorithm preference as permission to accept a new key. Native
+reconnect with the rebuilt desktop remains to be verified; the installed
+preview.100 still contains the old negotiation behavior. No host-key record
+was cleared or replaced and no paired worker is claimed yet.
+
 ### 2026-09-08 installation succeeded after local recovery
 
 Following the user's explicit continuing installation authorization, the
