@@ -14,6 +14,23 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 native desktop Linux onboarding resumed
+
+The running preview.100 native desktop retained a Linux provisioning record
+that had failed at SSH connection with `SSH_IO` (revision 3, cycle 0).
+An explicit Retry advanced it to the host-key approval checkpoint (revision 6,
+cycle 0). The existing record was reused; no new record, credential copy,
+installation, enrollment or service activation was performed. This proves
+current product SSH connectivity, not password authentication or Linux E2E.
+The desktop is awaiting verification/approval of the observed host key.
+The controller still reports zero available workers; its sole Windows node
+is stale/offline. Existing successful job evidence remains historical.
+
+The overview now keeps operational status visible and diagnostic metadata
+collapsed; [content rules](ui-content-policy.md) record that presentation policy.
+Desktop type checks, 103 frontend tests and production build passed for that
+change. Native provisioning remains the priority over further UI polish.
+
 ### 2026-09-08 native Linux public-kit acceptance
 
 P1 completed a native signed preview.100 Worker Kit install → repair → uninstall
