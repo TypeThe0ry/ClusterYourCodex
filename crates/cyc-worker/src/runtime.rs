@@ -417,6 +417,50 @@ impl PairingCredentialLedger {
     }
 }
 
+pub(crate) fn migration_credential_inventory(
+    raw: &[u8],
+    config: &WorkerConfig,
+    old_config: &Path,
+    new_config: &Path,
+) -> Result<Vec<crate::migration::MigrationCredential>> {
+    // Reuse the strict schema, path and settled-state checks before extracting
+    // any copy candidates. Never infer file names by enumerating a directory.
+    relocate_pairing_ledger(raw, old_config, new_config)?;
+    validate_migration_identity_binding(raw, config)?;
+    let ledger: PairingCredentialLedger = serde_json::from_slice(raw)?;
+    let mut candidates = BTreeMap::<PathBuf, String>::new();
+    for record in ledger.records {
+        let mut bindings = vec![(record.credential_file, record.credential_sha256)];
+        if let (Some(path), Some(digest)) = (
+            record.previous_credential_file,
+            record.previous_credential_sha256,
+        ) {
+            bindings.push((path, digest));
+        }
+        for (path, digest) in bindings {
+            if let Some(previous) = candidates.insert(path, digest.clone()) {
+                if previous != digest {
+                    bail!("migration credential has conflicting ledger digests");
+                }
+            }
+        }
+    }
+    let target = new_config
+        .parent()
+        .context("migration target has no parent")?;
+    candidates
+        .into_iter()
+        .map(|(source, sha256)| {
+            Ok(crate::migration::MigrationCredential {
+                target: target.join(source.file_name().context("credential has no filename")?),
+                required: source == config.credential_file,
+                source,
+                sha256,
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn validate_migration_identity_binding(raw: &[u8], config: &WorkerConfig) -> Result<()> {
     if raw.len() > MAX_PAIRING_LEDGER_BYTES {
         bail!("pairing ledger is unexpectedly large");

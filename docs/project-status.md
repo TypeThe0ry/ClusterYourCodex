@@ -14,6 +14,19 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 migration credential inventory
+
+Identity document conversion now returns exact credential source/target paths,
+expected digests, and required/optional status for transactional copying. The
+current credential is required; acknowledged cleanup can legitimately leave
+historical references whose files are absent. Repeated references are deduplicated
+and conflicting digests abort conversion. This inventory is not Debug/Serialize
+and contains no credential bytes. Filesystem verification, protected copying,
+durable journal recovery, and task switching remain unfinished.
+All seven migration-document integration tests passed, including required-current,
+optional-history, duplicate-reference, and conflicting-digest checks. Scoped
+Clippy passed with warnings denied; formatting and diff whitespace checks passed.
+
 ### 2026-09-08 worker regression and native installation preflight
 
 At source `90f21b7`, `cargo test -p cyc-worker --locked` completed with

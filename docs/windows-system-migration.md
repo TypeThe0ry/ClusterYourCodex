@@ -30,8 +30,12 @@ validation nor copying its repair journal implements a cross-root migration.
   a separate Credential Manager concern and must not be migrated.
 - Parse the pairing ledger and rewrite its credentialFile and
   previousCredentialFile entries to direct children of the new config directory.
-  Preserve record IDs, digests, states, and timestamps; copy every referenced
-  credential after validation, not just the current one.
+  Preserve record IDs, digests, states, and timestamps. The document conversion
+  returns a deduplicated source/target/digest inventory and rejects conflicting
+  digests for one path. The current credential is required. Historical entries
+  may already be absent after completed cleanup: never recreate them. Validate
+  and copy any still-present referenced credential through the protected
+  transaction, not by an unbounded directory copy.
 - Preserve boot-generation state. The first target startup must advance it;
   resetting generation can make valid new telemetry look obsolete.
 - Do not copy lock ownership. Acquire locks with both old and new instances

@@ -1,12 +1,24 @@
 //! In-memory identity documents for the future journaled migration operation.
 //! No function here reads credentials, creates files, or authorizes task switching.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
 use crate::config::{validate_boot_generation_document, WorkerConfig};
-use crate::runtime::{relocate_pairing_ledger, validate_migration_identity_binding};
+use crate::runtime::{
+    migration_credential_inventory, relocate_pairing_ledger, validate_migration_identity_binding,
+};
+
+/// Exact source/target binding for a protected transactional copy. Historical
+/// credentials may already have been removed by acknowledged pairing cleanup.
+/// Do not recreate absent optional files or emit this inventory to public logs.
+pub struct MigrationCredential {
+    pub source: PathBuf,
+    pub target: PathBuf,
+    pub sha256: String,
+    pub required: bool,
+}
 
 /// Caller must persist these through a protected, recoverable transaction.
 /// Intentionally not Debug/Serialize: avoid incidental logging of state documents.
@@ -15,6 +27,7 @@ pub struct RelocatedIdentityDocuments {
     pub pairing_ledger_json: Vec<u8>,
     pub boot_generation_json: Vec<u8>,
     pub boot_generation: u64,
+    pub credentials: Vec<MigrationCredential>,
 }
 
 /// Validate all documents before returning any target document. Preserve the
@@ -35,6 +48,7 @@ pub fn relocate_identity_documents(
     let config: WorkerConfig =
         serde_json::from_slice(config_json).context("parse migration config")?;
     validate_migration_identity_binding(ledger_json, &config)?;
+    let credentials = migration_credential_inventory(ledger_json, &config, old_config, new_config)?;
     let config = config.relocated(old_config, new_config, new_workspace)?;
     let pairing_ledger_json = relocate_pairing_ledger(ledger_json, old_config, new_config)?;
     let boot_generation = validate_boot_generation_document(boot_generation_json)?;
@@ -43,5 +57,6 @@ pub fn relocate_identity_documents(
         pairing_ledger_json,
         boot_generation_json: boot_generation_json.to_vec(),
         boot_generation,
+        credentials,
     })
 }

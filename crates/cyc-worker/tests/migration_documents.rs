@@ -24,6 +24,62 @@ fn migration_preserves_generation_bytes_without_incrementing() {
     let converted: WorkerConfig = serde_json::from_slice(&result.config_json).unwrap();
     assert_eq!(converted.node_id, config.node_id);
     assert_eq!(converted.controller_id, config.controller_id);
+    assert_eq!(result.credentials.len(), 2);
+    let current = result
+        .credentials
+        .iter()
+        .find(|entry| entry.required)
+        .unwrap();
+    assert_eq!(current.source, config.credential_file);
+    assert_eq!(current.target, converted.credential_file);
+    assert_eq!(current.sha256, "a".repeat(64));
+    let historical = result
+        .credentials
+        .iter()
+        .find(|entry| !entry.required)
+        .unwrap();
+    assert_eq!(
+        historical.source,
+        old.parent().unwrap().join("previous.credential")
+    );
+    assert_eq!(
+        historical.target,
+        new.parent().unwrap().join("previous.credential")
+    );
+    assert_eq!(historical.sha256, "b".repeat(64));
+}
+
+#[test]
+fn migration_inventory_deduplicates_history_and_rejects_conflicting_digests() {
+    let (config, mut ledger, old, new) = fixture();
+    let mut prior = ledger["records"][0].clone();
+    let prior_id = Uuid::from_u128(7);
+    prior["pairingId"] = json!(prior_id);
+    prior["credentialFile"] = json!(old.with_extension(format!("{prior_id}.credential")));
+    prior["state"] = json!("superseded");
+    ledger["records"].as_array_mut().unwrap().push(prior);
+    let convert = |ledger: &Value| {
+        relocate_identity_documents(
+            &serde_json::to_vec(&config).unwrap(),
+            &serde_json::to_vec(ledger).unwrap(),
+            br#"{"apiVersion":"cyc.dev/worker-boot-generation/v1","generation":1}"#,
+            &old,
+            &new,
+            &new.parent().unwrap().join("workspace"),
+        )
+    };
+    let result = convert(&ledger).unwrap();
+    assert_eq!(result.credentials.len(), 3);
+    assert_eq!(
+        result
+            .credentials
+            .iter()
+            .filter(|entry| entry.required)
+            .count(),
+        1
+    );
+    ledger["records"][1]["previousCredentialSha256"] = json!("c".repeat(64));
+    assert!(convert(&ledger).is_err());
 }
 
 #[test]
