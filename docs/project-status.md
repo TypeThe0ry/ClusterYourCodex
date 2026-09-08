@@ -31,9 +31,17 @@ The fixed-source full worker-kit run completed its Linux lifecycle fixture with
 `wait_completed=True`, `timeout_marker=NOT_TRIGGERED`, `exit_code=0`, and no
 remaining process IDs. Evidence: local temp directory
 `cyc-worker-kit-test-95cfd983cfcd47c5a153d2c6db15a0b1`, file
-`linux-worker-lifecycle.watchdog.txt`. The same run advanced to macOS fixtures.
+`linux-worker-lifecycle.watchdog.txt`. The same run then failed the macOS
+whole-suite watchdog at 600.07 seconds (native suite exit 1). Its retained
+files show progress through path-binding checks and into the loaded-LaunchAgent
+scenario, rather than a confirmed stationary lifecycle deadlock. The watchdog
+terminated its process tree successfully and recorded no remaining PIDs.
+The macOS fixture now uses the existing ordered setup/repair/binding/uninstall
+phase budgets: 600 seconds per phase, 2400 seconds total, no extension from
+duplicate markers, and no successful exit with missing markers. All lifecycle
+assertions remain intact; the revised full run is not yet accepted.
 This is Windows/Git Bash fixture coverage, not native Linux/macOS service
-acceptance, and the overall packaging gate is still pending.
+acceptance.
 
 Implemented no-I/O config and pairing-ledger relocation primitives in cyc-worker.
 They preserve all identity fields, rewrite only approved paths, reject pending

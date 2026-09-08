@@ -2707,6 +2707,7 @@ test ! -e "$weak_plist_logs"
 # This deterministic fake-Darwin fixture exercises only the transaction
 # state-machine re-entry path; it does not claim live macOS LaunchAgent
 # evidence while the containment gate remains closed.
+printf 'CYC_FIXTURE_BUDGET repair\n'
 interrupted_install="$root/macos-interrupted-install"
 interrupted_data="$root/macos-interrupted-data"
 interrupted_workspace="$root/macos-interrupted-workspace"
@@ -2914,6 +2915,7 @@ rm -f "$mac_missing_manifest_backup" "$mac_missing_launch_agent"
 # Existing ownership is bound to every macOS lifecycle root. Changing the
 # install, logs, or HOME-derived LaunchAgent root must fail before any
 # uninstall operation touches the paired installation or the sentinel.
+printf 'CYC_FIXTURE_BUDGET binding\n'
 mac_install_root="$install_root"
 mac_workspace_root="$workspace_root"
 mac_launch_agent_path="$HOME/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
@@ -2985,6 +2987,7 @@ assert_macos_manifest_binding_failure \
 
 # Uninstall is repeatable and preserves paired data, workspace, and logs by
 # default while removing only installer-owned executable/service material.
+printf 'CYC_FIXTURE_BUDGET uninstall\n'
 uninstall_one="$($upgrade/install-worker.sh uninstall --bundle-root "$upgrade" "${common[@]}")"
 grep -q '"dataPreserved":true' <<<"$uninstall_one"
 test ! -e "$install_root/cyc-worker"
@@ -3073,7 +3076,7 @@ test ! -e "$default_program/cyc-worker"
 test ! -e "$default_data"
 test ! -e "$default_logs"
 '@.TrimStart(), $utf8NoBom)
-        Invoke-CycWorkerKitBashSmoke -ScriptPath $macosSmoke -ArgumentPath $temporary -Label 'macos-worker-lifecycle'
+        Invoke-CycWorkerKitBashSmoke -ScriptPath $macosSmoke -ArgumentPath $temporary -Label 'macos-worker-lifecycle' -Phases @('repair', 'binding', 'uninstall')
     }
 
     foreach ($content in @(
