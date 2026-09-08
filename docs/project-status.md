@@ -14,6 +14,31 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 worker regression and native installation preflight
+
+At source `90f21b7`, `cargo test -p cyc-worker --locked` completed with
+native exit 0: 119 unit tests passed, one subprocess helper ignored, and all
+six migration-document integration tests passed. The unit suite took 239.90
+seconds. This covers pairing recovery, credential rotation, restart generation,
+execution and artifact handling locally; it does not prove a persistent remote
+worker installation.
+
+The provisioning state-machine integration suite also passed all 26 tests
+with native exit 0. Coverage includes durable authentication policy, password
+exclusion from serialized records, crash/resume, repair identity preservation,
+and smoke response-loss/retry binding. These use test transports, not live SSH
+credential-store or remote installation acceptance. MSVC emitted LNK4099
+warnings for missing OpenSSL debug symbols; linking and tests succeeded.
+
+A read-only Helio probe still found zero worker processes and the existing
+SYSTEM task in Ready state with LastTaskResult 1. Its executable remains in
+the SSH user's old LocalAppData installation. C: free space is 1,301,364,736
+bytes. A fresh data directory alone is not a valid side-by-side workaround:
+the installer uses a fixed task name and verifies its existing path binding
+before install, including PairOnly. No task, ACL, credential, or worker data
+was changed. Identity-preserving migration remains required for this existing
+installation; the new full worker-kit regression is still running separately.
+
 ### 2026-09-08 migration document conversion
 
 The combined identity-document conversion now also validates the config against
