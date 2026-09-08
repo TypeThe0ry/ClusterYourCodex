@@ -14,6 +14,17 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 migration residual checks
+
+Locked migration inputs now inspect residuals both at source acquisition and
+immediately before target staging. Existing repair/migration transactions,
+containment quarantine and retained job roots block copying; source workspace
+ACLs must match the old owner. No cleanup is performed. Native targeted residual
+tests passed (18.16s), preserving rejected markers/job roots; the ordinary locked
+source-to-stage test still passed (50.69s). Scoped Clippy and diff checks passed.
+Live task/process/lease checks and external guard reconciliation remain separate
+unfinished coordinator requirements.
+
 ### 2026-09-08 staging activation boundary
 
 Normal worker config load/write and pairing now reject any migration-stage

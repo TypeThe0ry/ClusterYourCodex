@@ -29,6 +29,7 @@ fn locked_source_stages_identity_without_touching_original_files() {
     ledger["records"][0]["credentialSha256"] =
         json!(hex::encode(Sha256::digest(b"source-fixture-token")));
     config.write(&old).unwrap();
+    write_secret_file(&config.workspace_root.join("fixture-marker"), "fixture").unwrap();
     write_secret_file(
         &old.with_extension("pairing-state.json"),
         &serde_json::to_string(&ledger).unwrap(),

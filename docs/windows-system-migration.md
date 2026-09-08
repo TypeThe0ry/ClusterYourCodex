@@ -63,6 +63,13 @@ its dedicated read-only parser and remains available. The future coordinator
 must retire staging explicitly as part of its durable activation/rollback
 sequence; changing the receipt's phase alone does not enable the worker.
 
+Pinned-input acquisition and staging both perform read-only residual checks:
+reject old repair transaction/staging entries, verify workspace ACLs against the
+old owner, reject any containment quarantine entry, and reject nonempty job roots
+(including unfinished cleanup directories). No residual is removed or treated
+as completed history. This does not replace live task/process/lease checks or
+external hostile-isolation reconciliation; those are coordinator responsibilities.
+
 ## Why ordinary Repair is insufficient
 
 The legacy failure mode has a SYSTEM task pointing at user-owned worker state.

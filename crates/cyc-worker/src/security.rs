@@ -609,6 +609,15 @@ pub struct LockedMigrationSource {
 }
 
 #[cfg(windows)]
+pub(crate) fn verify_migration_directory(path: &Path, expected_owner_sid: &str) -> Result<()> {
+    ensure_no_links_or_reparse_points(path)?;
+    if !fs::symlink_metadata(path)?.is_dir() {
+        bail!("migration workspace is not a directory");
+    }
+    run_windows_acl_for_owner(path, "verify", expected_owner_sid)
+}
+
+#[cfg(windows)]
 impl LockedMigrationSource {
     pub fn open(path: &Path, expected_owner_sid: &str) -> Result<Self> {
         use std::os::windows::fs::OpenOptionsExt;
