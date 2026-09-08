@@ -417,6 +417,29 @@ impl PairingCredentialLedger {
     }
 }
 
+pub(crate) fn validate_migration_identity_binding(raw: &[u8], config: &WorkerConfig) -> Result<()> {
+    if raw.len() > MAX_PAIRING_LEDGER_BYTES {
+        bail!("pairing ledger is unexpectedly large");
+    }
+    let ledger: PairingCredentialLedger =
+        serde_json::from_slice(raw).context("parse migration pairing ledger binding")?;
+    let matches = ledger
+        .records
+        .iter()
+        .filter(|record| {
+            record.state == PairingCredentialState::Acknowledged
+                && record.credential_file == config.credential_file
+        })
+        .collect::<Vec<_>>();
+    if matches.len() != 1
+        || matches[0].controller_id != config.controller_id
+        || matches[0].node_id != config.node_id
+    {
+        bail!("migration config is not bound to one acknowledged pairing record");
+    }
+    Ok(())
+}
+
 /// Transform only ledger path references; no filesystem, credential, or network I/O.
 /// This is not authorization to migrate a running worker or unresolved pairing.
 pub fn relocate_pairing_ledger(

@@ -7,7 +7,10 @@ Implemented building blocks: `WorkerConfig::relocated` and
 credential reads, filesystem writes, or network calls. They preserve identity
 fields, validate old ledger ownership bindings before rewriting, reject pending
 pairing/cleanup, and validate the new ledger. They are not yet connected to a
-migration journal or CLI. Boot-generation copying, source ACL verification,
+migration journal or CLI. `migration::relocate_identity_documents` now validates
+config, acknowledged ledger identity, and boot generation together, preserving
+the boot-generation document byte-for-byte. No target documents are returned
+when any input is invalid. Durable boot-generation copying, source ACL verification,
 quiescence, task switching, recovery, and live acceptance remain to implement.
 
 ## Why ordinary Repair is insufficient

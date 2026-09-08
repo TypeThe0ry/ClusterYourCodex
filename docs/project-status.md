@@ -16,6 +16,25 @@ change.
 
 ### 2026-09-08 migration document conversion
 
+The combined identity-document conversion now also validates the config against
+exactly one acknowledged pairing for its current credential, controller, and
+node. Boot-generation parsing is shared with normal startup and rejects unknown
+schemas, invalid values, or exhausted signed-64-bit counters. Conversion returns
+the original boot-generation bytes, without resetting or incrementing them.
+All six migration integration tests passed. This is still an in-memory building
+block, not a completed filesystem migration or service switch.
+Existing boot-generation restart/orphan-temp and independent-handle concurrency
+tests both passed (native exit 0; 66.42 seconds). Scoped Clippy also passed with
+warnings denied.
+
+The fixed-source full worker-kit run completed its Linux lifecycle fixture with
+`wait_completed=True`, `timeout_marker=NOT_TRIGGERED`, `exit_code=0`, and no
+remaining process IDs. Evidence: local temp directory
+`cyc-worker-kit-test-95cfd983cfcd47c5a153d2c6db15a0b1`, file
+`linux-worker-lifecycle.watchdog.txt`. The same run advanced to macOS fixtures.
+This is Windows/Git Bash fixture coverage, not native Linux/macOS service
+acceptance, and the overall packaging gate is still pending.
+
 Implemented no-I/O config and pairing-ledger relocation primitives in cyc-worker.
 They preserve all identity fields, rewrite only approved paths, reject pending
 pairing/cleanup, and reuse the existing strict ledger validator before/after

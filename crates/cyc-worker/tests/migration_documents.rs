@@ -1,8 +1,71 @@
 use cyc_worker::config::{WorkerConfig, WORKER_CONFIG_VERSION};
+use cyc_worker::migration::relocate_identity_documents;
 use cyc_worker::runtime::relocate_pairing_ledger;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use uuid::Uuid;
+
+#[test]
+fn migration_preserves_generation_bytes_without_incrementing() {
+    let (config, ledger, old, new) = fixture();
+    let boot =
+        b"{\n  \"apiVersion\": \"cyc.dev/worker-boot-generation/v1\", \"generation\": 475\n}\n";
+    let result = relocate_identity_documents(
+        &serde_json::to_vec(&config).unwrap(),
+        &serde_json::to_vec(&ledger).unwrap(),
+        boot,
+        &old,
+        &new,
+        &new.parent().unwrap().join("workspace"),
+    )
+    .unwrap();
+    assert_eq!(result.boot_generation, 475);
+    assert_eq!(result.boot_generation_json, boot);
+    let converted: WorkerConfig = serde_json::from_slice(&result.config_json).unwrap();
+    assert_eq!(converted.node_id, config.node_id);
+    assert_eq!(converted.controller_id, config.controller_id);
+}
+
+#[test]
+fn migration_rejects_invalid_generation_and_mismatched_identity() {
+    let (config, ledger, old, new) = fixture();
+    let config_bytes = serde_json::to_vec(&config).unwrap();
+    let ledger_bytes = serde_json::to_vec(&ledger).unwrap();
+    let workspace = new.parent().unwrap().join("workspace");
+    for boot in [
+        json!({"apiVersion": "unknown", "generation": 1}),
+        json!({"apiVersion": "cyc.dev/worker-boot-generation/v1", "generation": -1}),
+        json!({"apiVersion": "cyc.dev/worker-boot-generation/v1", "generation": i64::MAX}),
+        json!({"apiVersion": "cyc.dev/worker-boot-generation/v1", "generation": 1, "extra": true}),
+    ] {
+        assert!(relocate_identity_documents(
+            &config_bytes,
+            &ledger_bytes,
+            &serde_json::to_vec(&boot).unwrap(),
+            &old,
+            &new,
+            &workspace
+        )
+        .is_err());
+    }
+    let boot = serde_json::to_vec(
+        &json!({"apiVersion": "cyc.dev/worker-boot-generation/v1", "generation": 1}),
+    )
+    .unwrap();
+    for field in ["nodeId", "controllerId"] {
+        let mut altered = ledger.clone();
+        altered["records"][0][field] = json!(Uuid::from_u128(9));
+        assert!(relocate_identity_documents(
+            &config_bytes,
+            &serde_json::to_vec(&altered).unwrap(),
+            &boot,
+            &old,
+            &new,
+            &workspace
+        )
+        .is_err());
+    }
+}
 
 fn fixture() -> (WorkerConfig, Value, PathBuf, PathBuf) {
     let root = std::env::temp_dir().join("cyc-migration-document-fixture");
