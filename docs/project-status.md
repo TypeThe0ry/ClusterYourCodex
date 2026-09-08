@@ -14,6 +14,21 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 authorized preview.100 installer retry
+
+After explicit user confirmation, the live controller returned `jobs: []` and
+the path-verified development GUI/controller were stopped (PIDs 2368/76204).
+Port 47831 was free before launching the hash-verified preview.100 Setup.
+Setup PID 17848 started at 16:19:54 local time. Files and an install manifest
+briefly appeared, but the transaction ultimately returned `rolledBack` and
+the native dialog reported `installation failed (exit 1)`. The final private
+installer directory retained the firewall journal/receipts, not an install
+manifest. This disproves port conflict as the sole installation blocker.
+No successful install or GUI onboarding is claimed. The old development
+runtime remains stopped; its binaries and user data were not deleted by the
+operator. A diagnostic-enabled retry is needed to recover the core exception;
+the immutable preview.100 installer lacks the newer default diagnostic fix.
+
 The installer port-preflight and lifecycle-diagnostic Pester suites are now
 included in the Windows CI identity job, using its pinned Pester 3.4 runner.
 The combined local invocation passes all seven tests. A live authenticated
