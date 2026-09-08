@@ -16,6 +16,20 @@ change.
 
 ### 2026-09-08 authorized preview.100 installer retry
 
+Follow-up reproduced a concrete startup failure using the published preview.100
+controller with the installer's default database/token paths: native exit 1,
+`database security preflight failed`, caused by `refusing pre-existing object
+storage without a database`. The default `controller.db` was absent while the
+old development object directory `jobs` existed. Windows TaskScheduler
+Operational logging was disabled, so no historical task event was available.
+The object directory was verified empty (including hidden entries), regular,
+and at the exact expected path before being renamed to
+`jobs.preinstall-backup-20260908` in the same data directory. No contents were
+deleted and no database was fabricated. Restore that directory name only while
+the controller is stopped and no new `jobs`/database has been created. This
+removes the reproduced startup blocker; installation still needs a successful
+retry, and no remaining failures are assumed absent.
+
 After explicit user confirmation, the live controller returned `jobs: []` and
 the path-verified development GUI/controller were stopped (PIDs 2368/76204).
 Port 47831 was free before launching the hash-verified preview.100 Setup.
