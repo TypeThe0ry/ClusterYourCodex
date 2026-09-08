@@ -37,6 +37,17 @@ The installed preview.100 executable has not been replaced by this UI change.
 
 ### 2026-09-08 installed GUI provisioning resume
 
+Remote diagnosis identified the lifecycle failure: Windows `Install-Worker.ps1`
+line 586 rejects the staging root because it contains six files (the five kit
+files plus `cyc-discovery.ps1`). The explicit PairOnly diagnostic returned exit
+1 before installation. The driver now stages bundles in a dedicated `kit`
+child, keeping discovery and enrollment outside the signed file set. Existing
+install checkpoints re-stage the verified kit into the new location. All 37
+library tests pass, including a strict five-file assertion in the fake remote
+lifecycle and layout separation checks for Windows/Linux/macOS. Real remote
+acceptance of this fix remains pending. The read-only Helio probe also reported
+approximately 1 GB free disk; no unrelated files were removed.
+
 The rebuilt native GUI was launched successfully with the simplified layout
 and the existing controller and provisioning records. The retained mismatch
 record exposed only rollback/remove, so an explicit retry path now permits

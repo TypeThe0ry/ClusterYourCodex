@@ -29,6 +29,10 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Stage signed worker bundles in a dedicated `kit` directory, separate from
+  discovery scripts and enrollment files. Retrying an older install checkpoint
+  re-stages the verified bundle without weakening its exact-file-set checks.
+
 - Allow an explicit retry of a host-key mismatch when an approved pin already
   exists, without clearing or replacing that pin. A repeated mismatch still
   stops provisioning; no automatic mismatch retry is enabled.

@@ -363,6 +363,10 @@ impl SshProvisioningDriver {
         };
         ensure_lifecycle_expectation_supported(kit.target(), expectation)?;
         let mut session = self.authenticated_session(record)?;
+        // Replay verified staging for pre-upgrade checkpoints whose kit files
+        // shared the discovery directory. The dedicated bundle remains exact.
+        let layout = RemoteLayout::new(record, platform_for_target(kit.target()))?;
+        upload_kit_to_session(session.as_mut(), &layout, &kit)?;
         self.run_lifecycle(record, session.as_mut(), &kit, action, None, expectation)?;
         Ok(StepCompletion::WorkerInstalled)
     }
@@ -671,7 +675,7 @@ impl SshProvisioningDriver {
     ) -> Result<(), DriverFailure> {
         ensure_lifecycle_expectation_supported(kit.target(), expectation)?;
         let platform = platform_for_target(kit.target());
-        let layout = RemoteLayout::new(record, platform)?;
+        let layout = RemoteLayout::new(record, platform)?.kit_layout()?;
         let lifecycle_path = layout.join(kit.lifecycle_name())?;
         let mut arguments = Vec::new();
         match platform {
@@ -1158,6 +1162,13 @@ impl RemoteLayout {
     fn enrollment_path(&self, pairing_id: Uuid) -> Result<RemotePath, DriverFailure> {
         self.join(&format!("enrollment-{}.json", pairing_id.simple()))
     }
+
+    fn kit_layout(&self) -> Result<Self, DriverFailure> {
+        Ok(Self {
+            platform: self.platform,
+            staging_dir: self.join("kit")?,
+        })
+    }
 }
 
 fn cleanup_script_path(
@@ -1233,6 +1244,10 @@ fn upload_kit_to_session(
     layout: &RemoteLayout,
     kit: &WorkerKit,
 ) -> Result<(), DriverFailure> {
+    session
+        .create_dir(&layout.staging_dir, 0o700)
+        .map_err(map_ssh_error)?;
+    let layout = layout.kit_layout()?;
     session
         .create_dir(&layout.staging_dir, 0o700)
         .map_err(map_ssh_error)?;
@@ -1735,6 +1750,31 @@ mod tests {
         );
         assert_eq!(generic.code.as_str(), "WORKER_LIFECYCLE_FAILED");
         assert!(generic.retryable);
+    }
+
+    #[test]
+    fn signed_bundle_is_separate_from_discovery_and_enrollment() {
+        let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
+        let record = engine.create(new_computer(true)).unwrap();
+        for platform in [
+            RemotePlatform::Windows,
+            RemotePlatform::Linux,
+            RemotePlatform::Macos,
+        ] {
+            let layout = RemoteLayout::new(&record, platform).unwrap();
+            let kit = layout.kit_layout().unwrap();
+            assert_ne!(kit.staging_dir, layout.staging_dir);
+            assert!(!layout
+                .join(platform.discovery_file_name())
+                .unwrap()
+                .as_str()
+                .starts_with(kit.staging_dir.as_str()));
+            assert!(!layout
+                .enrollment_path(Uuid::new_v4())
+                .unwrap()
+                .as_str()
+                .starts_with(kit.staging_dir.as_str()));
+        }
     }
 
     #[test]
@@ -3038,6 +3078,21 @@ mod tests {
                 });
             }
             if path.ends_with("install-worker.sh") || path.ends_with("Install-Worker.ps1") {
+                let separator = if path.contains('\\') { '\\' } else { '/' };
+                let bundle = path.rsplit_once(separator).unwrap().0;
+                let prefix = format!("{bundle}{separator}");
+                let files = self
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .files
+                    .keys()
+                    .filter(|file| file.starts_with(&prefix))
+                    .count();
+                assert_eq!(
+                    files, 5,
+                    "lifecycle must receive only the signed kit file set"
+                );
                 let action = if path.ends_with("install-worker.sh") {
                     arguments.first().map(|value| value.as_str()).unwrap_or("")
                 } else {
