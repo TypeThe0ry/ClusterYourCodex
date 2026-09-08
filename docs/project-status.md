@@ -14,6 +14,17 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 validation queue deduplication
+
+Live GitHub inspection found several superseded PR #58 CI runs still executing
+Windows workspace/desktop tests concurrently. CI, CodeQL and dependency-security
+now group pull-request runs by workflow and PR number and cancel superseded
+members. Non-PR runs use their unique run ID with cancellation disabled, so main,
+tag and scheduled evidence is retained. Release publishing is unchanged.
+Action-pin validation (63 references), signing-boundary validation and diff
+checks passed. Cancellation behavior still requires a subsequent PR update to
+exercise on GitHub; pre-existing runs without this group are not claimed stopped.
+
 ### 2026-09-08 strict native credential persistence acceptance
 
 The Windows Credential Manager backend passed an explicit cross-process native
