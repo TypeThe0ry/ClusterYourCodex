@@ -14,6 +14,19 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 PR and live controller reconciliation
+
+PR #57 merged its prior head. The SYSTEM lifecycle changes are now PR #58,
+based on the resulting main commit, with squash auto-merge enabled subject to
+checks. No tag or release was created. The local full worker-kit run remains
+in progress against fixed script hashes recorded above/below.
+
+At 10:51:29 UTC, the installed product MCP returned controller/database healthy,
+Codex integration available, and the only paired node offline with stale
+telemetry (last accepted at 10:18:26 UTC). This agrees with the native process
+check; historical task success must not be treated as current readiness.
+No task was submitted to the offline node and no credential value was read.
+
 ### 2026-09-08 concise UI follow-up
 
 Confirmed the discarded promotional home/task headings are absent from the
