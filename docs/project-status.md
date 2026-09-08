@@ -14,6 +14,30 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### Completed CI for PR head 90bf4ae
+
+Run `34226042054` is now successful, including the Windows desktop job and
+its live controller/worker round trip. All PR checks reported pass. Downloaded
+artifact `10057535165` (98417 bytes) contains a passed result with 14 true
+checks, no failure, and queued/running/succeeded states. The run lasted 38s;
+cleanup reports removed, jobRootDeleted true and reservationReleasedAt set.
+Job ID: `695b00f1-a384-41de-b05a-eeaca7562fa1`.
+Run ID: `68e854ce-a189-4173-9224-968a0c3a7f48`.
+Executed merge commit: `158651c7f37660babafce34f32af4029c991b2c2`.
+Downloaded result.json SHA-256:
+`9ca37076e9a69cc7d13f56400f5c0093fb25fd645c1237a6fd3d3425d559b9e7`.
+
+This is same-host Windows live execution evidence, not cross-machine SSH,
+GUI credential persistence, Scheduled Task lifecycle, or GA approval.
+PR #58 remained open at observation despite all reported checks passing.
+Subsequent commits require their own checks; no new release was published.
+
+Downloaded Windows same-host live execution evidence from successful ancestor
+CI run `34224323417` is recorded in
+[the round-trip report](windows-ci-roundtrip-34224323417.md). Its merge commit
+is bound to PR head `51a1c51`; it is not evidence for newer head `90bf4ae` or
+for GUI SSH installation and persistent service acceptance.
+
 ### 2026-09-08 Linux discovery capacity formatting
 
 Latest follow-up for exact head `90bf4ae`: Windows Rust job `102060693675`
