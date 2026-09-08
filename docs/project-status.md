@@ -14,6 +14,22 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 installation succeeded after local recovery
+
+Following the user's explicit continuing installation authorization, the
+hash-verified preview.100 Setup was retried with `/S` and a process-scoped
+`CYC_SETUP_DIAGNOSTIC_LOG` pointing into the existing private installer directory.
+Setup PID 29692 completed; `retry-20260908-diagnostic.json` reports
+`status=succeeded`, `lastStage=complete`, `error=null`, and the install manifest
+is retained. The installed controller PID 50188 runs from the default per-user
+Programs directory. Its authenticated health API reports preview.100,
+`database=ok`, `status=ok`. The installed native GUI was opened and visibly
+reports the controller online with the Simplified Chinese three-step home.
+The nodes API returns an empty fleet: remote pairing and a cross-node job are
+still pending. This is local existing-profile installation evidence, not a
+clean-machine or cross-platform GA result. The previous failed attempts below
+remain historical evidence; the old development runtime was not restarted.
+
 ### 2026-09-08 authorized preview.100 installer retry
 
 The follow-up source fix now checks for `jobs`, `controller.db-wal`, and
