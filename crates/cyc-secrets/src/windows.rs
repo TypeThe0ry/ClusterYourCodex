@@ -208,6 +208,67 @@ mod tests {
     use crate::{CredentialKey, CredentialVault, Secret, VaultError};
 
     #[test]
+    #[ignore = "requires a real Windows Credential Manager logon; never skips unavailable vaults"]
+    fn windows_credential_manager_cross_process_acceptance() {
+        let vault = WindowsCredentialVault::new("ClusterYourCodex-Acceptance").expect("vault");
+        let key = CredentialKey::new("test", uuid::Uuid::new_v4().simple().to_string())
+            .expect("unique test key");
+        struct Cleanup<'a>(&'a WindowsCredentialVault, &'a CredentialKey);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.delete(self.1);
+            }
+        }
+        assert!(vault.retrieve(&key).expect("check unique target").is_none());
+        let _cleanup = Cleanup(&vault, &key);
+        let secret = Secret::from_string("synthetic-acceptance-value".to_owned());
+        assert_eq!(
+            vault
+                .store(&key, "acceptance-user", &secret)
+                .expect("native write required"),
+            key.reference()
+        );
+        drop(secret);
+        let child = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "windows::tests::windows_credential_manager_child_reader",
+                "--ignored",
+            ])
+            .env("CYC_VAULT_TEST_ENTRY_ID", key.identifier())
+            .output()
+            .expect("launch independent reader");
+        assert!(
+            child.status.success(),
+            "independent credential reader failed"
+        );
+        let report = String::from_utf8(child.stdout).expect("test report");
+        assert!(report.contains("windows::tests::windows_credential_manager_child_reader ... ok"));
+        assert!(report.contains("1 passed; 0 failed"));
+        assert!(vault.delete(&key).expect("delete only owned fixture"));
+        assert!(vault
+            .retrieve(&key)
+            .expect("verify fixture removal")
+            .is_none());
+    }
+
+    #[test]
+    #[ignore = "invoked only by the cross-process acceptance parent"]
+    fn windows_credential_manager_child_reader() {
+        let identifier = std::env::var("CYC_VAULT_TEST_ENTRY_ID").expect("parent test entry id");
+        let parsed = uuid::Uuid::parse_str(&identifier).expect("UUID test entry");
+        assert_eq!(identifier, parsed.simple().to_string());
+        let key = CredentialKey::new("test", identifier).expect("test key");
+        let vault = WindowsCredentialVault::new("ClusterYourCodex-Acceptance").expect("vault");
+        let recovered = vault
+            .retrieve(&key)
+            .expect("native read required")
+            .expect("persisted entry");
+        assert_eq!(recovered.username, "acceptance-user");
+        assert!(recovered.secret.expose_secret() == b"synthetic-acceptance-value");
+    }
+
+    #[test]
     fn windows_credential_manager_round_trip() {
         let vault = WindowsCredentialVault::new("ClusterYourCodex-Test").expect("vault");
         let key =

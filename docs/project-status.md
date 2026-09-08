@@ -14,6 +14,28 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 strict native credential persistence acceptance
+
+The Windows Credential Manager backend passed an explicit cross-process native
+test: write a unique synthetic credential, drop the original secret allocation,
+launch a fresh reader process, verify its username/value, delete the owned entry,
+and confirm absence. The reader's named test and pass count are checked, not just
+its exit code. This strict test fails if the vault is unavailable (including
+Windows error 1312); unlike the compatibility test it never silently skips.
+
+Reproduce on an interactive Windows controller:
+
+```powershell
+cargo test -p cyc-secrets --locked windows_credential_manager_cross_process_acceptance -- --ignored
+```
+
+Native acceptance passed (0.14s), the ordinary crate suite passed (5 tests;
+2 explicitly ignored native helper/acceptance entries), scoped Clippy and
+format/diff checks passed. Only unique synthetic entries in the test namespace
+were created and removed. No existing SSH credential was read or changed.
+This proves same-user cross-process persistence, not reboot, another user's
+access, real SSH authentication, or completion of GUI onboarding.
+
 ### 2026-09-08 native desktop Linux onboarding resumed
 
 The corresponding durable retry regression now closes/reopens SQLite twice:
