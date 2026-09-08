@@ -14,6 +14,10 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+Local candidate metadata is prepared as `0.1.0-preview.101`; no tag or release
+has been created. Published preview.100 remains unchanged. The candidate must
+pass exact-version checks and CI before a signed prerelease build is published.
+
 Named-instance implementation commit `f3c199a` is pushed to PR #58, with squash
 auto-merge still enabled. Its CI run `34234534065` is active across Windows,
 Linux and both macOS kit architectures; product version identity passed.

@@ -7,6 +7,24 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.101] - 2026-09-08
+
+### Added
+
+- Optional Windows worker instances with separate installation, data and
+  workspace directories and distinct Scheduled Tasks. Existing default worker
+  installations keep their original paths and task name.
+- Carry the instance name through the desktop form, persistent configuration,
+  and install/repair/uninstall commands. Reject non-Windows targets before kit
+  upload and prevent repair journals from crossing instance boundaries.
+
+### Validation scope
+
+- Local provisioning, native desktop and frontend regression tests pass,
+  including instance persistence after database reopen. Named-instance live
+  remote installation, pairing and persistent-service acceptance remain
+  unverified; this candidate is not a GA release.
+
 ### Changed
 
 - Remove promotional page subtitles and duplicate headers. Keep the global
@@ -1545,7 +1563,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.100...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.101...HEAD
+[0.1.0-preview.101]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.100...v0.1.0-preview.101
 [0.1.0-preview.100]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.99...v0.1.0-preview.100
 [0.1.0-preview.99]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.98...v0.1.0-preview.99
 [0.1.0-preview.98]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.97...v0.1.0-preview.98
