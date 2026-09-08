@@ -14,6 +14,18 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+Named-instance implementation commit `f3c199a` is pushed to PR #58, with squash
+auto-merge still enabled. Its CI run `34234534065` is active across Windows,
+Linux and both macOS kit architectures; product version identity passed.
+The preceding run `34230627688` ended cancelled, not successful, and must not
+be cited as completed Windows desktop acceptance.
+Local full worker-kit testing completed with exit 0 and
+`worker-kit packaging tests passed`. It began before the final edits, so this
+does not replace exact-commit CI or live installation acceptance.
+All 81 native library tests passed (exit 0), including the new database-reopen
+regression for named-instance configuration. The new regression exercises
+the real local store with a checkpoint driver, not live SSH credential storage.
+
 ### 2026-09-08 concise desktop copy verification
 
 Verified the running UI at `http://127.0.0.1:1420/`: Home shows fleet
@@ -41,8 +53,8 @@ on the current scripts (mock tasks; no live Scheduled Task changes).
 GUI/native bridge configuration propagation is implemented in source but not
 deployed. All 105 frontend tests and the frontend build pass. Native cargo
 check and cargo check --tests pass. The SYSTEM lifecycle dispatch fixture
-passes. The earlier full worker-kit test process remains active and has not
-returned a final result; it is not final-tree acceptance. Original worker state
+passes. The earlier full worker-kit test process finished successfully;
+it is not final-tree acceptance. Original worker state
 is unchanged. Live named-instance installation/pairing/service/job acceptance
 remains required.
 

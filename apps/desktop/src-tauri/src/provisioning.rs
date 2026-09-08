@@ -2251,6 +2251,28 @@ mod tests {
     }
 
     #[test]
+    fn named_instance_survives_native_start_and_database_reopen() {
+        let path = temporary_database("named-instance-reopen");
+        let first = manager(&path);
+        let mut request = start_request();
+        request.advanced.windows_instance_name = Some("alpha-1".to_owned());
+        let started = first.start(request).expect("start named instance");
+        let original = started.computer.expect("computer");
+        assert_eq!(original.configuration.windows_instance_name.as_deref(), Some("alpha-1"));
+        drop(first);
+
+        let reopened = manager(&path);
+        let computers = reopened.list().expect("reload computers");
+        assert_eq!(computers.len(), 1);
+        assert_eq!(computers[0].id, original.id);
+        assert_eq!(computers[0].configuration.windows_instance_name.as_deref(), Some("alpha-1"));
+        let serialized = serde_json::to_value(&computers[0]).expect("serialize native view");
+        assert_eq!(serialized["configuration"]["windowsInstanceName"], "alpha-1");
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn paired_node_config_preserves_user_labels_and_encodes_advanced_policy() {
         let endpoint = ComputerEndpoint::new("192.0.2.44", 22, "builder").expect("endpoint");
         let mut input = NewComputer::new("192.0.2.44", endpoint).expect("computer");

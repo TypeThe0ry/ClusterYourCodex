@@ -96,8 +96,9 @@ instances. Uninstall preserves data. This is a fresh identity path, not an
 identity-preserving migration and not permission to stop/remove an old task.
 
 Layout/name validation and WhatIf entry tests pass on Windows PowerShell 5.1,
-as does the existing SYSTEM dispatch fixture. Full Worker Kit regression,
-native bridge compilation, signed-kit publication, remote enrollment transfer and native
+as does the existing SYSTEM dispatch fixture. The full Worker Kit regression
+started before final edits also passed. Exact-commit CI, signed-kit publication,
+remote enrollment transfer and native
 persistent-service acceptance remain pending. No named instance has been
 deployed by this change.
 
@@ -105,11 +106,14 @@ The source GUI advanced form, native request/view DTOs, durable computer
 configuration and Windows SSH lifecycle arguments now carry windowsInstanceName.
 The field is optional for old records. Named configurations reject custom
 workspaces; non-Windows lifecycle use is rejected. Four locale labels and the
-frontend's 103 tests/type checks/production build pass. The running desktop
+frontend's 105 tests/type checks/production build pass. The running desktop
 has not been replaced, so this is source integration, not live GUI acceptance.
-The three provisioning model tests pass, including legacy-record decoding,
+All 43 provisioning library tests pass, including legacy-record decoding,
 named-instance serialization round trip, invalid names and workspace conflict
-rejection. Full provisioning tests and native bridge checking are in progress.
+rejection and Windows lifecycle instance argument selection. Native cargo check
+and cargo check --tests pass. All 81 native library tests pass, including the
+native store-reopen test;
+neither compile checks nor simulated SSH prove remote installation acceptance.
 
 The legacy failure mode has a SYSTEM task pointing at user-owned worker state.
 The new installer correctly creates SYSTEM-owned state, but ordinary Repair
