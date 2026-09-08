@@ -2,6 +2,14 @@
 
 Status: implementation plan, not an available installer action or accepted live migration.
 
+Implemented building blocks: `WorkerConfig::relocated` and
+`runtime::relocate_pairing_ledger` build validated in-memory documents without
+credential reads, filesystem writes, or network calls. They preserve identity
+fields, validate old ledger ownership bindings before rewriting, reject pending
+pairing/cleanup, and validate the new ledger. They are not yet connected to a
+migration journal or CLI. Boot-generation copying, source ACL verification,
+quiescence, task switching, recovery, and live acceptance remain to implement.
+
 ## Why ordinary Repair is insufficient
 
 The legacy failure mode has a SYSTEM task pointing at user-owned worker state.

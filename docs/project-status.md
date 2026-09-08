@@ -14,6 +14,23 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 migration document conversion
+
+Implemented no-I/O config and pairing-ledger relocation primitives in cyc-worker.
+They preserve all identity fields, rewrite only approved paths, reject pending
+pairing/cleanup, and reuse the existing strict ledger validator before/after
+conversion. Four native Rust integration tests passed for identity preservation,
+pending-state/schema rejection, path escapes/renaming, and invalid or duplicate
+ledger records. Scoped worker library/integration-test Clippy with warnings
+denied, formatting, and diff checks passed. This is not yet a runnable
+migration operation: boot-generation preservation, journal, source verification,
+task switching, and rollback still need integration.
+
+The phase-budget full worker-kit run has now passed all three Linux repair
+failure/rollback scenarios and reached binding checks (last verified repair at
+674 seconds; wrong-install/workspace checks also passed). It remains running;
+do not report the whole suite as passed from these partial phase observations.
+
 ### 2026-09-08 PR and live controller reconciliation
 
 PR #57 merged its prior head. The SYSTEM lifecycle changes are now PR #58,

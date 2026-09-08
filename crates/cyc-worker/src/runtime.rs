@@ -417,6 +417,58 @@ impl PairingCredentialLedger {
     }
 }
 
+/// Transform only ledger path references; no filesystem, credential, or network I/O.
+/// This is not authorization to migrate a running worker or unresolved pairing.
+pub fn relocate_pairing_ledger(
+    raw: &[u8],
+    old_config: &Path,
+    new_config: &Path,
+) -> Result<Vec<u8>> {
+    if raw.len() > MAX_PAIRING_LEDGER_BYTES {
+        bail!("pairing ledger is unexpectedly large");
+    }
+    if !old_config.is_absolute()
+        || !new_config.is_absolute()
+        || old_config.file_name() != new_config.file_name()
+        || [old_config, new_config].iter().any(|path| {
+            path.components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        })
+    {
+        bail!("migration requires canonical absolute config paths with unchanged filename");
+    }
+    let target = new_config
+        .parent()
+        .context("migration target has no parent")?;
+    let mut ledger: PairingCredentialLedger =
+        serde_json::from_slice(raw).context("parse migration pairing ledger")?;
+    ledger.validate(old_config)?;
+    for record in &mut ledger.records {
+        if matches!(record.state, PairingCredentialState::Staged)
+            || record.state.has_uncertain_remote_state()
+            || record.cleanup_pending
+            || record.previous_cleanup_pending
+        {
+            bail!("resolve pending pairing and cleanup before migration");
+        }
+        record.credential_file = target.join(
+            record
+                .credential_file
+                .file_name()
+                .context("credential filename missing")?,
+        );
+        if let Some(previous) = &mut record.previous_credential_file {
+            *previous = target.join(
+                previous
+                    .file_name()
+                    .context("previous credential filename missing")?,
+            );
+        }
+    }
+    ledger.validate(new_config)?;
+    serde_json::to_vec(&ledger).context("serialize migration pairing ledger")
+}
+
 fn validate_credential_digest(value: &str) -> Result<()> {
     if value.len() != 64
         || !value

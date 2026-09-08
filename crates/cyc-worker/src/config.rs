@@ -270,6 +270,54 @@ pub struct WorkerConfig {
 }
 
 impl WorkerConfig {
+    /// Build a relocation candidate without reading credentials or changing disk.
+    /// The migration transaction must separately prove quiescence, source ACLs,
+    /// boot-generation preservation, and target ownership before using it.
+    pub fn relocated(
+        &self,
+        old_config: &Path,
+        new_config: &Path,
+        new_workspace: &Path,
+    ) -> Result<Self> {
+        self.validate()?;
+        if !old_config.is_absolute()
+            || !new_config.is_absolute()
+            || !new_workspace.is_absolute()
+            || old_config.file_name() != new_config.file_name()
+        {
+            bail!("migration requires absolute paths and an unchanged config filename");
+        }
+        for path in [old_config, new_config, new_workspace] {
+            if path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+            {
+                bail!("migration paths must not contain parent traversal");
+            }
+        }
+        if self.credential_file.parent() != old_config.parent()
+            || self
+                .credential_file
+                .extension()
+                .and_then(|value| value.to_str())
+                != Some("credential")
+        {
+            bail!("migration credential must be a direct child of the old config directory");
+        }
+        let target = new_config
+            .parent()
+            .context("migration target has no parent")?;
+        let mut relocated = self.clone();
+        relocated.workspace_root = new_workspace.to_path_buf();
+        relocated.credential_file = target.join(
+            self.credential_file
+                .file_name()
+                .context("migration credential has no filename")?,
+        );
+        relocated.validate()?;
+        Ok(relocated)
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         ensure_protected_input(path)
             .with_context(|| format!("refuse unprotected worker config {}", path.display()))?;
