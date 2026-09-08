@@ -5,12 +5,12 @@ the current checkout and live GitHub state, rather than on chat history. Update
 it in the same pull request as every implementation, CI, packaging, or release
 change.
 
-- **Snapshot date:** 2026-09-07
+- **Snapshot date:** 2026-09-08
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
-- **Snapshot baseline:** public candidate `v0.1.0-preview.95`, source commit `6d06f84f3c95d6be8d5151a8950065f0602d651b`; the local checkout and GitHub release index resolve to the same tag and commit.
-- **Latest published preview:** [`v0.1.0-preview.95`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.95), published by tagged workflow [`34052588313`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34052588313); GitHub reports `isPrerelease=true` and `isDraft=false`, with 23 release assets. The Windows x64 self-contained and clean Windows 11 ARM64 acceptance jobs completed successfully.
+- **Snapshot baseline:** published `v0.1.0-preview.100`, source commit `2c269842dbc15934b5cfcf6a4cb3e0844cec3ed5`. Documentation and merge reconciliation may advance beyond this immutable release SHA.
+- **Latest published preview:** [`v0.1.0-preview.100`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.100), published 2026-09-07 17:42:22 UTC by successful tagged workflow [`34128668756`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34128668756). GitHub reports `isPrerelease=true`, `isDraft=false`, and 23 assets. Windows self-contained and clean Windows 11 ARM64 compatibility acceptance both passed.
 - **Previous stable-testing exception:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85) remains immutable **stable-testing** (`isPrerelease=false`) for the explicitly authorized test channel. Its embedded product version is still a preview; it is not Certified GA.
-- **Release channels:** preview.95 is the current public prerelease; preview.91 remains an older immutable fallback after the stalled preview.94 workflow was canceled before publication. Certified GA remains blocked by the open Issue #2, #3, and #5 acceptance gates; no `prerelease=false` Certified GA release has been created.
+- **Release channels:** preview.100 is the current public prerelease; preview.95 remains an immutable fallback. Certified GA remains separate from operator testing; open Issues #2, #3, and #5 retain their unverified platform, signing, and isolation gates.
 
 ## Current delivery goal: core usability before polish
 
@@ -96,6 +96,29 @@ packaged archive or hosted smoke test does not substitute for a real host,
 service-manager, credential, or cross-node acceptance gate.
 
 ## Current CI and release state
+
+### 2026-09-08: preview.100 available for operator testing
+
+- Tagged workflow `34128668756` completed successfully, including Windows
+  self-contained packaging, clean Windows 11 ARM64 x64-emulation fresh
+  deployment, silent Setup, and standard/admin/non-ASCII profile acceptance.
+- Preview.98 stopped at the outer Windows job timeout; preview.99 stopped at
+  a stale static timeout assertion. Neither was published. Preview.100 carries
+  the bounded budget and matching contract fix; per-attempt ceilings remain.
+- Independent release download verified all 11 SHA-256 sidecars and all 10
+  provenance subject hashes in `release-index.json`. The index binds the
+  product version and tag to source `2c269842dbc15934b5cfcf6a4cb3e0844cec3ed5`.
+  Installer SHA-256:
+  `8bf4ed52e8021fef888bb7acecaafcc5d099f4b2a5e87f11bfc6955ee071c9bf`.
+  These checks establish artifact consistency, not Authenticode signing.
+- PR #56 merged the earlier candidate. PR #57 reconciles its squash merge with
+  the preview.100 branch and updates the current download/status documentation.
+- Next acceptance action: launch the installed desktop, add one reachable
+  worker, save its credential, install/pair, connect Codex, then return a real
+  job result and logs. Browser-only UI checks do not satisfy that native path.
+  Non-blocking UI polish remains in the feedback backlog.
+
+### Earlier source and release evidence (historical)
 
 - The core-usability candidate merged as PR [#54](https://github.com/TypeThe0ry/ClusterYourCodex/pull/54) at `a103306ec7b2ba8a7b3571fc24317a4876928bf2`. The CI run [`34027758058`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34027758058) passed Windows desktop lifecycle and managed worker kits, the Windows controller/worker live round trip, Rust workspace tests on Windows/Ubuntu/macOS, native worker kits, and MSRV. The separate CodeQL run [`34027758039`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34027758039) and Dependency security run [`34027758028`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34027758028) also passed. The candidate's local evidence also passed the same-host Windows `queued` → `running` → `succeeded` path with heartbeat, logs, artifact, cleanup, and secret scanning.
 

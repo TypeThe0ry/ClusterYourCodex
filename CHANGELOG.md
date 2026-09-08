@@ -23,7 +23,7 @@ are versioned independently from the product.
 - Keep the Windows packaging contract aligned with the bounded 180-minute
   hosted-runner budget used by the self-contained and clean ARM64 preview
   jobs. The `.99` run failed closed on this stale exact-`120` assertion before
-  any installer lifecycle assertion executed; the production workflow and its
+  packaged archive and Setup acceptance ran; the production workflow and its
   per-attempt 900-second ceilings remain unchanged.
 
 ### Tests

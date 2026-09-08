@@ -5,7 +5,7 @@ container, GPU, and batch workloads on the best compatible computer in a
 user-owned fleet, then return verified logs and artifacts.
 
 > **Release status:** Windows-first public developer preview
-> [`v0.1.0-preview.95`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.95)
+> [`v0.1.0-preview.100`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.100)
 > is the current public non-draft GitHub prerelease candidate. The Windows
 > controller/desktop and trusted-job Windows/Linux worker paths are
 > implemented and CI-verified, but password/agent/private-key live authentication
@@ -44,6 +44,12 @@ verbatim by design. Optional SSH fields and the full technical verification
 record stay under **Advanced options** so the normal setup path remains short.
 
 ## Windows preview setup and acceptance path
+
+**Try the desktop now:** download [Windows Setup](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.1.0-preview.100/ClusterYourCodex-Setup.exe)
+and its [SHA-256 sidecar](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.1.0-preview.100/ClusterYourCodex-Setup.exe.sha256).
+The published preview.100 passed the Windows self-contained and clean Windows
+11 ARM64 compatibility acceptance jobs. Use the installed desktop, not a
+browser-only renderer, for saving SSH credentials and installing workers.
 
 The flow below is the implemented preview workflow and the procedure for
 collecting live acceptance evidence. It is not a claim that every SSH

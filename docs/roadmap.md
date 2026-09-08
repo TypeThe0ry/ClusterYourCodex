@@ -41,7 +41,7 @@ feedback backlog and are handled in priority order.
 computer, retain its credential in the native vault, complete install/pair,
 submit a meaningful build or test, and show the verified result and logs. The
 current public candidate for this check is
-[`v0.1.0-preview.95`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.95).
+[`v0.1.0-preview.100`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.100).
 
 **Following goal:** after the core path is exercised, collect user feedback
 from the same build, record each reproducible issue with environment and
