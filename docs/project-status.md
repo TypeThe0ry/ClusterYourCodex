@@ -14,6 +14,17 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### 2026-09-08 Windows stable migration-source reads
+
+`LockedMigrationSource` now opens source files with read-only Windows sharing
+and retains non-delete-sharing ancestor handles before verifying the explicit
+old owner's existing ACLs. It never repairs ownership/permissions. The native
+local regression passed: writes, file rename and parent rename fail while held;
+bounded reads preserve contents; a wrong owner is rejected without changing
+the source; ordinary writes work after release. Targeted test exit 0 (5.44s),
+Clippy with denied warnings and diff checks passed. This is a Windows primitive,
+not an implemented live SYSTEM migration or a Linux/macOS ownership check.
+
 ### 2026-09-08 migration staging inspection CLI
 
 `cyc-worker migration-status --config <absolute config> [--pretty]` now provides

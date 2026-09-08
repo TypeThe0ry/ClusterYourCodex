@@ -38,6 +38,16 @@ output contains only phase, verified-file count and `activationAllowed=false`;
 no credentials or identity documents. This is an inspection command, not the
 unfinished migration/rollback coordinator or evidence of controller authentication.
 
+On Windows, `security::LockedMigrationSource` now pins source files and ancestor
+directories with native read handles. The file denies write/delete sharing;
+ancestor handles deny delete sharing to prevent path rebinding. It verifies the
+explicit old-owner SID against the existing parent/file ACL contract using only
+the verify action, and performs bounded reads without printing contents. The
+coordinator must retain these handles through staging and derive the SID from
+verified installation metadata; this primitive does not establish quiescence,
+acquire pairing/run locks, or switch tasks. Linux/macOS have no equivalent
+migration-source API yet and must not silently inherit Windows acceptance.
+
 ## Why ordinary Repair is insufficient
 
 The legacy failure mode has a SYSTEM task pointing at user-owned worker state.
