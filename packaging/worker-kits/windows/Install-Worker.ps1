@@ -27,7 +27,9 @@ param(
     [switch]$PurgeData,
 
     [ValidateSet('None', 'AfterPair', 'AfterServiceRegistration', 'BeforeManifestWrite')]
-    [string]$FailureInjection = 'None'
+    [string]$FailureInjection = 'None',
+
+    [string]$OwnerSid
 )
 
 Set-StrictMode -Version Latest
@@ -44,6 +46,20 @@ if ($InstanceName) { $script:OwnerMarkerValue += ':' + $InstanceName }
 $script:MarkerName = '.clusteryourcodex-worker-owned'
 $script:TransactionName = '.repair-transaction'
 $script:TransactionSchema = 'cyc.dev/windows-worker-repair-transaction/v1'
+$currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+if ([string]::IsNullOrWhiteSpace($OwnerSid)) {
+    $script:OwnerSid = $currentSid
+} else {
+    try {
+        $script:OwnerSid = (New-Object System.Security.Principal.SecurityIdentifier($OwnerSid)).Value
+    } catch {
+        throw 'OwnerSid must be a valid Windows security identifier.'
+    }
+    if ($currentSid -ne 'S-1-5-18' -and
+        -not [string]::Equals($script:OwnerSid, $currentSid, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Only SYSTEM may select a different private-state owner.'
+    }
+}
 
 function Get-WorkerInstanceLayout {
     param(
@@ -131,25 +147,31 @@ function Get-PrivatePrincipalSids {
     @($UserSid, 'S-1-5-18') | Sort-Object -Unique
 }
 
+function Get-PrivateOwnerSid {
+    $configured = Get-Variable -Name OwnerSid -Scope Script -ErrorAction SilentlyContinue
+    if ($null -ne $configured -and -not [string]::IsNullOrWhiteSpace([string]$configured.Value)) {
+        return [string]$configured.Value
+    }
+    return [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+}
+
 function New-PrivateAcl {
     param([Parameter(Mandatory = $true)][bool]$Directory)
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-    $userSid = $identity.User
-    $systemSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
+    $ownerSid = New-Object System.Security.Principal.SecurityIdentifier((Get-PrivateOwnerSid))
     $acl = if ($Directory) {
         New-Object System.Security.AccessControl.DirectorySecurity
     } else {
         New-Object System.Security.AccessControl.FileSecurity
     }
     $acl.SetAccessRuleProtection($true, $false)
-    $acl.SetOwner($userSid)
+    $acl.SetOwner($ownerSid)
     $inheritance = if ($Directory) {
         [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
     } else {
         [System.Security.AccessControl.InheritanceFlags]::None
     }
-    foreach ($sidText in @(Get-PrivatePrincipalSids -UserSid $userSid.Value)) {
-        $sid = if ($sidText -eq $userSid.Value) { $userSid } else { $systemSid }
+    foreach ($sidText in @(Get-PrivatePrincipalSids -UserSid $ownerSid.Value)) {
+        $sid = New-Object System.Security.Principal.SecurityIdentifier($sidText)
         $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
             $sid,
             [System.Security.AccessControl.FileSystemRights]::FullControl,
@@ -191,12 +213,12 @@ function Assert-PrivateAcl {
     } else {
         [System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.FileInfo]$Item)
     }
-    $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $ownerSid = Get-PrivateOwnerSid
     if (-not $acl.AreAccessRulesProtected -or
-        $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -cne $userSid) {
+        $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -cne $ownerSid) {
         throw "Existing private path ACL is weak or owned by another identity: $($Item.FullName)"
     }
-    $expectedSids = @(Get-PrivatePrincipalSids -UserSid $userSid)
+    $expectedSids = @(Get-PrivatePrincipalSids -UserSid $ownerSid)
     $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
     if ($rules.Count -ne $expectedSids.Count) {
         throw "Existing private path ACL contains an unexpected principal set: $($Item.FullName)"
@@ -1430,6 +1452,7 @@ if ($resolvedScope -eq 'System') {
             Action = $Action; BundleRoot = (Resolve-NormalizedPath $BundleRoot)
             InstallRoot = (Resolve-NormalizedPath $InstallRoot); DataRoot = (Resolve-NormalizedPath $DataRoot)
             WorkspaceRoot = (Resolve-NormalizedPath $WorkspaceRoot); Scope = 'System'
+            OwnerSid = $script:OwnerSid
             AllowOnBattery = [bool]$AllowOnBattery; PairOnly = [bool]$PairOnly
             PurgeData = [bool]$PurgeData; FailureInjection = $FailureInjection; InstanceName = $InstanceName
         }

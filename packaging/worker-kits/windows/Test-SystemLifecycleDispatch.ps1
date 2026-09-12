@@ -29,7 +29,7 @@ if ($dispatchBlock -isnot [System.Management.Automation.Language.StatementBlockA
     throw 'Administrator dispatch must return before root ownership preflight.'
 }
 $names = @('Invoke-SystemWorkerLifecycle', 'Resolve-NormalizedPath', 'Test-ReparsePoint', 'Assert-PathChainNoReparse',
-    'Assert-CreationPathNoReparse', 'Get-PrivatePrincipalSids', 'New-PrivateAcl', 'Set-AclPortable',
+    'Assert-CreationPathNoReparse', 'Get-PrivatePrincipalSids', 'Get-PrivateOwnerSid', 'New-PrivateAcl', 'Set-AclPortable',
     'Assert-PrivateAcl', 'Protect-Directory', 'Protect-File')
 foreach ($name in $names) {
     $found = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true))

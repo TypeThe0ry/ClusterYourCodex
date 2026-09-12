@@ -27,7 +27,7 @@ fn locked_source_stages_identity_without_touching_original_files() {
     )
     .unwrap();
     ledger["records"][0]["credentialSha256"] =
-        json!(hex::encode(Sha256::digest(b"source-fixture-token")));
+        json!(hex::encode(Sha256::digest(b"source-credential-fixture")));
     config.write(&old).unwrap();
     write_secret_file(&config.workspace_root.join("fixture-marker"), "fixture").unwrap();
     write_secret_file(
@@ -40,7 +40,7 @@ fn locked_source_stages_identity_without_touching_original_files() {
         r#"{"apiVersion":"cyc.dev/worker-boot-generation/v1","generation":29}"#,
     )
     .unwrap();
-    write_secret_file(&config.credential_file, "source-fixture-token").unwrap();
+    write_secret_file(&config.credential_file, "source-credential-fixture").unwrap();
     let before = std::fs::read(&old).unwrap();
     let output = std::process::Command::new("whoami.exe")
         .args(["/user", "/fo", "csv", "/nh"])
@@ -62,14 +62,14 @@ fn locked_source_stages_identity_without_touching_original_files() {
     assert_eq!(std::fs::read(&old).unwrap(), before);
     assert_eq!(
         std::fs::read(&config.credential_file).unwrap(),
-        b"source-fixture-token"
+        b"source-credential-fixture"
     );
     let converted: WorkerConfig = serde_json::from_slice(&std::fs::read(&new).unwrap()).unwrap();
     assert_eq!(converted.node_id, config.node_id);
     assert_eq!(converted.controller_id, config.controller_id);
     assert_eq!(
         std::fs::read(&converted.credential_file).unwrap(),
-        b"source-fixture-token"
+        b"source-credential-fixture"
     );
 }
 
@@ -81,9 +81,8 @@ fn migration_staging_validates_before_writes_and_preserves_exact_bytes() {
     let temporary = tempfile::tempdir().unwrap();
     let (config, mut ledger, old, _) = fixture();
     let new = temporary.path().join("private/staged/config.json");
-    let secret = b"fixture-migration-token\n".to_vec();
-    ledger["records"][0]["credentialSha256"] =
-        json!(hex::encode(Sha256::digest(b"fixture-migration-token")));
+    let secret: Vec<u8> = (0u8..32).map(|index| b'a' + (index % 26)).collect();
+    ledger["records"][0]["credentialSha256"] = json!(hex::encode(Sha256::digest(&secret)));
     let boot = br#"{"apiVersion":"cyc.dev/worker-boot-generation/v1","generation":17}"#;
     let documents = relocate_identity_documents(
         &serde_json::to_vec(&config).unwrap(),
@@ -120,9 +119,7 @@ fn migration_staging_validates_before_writes_and_preserves_exact_bytes() {
     assert_eq!(receipt["phase"], "staged");
     assert_eq!(receipt["activationAllowed"], false);
     assert_eq!(receipt["files"].as_array().unwrap().len(), 4);
-    assert!(!String::from_utf8(journal)
-        .unwrap()
-        .contains("fixture-migration-token"));
+    assert!(!journal.windows(secret.len()).any(|window| window == secret));
     assert!(stage_identity_documents(&new, &documents, &credentials).is_err());
     assert_eq!(std::fs::read(&current.target).unwrap(), secret);
     let inspected = cyc_worker::migration::inspect_migration_stage(&new).unwrap();
@@ -154,9 +151,10 @@ fn migration_staging_validates_before_writes_and_preserves_exact_bytes() {
     let public: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(public["phase"], "staged");
     assert_eq!(public["activationAllowed"], false);
-    assert!(!String::from_utf8(output.stdout)
-        .unwrap()
-        .contains("fixture-migration-token"));
+    assert!(!output
+        .stdout
+        .windows(secret.len())
+        .any(|window| window == secret));
     std::fs::write(&current.target, b"changed").unwrap();
     assert!(cyc_worker::migration::inspect_migration_stage(&new).is_err());
     std::fs::write(&current.target, &secret).unwrap();

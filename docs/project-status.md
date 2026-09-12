@@ -453,14 +453,14 @@ This frontend-only change does not alter worker lifecycle or release status.
 
 ### 2026-09-08 SYSTEM lifecycle dispatcher implementation
 
-Native SYSTEM ACL acceptance now passed on Helio (remote exit 0), using exact
-private-ACL functions extracted from the current installer, not mocked identity
+Native SYSTEM ACL acceptance now passed on a Windows test host (remote exit 0),
+using exact private-ACL functions extracted from the current installer, not mocked identity
 or scheduler calls. A real temporary SYSTEM task created/protected/revalidated
 a directory and file and read its known non-secret content. Receipt: runtime
 SID and owner `S-1-5-18`, protected DACL, exactly one rule. Independent follow-up
 found zero native-probe tasks; the original worker task stayed Ready/result 1.
-Evidence retained remotely at
-`C:\ProgramData\ClusterYourCodex-native-acl-9676d563a0ff4f47afc86bbb70464b66`.
+Evidence remains in the test host's isolated, job-owned directory; the absolute
+host path is intentionally omitted from repository documentation.
 Reproducer: `packaging/worker-kits/windows/Test-SystemPrivateAclNative.ps1`.
 Installer SHA256:
 `FE4E42584B1EC8C424CBF117F44F1FBA64FB50262953167EDDC4C44F3B362DDC`;
@@ -470,12 +470,12 @@ This proves the native ACL primitive only, not signed-kit dispatch, pairing,
 worker startup, service restart, or full task round-trip acceptance. The probe
 retains a tiny protected evidence tree and never edits existing worker data.
 
-Latest read-only Helio recheck: SSH has an elevated administrator token; the
+Latest read-only Windows-host recheck: SSH has an elevated administrator token; the
 `ClusterYourCodex Worker` task exists with SYSTEM principal, Ready state, and
 LastTaskResult 1. No `cyc-worker` process is currently present. The earlier
 foreground proof remains historical execution evidence, not current availability.
-The controller shell is not elevated. Helio C: free space was 1,309,270,016 bytes;
-avoid a full remote debug build or unrelated cleanup. These probes changed no
+The controller shell is not elevated; no capacity snapshot is retained here.
+Avoid a full remote debug build or unrelated cleanup. These probes changed no
 remote task, process, ACL, pairing, or worker data.
 
 The Windows installer now delegates the entire System-scope lifecycle to a
@@ -485,13 +485,17 @@ uses a per-data-root mutex, private request/result files, and the copied verifie
 five-file kit. The parent waits for actual helper completion and a successful
 exit/receipt; failed/timed-out operations retain evidence, while successful
 handoffs delete only their exact known files. WhatIf stops before dispatch.
+System-scope handoffs carry the invoking administrator SID into the SYSTEM
+child, so newly created worker roots remain administrator-owned while SYSTEM
+retains the required access; a different administrator is rejected on repair
+or uninstall instead of taking ownership.
 
 The dispatcher fixture passed under PowerShell 7 and Windows PowerShell 5.1,
 covering successful receipt/cleanup, failure evidence retention, timeout stop,
 non-admin rejection, SYSTEM task principal, copied kit shape, and generated
 helper syntax. Scheduler operations are mocked; private filesystem/ACL actions
 are real. No actual SYSTEM process, live migration, or remote persistent worker
-acceptance is claimed by these tests. The existing Helio foreground worker and
+acceptance is claimed by these tests. The existing foreground worker and
 user-owned data were not modified. Existing task/root conflicts remain explicit;
 there is no automatic ownership takeover. The full worker-kit regression failed
 at its 600-second `linux-worker-lifecycle` watchdog on Windows/Git Bash. Retained
