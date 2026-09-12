@@ -14,16 +14,17 @@ change.
 
 ### Current checkpoint — 2026-09-12
 
-PR #58 is the active lifecycle candidate. The preceding candidate head
-`4dce49137800f4bc992c300db188ed4f6bcd996a` passed CI run
-[`34690034466`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34690034466),
+PR #58 was merged at 2026-09-12 12:56:44 UTC as merge commit
+`36d3deeddf50620dba072ac59ead78e07f4f6e04`. Its final head
+`28c178ed89c90093f943eef300e9eaf24333632b` passed CI run
+[`34693095922`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34693095922),
 including Windows controller/worker live round trip, managed worker kits,
 Windows installer lifecycle, Rust/desktop tests, CodeQL, and dependency gates.
-The current follow-up binds Windows named-instance and service-scope discovery
-to the installer's actual workspace layout; its focused provisioning regression
-passes locally (45 tests). A fresh CI run is required for this follow-up before
-merge. The latest public build remains preview.100 and is still a GitHub
-prerelease; no stable GA release has been created.
+That follow-up binds Windows named-instance and service-scope discovery to the
+installer's actual workspace layout; its focused provisioning regression passed
+locally (45 tests). All ten review threads were resolved before the automatic
+squash merge. The latest public build remains preview.100 and is still a
+GitHub prerelease; no stable GA release has been created.
 
 ## Current delivery goal: core usability before polish
 
@@ -47,10 +48,10 @@ GitHub confirms parents `2b1a755b1072c63f8e74ac08b695b480bf6a828c` and the
 candidate head above. This is same-host Windows live evidence, not remote SSH
 installation or persistent-service acceptance.
 
-Auto squash merge is enabled. Review discussions must remain resolved and the
-repository still requires an approving review; no discussion or branch
-protection is bypassed. The remaining Windows discovery workspace issue is
-addressed in the current follow-up and will be rechecked by fresh CI.
+At that historical checkpoint, auto squash merge was enabled and review
+discussions were still being reconciled. The final follow-up resolved all
+threads and merged only after the required checks passed; no branch-protection
+rule was bypassed.
 
 The named-instance tests cover layout, task ownership and lifecycle argument
 selection with mocked scheduled tasks; the native persistence regression
