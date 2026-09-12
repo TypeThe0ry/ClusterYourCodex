@@ -22,7 +22,7 @@ reqwest.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
+sha2 = "0.11"
 sysinfo = "0.33"
 tar = "0.4"
 tokio.workspace = true
