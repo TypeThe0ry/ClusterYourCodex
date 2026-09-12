@@ -14,6 +14,72 @@ change.
 
 ## Current delivery goal: core usability before polish
 
+### Candidate CI checkpoint — 2026-09-08
+
+PR #58 head `ff7da71ff8cce24db658ae1049b5406747898f80` passed
+CI run `34235712011`. Windows workspace Rust completed successfully in
+23m50s. CodeQL and dependency checks also passed. The remaining desktop job
+`102093450517` has passed native tests, Clippy, Windows installer lifecycle
+validation, and managed worker-kit validation. The kit validation completed at
+14:38:32 UTC after 11m07s. The live Windows controller/worker step started at
+that timestamp and passed. Downloaded artifact `10061628508` contains a passed
+result with all 14 checks true, queued/running/succeeded transitions, and a
+37-second task. Downloaded stdout contains both expected step markers. The
+43-byte result.txt hashes to
+`7a628a8467fea26c070c97c2be9ecbad371a2d279443a8726efb651ab3bc34b0`, matching
+the controller artifact record. The result.json SHA-256 is
+`2c6a2b7c99137159b4701a48647c1ce3afb78bc7e06271984e8bdd74f92685f4`.
+Executed source is the PR merge ref `1f09de019589aef9d3249b45d357b37bf70b872b`;
+GitHub confirms parents `2b1a755b1072c63f8e74ac08b695b480bf6a828c` and the
+candidate head above. This is same-host Windows live evidence, not remote SSH
+installation or persistent-service acceptance.
+
+Auto squash merge is enabled, but seven unresolved review discussions still
+block merging. In particular, the current SYSTEM dispatcher still needs review
+of copied-kit validation, uninstall dependence on a complete kit, and enrollment
+file staging. No discussion or branch protection was bypassed.
+
+The named-instance tests cover layout, task ownership and lifecycle argument
+selection with mocked scheduled tasks; the native persistence regression
+covers reopening the computer record. Neither proves a newly installed remote
+named worker survives a service restart. After signed candidate publication,
+that remains the next Windows acceptance step, followed by a fresh task and
+retrieved logs/artifact bytes. Local UI copy edits are not part of this CI SHA.
+
+### Live controller check at 2026-09-08 14:04 UTC
+
+The installed ClusterYourCodex MCP reports controller/database healthy and MCP
+available, still at preview.100. Its only registered worker, Helio live usability,
+is offline with stale telemetry (last accepted at 10:18:26 UTC). The reported
+1251 MiB free disk is cached, not a fresh installation-capacity measurement.
+The controller retains job `7c09a0be-764b-527a-a31d-1867523b2448` as succeeded,
+exit 0, with artifact ID `1cc32963-cbb9-4d5a-9354-de7038fbb583`; this read does
+not revalidate artifact bytes or prove ongoing persistent-service availability.
+No new job was submitted to the offline worker.
+
+Follow-up runner probes (strict known-host verification, exit 0) confirmed Helio
+SSH reachable, approximately 1.5 GB free disk, and no cyc-worker process. The
+default worker task is Ready (not Running), principal SYSTEM, last result 1.
+Its executable/workspace target sshadmin's LocalAppData directories; installation
+root, data root and config.json are owned by WS\sshadmin and are not reparse
+points. Default Program Files/ProgramData worker roots and named-instance roots
+do not exist. This is a confirmed principal/ownership mismatch consistent with
+the worker's current-user owner validation, not a network outage. No task,
+credential, ACL or worker data was changed by these probes. Exact failure stderr
+under SYSTEM was not reproduced in this read-only check.
+
+Linux fallback probes confirmed P1 reachable (exit 0), but root and the
+configured workspace share an ext4 filesystem at 100% use with only 299 MB
+available. No alternate persistent data filesystem was found in lsblk. /tmp
+is tmpfs and is not a substitute for durable worker-service acceptance. The
+queried systemd unit patterns returned no loaded worker units; this does not
+prove that no differently named or disabled unit exists. NUC TCP/22 was
+unavailable. No cleanup, installation or heavy job was attempted on either node.
+
+The preview.101 debug desktop executable built successfully from the candidate
+source. SHA-256: `585fff368c63916a62346db23d9407bd5358fb56dc858415245e12f5f23a51d4`.
+It was not launched or installed and is not the signed distribution package.
+
 Local candidate metadata is prepared as `0.1.0-preview.101`; no tag or release
 has been created. Published preview.100 remains unchanged. The candidate must
 pass exact-version checks and CI before a signed prerelease build is published.
@@ -25,9 +91,10 @@ private-file protection checks also passed. The private-file check ran under
 PowerShell 7 as required; its initial PowerShell 5.1 invocation was rejected
 before execution. These results do not replace exact-candidate CI or deployment.
 
-Named-instance implementation commit `f3c199a` is pushed to PR #58, with squash
-auto-merge still enabled. Its CI run `34234534065` is active across Windows,
-Linux and both macOS kit architectures; product version identity passed.
+Named-instance implementation commit `f3c199a` is included in PR #58, with
+squash auto-merge still enabled. Its CI run `34234534065` ended cancelled;
+the current candidate run is `34235712011` for head `ff7da71`. The cancelled
+run is not evidence of completed platform acceptance.
 The preceding run `34230627688` ended cancelled, not successful, and must not
 be cited as completed Windows desktop acceptance.
 Local full worker-kit testing completed with exit 0 and

@@ -21,7 +21,12 @@ $script:registered = $false
 $script:stopped = $false
 $script:workdir = ''
 function Test-IsAdministrator { return $script:isAdmin }
-function Read-KitManifest { param($Root) if (-not (Test-Path -LiteralPath (Join-Path $Root 'worker-kit.sig'))) { throw 'Missing signature fixture' } }
+function Read-KitManifest {
+    param($Root)
+    $script:validatedRoots += $Root
+    if ($script:mode -eq 'reject-copy' -and $script:validatedRoots.Count -eq 2) { throw 'Copied kit validation rejected fixture' }
+    if (-not (Test-Path -LiteralPath (Join-Path $Root 'worker-kit.sig'))) { throw 'Missing signature fixture' }
+}
 function Read-WorkerUtf8Json { param($Path, $Label, $MaximumBytes) return ([System.IO.File]::ReadAllText($Path) | ConvertFrom-Json) }
 function New-ScheduledTaskAction {
     param($Execute, $Argument, $WorkingDirectory)
@@ -35,12 +40,21 @@ function New-ScheduledTaskPrincipal {
     return @{}
 }
 function New-ScheduledTaskSettingsSet { param($MultipleInstances, $ExecutionTimeLimit, [switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries) return @{} }
-function Register-ScheduledTask { param($TaskName, $TaskPath, $Action, $Principal, $Settings) $script:registered = $true }
+function Register-ScheduledTask {
+    param($TaskName, $TaskPath, $Action, $Principal, $Settings)
+    if ($script:validatedRoots.Count -ne 2 -or $script:validatedRoots[1] -cne (Join-Path $script:workdir 'kit')) {
+        throw 'Copied kit was not validated before dispatch'
+    }
+    $script:registered = $true
+}
 function Start-ScheduledTask {
     param($TaskName, $TaskPath)
     $request = [System.IO.File]::ReadAllText((Join-Path $script:workdir 'request.json')) | ConvertFrom-Json
     if ($request.Scope -cne 'System' -or -not $request.PairOnly) { throw 'Lost lifecycle parameters' }
     if (@(Get-ChildItem -LiteralPath $request.BundleRoot -File).Count -ne 5) { throw 'Kit copy incomplete' }
+    if ($request.EnrollmentFile -cne (Join-Path $script:workdir 'enrollment.json')) { throw 'Enrollment was not staged locally' }
+    if ([System.IO.File]::ReadAllText($request.EnrollmentFile) -cne 'synthetic-enrollment-fixture') { throw 'Enrollment bytes changed' }
+    Assert-PrivateAcl -Item (Get-Item -LiteralPath $request.EnrollmentFile) -Directory $false
     $helperErrors = $null
     $helperTokens = $null
     [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:workdir 'lifecycle.ps1'), [ref]$helperTokens, [ref]$helperErrors)
@@ -71,13 +85,17 @@ $bundle = Join-Path $fixtureRoot 'source'
 foreach ($name in @('Install-Worker.ps1', 'cyc-worker.exe', 'worker-kit.json', 'worker-kit.sig', 'SHA256SUMS')) {
     [System.IO.File]::WriteAllText((Join-Path $bundle $name), 'fixture')
 }
+$enrollment = Join-Path $fixtureRoot 'source-enrollment.json'
+[System.IO.File]::WriteAllText($enrollment, 'synthetic-enrollment-fixture')
 foreach ($mode in @('success', 'failure', 'timeout', 'crash')) {
     $script:mode = $mode
     $script:stopped = $false
     $script:pollCount = 0
-    $parameters = @{ BundleRoot = $bundle; Scope = 'System'; Action = 'Install'; PairOnly = $true }
+    $script:validatedRoots = @()
+    $parameters = @{ BundleRoot = $bundle; Scope = 'System'; Action = 'Install'; PairOnly = $true; EnrollmentFile = $enrollment }
     $failed = $false
     $failureMessage = ''
+    $output = ''
     $priorStderr = [Console]::Error
     $capturedStderr = New-Object System.IO.StringWriter
     $timeout = if ($mode -eq 'timeout') { 6 } else { 1 }
@@ -87,7 +105,7 @@ foreach ($mode in @('success', 'failure', 'timeout', 'crash')) {
     }
     catch { $failed = $true; $failureMessage = $_.Exception.Message }
     finally { [Console]::SetError($priorStderr) }
-    if ($failed -ne ($mode -ne 'success')) { throw "Unexpected outcome for $mode" }
+    if ($failed -ne ($mode -ne 'success')) { throw "Unexpected outcome for $mode (message=$failureMessage; output=$($output | Out-String); roots=$($script:validatedRoots -join '|'); workdir=$script:workdir)" }
     if ($script:registered) { throw "Scheduler task leaked for $mode" }
     if ($mode -eq 'crash' -and ($failureMessage -notmatch 'exited without a receipt' -or $script:stopped)) {
         throw 'A completed failed helper without a receipt must fail immediately, not time out or be stopped again'
@@ -101,6 +119,13 @@ foreach ($mode in @('success', 'failure', 'timeout', 'crash')) {
     }
     $capturedStderr.Dispose()
 }
+if (-not (Test-Path -LiteralPath $enrollment)) { throw 'Original enrollment was removed by handoff' }
+$script:mode = 'reject-copy'
+$script:validatedRoots = @()
+$rejectedCopy = $false
+try { Invoke-SystemWorkerLifecycle -Parameters @{ BundleRoot = $bundle } -HandoffParent $fixtureRoot }
+catch { $rejectedCopy = $_.Exception.Message -eq 'Copied kit validation rejected fixture' }
+if (-not $rejectedCopy -or $script:registered) { throw 'Rejected copied kit reached dispatch' }
 $script:isAdmin = $false
 $denied = $false
 try { Invoke-SystemWorkerLifecycle -Parameters @{ BundleRoot = $bundle } -HandoffParent $fixtureRoot } catch { $denied = $true }

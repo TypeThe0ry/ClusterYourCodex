@@ -27,6 +27,11 @@ are versioned independently from the product.
 
 ### Changed
 
+- Harden the Windows SYSTEM lifecycle handoff by validating the protected kit
+  copy before task registration and staging enrollment files inside the
+  protected handoff directory. Add regression coverage for copied-kit
+  validation, enrollment byte preservation, and cleanup behavior.
+
 - Remove promotional page subtitles and duplicate headers. Keep the global
   bar limited to language, connection state, and refresh; computer actions
   stay in the overview and Computers page rather than unrelated task pages.

@@ -862,8 +862,7 @@ function Invoke-SystemWorkerLifecycle {
         [ValidateRange(1, 300)][int]$TimeoutSeconds = 300
     )
     if (-not (Test-IsAdministrator)) { throw 'System lifecycle requires an elevated administrator.' }
-    # Verify before copying anything into an elevated execution path. The child
-    # verifies the copied kit again through the normal installer entry point.
+    # Verify the source and the protected copy before executing any copied code.
     $null = Read-KitManifest -Root $Parameters.BundleRoot
     $handoffRoot = Join-Path $HandoffParent ('ClusterYourCodex-lifecycle-' + [Guid]::NewGuid().ToString('N'))
     Protect-Directory -Path $handoffRoot
@@ -874,7 +873,23 @@ function Invoke-SystemWorkerLifecycle {
         Copy-Item -LiteralPath (Join-Path $Parameters.BundleRoot $name) -Destination $destination
         Protect-File -Path $destination -NewlyCreated
     }
+    $null = Read-KitManifest -Root $kitRoot
     $Parameters.BundleRoot = $kitRoot
+    $stagedEnrollment = $null
+    if ($Parameters.ContainsKey('EnrollmentFile') -and $Parameters.EnrollmentFile) {
+        $sourceEnrollment = Resolve-NormalizedPath $Parameters.EnrollmentFile
+        Assert-PathChainNoReparse -Path $sourceEnrollment
+        $sourceItem = Get-Item -LiteralPath $sourceEnrollment -Force
+        if ($sourceItem.PSIsContainer -or $sourceItem.Length -le 0 -or $sourceItem.Length -gt 2MB) {
+            throw 'Enrollment file is invalid.'
+        }
+        $stagedEnrollment = Join-Path $handoffRoot 'enrollment.json'
+        Copy-Item -LiteralPath $sourceEnrollment -Destination $stagedEnrollment
+        Protect-File -Path $stagedEnrollment -NewlyCreated
+        $stagedItem = Get-Item -LiteralPath $stagedEnrollment -Force
+        if ($stagedItem.Length -le 0 -or $stagedItem.Length -gt 2MB) { throw 'Enrollment file is invalid.' }
+        $Parameters.EnrollmentFile = $stagedEnrollment
+    }
     $requestPath = Join-Path $handoffRoot 'request.json'
     $resultPath = Join-Path $handoffRoot 'result.json'
     $helperPath = Join-Path $handoffRoot 'lifecycle.ps1'
@@ -987,6 +1002,10 @@ if (-not $result.succeeded) { exit 1 }
             foreach ($ownedPath in @($requestPath, $helperPath, $resultPath)) {
                 Assert-PathChainNoReparse -Path $ownedPath
                 Remove-Item -LiteralPath $ownedPath -Force
+            }
+            if ($stagedEnrollment -and (Test-Path -LiteralPath $stagedEnrollment)) {
+                Assert-PathChainNoReparse -Path $stagedEnrollment
+                Remove-Item -LiteralPath $stagedEnrollment -Force
             }
             if (@(Get-ChildItem -LiteralPath $handoffRoot -Force).Count -eq 0) { Remove-Item -LiteralPath $handoffRoot }
         }
