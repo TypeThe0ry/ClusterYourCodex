@@ -49,7 +49,7 @@ retrieved logs/artifact bytes. Local UI copy edits are not part of this CI SHA.
 ### Live controller check at 2026-09-08 14:04 UTC
 
 The installed ClusterYourCodex MCP reports controller/database healthy and MCP
-available, still at preview.100. Its only registered worker, Helio live usability,
+available, still at preview.100. Its only registered worker, the primary Windows test host,
 is offline with stale telemetry (last accepted at 10:18:26 UTC). The reported
 1251 MiB free disk is cached, not a fresh installation-capacity measurement.
 The controller retains job `7c09a0be-764b-527a-a31d-1867523b2448` as succeeded,
@@ -57,7 +57,7 @@ exit 0, with artifact ID `1cc32963-cbb9-4d5a-9354-de7038fbb583`; this read does
 not revalidate artifact bytes or prove ongoing persistent-service availability.
 No new job was submitted to the offline worker.
 
-Follow-up runner probes (strict known-host verification, exit 0) confirmed Helio
+Follow-up runner probes (strict known-host verification, exit 0) confirmed the Windows test host
 SSH reachable, approximately 1.5 GB free disk, and no cyc-worker process. The
 default worker task is Ready (not Running), principal SYSTEM, last result 1.
 Its executable/workspace target sshadmin's LocalAppData directories; installation
@@ -68,12 +68,12 @@ the worker's current-user owner validation, not a network outage. No task,
 credential, ACL or worker data was changed by these probes. Exact failure stderr
 under SYSTEM was not reproduced in this read-only check.
 
-Linux fallback probes confirmed P1 reachable (exit 0), but root and the
+Linux fallback probes confirmed a Linux test host reachable (exit 0), but root and the
 configured workspace share an ext4 filesystem at 100% use with only 299 MB
 available. No alternate persistent data filesystem was found in lsblk. /tmp
 is tmpfs and is not a substitute for durable worker-service acceptance. The
 queried systemd unit patterns returned no loaded worker units; this does not
-prove that no differently named or disabled unit exists. NUC TCP/22 was
+prove that no differently named or disabled unit exists. A secondary worker endpoint was
 unavailable. No cleanup, installation or heavy job was attempted on either node.
 
 The preview.101 debug desktop executable built successfully from the candidate

@@ -2,8 +2,8 @@
 
 ## Scope and outcome
 
-Native P1 x86_64, existing password-SSH runner, isolated directory:
-`/srv/codex-worker/jobs/20260908-preview100-native-acceptance`.
+Native Linux x86_64 test host, existing password-SSH runner, isolated job-owned directory:
+`<job-owned-root>/20260908-preview100-native-acceptance`.
 This is a real Linux **unpaired** signed-kit install/repair/uninstall test,
 not a fake-systemd fixture and not end-to-end onboarding acceptance.
 
@@ -35,12 +35,12 @@ was performed by that command.
 
 ## Resources and retained state
 
-P1 had 347,729,920 bytes available before acquisition, and 317,915,136 bytes
+The Linux test host had 347,729,920 bytes available before acquisition, and 317,915,136 bytes
 after uninstall. No builds, package installations, or unrelated cleanup ran.
 The downloaded archive, sidecar, extracted signed kit and test data remain in
 the isolated directory. Uninstall removed only its installed executable; it
 can be restored from the retained kit. No worker was paired or service enabled.
-NUC SSH was unreachable; no action was performed there.
+An additional worker endpoint was unreachable; no action was performed there.
 
 ## Still required
 
