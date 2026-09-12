@@ -5,6 +5,29 @@ $tokens = $null
 $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Install-Worker.ps1'), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'Installer syntax invalid.' }
+# This is an ordering contract, not evidence of a native SYSTEM repair.
+# The administrator must return from dispatch before touching SYSTEM-owned roots.
+$dispatchCalls = @($ast.FindAll({ param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+    $node.GetCommandName() -eq 'Invoke-SystemWorkerLifecycle'
+}, $true))
+$preflightCalls = @($ast.FindAll({ param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+    $node.GetCommandName() -eq 'Assert-ExistingPrivateDirectory'
+}, $true))
+if ($dispatchCalls.Count -ne 1 -or $preflightCalls.Count -ne 3) {
+    throw 'Unexpected SYSTEM dispatch or lifecycle preflight structure.'
+}
+foreach ($call in $preflightCalls) {
+    if ($dispatchCalls[0].Extent.EndOffset -ge $call.Extent.StartOffset) {
+        throw 'SYSTEM dispatch must precede every root ownership preflight.'
+    }
+}
+$dispatchBlock = $dispatchCalls[0].Parent.Parent
+if ($dispatchBlock -isnot [System.Management.Automation.Language.StatementBlockAst] -or
+    $dispatchBlock.Statements[-1] -isnot [System.Management.Automation.Language.ReturnStatementAst]) {
+    throw 'Administrator dispatch must return before root ownership preflight.'
+}
 $names = @('Invoke-SystemWorkerLifecycle', 'Resolve-NormalizedPath', 'Test-ReparsePoint', 'Assert-PathChainNoReparse',
     'Assert-CreationPathNoReparse', 'Get-PrivatePrincipalSids', 'New-PrivateAcl', 'Set-AclPortable',
     'Assert-PrivateAcl', 'Protect-Directory', 'Protect-File')

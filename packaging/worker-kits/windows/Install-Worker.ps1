@@ -179,8 +179,7 @@ function Set-AclPortable {
 function Assert-PrivateAcl {
     param(
         [Parameter(Mandatory = $true)][System.IO.FileSystemInfo]$Item,
-        [Parameter(Mandatory = $true)][bool]$Directory,
-        [string[]]$AllowedOwnerSid = @([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+        [Parameter(Mandatory = $true)][bool]$Directory
     )
     if ($Item.PSIsContainer -ne $Directory -or (Test-ReparsePoint $Item)) {
         throw "Private path is not a normal $([string]$(if ($Directory) { 'directory' } else { 'file' })): $($Item.FullName)"
@@ -193,9 +192,8 @@ function Assert-PrivateAcl {
         [System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.FileInfo]$Item)
     }
     $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $ownerSid = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
     if (-not $acl.AreAccessRulesProtected -or
-        $ownerSid -notin $AllowedOwnerSid) {
+        $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -cne $userSid) {
         throw "Existing private path ACL is weak or owned by another identity: $($Item.FullName)"
     }
     $expectedSids = @(Get-PrivatePrincipalSids -UserSid $userSid)
@@ -274,7 +272,7 @@ function Protect-File {
 
 function Assert-ExistingPrivateDirectory {
     <# Verify-only lifecycle preflight; never repair a pre-existing weak root. #>
-    param([Parameter(Mandatory = $true)][string]$Path, [string[]]$AllowedOwnerSid)
+    param([Parameter(Mandatory = $true)][string]$Path)
     $resolved = Resolve-NormalizedPath $Path
     if (-not (Test-Path -LiteralPath $resolved)) { return $resolved }
     Assert-PathChainNoReparse -Path $resolved
@@ -282,8 +280,7 @@ function Assert-ExistingPrivateDirectory {
     if (-not $item.PSIsContainer -or (Test-ReparsePoint $item)) {
         throw "Existing private path is not a normal directory: $resolved"
     }
-    $ownerAllowlist = if ($AllowedOwnerSid) { $AllowedOwnerSid } else { @([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value) }
-    Assert-PrivateAcl -Item $item -Directory $true -AllowedOwnerSid $ownerAllowlist
+    Assert-PrivateAcl -Item $item -Directory $true
     return $resolved
 }
 
@@ -1455,10 +1452,9 @@ $configPath = Join-Path $data 'config.json'
 $workerPath = Join-Path $install 'cyc-worker.exe'
 $markerPath = Join-Path $data $script:MarkerName
 $transactionPath = Join-Path $data $script:TransactionName
-$allowedLifecycleOwners = if ($resolvedScope -eq 'System') { @('S-1-5-18', [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value) } else { @([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value) }
-$null = Assert-ExistingPrivateDirectory -Path $install -AllowedOwnerSid $allowedLifecycleOwners
-$null = Assert-ExistingPrivateDirectory -Path $data -AllowedOwnerSid $allowedLifecycleOwners
-$null = Assert-ExistingPrivateDirectory -Path $workspace -AllowedOwnerSid $allowedLifecycleOwners
+$null = Assert-ExistingPrivateDirectory -Path $install
+$null = Assert-ExistingPrivateDirectory -Path $data
+$null = Assert-ExistingPrivateDirectory -Path $workspace
 if (Test-Path -LiteralPath $data -PathType Container) {
     foreach ($stagingDirectory in @(Get-ChildItem -LiteralPath $data -Force -Directory | Where-Object {
         $_.Name.StartsWith(($script:TransactionName + '.new-'), [System.StringComparison]::Ordinal)
