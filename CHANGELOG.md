@@ -27,6 +27,8 @@ are versioned independently from the product.
 
 ### Changed
 
+- Pin the transitive Hono dependency to patched 4.13.5 in the workspace
+  override so the MCP package does not resolve known moderate advisories.
 - Harden the Windows SYSTEM lifecycle handoff by validating the protected kit
   copy before task registration and staging enrollment files inside the
   protected handoff directory. Add regression coverage for copied-kit
