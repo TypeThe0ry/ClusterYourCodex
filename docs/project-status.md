@@ -5,12 +5,25 @@ the current checkout and live GitHub state, rather than on chat history. Update
 it in the same pull request as every implementation, CI, packaging, or release
 change.
 
-- **Snapshot date:** 2026-09-08
+- **Snapshot date:** 2026-09-12
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
 - **Snapshot baseline:** published `v0.1.0-preview.100`, source commit `2c269842dbc15934b5cfcf6a4cb3e0844cec3ed5`. Documentation and merge reconciliation may advance beyond this immutable release SHA.
 - **Latest published preview:** [`v0.1.0-preview.100`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.100), published 2026-09-07 17:42:22 UTC by successful tagged workflow [`34128668756`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34128668756). GitHub reports `isPrerelease=true`, `isDraft=false`, and 23 assets. Windows self-contained and clean Windows 11 ARM64 compatibility acceptance both passed.
 - **Previous stable-testing exception:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85) remains immutable **stable-testing** (`isPrerelease=false`) for the explicitly authorized test channel. Its embedded product version is still a preview; it is not Certified GA.
 - **Release channels:** preview.100 is the current public prerelease; preview.95 remains an immutable fallback. Certified GA remains separate from operator testing; open Issues #2, #3, and #5 retain their unverified platform, signing, and isolation gates.
+
+### Current checkpoint — 2026-09-12
+
+PR #58 is the active lifecycle candidate. The preceding candidate head
+`4dce49137800f4bc992c300db188ed4f6bcd996a` passed CI run
+[`34690034466`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34690034466),
+including Windows controller/worker live round trip, managed worker kits,
+Windows installer lifecycle, Rust/desktop tests, CodeQL, and dependency gates.
+The current follow-up binds Windows named-instance and service-scope discovery
+to the installer's actual workspace layout; its focused provisioning regression
+passes locally (45 tests). A fresh CI run is required for this follow-up before
+merge. The latest public build remains preview.100 and is still a GitHub
+prerelease; no stable GA release has been created.
 
 ## Current delivery goal: core usability before polish
 
@@ -34,10 +47,10 @@ GitHub confirms parents `2b1a755b1072c63f8e74ac08b695b480bf6a828c` and the
 candidate head above. This is same-host Windows live evidence, not remote SSH
 installation or persistent-service acceptance.
 
-Auto squash merge is enabled, but seven unresolved review discussions still
-block merging. In particular, the current SYSTEM dispatcher still needs review
-of copied-kit validation, uninstall dependence on a complete kit, and enrollment
-file staging. No discussion or branch protection was bypassed.
+Auto squash merge is enabled. Review discussions must remain resolved and the
+repository still requires an approving review; no discussion or branch
+protection is bypassed. The remaining Windows discovery workspace issue is
+addressed in the current follow-up and will be rechecked by fresh CI.
 
 The named-instance tests cover layout, task ownership and lifecycle argument
 selection with mocked scheduled tasks; the native persistence regression

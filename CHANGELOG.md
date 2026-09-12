@@ -7,6 +7,12 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+### Fixed
+
+- Bind Windows named-instance and service-scope discovery to the same workspace
+  layout used by worker installation, so capacity probes no longer fall back to
+  the SSH user's default profile volume.
+
 ## [0.1.0-preview.101] - 2026-09-08
 
 ### Added

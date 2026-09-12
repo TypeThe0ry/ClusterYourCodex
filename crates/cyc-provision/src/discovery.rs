@@ -323,7 +323,13 @@ tool_version() {
 for tool in git cargo rustc docker cmake ninja node python3 xcrun swift; do tool_version "$tool"; done
 "#;
 
-const WINDOWS_DISCOVERY_SCRIPT: &str = r#"param([string]$WorkspaceRoot = '')
+const WINDOWS_DISCOVERY_SCRIPT: &str = r#"param(
+    [string]$WorkspaceRoot = '',
+    [ValidatePattern('^$|^[a-z0-9][a-z0-9-]{0,31}$', Options = 'None')]
+    [string]$InstanceName = '',
+    [ValidateSet('auto', 'user', 'system')]
+    [string]$ServiceScope = 'auto'
+)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 function B64([string]$Value) {
@@ -361,7 +367,31 @@ $architecture = switch ($env:PROCESSOR_ARCHITECTURE.ToUpperInvariant()) {
 }
 $computer = Get-CimInstance Win32_ComputerSystem -OperationTimeoutSec 3
 $processor = Get-CimInstance Win32_Processor -OperationTimeoutSec 3 | Select-Object -First 1
-if (-not $WorkspaceRoot) { $WorkspaceRoot = $env:LOCALAPPDATA }
+if ($InstanceName) {
+    if ($PSBoundParameters.ContainsKey('WorkspaceRoot') -and -not [string]::IsNullOrWhiteSpace($WorkspaceRoot)) {
+        throw 'Named Windows worker instances derive their workspace from the instance layout.'
+    }
+    if ($ServiceScope -eq 'auto') {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+        $ServiceScope = if ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) { 'system' } else { 'user' }
+    }
+    $dataBase = if ($ServiceScope -eq 'system') { $env:ProgramData } else { $env:LOCALAPPDATA }
+    if ([string]::IsNullOrWhiteSpace($dataBase)) { throw 'The selected Windows worker instance has no data base path.' }
+    $WorkspaceRoot = Join-Path (Join-Path (Join-Path $dataBase 'ClusterYourCodex\worker-instances') $InstanceName) 'workspace'
+} elseif (-not $WorkspaceRoot) {
+    if ($ServiceScope -eq 'system') {
+        $dataBase = $env:ProgramData
+    } elseif ($ServiceScope -eq 'user') {
+        $dataBase = $env:LOCALAPPDATA
+    } else {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+        $dataBase = if ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) { $env:ProgramData } else { $env:LOCALAPPDATA }
+    }
+    if ([string]::IsNullOrWhiteSpace($dataBase)) { throw 'Windows discovery has no default data base path.' }
+    $WorkspaceRoot = Join-Path $dataBase 'ClusterYourCodex\worker\workspace'
+}
 $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($WorkspaceRoot)).TrimEnd('\')
 $drive = Get-PSDrive -Name $root.TrimEnd(':') -ErrorAction Stop
 Write-Output 'CYC_DISCOVERY_V1'
@@ -442,6 +472,18 @@ mod tests {
         assert!(macos.contains("operating_system=macos"));
         assert!(macos.contains("sysctl -n hw.memsize"));
         assert!(macos.contains("df -Pk \"$workspace\""));
+    }
+
+    #[test]
+    fn windows_script_derives_the_installer_workspace_for_named_instances_and_scope() {
+        let windows = std::str::from_utf8(RemotePlatform::Windows.discovery_script()).unwrap();
+        assert!(windows.contains("[string]$InstanceName = ''"));
+        assert!(windows.contains("[string]$ServiceScope = 'auto'"));
+        assert!(windows.contains("ClusterYourCodex\\worker-instances"));
+        assert!(windows.contains("$env:ProgramData"));
+        assert!(windows.contains("$env:LOCALAPPDATA"));
+        assert!(windows.contains("WindowsBuiltInRole]::Administrator"));
+        assert!(windows.contains("ClusterYourCodex\\worker\\workspace"));
     }
 
     #[test]

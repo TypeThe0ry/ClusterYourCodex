@@ -311,13 +311,34 @@ impl SshProvisioningDriver {
         let script_path = layout.join(platform.discovery_file_name())?;
         upload_and_verify(session, &script_path, platform.discovery_script(), 0o700)?;
         let workspace = record.configuration.workspace.clone().unwrap_or_default();
-        let argument = CommandArgument::new(workspace).map_err(map_ssh_error)?;
+        let mut arguments = vec![CommandArgument::new(workspace).map_err(map_ssh_error)?];
+        if platform == RemotePlatform::Windows {
+            // Windows named instances (and system-scope installs without an
+            // explicit workspace) derive their actual workspace from the
+            // installer's scope and instance layout. Pass the same inputs to
+            // the probe instead of letting it silently fall back to the SSH
+            // user's LOCALAPPDATA volume.
+            arguments.push(
+                CommandArgument::new(
+                    record
+                        .configuration
+                        .windows_instance_name
+                        .clone()
+                        .unwrap_or_default(),
+                )
+                .map_err(map_ssh_error)?,
+            );
+            arguments.push(
+                CommandArgument::new(record.configuration.service_scope.as_str())
+                    .map_err(map_ssh_error)?,
+            );
+        }
         let command = match platform {
             RemotePlatform::Linux | RemotePlatform::Macos => {
-                FixedCommand::posix_script(script_path, [argument])
+                FixedCommand::posix_script(script_path, arguments)
             }
             RemotePlatform::Windows => {
-                FixedCommand::windows_powershell_script(script_path, [argument])
+                FixedCommand::windows_powershell_script(script_path, arguments)
             }
         };
         let output = session.exec_fixed(&command).map_err(map_ssh_error)?;
@@ -1960,6 +1981,39 @@ mod tests {
     }
 
     #[test]
+    fn windows_discovery_uses_the_same_workspace_contract_as_the_installer() {
+        use crate::ServiceScope;
+
+        for scope in [ServiceScope::Auto, ServiceScope::User, ServiceScope::System] {
+            let harness = Harness::new(good_password());
+            let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
+            let mut record = engine.create(new_computer(true)).unwrap();
+            record.configuration.windows_instance_name = Some("alpha-1".to_owned());
+            record.configuration.service_scope = scope;
+            let mut session = FakeSession {
+                inner: harness.ssh.inner.clone(),
+                pairing_phase: harness.ssh.pairing_phase.clone(),
+            };
+
+            harness
+                .driver()
+                .run_discovery(&record, RemotePlatform::Windows, &mut session)
+                .unwrap();
+
+            let state = harness.ssh.inner.lock().unwrap();
+            assert_eq!(state.discovery_arguments.len(), 1);
+            assert_eq!(
+                state.discovery_arguments[0],
+                vec![
+                    String::new(),
+                    "alpha-1".to_owned(),
+                    scope.as_str().to_owned()
+                ]
+            );
+        }
+    }
+
+    #[test]
     fn windows_instance_on_linux_is_rejected_before_staging_or_authentication() {
         let harness = Harness::new(good_password());
         let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().unwrap());
@@ -3001,6 +3055,7 @@ mod tests {
     #[derive(Default)]
     struct FakeSshState {
         events: Vec<String>,
+        discovery_arguments: Vec<Vec<String>>,
         lifecycle_arguments: Vec<Vec<String>>,
         files: HashMap<String, Vec<u8>>,
         private_directory_modes: Vec<i32>,
@@ -3195,9 +3250,19 @@ mod tests {
                 } => (remote_path.as_str(), arguments),
             };
             if path.ends_with("cyc-discovery.sh") || path.ends_with("cyc-discovery.ps1") {
+                self.inner.lock().unwrap().discovery_arguments.push(
+                    arguments
+                        .iter()
+                        .map(|value| value.as_str().to_owned())
+                        .collect(),
+                );
                 return Ok(CommandOutput {
                     exit_code: 0,
-                    stdout: discovery_payload(),
+                    stdout: if path.ends_with("cyc-discovery.ps1") {
+                        discovery_payload_for_platform(RemotePlatform::Windows)
+                    } else {
+                        discovery_payload()
+                    },
                     stderr: Vec::new(),
                 });
             }
@@ -3395,8 +3460,17 @@ mod tests {
     }
 
     fn discovery_payload() -> Vec<u8> {
+        discovery_payload_for_platform(RemotePlatform::Linux)
+    }
+
+    fn discovery_payload_for_platform(platform: RemotePlatform) -> Vec<u8> {
+        let (operating_system, architecture) = match platform {
+            RemotePlatform::Linux => ("linux", "x86_64"),
+            RemotePlatform::Macos => ("macos", "x86_64"),
+            RemotePlatform::Windows => ("windows", "x86_64"),
+        };
         format!(
-            "CYC_DISCOVERY_V1\nhostname={}\noperating_system=linux\narchitecture=x86_64\ncpu_model={}\nlogical_cpu_count=16\nmemory_bytes=34359738368\nworkspace_free_bytes=107374182400\ngpu={}|{}|8589934592\ntool={}|{}\n",
+            "CYC_DISCOVERY_V1\nhostname={}\noperating_system={operating_system}\narchitecture={architecture}\ncpu_model={}\nlogical_cpu_count=16\nmemory_bytes=34359738368\nworkspace_free_bytes=107374182400\ngpu={}|{}|8589934592\ntool={}|{}\n",
             STANDARD.encode("worker-01"),
             STANDARD.encode("Fixture CPU"),
             STANDARD.encode("Fixture GPU"),
