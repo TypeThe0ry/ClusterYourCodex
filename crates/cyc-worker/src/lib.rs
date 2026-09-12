@@ -22,6 +22,7 @@ pub mod config;
 pub mod executor;
 pub mod http;
 pub mod isolation;
+pub mod migration;
 pub mod process;
 pub mod runtime;
 pub mod security;

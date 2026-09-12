@@ -1171,6 +1171,8 @@ fn default_true() -> bool {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AdvancedOptionsRequest {
     #[serde(default)]
+    windows_instance_name: Option<String>,
+    #[serde(default)]
     service_scope: ServiceScopeInput,
     #[serde(default)]
     workspace: Option<String>,
@@ -1192,6 +1194,7 @@ impl Default for AdvancedOptionsRequest {
     fn default() -> Self {
         Self {
             service_scope: ServiceScopeInput::Auto,
+            windows_instance_name: None,
             workspace: None,
             priority: 0,
             maximum_parallel_jobs: None,
@@ -1214,6 +1217,7 @@ impl AdvancedOptionsRequest {
             None => None,
         };
         let configuration = ComputerConfiguration {
+            windows_instance_name: self.windows_instance_name.filter(|value| !value.is_empty()),
             service_scope: self.service_scope.into(),
             workspace: self.workspace.filter(|value| !value.is_empty()),
             priority: self.priority,
@@ -1435,6 +1439,7 @@ impl ProvisioningComputerView {
                 state: credential_state_name(record.credential_policy.state),
             },
             configuration: AdvancedOptionsView {
+                windows_instance_name: record.configuration.windows_instance_name.clone(),
                 service_scope: record.configuration.service_scope.as_str(),
                 workspace: record.configuration.workspace.clone(),
                 priority: record.configuration.priority,
@@ -1491,6 +1496,8 @@ struct FailureView {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AdvancedOptionsView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    windows_instance_name: Option<String>,
     service_scope: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     workspace: Option<String>,
@@ -2244,10 +2251,33 @@ mod tests {
     }
 
     #[test]
+    fn named_instance_survives_native_start_and_database_reopen() {
+        let path = temporary_database("named-instance-reopen");
+        let first = manager(&path);
+        let mut request = start_request();
+        request.advanced.windows_instance_name = Some("alpha-1".to_owned());
+        let started = first.start(request).expect("start named instance");
+        let original = started.computer.expect("computer");
+        assert_eq!(original.configuration.windows_instance_name.as_deref(), Some("alpha-1"));
+        drop(first);
+
+        let reopened = manager(&path);
+        let computers = reopened.list().expect("reload computers");
+        assert_eq!(computers.len(), 1);
+        assert_eq!(computers[0].id, original.id);
+        assert_eq!(computers[0].configuration.windows_instance_name.as_deref(), Some("alpha-1"));
+        let serialized = serde_json::to_value(&computers[0]).expect("serialize native view");
+        assert_eq!(serialized["configuration"]["windowsInstanceName"], "alpha-1");
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn paired_node_config_preserves_user_labels_and_encodes_advanced_policy() {
         let endpoint = ComputerEndpoint::new("192.0.2.44", 22, "builder").expect("endpoint");
         let mut input = NewComputer::new("192.0.2.44", endpoint).expect("computer");
         input.configuration = ComputerConfiguration {
+            windows_instance_name: None,
             service_scope: ServiceScope::System,
             workspace: Some("/srv/cyc".to_owned()),
             priority: 730,

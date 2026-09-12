@@ -72,6 +72,10 @@ foreach ($scriptPath in @($windowsInstaller, $builder)) {
 }
 
 & (Join-Path $PSScriptRoot 'windows\Test-PrivatePrincipalSids.ps1')
+if ($env:OS -eq 'Windows_NT') {
+    & (Join-Path $PSScriptRoot 'windows\Test-WorkerInstances.ps1')
+    & (Join-Path $PSScriptRoot 'windows\Test-SystemLifecycleDispatch.ps1')
+}
 
 $gitBash = 'C:\Program Files\Git\bin\bash.exe'
 $bashPath = if (Test-Path -LiteralPath $gitBash -PathType Leaf) {
@@ -122,12 +126,60 @@ function Write-CycWorkerKitWatchdogEvidence {
     [System.IO.File]::WriteAllText($Path, (($lines -join [Environment]::NewLine) + [Environment]::NewLine), (New-Object System.Text.UTF8Encoding($false)))
 }
 
+function Wait-CycWorkerKitSmokeExit {
+    param(
+        [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)][string]$StdoutPath,
+        [ValidateRange(1, 3600)][int]$TimeoutSeconds,
+        [string[]]$Phases = @()
+    )
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $phaseStarted = 0.0
+    $nextPhase = 0
+    $currentPhase = 'setup'
+    $seenLines = 0
+    $totalLimit = $TimeoutSeconds * (1 + $Phases.Count)
+    while ($true) {
+        $exited = $Process.WaitForExit(100)
+        if ($Phases.Count -gt 0 -and (Test-Path -LiteralPath $StdoutPath)) {
+            $stream = [IO.File]::Open($StdoutPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+            $reader = New-Object IO.StreamReader($stream)
+            try { $lines = @($reader.ReadToEnd() -split '\r?\n') }
+            finally { $reader.Dispose() }
+            # A writer may be midway through its last record. Consume only
+            # newline-terminated records, then revisit the unfinished tail.
+            $completeLineCount = [Math]::Max(0, $lines.Count - 1)
+            for ($index = $seenLines; $index -lt $completeLineCount; $index++) {
+                if ($lines[$index] -match '^CYC_FIXTURE_BUDGET ([a-z-]+)$') {
+                    # Only the next declared phase may receive a fresh budget.
+                    # Repeated/unknown markers never extend a deadline.
+                    if ($nextPhase -lt $Phases.Count -and $Matches[1] -ceq $Phases[$nextPhase]) {
+                        if (($clock.Elapsed.TotalSeconds - $phaseStarted) -ge $TimeoutSeconds) { break }
+                        $currentPhase = $Phases[$nextPhase]
+                        $nextPhase++
+                        $phaseStarted = $clock.Elapsed.TotalSeconds
+                    }
+                }
+            }
+            $seenLines = $completeLineCount
+        }
+        if (($clock.Elapsed.TotalSeconds - $phaseStarted) -ge $TimeoutSeconds -or $clock.Elapsed.TotalSeconds -ge $totalLimit) {
+            return [pscustomobject]@{ Completed = $false; Phase = $currentPhase; Elapsed = $clock.Elapsed.TotalSeconds }
+        }
+        if ($exited) {
+            if ($Process.ExitCode -eq 0 -and $nextPhase -ne $Phases.Count) { throw 'Successful smoke omitted required lifecycle phase markers.' }
+            return [pscustomobject]@{ Completed = $true; Phase = $currentPhase; Elapsed = $clock.Elapsed.TotalSeconds }
+        }
+    }
+}
+
 function Invoke-CycWorkerKitBashSmoke {
     param(
         [Parameter(Mandatory = $true)][string]$ScriptPath,
         [Parameter(Mandatory = $true)][string]$ArgumentPath,
         [Parameter(Mandatory = $true)][string]$Label,
-        [int]$TimeoutSeconds = 600
+        [int]$TimeoutSeconds = 600,
+        [string[]]$Phases = @()
     )
 
     $stdoutPath = Join-Path $ArgumentPath ("{0}.stdout.log" -f $Label)
@@ -153,6 +205,8 @@ function Invoke-CycWorkerKitBashSmoke {
     $terminationExitCode = $null
     $terminationOutput = ''
     $remainingProcessIds = @()
+    $waitResult = $null
+    $failureKind = 'none'
     try {
         $startParameters = @{
             FilePath = $cmdPath
@@ -163,7 +217,8 @@ function Invoke-CycWorkerKitBashSmoke {
         }
         $smokeProcess = Start-Process @startParameters
         $processId = [int]$smokeProcess.Id
-        if (-not $smokeProcess.WaitForExit($TimeoutSeconds * 1000)) {
+        $waitResult = Wait-CycWorkerKitSmokeExit -Process $smokeProcess -StdoutPath $stdoutPath -TimeoutSeconds $TimeoutSeconds -Phases $Phases
+        if (-not $waitResult.Completed) {
             $timedOut = $true
             $treeBeforeKill = @(Get-CycWorkerKitProcessTreeIds -RootProcessId $processId)
             try {
@@ -199,7 +254,7 @@ function Invoke-CycWorkerKitBashSmoke {
                 remaining_process_ids = $remainingProcessIds
             })
             $script:cycWorkerKitPreserveEvidence = $true
-            throw "$Label watchdog timeout after $TimeoutSeconds seconds. Evidence: $ArgumentPath ; stdout: $stdoutPath ; stderr: $stderrPath ; watchdog: $watchdogPath ; termination: $terminationResult ; remaining PIDs: $($remainingProcessIds -join ',')"
+            throw "$Label watchdog timeout after $TimeoutSeconds seconds. Phase: $($waitResult.Phase); total elapsed: $($waitResult.Elapsed); Evidence: $ArgumentPath ; stdout: $stdoutPath ; stderr: $stderrPath ; watchdog: $watchdogPath ; termination: $terminationResult ; remaining PIDs: $($remainingProcessIds -join ',')"
         }
 
         $waitCompleted = $true
@@ -290,6 +345,7 @@ function Invoke-CycWorkerKitBashSmoke {
             remaining_process_ids = @()
         })
     } catch {
+        $failureKind = if ($timedOut) { 'timeout' } elseif ($_.Exception.Message -eq 'Successful smoke omitted required lifecycle phase markers.') { 'missing-phase' } else { 'smoke-failure' }
         if (-not $script:cycWorkerKitPreserveEvidence) {
             $script:cycWorkerKitPreserveEvidence = $true
             try {
@@ -341,6 +397,9 @@ function Invoke-CycWorkerKitBashSmoke {
                         stderr = $stderrPath
                         pid = $processId
                         wait_completed = $waitCompleted
+                        phase = if ($null -ne $waitResult) { $waitResult.Phase } else { '<unknown>' }
+                        elapsed_seconds = if ($null -ne $waitResult) { $waitResult.Elapsed } else { '<unknown>' }
+                        failure_kind = $failureKind
                         timeout_marker = if ($timedOut) { 'TIMEOUT' } else { 'NOT_TRIGGERED' }
                         exit_code = if ($null -eq $exitCode) { '<null>' } else { [int]$exitCode }
                         termination_result = $terminationResult
@@ -413,6 +472,26 @@ if ([string]$env:CYC_WORKER_KIT_BASH_SMOKE_SELF_TEST -eq '1') {
             $timeoutEvidence -notmatch '(?m)^termination_result=(taskkill-invoked|process-kill-fallback|finally-taskkill-invoked)\r?$') {
             throw 'Bash watchdog helper timeout metadata is incomplete.'
         }
+        $phasedScript = Join-Path $helperSelfTestRoot 'phased.sh'
+        [IO.File]::WriteAllText($phasedScript, "#!/usr/bin/env bash`nsleep 4`nprintf 'CYC_FIXTURE_BUDGET repair\n'`nsleep 4`nexit 0`n", $selfTestEncoding)
+        Invoke-CycWorkerKitBashSmoke -ScriptPath $phasedScript -ArgumentPath $helperSelfTestRoot -Label 'helper-phased' -TimeoutSeconds 6 -Phases @('repair')
+        $partialScript = Join-Path $helperSelfTestRoot 'partial-phase.sh'
+        [IO.File]::WriteAllText($partialScript, "#!/usr/bin/env bash`nprintf 'CYC_FIXTURE_BUD'`nsleep 1`nprintf 'GET repair\n'`nsleep 1`nexit 0`n", $selfTestEncoding)
+        Invoke-CycWorkerKitBashSmoke -ScriptPath $partialScript -ArgumentPath $helperSelfTestRoot -Label 'helper-partial-phase' -TimeoutSeconds 6 -Phases @('repair')
+        $repeatScript = Join-Path $helperSelfTestRoot 'repeated-phase.sh'
+        [IO.File]::WriteAllText($repeatScript, "#!/usr/bin/env bash`nfor i in 1 2 3 4 5 6 7 8 9 10; do`n  printf 'CYC_FIXTURE_BUDGET repair\n'`n  sleep 1`ndone`n", $selfTestEncoding)
+        $repeatFailure = ''
+        try {
+            Invoke-CycWorkerKitBashSmoke -ScriptPath $repeatScript -ArgumentPath $helperSelfTestRoot -Label 'helper-repeated-phase' -TimeoutSeconds 3 -Phases @('repair')
+        } catch { $repeatFailure = $_.Exception.Message }
+        if ($repeatFailure -notmatch 'watchdog timeout after 3 seconds. Phase: repair') { throw 'Repeated phase markers extended the deadline.' }
+        $missingFailure = ''
+        try {
+            Invoke-CycWorkerKitBashSmoke -ScriptPath $successScript -ArgumentPath $helperSelfTestRoot -Label 'helper-missing-phase' -TimeoutSeconds 3 -Phases @('repair')
+        } catch { $missingFailure = $_.Exception.Message }
+        if ($missingFailure -notmatch 'omitted required lifecycle phase markers') { throw 'Missing phase markers were accepted.' }
+        $missingEvidence = [IO.File]::ReadAllText((Join-Path $helperSelfTestRoot 'helper-missing-phase.watchdog.txt'))
+        if ($missingEvidence -notmatch '(?m)^failure_kind=missing-phase\r?$') { throw 'Missing-phase evidence lost its failure classification.' }
         Write-Output "Bash watchdog helper self-test passed; evidence retained at $helperSelfTestRoot"
         exit 0
     } catch {
@@ -2101,6 +2180,7 @@ rm -f -- "$missing_manifest_backup"
 # Ready-node repair is one transaction. A normal repair does not rotate the
 # credential; injected failures after pair, service registration, and before
 # manifest commit must restore every old byte and the active/enabled state.
+printf 'CYC_FIXTURE_BUDGET repair\n'
 baseline_worker="$(sha256sum "$worker" | awk '{print $1}')"
 baseline_config="$(sha256sum "$data/config.json" | awk '{print $1}')"
 baseline_manifest="$(sha256sum "$data/install-manifest.json" | awk '{print $1}')"
@@ -2110,6 +2190,7 @@ test -f "$baseline_credential_path"
 baseline_credential="$(sha256sum "$baseline_credential_path" | awk '{print $1}')"
 
 for injection in after-pair after-service-registration before-manifest-write; do
+  printf 'CYC_FIXTURE_PHASE repair-%s start elapsed=%ss\n' "$injection" "$SECONDS"
   enrollment_args=()
   if [[ "$injection" == after-pair ]]; then
     printf '%s\n' 'LINUX_ENROLLMENT_SECRET_DO_NOT_LOG' >"$root/enrollment-$injection.json"
@@ -2121,6 +2202,7 @@ for injection in after-pair after-service-registration before-manifest-write; do
     >"$root/$injection.stdout" 2>"$root/$injection.stderr"
   injection_exit=$?
   set -e
+  printf 'CYC_FIXTURE_PHASE repair-%s returned exit=%s elapsed=%ss\n' "$injection" "$injection_exit" "$SECONDS"
   test "$injection_exit" -ne 0
   ! grep -q 'LINUX_.*SECRET_DO_NOT_LOG' "$root/$injection.stdout" "$root/$injection.stderr"
   test "$(sha256sum "$worker" | awk '{print $1}')" = "$baseline_worker"
@@ -2133,11 +2215,13 @@ for injection in after-pair after-service-registration before-manifest-write; do
   test -f "$CYC_FAKE_SYSTEMD_ROOT/service-enabled"
   test -f "$CYC_FAKE_SYSTEMD_ROOT/service-active"
   test ! -e "$data/.repair-transaction"
+  printf 'CYC_FIXTURE_PHASE repair-%s verified elapsed=%ss\n' "$injection" "$SECONDS"
 done
 
 # Existing ownership is bound to the install manifest roots. A lifecycle call
 # with a different install/workspace root must fail before service removal and
 # leave unrelated same-named files untouched.
+printf 'CYC_FIXTURE_BUDGET binding\n'
 bound_install_root="$(dirname "$worker")"
 bound_workspace_root="$data/workspace"
 bound_systemctl_lines="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')"
@@ -2150,6 +2234,7 @@ bound_credential_hash="$(sha256sum "$baseline_credential_path" | awk '{print $1}
 
 assert_linux_manifest_binding_failure() {
   local label="$1" requested_install_root="$2" requested_workspace_root="$3" sentinel="$4"
+  printf 'CYC_FIXTURE_PHASE %s start elapsed=%ss\n' "$label" "$SECONDS"
   set +e
   "$good/install-worker.sh" uninstall --bundle-root "$good" \
     --install-root "$requested_install_root" \
@@ -2174,6 +2259,7 @@ assert_linux_manifest_binding_failure() {
   test ! -e "$data/.repair-transaction"
   test -f "$sentinel"
   test "$(cat "$sentinel")" = 'LINUX_PATH_BINDING_SENTINEL'
+  printf 'CYC_FIXTURE_PHASE %s verified elapsed=%ss\n' "$label" "$SECONDS"
 }
 
 wrong_install_root="$root/linux-wrong-install"
@@ -2261,6 +2347,7 @@ test -f "$CYC_FAKE_SYSTEMD_ROOT/service-active"
 # A manager query that cannot produce a recognized LoadState/ActiveState pair
 # is not equivalent to an inactive service. The installer must leave every
 # owned byte and manager marker in place for a later retry.
+printf 'CYC_FIXTURE_BUDGET uninstall\n'
 unknown_state_worker_hash="$(sha256sum "$worker" | awk '{print $1}')"
 unknown_state_unit_hash="$(sha256sum "$unit" | awk '{print $1}')"
 unknown_state_systemctl_lines_before="$(wc -l <"$CYC_FAKE_SYSTEMD_ROOT/systemctl.log" | tr -d '[:space:]')"
@@ -2362,7 +2449,7 @@ test -s "$data/config.json"
 "$good/install-worker.sh" uninstall --bundle-root "$good" --purge-data >/dev/null
 test ! -e "$data"
 '@.TrimStart(), $utf8NoBom)
-        Invoke-CycWorkerKitBashSmoke -ScriptPath $smoke -ArgumentPath $temporary -Label 'linux-worker-lifecycle'
+        Invoke-CycWorkerKitBashSmoke -ScriptPath $smoke -ArgumentPath $temporary -Label 'linux-worker-lifecycle' -Phases @('repair', 'binding', 'uninstall')
 
         $macosGoodKit = Join-Path $temporary 'macos-smoke-good'
         $macosUpgradeKit = Join-Path $temporary 'macos-smoke-upgrade'
@@ -2621,6 +2708,7 @@ test ! -e "$weak_plist_logs"
 # This deterministic fake-Darwin fixture exercises only the transaction
 # state-machine re-entry path; it does not claim live macOS LaunchAgent
 # evidence while the containment gate remains closed.
+printf 'CYC_FIXTURE_BUDGET repair\n'
 interrupted_install="$root/macos-interrupted-install"
 interrupted_data="$root/macos-interrupted-data"
 interrupted_workspace="$root/macos-interrupted-workspace"
@@ -2828,6 +2916,7 @@ rm -f "$mac_missing_manifest_backup" "$mac_missing_launch_agent"
 # Existing ownership is bound to every macOS lifecycle root. Changing the
 # install, logs, or HOME-derived LaunchAgent root must fail before any
 # uninstall operation touches the paired installation or the sentinel.
+printf 'CYC_FIXTURE_BUDGET binding\n'
 mac_install_root="$install_root"
 mac_workspace_root="$workspace_root"
 mac_launch_agent_path="$HOME/Library/LaunchAgents/dev.clusteryourcodex.worker.plist"
@@ -2899,6 +2988,7 @@ assert_macos_manifest_binding_failure \
 
 # Uninstall is repeatable and preserves paired data, workspace, and logs by
 # default while removing only installer-owned executable/service material.
+printf 'CYC_FIXTURE_BUDGET uninstall\n'
 uninstall_one="$($upgrade/install-worker.sh uninstall --bundle-root "$upgrade" "${common[@]}")"
 grep -q '"dataPreserved":true' <<<"$uninstall_one"
 test ! -e "$install_root/cyc-worker"
@@ -2987,7 +3077,7 @@ test ! -e "$default_program/cyc-worker"
 test ! -e "$default_data"
 test ! -e "$default_logs"
 '@.TrimStart(), $utf8NoBom)
-        Invoke-CycWorkerKitBashSmoke -ScriptPath $macosSmoke -ArgumentPath $temporary -Label 'macos-worker-lifecycle'
+        Invoke-CycWorkerKitBashSmoke -ScriptPath $macosSmoke -ArgumentPath $temporary -Label 'macos-worker-lifecycle' -Phases @('repair', 'binding', 'uninstall')
     }
 
     foreach ($content in @(

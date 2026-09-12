@@ -14,6 +14,9 @@ param(
 
     [string]$EnrollmentFile,
 
+    [ValidatePattern('^$|^[a-z0-9][a-z0-9-]{0,31}$', Options = 'None')]
+    [string]$InstanceName = '',
+
     [ValidateSet('Auto', 'User', 'System')]
     [string]$Scope = 'Auto',
 
@@ -24,7 +27,9 @@ param(
     [switch]$PurgeData,
 
     [ValidateSet('None', 'AfterPair', 'AfterServiceRegistration', 'BeforeManifestWrite')]
-    [string]$FailureInjection = 'None'
+    [string]$FailureInjection = 'None',
+
+    [string]$OwnerSid
 )
 
 Set-StrictMode -Version Latest
@@ -35,9 +40,54 @@ $script:SignatureSchema = 'cyc.dev/worker-kit-signature/v1'
 $script:PublisherKeyId = 'cyc-release-2026-02'
 $script:PublisherPublicKeyBase64 = '__CYC_PUBLISHER_PUBLIC_KEY_BASE64__'
 $script:TaskName = 'ClusterYourCodex Worker'
+if ($InstanceName) { $script:TaskName += ' - ' + $InstanceName }
+$script:OwnerMarkerValue = $script:Schema
+if ($InstanceName) { $script:OwnerMarkerValue += ':' + $InstanceName }
 $script:MarkerName = '.clusteryourcodex-worker-owned'
 $script:TransactionName = '.repair-transaction'
 $script:TransactionSchema = 'cyc.dev/windows-worker-repair-transaction/v1'
+$currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+if ([string]::IsNullOrWhiteSpace($OwnerSid)) {
+    $script:OwnerSid = $currentSid
+} else {
+    try {
+        $script:OwnerSid = (New-Object System.Security.Principal.SecurityIdentifier($OwnerSid)).Value
+    } catch {
+        throw 'OwnerSid must be a valid Windows security identifier.'
+    }
+    if ($currentSid -ne 'S-1-5-18' -and
+        -not [string]::Equals($script:OwnerSid, $currentSid, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Only SYSTEM may select a different private-state owner.'
+    }
+}
+
+function Get-WorkerInstanceLayout {
+    param(
+        [Parameter(Mandatory = $true)][ValidatePattern('^[a-z0-9][a-z0-9-]{0,31}$', Options = 'None')][string]$Name,
+        [Parameter(Mandatory = $true)][string]$InstallBase,
+        [Parameter(Mandatory = $true)][string]$DataBase
+    )
+    $instanceData = Join-Path (Join-Path $DataBase 'ClusterYourCodex\worker-instances') $Name
+    return @{
+        InstallRoot = Join-Path (Join-Path $InstallBase 'ClusterYourCodexWorker-instances') $Name
+        DataRoot = $instanceData
+        WorkspaceRoot = Join-Path $instanceData 'workspace'
+    }
+}
+
+function Assert-WorkerTransactionInstance {
+    param([Parameter(Mandatory = $true)]$State, [Parameter(Mandatory = $true)][string]$ExpectedTaskName)
+    $binding = $State.PSObject.Properties['taskName']
+    if ($null -eq $binding) {
+        if ($ExpectedTaskName -cne 'ClusterYourCodex Worker') {
+            throw 'Named worker transaction is missing its instance binding.'
+        }
+        return
+    }
+    if ($binding.Value -isnot [string] -or $binding.Value -cne $ExpectedTaskName) {
+        throw 'Worker transaction belongs to a different instance.'
+    }
+}
 
 function Resolve-NormalizedPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -97,25 +147,31 @@ function Get-PrivatePrincipalSids {
     @($UserSid, 'S-1-5-18') | Sort-Object -Unique
 }
 
+function Get-PrivateOwnerSid {
+    $configured = Get-Variable -Name OwnerSid -Scope Script -ErrorAction SilentlyContinue
+    if ($null -ne $configured -and -not [string]::IsNullOrWhiteSpace([string]$configured.Value)) {
+        return [string]$configured.Value
+    }
+    return [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+}
+
 function New-PrivateAcl {
     param([Parameter(Mandatory = $true)][bool]$Directory)
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-    $userSid = $identity.User
-    $systemSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
+    $ownerSid = New-Object System.Security.Principal.SecurityIdentifier((Get-PrivateOwnerSid))
     $acl = if ($Directory) {
         New-Object System.Security.AccessControl.DirectorySecurity
     } else {
         New-Object System.Security.AccessControl.FileSecurity
     }
     $acl.SetAccessRuleProtection($true, $false)
-    $acl.SetOwner($userSid)
+    $acl.SetOwner($ownerSid)
     $inheritance = if ($Directory) {
         [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
     } else {
         [System.Security.AccessControl.InheritanceFlags]::None
     }
-    foreach ($sidText in @(Get-PrivatePrincipalSids -UserSid $userSid.Value)) {
-        $sid = if ($sidText -eq $userSid.Value) { $userSid } else { $systemSid }
+    foreach ($sidText in @(Get-PrivatePrincipalSids -UserSid $ownerSid.Value)) {
+        $sid = New-Object System.Security.Principal.SecurityIdentifier($sidText)
         $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
             $sid,
             [System.Security.AccessControl.FileSystemRights]::FullControl,
@@ -157,12 +213,12 @@ function Assert-PrivateAcl {
     } else {
         [System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.FileInfo]$Item)
     }
-    $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $ownerSid = Get-PrivateOwnerSid
     if (-not $acl.AreAccessRulesProtected -or
-        $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -cne $userSid) {
+        $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -cne $ownerSid) {
         throw "Existing private path ACL is weak or owned by another identity: $($Item.FullName)"
     }
-    $expectedSids = @(Get-PrivatePrincipalSids -UserSid $userSid)
+    $expectedSids = @(Get-PrivatePrincipalSids -UserSid $ownerSid)
     $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
     if ($rules.Count -ne $expectedSids.Count) {
         throw "Existing private path ACL contains an unexpected principal set: $($Item.FullName)"
@@ -821,6 +877,163 @@ function Resolve-ServiceScope {
     return $RequestedScope
 }
 
+function Invoke-SystemWorkerLifecycle {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Parameters,
+        [string]$HandoffParent = $env:ProgramData,
+        [ValidateRange(1, 300)][int]$TimeoutSeconds = 300
+    )
+    if (-not (Test-IsAdministrator)) { throw 'System lifecycle requires an elevated administrator.' }
+    # Verify the source and the protected copy before executing any copied code.
+    $null = Read-KitManifest -Root $Parameters.BundleRoot
+    $handoffRoot = Join-Path $HandoffParent ('ClusterYourCodex-lifecycle-' + [Guid]::NewGuid().ToString('N'))
+    Protect-Directory -Path $handoffRoot
+    $kitRoot = Join-Path $handoffRoot 'kit'
+    Protect-Directory -Path $kitRoot
+    foreach ($name in @('Install-Worker.ps1', 'cyc-worker.exe', 'worker-kit.json', 'worker-kit.sig', 'SHA256SUMS')) {
+        $destination = Join-Path $kitRoot $name
+        Copy-Item -LiteralPath (Join-Path $Parameters.BundleRoot $name) -Destination $destination
+        Protect-File -Path $destination -NewlyCreated
+    }
+    $null = Read-KitManifest -Root $kitRoot
+    $Parameters.BundleRoot = $kitRoot
+    $stagedEnrollment = $null
+    if ($Parameters.ContainsKey('EnrollmentFile') -and $Parameters.EnrollmentFile) {
+        $sourceEnrollment = Resolve-NormalizedPath $Parameters.EnrollmentFile
+        Assert-PathChainNoReparse -Path $sourceEnrollment
+        $sourceItem = Get-Item -LiteralPath $sourceEnrollment -Force
+        if ($sourceItem.PSIsContainer -or $sourceItem.Length -le 0 -or $sourceItem.Length -gt 2MB) {
+            throw 'Enrollment file is invalid.'
+        }
+        $stagedEnrollment = Join-Path $handoffRoot 'enrollment.json'
+        Copy-Item -LiteralPath $sourceEnrollment -Destination $stagedEnrollment
+        Protect-File -Path $stagedEnrollment -NewlyCreated
+        $stagedItem = Get-Item -LiteralPath $stagedEnrollment -Force
+        if ($stagedItem.Length -le 0 -or $stagedItem.Length -gt 2MB) { throw 'Enrollment file is invalid.' }
+        $Parameters.EnrollmentFile = $stagedEnrollment
+    }
+    $requestPath = Join-Path $handoffRoot 'request.json'
+    $resultPath = Join-Path $handoffRoot 'result.json'
+    $helperPath = Join-Path $handoffRoot 'lifecycle.ps1'
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($requestPath, ($Parameters | ConvertTo-Json -Depth 8), $utf8)
+    Protect-File -Path $requestPath -NewlyCreated
+    $helper = @'
+#requires -Version 5.1
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+if ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') {
+    exit 1
+}
+$result = @{ succeeded = $false; output = ''; code = 'SYSTEM_LIFECYCLE_FAILED'; line = 0 }
+$mutex = $null
+$ownsMutex = $false
+try {
+    $request = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'request.json'), [System.Text.UTF8Encoding]::new($false, $true)) | ConvertFrom-Json
+    $parameters = @{}
+    foreach ($property in $request.PSObject.Properties) { $parameters[$property.Name] = $property.Value }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes(([string]$parameters.DataRoot).ToLowerInvariant())) }
+    finally { $sha.Dispose() }
+    $mutexName = 'Global\ClusterYourCodex-Lifecycle-' + ([BitConverter]::ToString($digest).Replace('-', ''))
+    $mutex = [System.Threading.Mutex]::new($false, $mutexName)
+    try { $ownsMutex = $mutex.WaitOne(0) }
+    catch [System.Threading.AbandonedMutexException] { $ownsMutex = $true }
+    if (-not $ownsMutex) { $result.code = 'SYSTEM_LIFECYCLE_BUSY'; throw 'Lifecycle already running' }
+    $output = & (Join-Path $PSScriptRoot 'kit\Install-Worker.ps1') @parameters
+    $result = @{ succeeded = $true; output = ($output | Out-String); code = ''; line = 0 }
+} catch {
+    # Do not serialize arbitrary exceptions or enrollment contents into receipts.
+    $result.line = $_.InvocationInfo.ScriptLineNumber
+} finally {
+    if ($ownsMutex) { $mutex.ReleaseMutex() }
+    if ($null -ne $mutex) { $mutex.Dispose() }
+}
+[System.IO.File]::WriteAllText((Join-Path $PSScriptRoot 'result.json'), ($result | ConvertTo-Json -Depth 4), (New-Object System.Text.UTF8Encoding($false)))
+if (-not $result.succeeded) { exit 1 }
+'@
+    [System.IO.File]::WriteAllText($helperPath, $helper, $utf8)
+    Protect-File -Path $helperPath -NewlyCreated
+    $taskName = 'ClusterYourCodex Lifecycle ' + [Guid]::NewGuid().ToString('N')
+    $action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
+        -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $helperPath + '"') -WorkingDirectory $handoffRoot
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    $registered = $false
+    $finished = $false
+    $succeeded = $false
+    try {
+        Register-ScheduledTask -TaskName $taskName -TaskPath '\' -Action $action -Principal $principal -Settings $settings | Out-Null
+        $registered = $true
+        $startedAfter = [DateTime]::Now.AddSeconds(-1)
+        Start-ScheduledTask -TaskName $taskName -TaskPath '\'
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        $nextProgress = [DateTime]::UtcNow.AddSeconds(5)
+        do {
+            Start-Sleep -Milliseconds 250
+            if ([DateTime]::UtcNow -ge $nextProgress) {
+                # Keep the SSH output-inactivity watchdog alive, without paths,
+                # enrollment material, credentials, or arbitrary child output.
+                [Console]::Error.WriteLine('CYC_SYSTEM_LIFECYCLE_WAIT')
+                $nextProgress = [DateTime]::UtcNow.AddSeconds(5)
+            }
+            $task = Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop
+            if ((Test-Path -LiteralPath $resultPath -PathType Leaf) -and $task.State -notin @('Running', 'Queued')) {
+                $finished = $true
+                break
+            }
+            if ($task.State -notin @('Running', 'Queued')) {
+                $observedRun = Get-ScheduledTaskInfo -TaskName $taskName -TaskPath '\'
+                # A newly registered task can still be Ready before its first
+                # launch. Only treat a recorded execution as a failed helper.
+                if ($observedRun.LastRunTime -ge $startedAfter -and $observedRun.LastTaskResult -ne 0) {
+                    $finished = $true
+                    throw "System lifecycle helper exited without a receipt (task result $($observedRun.LastTaskResult)); protected recovery evidence retained at $handoffRoot"
+                }
+            }
+        } while ([DateTime]::UtcNow -lt $deadline)
+        if (-not $finished) { throw "System lifecycle timed out; protected recovery evidence retained at $handoffRoot" }
+        Assert-PathChainNoReparse -Path $resultPath
+        $receipt = Read-WorkerUtf8Json -Path $resultPath -Label 'System lifecycle result' -MaximumBytes 1MB
+        $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -TaskPath '\'
+        if ($receipt.succeeded -ne $true -or $taskInfo.LastTaskResult -ne 0) {
+            throw "System lifecycle failed at installer line $($receipt.line); protected recovery evidence retained at $handoffRoot"
+        }
+        $succeeded = $true
+        Write-Output ([string]$receipt.output)
+    } finally {
+        if ($registered) {
+            if (-not $finished) { Stop-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction SilentlyContinue }
+            $finalTask = Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction SilentlyContinue
+            if ($finalTask -and $finalTask.State -notin @('Running', 'Queued')) {
+                Unregister-ScheduledTask -TaskName $taskName -TaskPath '\' -Confirm:$false
+            }
+        }
+        # Retain the protected request/result and verified kit on failure or
+        # timeout; never erase evidence or an uncertain live helper's inputs.
+        if ($succeeded -and $finished) {
+            # Delete only the exact files we created, with no recursive traversal.
+            foreach ($name in @('Install-Worker.ps1', 'cyc-worker.exe', 'worker-kit.json', 'worker-kit.sig', 'SHA256SUMS')) {
+                $ownedPath = Join-Path $kitRoot $name
+                Assert-PathChainNoReparse -Path $ownedPath
+                Remove-Item -LiteralPath $ownedPath -Force
+            }
+            Assert-PathChainNoReparse -Path $kitRoot
+            if (@(Get-ChildItem -LiteralPath $kitRoot -Force).Count -eq 0) { Remove-Item -LiteralPath $kitRoot }
+            foreach ($ownedPath in @($requestPath, $helperPath, $resultPath)) {
+                Assert-PathChainNoReparse -Path $ownedPath
+                Remove-Item -LiteralPath $ownedPath -Force
+            }
+            if ($stagedEnrollment -and (Test-Path -LiteralPath $stagedEnrollment)) {
+                Assert-PathChainNoReparse -Path $stagedEnrollment
+                Remove-Item -LiteralPath $stagedEnrollment -Force
+            }
+            if (@(Get-ChildItem -LiteralPath $handoffRoot -Force).Count -eq 0) { Remove-Item -LiteralPath $handoffRoot }
+        }
+    }
+}
+
 function Resolve-AccountSid {
     param([Parameter(Mandatory = $true)][string]$Account)
     if ([string]::IsNullOrWhiteSpace($Account)) { return $null }
@@ -1083,6 +1296,7 @@ function New-WorkerTransaction {
         }
         Write-JsonAtomic -Path (Join-Path $stagingRoot 'state.json') -Value ([ordered]@{
             schemaVersion = $script:TransactionSchema
+            taskName = $script:TaskName
             binaryExisted = [bool]$binaryExisted
             manifestExisted = [bool]$manifestExisted
             taskExisted = [bool]$taskExisted
@@ -1115,6 +1329,7 @@ function Restore-WorkerTransaction {
     }
     $state = Read-WorkerUtf8Json -Path $statePath -Label 'Worker repair transaction state' -MaximumBytes 64KB
     if ($state.schemaVersion -ne $script:TransactionSchema) { throw 'Unsupported worker repair transaction state.' }
+    Assert-WorkerTransactionInstance -State $state -ExpectedTaskName $script:TaskName
 
     Stop-AndRemoveTask `
         -Executable $WorkerBinaryPath `
@@ -1191,8 +1406,12 @@ function Invoke-FailureInjection {
 }
 
 function Assert-DefaultDataPurgeTarget {
-    param([Parameter(Mandatory = $true)][string]$Path)
-    $expected = Resolve-NormalizedPath (Join-Path $env:LOCALAPPDATA 'ClusterYourCodex\worker')
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][ValidateSet('User', 'System')][string]$ResolvedScope
+    )
+    $base = if ($ResolvedScope -eq 'System') { $env:ProgramData } else { $env:LOCALAPPDATA }
+    $expected = Resolve-NormalizedPath (Join-Path $base 'ClusterYourCodex\worker')
     $actual = Resolve-NormalizedPath $Path
     if (-not [string]::Equals($expected, $actual, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw 'PurgeData is limited to the default installer-owned worker data root.'
@@ -1205,6 +1424,43 @@ function Assert-DefaultDataPurgeTarget {
     }
 }
 
+$resolvedScope = Resolve-ServiceScope -RequestedScope $Scope
+if ($InstanceName) {
+    $installBase = if ($resolvedScope -eq 'System') { $env:ProgramFiles } else { Join-Path $env:LOCALAPPDATA 'Programs' }
+    $dataBase = if ($resolvedScope -eq 'System') { $env:ProgramData } else { $env:LOCALAPPDATA }
+    $instanceLayout = Get-WorkerInstanceLayout -Name $InstanceName -InstallBase $installBase -DataBase $dataBase
+    foreach ($rootName in @('InstallRoot', 'DataRoot', 'WorkspaceRoot')) {
+        if ($PSBoundParameters.ContainsKey($rootName) -and
+            -not [string]::Equals((Resolve-NormalizedPath $PSBoundParameters[$rootName]), (Resolve-NormalizedPath $instanceLayout[$rootName]), [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Named worker instances require their dedicated default roots.'
+        }
+    }
+    $InstallRoot = $instanceLayout.InstallRoot
+    $DataRoot = $instanceLayout.DataRoot
+    $WorkspaceRoot = $instanceLayout.WorkspaceRoot
+    if ($PurgeData) { throw 'Named instance uninstall preserves data; PurgeData is not supported.' }
+}
+if ($resolvedScope -eq 'System' -and -not $InstanceName) {
+    if (-not $PSBoundParameters.ContainsKey('InstallRoot')) { $InstallRoot = Join-Path $env:ProgramFiles 'ClusterYourCodexWorker' }
+    if (-not $PSBoundParameters.ContainsKey('DataRoot')) { $DataRoot = Join-Path $env:ProgramData 'ClusterYourCodex\worker' }
+    if (-not $PSBoundParameters.ContainsKey('WorkspaceRoot')) { $WorkspaceRoot = Join-Path $DataRoot 'workspace' }
+}
+if (-not $PSCmdlet.ShouldProcess($DataRoot, "$Action $resolvedScope worker")) { return }
+if ($resolvedScope -eq 'System') {
+    if ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') {
+        $parameters = @{
+            Action = $Action; BundleRoot = (Resolve-NormalizedPath $BundleRoot)
+            InstallRoot = (Resolve-NormalizedPath $InstallRoot); DataRoot = (Resolve-NormalizedPath $DataRoot)
+            WorkspaceRoot = (Resolve-NormalizedPath $WorkspaceRoot); Scope = 'System'
+            OwnerSid = $script:OwnerSid
+            AllowOnBattery = [bool]$AllowOnBattery; PairOnly = [bool]$PairOnly
+            PurgeData = [bool]$PurgeData; FailureInjection = $FailureInjection; InstanceName = $InstanceName
+        }
+        if ($EnrollmentFile) { $parameters.EnrollmentFile = Resolve-NormalizedPath $EnrollmentFile }
+        Invoke-SystemWorkerLifecycle -Parameters $parameters
+        return
+    }
+}
 $bundle = Resolve-NormalizedPath $BundleRoot
 $install = Resolve-NormalizedPath $InstallRoot
 $data = Resolve-NormalizedPath $DataRoot
@@ -1232,13 +1488,13 @@ if (Test-Path -LiteralPath $data -PathType Container) {
         Assert-PrivateStateTree -Root $transactionPath
     }
 }
-$resolvedScope = Resolve-ServiceScope -RequestedScope $Scope
 $ownedInstallation = $false
 $recordedManifest = $null
 if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
     $markerItem = Get-Item -LiteralPath $markerPath -Force
     if (-not (Test-ReparsePoint $markerItem)) {
-        $ownedInstallation = ((Get-Content -LiteralPath $markerPath -Raw).Trim() -eq $script:Schema)
+        $ownedInstallation = ((Get-Content -LiteralPath $markerPath -Raw).Trim() -ceq $script:OwnerMarkerValue)
+        if (-not $ownedInstallation) { throw 'Worker ownership marker does not match this instance.' }
     }
 }
 if (Test-Path -LiteralPath $data -PathType Container) {
@@ -1302,7 +1558,7 @@ if ($Action -eq 'Uninstall') {
         if ($remaining.Count -eq 0) { Remove-Item -LiteralPath $install -Force }
     }
     if ($PurgeData) {
-        Assert-DefaultDataPurgeTarget -Path $data
+        Assert-DefaultDataPurgeTarget -Path $data -ResolvedScope $resolvedScope
         Remove-Item -LiteralPath $data -Recurse -Force
     }
     [PSCustomObject]@{ schemaVersion = $script:Schema; action = 'uninstall'; succeeded = $true; dataPreserved = (-not $PurgeData) } | ConvertTo-Json
@@ -1327,7 +1583,7 @@ Protect-Directory -Path $install
 Protect-Directory -Path $data
 Protect-Directory -Path $workspace
 if (-not (Test-Path -LiteralPath $markerPath)) {
-    [System.IO.File]::WriteAllText($markerPath, "cyc.dev/windows-worker-install/v1`n", (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText($markerPath, ($script:OwnerMarkerValue + "`n"), (New-Object System.Text.UTF8Encoding($false)))
     Protect-File -Path $markerPath -NewlyCreated
 }
 

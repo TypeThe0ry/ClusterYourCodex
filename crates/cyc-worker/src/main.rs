@@ -16,6 +16,13 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Inspect protected migration staging; never activate or alter a worker.
+    MigrationStatus {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        pretty: bool,
+    },
     /// Inspect hardware, capacity, and installed toolchains.
     Probe {
         /// Workspace whose actual disk volume should be measured.
@@ -57,6 +64,10 @@ enum Commands {
 async fn main() -> Result<()> {
     let args = Args::parse();
     match args.command {
+        Commands::MigrationStatus { config, pretty } => {
+            let status = cyc_worker::migration::inspect_migration_stage(&config)?;
+            print_json(&status, pretty)?;
+        }
         Commands::Probe { workspace, pretty } => {
             let report = cyc_worker::probe_at(&workspace)?;
             print_json(&report, pretty)?;

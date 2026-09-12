@@ -5,14 +5,560 @@ the current checkout and live GitHub state, rather than on chat history. Update
 it in the same pull request as every implementation, CI, packaging, or release
 change.
 
-- **Snapshot date:** 2026-09-08
+- **Snapshot date:** 2026-09-12
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
 - **Snapshot baseline:** published `v0.1.0-preview.100`, source commit `2c269842dbc15934b5cfcf6a4cb3e0844cec3ed5`. Documentation and merge reconciliation may advance beyond this immutable release SHA.
 - **Latest published preview:** [`v0.1.0-preview.100`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.100), published 2026-09-07 17:42:22 UTC by successful tagged workflow [`34128668756`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34128668756). GitHub reports `isPrerelease=true`, `isDraft=false`, and 23 assets. Windows self-contained and clean Windows 11 ARM64 compatibility acceptance both passed.
 - **Previous stable-testing exception:** [`v0.1.0-preview.85`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.85) remains immutable **stable-testing** (`isPrerelease=false`) for the explicitly authorized test channel. Its embedded product version is still a preview; it is not Certified GA.
 - **Release channels:** preview.100 is the current public prerelease; preview.95 remains an immutable fallback. Certified GA remains separate from operator testing; open Issues #2, #3, and #5 retain their unverified platform, signing, and isolation gates.
 
+### Current checkpoint — 2026-09-12
+
+PR #58 is the active lifecycle candidate. The preceding candidate head
+`4dce49137800f4bc992c300db188ed4f6bcd996a` passed CI run
+[`34690034466`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34690034466),
+including Windows controller/worker live round trip, managed worker kits,
+Windows installer lifecycle, Rust/desktop tests, CodeQL, and dependency gates.
+The current follow-up binds Windows named-instance and service-scope discovery
+to the installer's actual workspace layout; its focused provisioning regression
+passes locally (45 tests). A fresh CI run is required for this follow-up before
+merge. The latest public build remains preview.100 and is still a GitHub
+prerelease; no stable GA release has been created.
+
 ## Current delivery goal: core usability before polish
+
+### Candidate CI checkpoint — 2026-09-08
+
+PR #58 head `ff7da71ff8cce24db658ae1049b5406747898f80` passed
+CI run `34235712011`. Windows workspace Rust completed successfully in
+23m50s. CodeQL and dependency checks also passed. The remaining desktop job
+`102093450517` has passed native tests, Clippy, Windows installer lifecycle
+validation, and managed worker-kit validation. The kit validation completed at
+14:38:32 UTC after 11m07s. The live Windows controller/worker step started at
+that timestamp and passed. Downloaded artifact `10061628508` contains a passed
+result with all 14 checks true, queued/running/succeeded transitions, and a
+37-second task. Downloaded stdout contains both expected step markers. The
+43-byte result.txt hashes to
+`7a628a8467fea26c070c97c2be9ecbad371a2d279443a8726efb651ab3bc34b0`, matching
+the controller artifact record. The result.json SHA-256 is
+`2c6a2b7c99137159b4701a48647c1ce3afb78bc7e06271984e8bdd74f92685f4`.
+Executed source is the PR merge ref `1f09de019589aef9d3249b45d357b37bf70b872b`;
+GitHub confirms parents `2b1a755b1072c63f8e74ac08b695b480bf6a828c` and the
+candidate head above. This is same-host Windows live evidence, not remote SSH
+installation or persistent-service acceptance.
+
+Auto squash merge is enabled. Review discussions must remain resolved and the
+repository still requires an approving review; no discussion or branch
+protection is bypassed. The remaining Windows discovery workspace issue is
+addressed in the current follow-up and will be rechecked by fresh CI.
+
+The named-instance tests cover layout, task ownership and lifecycle argument
+selection with mocked scheduled tasks; the native persistence regression
+covers reopening the computer record. Neither proves a newly installed remote
+named worker survives a service restart. After signed candidate publication,
+that remains the next Windows acceptance step, followed by a fresh task and
+retrieved logs/artifact bytes. Local UI copy edits are not part of this CI SHA.
+
+### Live controller check at 2026-09-08 14:04 UTC
+
+The installed ClusterYourCodex MCP reports controller/database healthy and MCP
+available, still at preview.100. Its only registered worker, the primary Windows test host,
+is offline with stale telemetry (last accepted at 10:18:26 UTC). The reported
+1251 MiB free disk is cached, not a fresh installation-capacity measurement.
+The controller retains job `7c09a0be-764b-527a-a31d-1867523b2448` as succeeded,
+exit 0, with artifact ID `1cc32963-cbb9-4d5a-9354-de7038fbb583`; this read does
+not revalidate artifact bytes or prove ongoing persistent-service availability.
+No new job was submitted to the offline worker.
+
+Follow-up runner probes (strict known-host verification, exit 0) confirmed the Windows test host
+SSH reachable, approximately 1.5 GB free disk, and no cyc-worker process. The
+default worker task is Ready (not Running), principal SYSTEM, last result 1.
+Its executable/workspace target sshadmin's LocalAppData directories; installation
+root, data root and config.json are owned by WS\sshadmin and are not reparse
+points. Default Program Files/ProgramData worker roots and named-instance roots
+do not exist. This is a confirmed principal/ownership mismatch consistent with
+the worker's current-user owner validation, not a network outage. No task,
+credential, ACL or worker data was changed by these probes. Exact failure stderr
+under SYSTEM was not reproduced in this read-only check.
+
+Linux fallback probes confirmed a Linux test host reachable (exit 0), but root and the
+configured workspace share an ext4 filesystem at 100% use with only 299 MB
+available. No alternate persistent data filesystem was found in lsblk. /tmp
+is tmpfs and is not a substitute for durable worker-service acceptance. The
+queried systemd unit patterns returned no loaded worker units; this does not
+prove that no differently named or disabled unit exists. A secondary worker endpoint was
+unavailable. No cleanup, installation or heavy job was attempted on either node.
+
+The preview.101 debug desktop executable built successfully from the candidate
+source. SHA-256: `585fff368c63916a62346db23d9407bd5358fb56dc858415245e12f5f23a51d4`.
+It was not launched or installed and is not the signed distribution package.
+
+Local candidate metadata is prepared as `0.1.0-preview.101`; no tag or release
+has been created. Published preview.100 remains unchanged. The candidate must
+pass exact-version checks and CI before a signed prerelease build is published.
+Candidate commit `e0d58b9` passed local native library tests (81), provisioning
+library tests (43), desktop tests (105), MCP tests (44), and both JS builds.
+Version consistency including negative tests, changelog consistency, release
+signing boundary, 63 pinned Actions references, and worker-kit signing-key
+private-file protection checks also passed. The private-file check ran under
+PowerShell 7 as required; its initial PowerShell 5.1 invocation was rejected
+before execution. These results do not replace exact-candidate CI or deployment.
+
+Named-instance implementation commit `f3c199a` is included in PR #58, with
+squash auto-merge still enabled. Its CI run `34234534065` ended cancelled;
+the current candidate run is `34235712011` for head `ff7da71`. The cancelled
+run is not evidence of completed platform acceptance.
+The preceding run `34230627688` ended cancelled, not successful, and must not
+be cited as completed Windows desktop acceptance.
+Local full worker-kit testing completed with exit 0 and
+`worker-kit packaging tests passed`. It began before the final edits, so this
+does not replace exact-commit CI or live installation acceptance.
+All 81 native library tests passed (exit 0), including the new database-reopen
+regression for named-instance configuration. The new regression exercises
+the real local store with a checkpoint driver, not live SSH credential storage.
+
+### 2026-09-08 concise desktop copy verification
+
+Verified the running UI at `http://127.0.0.1:1420/`: Home shows fleet
+counts, computers and recent tasks without the former promotional heading or
+subtitle. Tasks shows filters and task rows without the tracking-description
+paragraph. Task records and expandable placement details remain available.
+The four locale catalogs already exclude the discarded page-copy keys.
+A rendered-home regression test now checks the three removed Chinese phrases
+and retains status/action content. Desktop tests: 105 passed. This is a UI
+content check, not worker installation or release acceptance.
+
+Windows installer named-instance support is now in development as an
+alternative to blocking first usability on legacy identity migration. See
+[scope and pending checks](windows-system-migration.md#fresh-named-instance-alternative-implementation-in-progress).
+The provisioning driver now rejects a Windows instance name on a non-Windows
+kit before SSH authentication or kit upload. A Linux fixture regression checks
+that no transport events, uploaded files or transient-secret reads occur.
+All 43 provisioning library tests now pass, including this regression.
+The driver fixture also includes a signed Windows kit and asserts that Install,
+Repair and Uninstall preserve the selected instance name, while the default
+instance omits that argument. These simulated transport checks pass; they are
+not evidence of a live Windows service installation.
+Windows instance layout, journal binding and task-selection tests passed again
+on the current scripts (mock tasks; no live Scheduled Task changes).
+GUI/native bridge configuration propagation is implemented in source but not
+deployed. All 105 frontend tests and the frontend build pass. Native cargo
+check and cargo check --tests pass. The SYSTEM lifecycle dispatch fixture
+passes. The earlier full worker-kit test process finished successfully;
+it is not final-tree acceptance. Original worker state
+is unchanged. Live named-instance installation/pairing/service/job acceptance
+remains required.
+
+### Completed CI for PR head 90bf4ae
+
+Run `34226042054` is now successful, including the Windows desktop job and
+its live controller/worker round trip. All PR checks reported pass. Downloaded
+artifact `10057535165` (98417 bytes) contains a passed result with 14 true
+checks, no failure, and queued/running/succeeded states. The run lasted 38s;
+cleanup reports removed, jobRootDeleted true and reservationReleasedAt set.
+Job ID: `695b00f1-a384-41de-b05a-eeaca7562fa1`.
+Run ID: `68e854ce-a189-4173-9224-968a0c3a7f48`.
+Executed merge commit: `158651c7f37660babafce34f32af4029c991b2c2`.
+Downloaded result.json SHA-256:
+`9ca37076e9a69cc7d13f56400f5c0093fb25fd645c1237a6fd3d3425d559b9e7`.
+
+This is same-host Windows live execution evidence, not cross-machine SSH,
+GUI credential persistence, Scheduled Task lifecycle, or GA approval.
+PR #58 remained open at observation despite all reported checks passing.
+Subsequent commits require their own checks; no new release was published.
+
+Downloaded Windows same-host live execution evidence from successful ancestor
+CI run `34224323417` is recorded in
+[the round-trip report](windows-ci-roundtrip-34224323417.md). Its merge commit
+is bound to PR head `51a1c51`; it is not evidence for newer head `90bf4ae` or
+for GUI SSH installation and persistent service acceptance.
+
+### 2026-09-08 Linux discovery capacity formatting
+
+Latest follow-up for exact head `90bf4ae`: Windows Rust job `102060693675`
+in run `34226042054` also completed successfully. Its completed log reports
+121 worker library tests passed (one ignored; 993.29s) at 12:50:43 UTC and
+all nine migration-document tests passed (84.52s) at 12:52:08 UTC. The desktop
+job `102060693531` remained active in `Validate managed worker kits`, entered
+at 12:52:22 UTC. PR #58 was still open with squash auto-merge enabled; this
+observation does not establish whole-run success or a completed merge.
+These CI tests do not establish live worker pairing or service persistence.
+
+Linux disk discovery now uses explicit `awk printf "%.0f"` integer formatting,
+matching macOS, instead of default numeric printing followed by decimal-point
+truncation. This avoids implementation-dependent scientific notation being
+truncated or rejected by the integer-only discovery protocol. The available
+local Git awk printed the old 100-GiB fixture correctly, so this is a portability
+repair, not a reproduced P1 root cause. Five Windows discovery tests passed;
+executing the exact updated awk expression with local Git awk returned exact
+0-byte, 1-KiB, 100-GiB and 1-TiB fixture values. A Unix-only native awk regression
+is included for Linux/macOS CI; its execution is not claimed from Windows.
+
+Subsequent exact-source CI `34226042054` at `90bf4ae` completed both Rust
+workspace platform jobs successfully. Completed job logs explicitly report
+`native_awk_disk_probe_preserves_large_capacity ... ok` on Linux (job
+`102060693779`, 12:28:16 UTC) and macOS (job `102060693571`, 12:28:25 UTC).
+This verifies the probe expression on both native CI platforms. Windows,
+desktop and Worker Kit jobs were still running at this observation; neither
+full CI success nor deployed worker acceptance is implied.
+
+The earlier Windows workspace job `102054930277` in run `34224323417`
+completed successfully at 12:30:43 UTC for `51a1c51`. Its completed log reports
+all nine migration-document tests passing (91.61s). This is independent Windows
+CI evidence for the migration implementation present at that ancestor, not
+validation of subsequent commits or live migration of the existing worker.
+
+### 2026-09-08 validation queue deduplication
+
+Live GitHub inspection found several superseded PR #58 CI runs still executing
+Windows workspace/desktop tests concurrently. CI, CodeQL and dependency-security
+now group pull-request runs by workflow and PR number and cancel superseded
+members. Non-PR runs use their unique run ID with cancellation disabled, so main,
+tag and scheduled evidence is retained. Release publishing is unchanged.
+Action-pin validation (63 references), signing-boundary validation and diff
+checks passed. Cancellation behavior still requires a subsequent PR update to
+exercise on GitHub; pre-existing runs without this group are not claimed stopped.
+
+### 2026-09-08 strict native credential persistence acceptance
+
+The Windows Credential Manager backend passed an explicit cross-process native
+test: write a unique synthetic credential, drop the original secret allocation,
+launch a fresh reader process, verify its username/value, delete the owned entry,
+and confirm absence. The reader's named test and pass count are checked, not just
+its exit code. This strict test fails if the vault is unavailable (including
+Windows error 1312); unlike the compatibility test it never silently skips.
+
+Reproduce on an interactive Windows controller:
+
+```powershell
+cargo test -p cyc-secrets --locked windows_credential_manager_cross_process_acceptance -- --ignored
+```
+
+Native acceptance passed (0.14s), the ordinary crate suite passed (5 tests;
+2 explicitly ignored native helper/acceptance entries), scoped Clippy and
+format/diff checks passed. Only unique synthetic entries in the test namespace
+were created and removed. No existing SSH credential was read or changed.
+This proves same-user cross-process persistence, not reboot, another user's
+access, real SSH authentication, or completion of GUI onboarding.
+
+### 2026-09-08 native desktop Linux onboarding resumed
+
+The corresponding durable retry regression now closes/reopens SQLite twice:
+after a simulated SSH probe failure, and again at host-key approval. It verifies
+the same computer/node/cycle and probe operation ID, one retained record, no
+credential reference before authentication, and no authentication/install calls
+while awaiting approval. The targeted test and all 27 provisioning state-machine
+tests passed on Windows; formatting/diff checks passed. This uses a fake SSH
+driver and proves recovery semantics, not native password storage or installation.
+
+The running preview.100 native desktop retained a Linux provisioning record
+that had failed at SSH connection with `SSH_IO` (revision 3, cycle 0).
+An explicit Retry advanced it to the host-key approval checkpoint (revision 6,
+cycle 0). The existing record was reused; no new record, credential copy,
+installation, enrollment or service activation was performed. This proves
+current product SSH connectivity, not password authentication or Linux E2E.
+The desktop is awaiting verification/approval of the observed host key.
+The controller still reports zero available workers; its sole Windows node
+is stale/offline. Existing successful job evidence remains historical.
+
+The overview now keeps operational status visible and diagnostic metadata
+collapsed; [content rules](ui-content-policy.md) record that presentation policy.
+Desktop type checks, 103 frontend tests and production build passed for that
+change. Native provisioning remains the priority over further UI polish.
+
+### 2026-09-08 native Linux public-kit acceptance
+
+P1 completed a native signed preview.100 Worker Kit install → repair → uninstall
+with isolated roots and no enrollment. All lifecycle commands succeeded;
+independent final assertions/version execution exited 0. The worker remained
+unpaired and no service was enabled. Source archive hash, native receipts,
+the combined probe's final systemctl exit 1, disk limits and retained artifacts
+are recorded in [the native Linux acceptance report](linux-native-preview100-acceptance.md).
+This advances native packaging acceptance, not GUI/credential/heartbeat/job E2E.
+NUC SSH was unavailable; the controller still reports only stale/offline Helio.
+
+### 2026-09-08 migration residual checks
+
+Locked migration inputs now inspect residuals both at source acquisition and
+immediately before target staging. Existing repair/migration transactions,
+containment quarantine and retained job roots block copying; source workspace
+ACLs must match the old owner. No cleanup is performed. Native targeted residual
+tests passed (18.16s), preserving rejected markers/job roots; the ordinary locked
+source-to-stage test still passed (50.69s). Scoped Clippy and diff checks passed.
+Live task/process/lease checks and external guard reconciliation remain separate
+unfinished coordinator requirements.
+
+### 2026-09-08 staging activation boundary
+
+Normal worker config load/write and pairing now reject any migration-stage
+entry. This closes the gap where `activationAllowed=false` was only descriptive:
+`run`/`status`/`pair` cannot use the staging directory until a future coordinator
+explicitly retires it. Dedicated read-only `migration-status` remains available.
+The change does not implement task switching or declare the worker available.
+All nine migration tests passed (46.95s), including real CLI rejection of run,
+status and pair before creation of pairing/generation locks, while inspection
+still succeeds. Normal protected config publishing/loading regression passed
+separately (8.15s). Scoped Clippy and diff checks passed.
+
+### 2026-09-08 full worker-kit regression completed
+
+The fixed-script run started at `90f21b7` completed with native exit 0 and
+`worker-kit packaging tests passed`. Linux and the newly phased macOS lifecycle
+fixtures both completed. The test's success cleanup removed its temporary tree
+`cyc-worker-kit-test-65ff591954e14688be4b8c66aa39b438`; its Linux watchdog had
+already been inspected as exit 0/no timeout. Earlier failed-run evidence remains
+separate and retained. This is fixture coverage, not native Linux/macOS service
+acceptance or acceptance of all subsequent Rust migration changes.
+
+Windows `LockedMigrationInputs` now joins old-owner-verified, pinned source reads
+with protected target staging while retaining all source handles through the
+copy. It clears captured credential buffers on completion/error. Source task
+quiescence, installation metadata ownership, interrupted transaction recovery
+and live task switching still need the migration coordinator.
+The native local source-to-stage test passed (exit 0, 39.21s): config and
+credential writes were blocked while captured, target inspection verified four
+files, and original bytes plus node/controller identity remained unchanged.
+Scoped Clippy passed. The initial fixture correctly rejected a non-private
+temporary parent; the rerun used a newly provisioned private destination parent.
+
+### 2026-09-08 Windows stable migration-source reads
+
+`LockedMigrationSource` now opens source files with read-only Windows sharing
+and retains non-delete-sharing ancestor handles before verifying the explicit
+old owner's existing ACLs. It never repairs ownership/permissions. The native
+local regression passed: writes, file rename and parent rename fail while held;
+bounded reads preserve contents; a wrong owner is rejected without changing
+the source; ordinary writes work after release. Targeted test exit 0 (5.44s),
+Clippy with denied warnings and diff checks passed. This is a Windows primitive,
+not an implemented live SYSTEM migration or a Linux/macOS ownership check.
+
+### 2026-09-08 migration staging inspection CLI
+
+`cyc-worker migration-status --config <absolute config> [--pretty]` now provides
+read-only staging inspection. It distinguishes incomplete copying from verified
+staging, enforces bounded strict receipts and documents, checks protected files,
+validates credential/ledger binding, and verifies every digest and the directory
+inventory. It never authorizes activation. Source-owner-aware migration and
+task-switch/rollback coordination remain unfinished.
+All eight migration tests passed, including a real CLI child invocation,
+changed-credential rejection, receipt path-traversal rejection and incomplete
+copying inspection. The initial inspection test exposed Windows OsStr being
+serialized as a platform object; staging now validates Unicode names and writes
+plain JSON strings. The rerun passed in 50.64 seconds. Scoped Clippy passed.
+The full packaging run `cyc-worker-kit-test-65ff591954e14688be4b8c66aa39b438`
+finished its Linux fixture with exit 0/no timeout/no remaining PIDs and is now
+executing the phased macOS fixture. This is not native service acceptance.
+
+### 2026-09-08 protected migration staging
+
+The new staging function validates all caller-supplied credential bytes before
+output, exclusively creates a private destination, writes protected files,
+re-reads and verifies their hashes, and records copying/staged phases in a
+protected receipt. Existing target directories are never adopted or overwritten.
+The receipt explicitly has `activationAllowed=false`; no old file is read or
+removed, and no task switches. A native local filesystem/ACL integration test
+passed for missing/wrong credentials causing no output, exact-byte preservation,
+private output, secret-free receipt, and retry refusing an existing target.
+This is not a completed source-ACL-aware SYSTEM migration or recovery CLI.
+
+### 2026-09-08 migration credential inventory
+
+Identity document conversion now returns exact credential source/target paths,
+expected digests, and required/optional status for transactional copying. The
+current credential is required; acknowledged cleanup can legitimately leave
+historical references whose files are absent. Repeated references are deduplicated
+and conflicting digests abort conversion. This inventory is not Debug/Serialize
+and contains no credential bytes. Filesystem verification, protected copying,
+durable journal recovery, and task switching remain unfinished.
+All seven migration-document integration tests passed, including required-current,
+optional-history, duplicate-reference, and conflicting-digest checks. Scoped
+Clippy passed with warnings denied; formatting and diff whitespace checks passed.
+
+### 2026-09-08 worker regression and native installation preflight
+
+At source `90f21b7`, `cargo test -p cyc-worker --locked` completed with
+native exit 0: 119 unit tests passed, one subprocess helper ignored, and all
+six migration-document integration tests passed. The unit suite took 239.90
+seconds. This covers pairing recovery, credential rotation, restart generation,
+execution and artifact handling locally; it does not prove a persistent remote
+worker installation.
+
+The provisioning state-machine integration suite also passed all 26 tests
+with native exit 0. Coverage includes durable authentication policy, password
+exclusion from serialized records, crash/resume, repair identity preservation,
+and smoke response-loss/retry binding. These use test transports, not live SSH
+credential-store or remote installation acceptance. MSVC emitted LNK4099
+warnings for missing OpenSSL debug symbols; linking and tests succeeded.
+
+A read-only Helio probe still found zero worker processes and the existing
+SYSTEM task in Ready state with LastTaskResult 1. Its executable remains in
+the SSH user's old LocalAppData installation. C: free space is 1,301,364,736
+bytes. A fresh data directory alone is not a valid side-by-side workaround:
+the installer uses a fixed task name and verifies its existing path binding
+before install, including PairOnly. No task, ACL, credential, or worker data
+was changed. Identity-preserving migration remains required for this existing
+installation; the new full worker-kit regression is still running separately.
+
+### 2026-09-08 migration document conversion
+
+The combined identity-document conversion now also validates the config against
+exactly one acknowledged pairing for its current credential, controller, and
+node. Boot-generation parsing is shared with normal startup and rejects unknown
+schemas, invalid values, or exhausted signed-64-bit counters. Conversion returns
+the original boot-generation bytes, without resetting or incrementing them.
+All six migration integration tests passed. This is still an in-memory building
+block, not a completed filesystem migration or service switch.
+Existing boot-generation restart/orphan-temp and independent-handle concurrency
+tests both passed (native exit 0; 66.42 seconds). Scoped Clippy also passed with
+warnings denied.
+
+The fixed-source full worker-kit run completed its Linux lifecycle fixture with
+`wait_completed=True`, `timeout_marker=NOT_TRIGGERED`, `exit_code=0`, and no
+remaining process IDs. Evidence: local temp directory
+`cyc-worker-kit-test-95cfd983cfcd47c5a153d2c6db15a0b1`, file
+`linux-worker-lifecycle.watchdog.txt`. The same run then failed the macOS
+whole-suite watchdog at 600.07 seconds (native suite exit 1). Its retained
+files show progress through path-binding checks and into the loaded-LaunchAgent
+scenario, rather than a confirmed stationary lifecycle deadlock. The watchdog
+terminated its process tree successfully and recorded no remaining PIDs.
+The macOS fixture now uses the existing ordered setup/repair/binding/uninstall
+phase budgets: 600 seconds per phase, 2400 seconds total, no extension from
+duplicate markers, and no successful exit with missing markers. All lifecycle
+assertions remain intact; the revised full run is not yet accepted.
+This is Windows/Git Bash fixture coverage, not native Linux/macOS service
+acceptance.
+
+Implemented no-I/O config and pairing-ledger relocation primitives in cyc-worker.
+They preserve all identity fields, rewrite only approved paths, reject pending
+pairing/cleanup, and reuse the existing strict ledger validator before/after
+conversion. Four native Rust integration tests passed for identity preservation,
+pending-state/schema rejection, path escapes/renaming, and invalid or duplicate
+ledger records. Scoped worker library/integration-test Clippy with warnings
+denied, formatting, and diff checks passed. This is not yet a runnable
+migration operation: boot-generation preservation, journal, source verification,
+task switching, and rollback still need integration.
+
+The phase-budget full worker-kit run has now passed all three Linux repair
+failure/rollback scenarios and reached binding checks (last verified repair at
+674 seconds; wrong-install/workspace checks also passed). It remains running;
+do not report the whole suite as passed from these partial phase observations.
+
+### 2026-09-08 PR and live controller reconciliation
+
+PR #57 merged its prior head. The SYSTEM lifecycle changes are now PR #58,
+based on the resulting main commit, with squash auto-merge enabled subject to
+checks. No tag or release was created. The local full worker-kit run remains
+in progress against fixed script hashes recorded above/below.
+
+At 10:51:29 UTC, the installed product MCP returned controller/database healthy,
+Codex integration available, and the only paired node offline with stale
+telemetry (last accepted at 10:18:26 UTC). This agrees with the native process
+check; historical task success must not be treated as current readiness.
+No task was submitted to the offline node and no credential value was read.
+
+### 2026-09-08 concise UI follow-up
+
+Confirmed the discarded promotional home/task headings are absent from the
+current desktop source. Removed the repeated quick-start description above the
+action steps. Task filters now distinguish an empty history from no matching
+tasks, with equivalent messages in English, Chinese, Spanish, and Japanese.
+This frontend-only change does not alter worker lifecycle or release status.
+
+### 2026-09-08 SYSTEM lifecycle dispatcher implementation
+
+Native SYSTEM ACL acceptance now passed on a Windows test host (remote exit 0),
+using exact private-ACL functions extracted from the current installer, not mocked identity
+or scheduler calls. A real temporary SYSTEM task created/protected/revalidated
+a directory and file and read its known non-secret content. Receipt: runtime
+SID and owner `S-1-5-18`, protected DACL, exactly one rule. Independent follow-up
+found zero native-probe tasks; the original worker task stayed Ready/result 1.
+Evidence remains in the test host's isolated, job-owned directory; the absolute
+host path is intentionally omitted from repository documentation.
+Reproducer: `packaging/worker-kits/windows/Test-SystemPrivateAclNative.ps1`.
+Installer SHA256:
+`FE4E42584B1EC8C424CBF117F44F1FBA64FB50262953167EDDC4C44F3B362DDC`;
+probe SHA256:
+`4833EF4D3F807118F52033927653108B233BA362DA7893FB37964B87D40BDBA5`.
+This proves the native ACL primitive only, not signed-kit dispatch, pairing,
+worker startup, service restart, or full task round-trip acceptance. The probe
+retains a tiny protected evidence tree and never edits existing worker data.
+
+Latest read-only Windows-host recheck: SSH has an elevated administrator token; the
+`ClusterYourCodex Worker` task exists with SYSTEM principal, Ready state, and
+LastTaskResult 1. No `cyc-worker` process is currently present. The earlier
+foreground proof remains historical execution evidence, not current availability.
+The controller shell is not elevated; no capacity snapshot is retained here.
+Avoid a full remote debug build or unrelated cleanup. These probes changed no
+remote task, process, ACL, pairing, or worker data.
+
+The Windows installer now delegates the entire System-scope lifecycle to a
+bounded SYSTEM helper task before accessing worker-owned state. System defaults
+use Program Files/ProgramData; User behavior remains logon-scoped. The helper
+uses a per-data-root mutex, private request/result files, and the copied verified
+five-file kit. The parent waits for actual helper completion and a successful
+exit/receipt; failed/timed-out operations retain evidence, while successful
+handoffs delete only their exact known files. WhatIf stops before dispatch.
+System-scope handoffs carry the invoking administrator SID into the SYSTEM
+child, so newly created worker roots remain administrator-owned while SYSTEM
+retains the required access; a different administrator is rejected on repair
+or uninstall instead of taking ownership.
+
+The dispatcher fixture passed under PowerShell 7 and Windows PowerShell 5.1,
+covering successful receipt/cleanup, failure evidence retention, timeout stop,
+non-admin rejection, SYSTEM task principal, copied kit shape, and generated
+helper syntax. Scheduler operations are mocked; private filesystem/ACL actions
+are real. No actual SYSTEM process, live migration, or remote persistent worker
+acceptance is claimed by these tests. The existing foreground worker and
+user-owned data were not modified. Existing task/root conflicts remain explicit;
+there is no automatic ownership takeover. The full worker-kit regression failed
+at its 600-second `linux-worker-lifecycle` watchdog on Windows/Git Bash. Retained
+evidence is in local temp directory
+`cyc-worker-kit-test-c007be50b0de40dc93349b5398966b43`: child stderr reached
+the expected `before-manifest-write` failure injection, while top-level logs
+were empty. This does not establish whether rollback or a later assertion was
+still executing. Added fixed phase/elapsed-time markers around repair injection
+and path-binding checks without logging secrets or changing the watchdog limit.
+No native Linux pass or complete packaging-gate pass is claimed.
+The instrumented rerun also exited 1 at 600 seconds; evidence directory:
+`cyc-worker-kit-test-13e7b159cfb0492d9f1df890165d453b`. Its phase log now proves
+repair-after-pair started at 510s, returned expected failure at 584s, and passed
+rollback assertions at 586s. The next injection began at 586s and was killed
+by the suite deadline. Thus that rollback completed, and cumulative suite
+runtime exhausted the budget; the next injection is still unverified. Do not
+diagnose this as a confirmed lifecycle deadlock or mark the suite passed.
+The Linux fixture now uses ordered setup/repair/binding/uninstall time budgets
+within the same shell, preserving transaction state and every assertion. Each
+phase has a 600-second limit; total time is bounded to 2400 seconds. Only the
+next declared marker grants a fresh budget; repeats/unknown markers cannot
+extend it. Successful early exits that omit required phases are rejected.
+PowerShell 7 and Windows PowerShell 5.1 watchdog self-tests passed: ordinary success, exit 23, timeout,
+valid phase transition exceeding the old whole-run budget, repeated markers
+still timing out, and missing required markers failing. Full lifecycle and
+complete platform acceptance remain pending for this watchdog revision.
+Independent review found an unfinished-log-line race; the reader now consumes
+only newline-terminated records and revisits an incomplete tail. The first
+retest exposed a Windows sharing violation from ReadAllText against redirected
+stdout (retained helper evidence `3bd6d9d6115f4c7ebaae1f80c0e0c594`); live log
+reads now explicitly use FileShare.ReadWrite. Added split-marker regression,
+deadline-before-success handling, and persistent failure classification so a
+missing phase cannot disappear from the final watchdog evidence.
+The corrected shared-reader/split-marker revision passed both PowerShell 7
+and Windows PowerShell 5.1 self-tests (native process exit 0), with evidence
+directories `cyc-worker-kit-bash-helper-f367f717bb3346bfac0a1aca0701a627` and
+`cyc-worker-kit-bash-helper-fe3dd5e7745c4e299b656e1a3d0cb77c`. Generated Linux
+shell syntax and git diff whitespace checks also passed. The next full run
+must be evaluated separately; these helper checks are not lifecycle acceptance.
+The dispatcher now detects a recorded nonzero helper exit without a receipt
+instead of waiting the full five minutes. It checks LastRunTime to avoid
+mistaking a newly registered, not-yet-started Ready task for a failed execution.
+Regression fixtures cover missing-receipt failure and Ready-before-first-run;
+this remains fixture evidence, not live SYSTEM installation acceptance.
+Independent review identified and fixed Windows PowerShell 5.1's default ANSI
+decoding of BOM-less UTF-8 requests and the mismatch between a silent helper
+wait and the SSH transport's 15-second inactivity limit. Requests now use
+explicit UTF-8, with Chinese-path decoding exercised in real Windows PowerShell
+5.1. The parent emits a fixed non-secret stderr marker every five seconds;
+the transport source refreshes its progress timer on either stdout or stderr.
 
 ### 2026-09-08 completion timestamp reconciliation
 

@@ -16,6 +16,22 @@ use crate::security::{
 };
 
 pub const WORKER_CONFIG_VERSION: &str = "cyc.dev/worker-config/v1";
+
+/// A staging receipt is not authorization to run or re-pair the target. Only
+/// the migration coordinator may retire it after completing activation checks.
+pub(crate) fn reject_pending_migration(config_path: &Path) -> Result<()> {
+    let marker = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".migration-stage.json");
+    match fs::symlink_metadata(marker) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("inspect migration staging boundary"),
+        Ok(_) => {
+            bail!("worker migration is pending; inspect with migration-status before activation")
+        }
+    }
+}
 const BOOT_GENERATION_STATE_VERSION: &str = "cyc.dev/worker-boot-generation/v1";
 // Allocating a generation replaces an ACL-protected state file while holding
 // this lock. On Windows, every contender must complete several native DACL
@@ -76,6 +92,22 @@ struct BootGenerationState {
     generation: u64,
 }
 
+/// Validate a persisted generation without allocating or resetting it.
+pub fn validate_boot_generation_document(raw: &[u8]) -> Result<u64> {
+    if raw.len() > 16 * 1024 {
+        bail!("boot generation state is unexpectedly large");
+    }
+    let state: BootGenerationState =
+        serde_json::from_slice(raw).context("parse boot generation state JSON")?;
+    if state.api_version != BOOT_GENERATION_STATE_VERSION {
+        bail!("unsupported boot generation state apiVersion");
+    }
+    if state.generation >= i64::MAX as u64 {
+        bail!("boot generation exhausted signed 64-bit storage");
+    }
+    Ok(state.generation)
+}
+
 /// Allocate one durable daemon generation under an OS-backed cross-process
 /// lock. The protected state file is atomically replaced before the caller may
 /// construct a boot id, so a crash can skip a generation but can never reuse
@@ -113,18 +145,7 @@ pub fn allocate_boot_generation(config_path: &Path) -> Result<u64> {
         ensure_protected_input(&state_path)?;
         let raw = fs::read(&state_path)
             .with_context(|| format!("read boot generation state {}", state_path.display()))?;
-        if raw.len() > 16 * 1024 {
-            bail!("boot generation state is unexpectedly large");
-        }
-        let state: BootGenerationState =
-            serde_json::from_slice(&raw).context("parse boot generation state JSON")?;
-        if state.api_version != BOOT_GENERATION_STATE_VERSION {
-            bail!(
-                "unsupported boot generation state apiVersion `{}`",
-                state.api_version
-            );
-        }
-        state.generation
+        validate_boot_generation_document(&raw)?
     } else {
         0
     };
@@ -270,7 +291,56 @@ pub struct WorkerConfig {
 }
 
 impl WorkerConfig {
+    /// Build a relocation candidate without reading credentials or changing disk.
+    /// The migration transaction must separately prove quiescence, source ACLs,
+    /// boot-generation preservation, and target ownership before using it.
+    pub fn relocated(
+        &self,
+        old_config: &Path,
+        new_config: &Path,
+        new_workspace: &Path,
+    ) -> Result<Self> {
+        self.validate()?;
+        if !old_config.is_absolute()
+            || !new_config.is_absolute()
+            || !new_workspace.is_absolute()
+            || old_config.file_name() != new_config.file_name()
+        {
+            bail!("migration requires absolute paths and an unchanged config filename");
+        }
+        for path in [old_config, new_config, new_workspace] {
+            if path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+            {
+                bail!("migration paths must not contain parent traversal");
+            }
+        }
+        if self.credential_file.parent() != old_config.parent()
+            || self
+                .credential_file
+                .extension()
+                .and_then(|value| value.to_str())
+                != Some("credential")
+        {
+            bail!("migration credential must be a direct child of the old config directory");
+        }
+        let target = new_config
+            .parent()
+            .context("migration target has no parent")?;
+        let mut relocated = self.clone();
+        relocated.workspace_root = new_workspace.to_path_buf();
+        relocated.credential_file = target.join(
+            self.credential_file
+                .file_name()
+                .context("migration credential has no filename")?,
+        );
+        relocated.validate()?;
+        Ok(relocated)
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
+        reject_pending_migration(path)?;
         ensure_protected_input(path)
             .with_context(|| format!("refuse unprotected worker config {}", path.display()))?;
         let raw = fs::read(path).with_context(|| format!("read config {}", path.display()))?;
@@ -332,6 +402,7 @@ impl WorkerConfig {
     }
 
     fn persist(&self, path: &Path, replace: bool) -> Result<()> {
+        reject_pending_migration(path)?;
         self.validate()?;
         let mut bytes = serde_json::to_vec_pretty(self).context("serialize worker config")?;
         bytes.push(b'\n');

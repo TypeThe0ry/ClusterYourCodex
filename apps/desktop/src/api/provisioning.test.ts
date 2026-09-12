@@ -68,6 +68,24 @@ function startInput(): StartComputerInput {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("provisioning client secret boundary", () => {
+  it("preserves the optional Windows instance through request and returned configuration", async () => {
+    const form = { ...resetProvisioningModal().form, host: "worker.example.test", username: "builder", password: PASSWORD, windowsInstanceName: "alpha-1" };
+    expect(canSubmitProvisioningForm(form)).toBe(true);
+    for (const name of ["Alpha", "../alpha", "a b", "a*", "-alpha", "a".repeat(33)]) {
+      expect(canSubmitProvisioningForm({ ...form, windowsInstanceName: name })).toBe(false);
+    }
+    expect(canSubmitProvisioningForm({ ...form, workspace: "C:/shared" })).toBe(false);
+    const input = buildStartComputerInput(form, startInput().recordId, startInput().intendedNodeId);
+    expect(input.advanced.windowsInstanceName).toBe("alpha-1");
+    expect(input.advanced.workspace).toBeUndefined();
+    const provisioningStart = vi.fn(async () => ({
+      outcome: "awaiting_host_key_approval",
+      computer: record({ configuration: { ...record().configuration, windowsInstanceName: "alpha-1" } }),
+    }));
+    vi.stubGlobal("window", { __CLUSTER_YOUR_CODEX__: { provisioningStart } });
+    const result = await provisioningClient.start(input);
+    expect(result.computer?.configuration.windowsInstanceName).toBe("alpha-1");
+  });
   it("clears password objects after start and never returns the secret", async () => {
     const provisioningStart = vi.fn(async (_request: unknown) => ({
       outcome: "awaiting_host_key_approval",

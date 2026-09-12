@@ -257,10 +257,14 @@ function NodeRow({ node }: { node: NodeSummary }) {
       <div className="node-main">
         <div className="node-title"><StatusDot status={node.status} /><strong>{node.name}</strong></div>
         <span>{node.os} · {node.arch} · {node.address}</span>
-        <span>{node.availability ? t("home.availability", { value: node.availability }) : t("home.statusValue", { value: t(nodeStatusKeys[node.status]) })}</span>
-        {node.slots && <span>{t("home.executionSlots", { available: node.slots.available, effective: node.slots.effective })}</span>}
-        {node.availabilityReasons?.[0] && <span className="capacity-reason">{node.availabilityReasons[0]}</span>}
-        {node.telemetry && <span className="capacity-reason">{t("home.telemetry", { sequence: node.telemetry.sequence, bootGeneration: node.telemetry.bootGeneration, time: new Date(node.telemetry.receivedAt).toLocaleTimeString() })}</span>}
+        <span>{t(nodeStatusKeys[node.status])}</span>
+        <details className="node-details">
+          <summary>{t("provision.showDetails")}</summary>
+          {node.availability && <span>{t("home.availability", { value: node.availability })}</span>}
+          {node.slots && <span>{t("home.executionSlots", { available: node.slots.available, effective: node.slots.effective })}</span>}
+          {node.availabilityReasons?.map((reason) => <span key={reason}>{reason}</span>)}
+          {node.telemetry && <span>{t("home.telemetry", { sequence: node.telemetry.sequence, bootGeneration: node.telemetry.bootGeneration, time: new Date(node.telemetry.receivedAt).toLocaleTimeString() })}</span>}
+        </details>
       </div>
       <div className="node-capabilities">
         {node.capabilities.slice(0, 3).map((capability) => <span key={capability}>{capability}</span>)}
@@ -300,9 +304,6 @@ function HomePage({ fleet, online, openPage, openAddComputer }: { fleet?: FleetI
       {isFirstRun ? (
         <details className="panel first-run-panel">
           <summary>{t("home.quickStartTitle")}</summary>
-          <div className="first-run-copy">
-            <p>{t("home.quickStartDescription")}</p>
-          </div>
           <ol className="first-run-steps">
             <li><span>1</span><strong>{t("home.stepAdd")}</strong>{online ? <button className="text-button small" onClick={primaryAction.onClick}>{t("home.stepStart")} <Icon name="arrow" size={14} /></button> : <small>{t("controller.offline")}</small>}</li>
             <li><span>2</span><strong>{t("home.stepConnect")}</strong><button className="text-button small" onClick={() => openPage("integration")}>{t("home.stepOpen")} <Icon name="arrow" size={14} /></button></li>
@@ -418,7 +419,7 @@ function TasksPage({ fleet }: { fleet?: FleetInfo }) {
             </div>
           ))}
         </div>
-      ) : <EmptyState icon="tasks" title={t("tasks.emptyTitle")} />}
+      ) : <EmptyState icon="tasks" title={t(filter === "all" ? "tasks.emptyTitle" : "tasks.noMatches")} />}
     </section>
   );
 }

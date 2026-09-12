@@ -417,6 +417,129 @@ impl PairingCredentialLedger {
     }
 }
 
+pub(crate) fn migration_credential_inventory(
+    raw: &[u8],
+    config: &WorkerConfig,
+    old_config: &Path,
+    new_config: &Path,
+) -> Result<Vec<crate::migration::MigrationCredential>> {
+    // Reuse the strict schema, path and settled-state checks before extracting
+    // any copy candidates. Never infer file names by enumerating a directory.
+    relocate_pairing_ledger(raw, old_config, new_config)?;
+    validate_migration_identity_binding(raw, config)?;
+    let ledger: PairingCredentialLedger = serde_json::from_slice(raw)?;
+    let mut candidates = BTreeMap::<PathBuf, String>::new();
+    for record in ledger.records {
+        let mut bindings = vec![(record.credential_file, record.credential_sha256)];
+        if let (Some(path), Some(digest)) = (
+            record.previous_credential_file,
+            record.previous_credential_sha256,
+        ) {
+            bindings.push((path, digest));
+        }
+        for (path, digest) in bindings {
+            if let Some(previous) = candidates.insert(path, digest.clone()) {
+                if previous != digest {
+                    bail!("migration credential has conflicting ledger digests");
+                }
+            }
+        }
+    }
+    let target = new_config
+        .parent()
+        .context("migration target has no parent")?;
+    candidates
+        .into_iter()
+        .map(|(source, sha256)| {
+            Ok(crate::migration::MigrationCredential {
+                target: target.join(source.file_name().context("credential has no filename")?),
+                required: source == config.credential_file,
+                source,
+                sha256,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn validate_migration_identity_binding(raw: &[u8], config: &WorkerConfig) -> Result<()> {
+    if raw.len() > MAX_PAIRING_LEDGER_BYTES {
+        bail!("pairing ledger is unexpectedly large");
+    }
+    let ledger: PairingCredentialLedger =
+        serde_json::from_slice(raw).context("parse migration pairing ledger binding")?;
+    let matches = ledger
+        .records
+        .iter()
+        .filter(|record| {
+            record.state == PairingCredentialState::Acknowledged
+                && record.credential_file == config.credential_file
+        })
+        .collect::<Vec<_>>();
+    if matches.len() != 1
+        || matches[0].controller_id != config.controller_id
+        || matches[0].node_id != config.node_id
+    {
+        bail!("migration config is not bound to one acknowledged pairing record");
+    }
+    Ok(())
+}
+
+/// Transform only ledger path references; no filesystem, credential, or network I/O.
+/// This is not authorization to migrate a running worker or unresolved pairing.
+pub fn relocate_pairing_ledger(
+    raw: &[u8],
+    old_config: &Path,
+    new_config: &Path,
+) -> Result<Vec<u8>> {
+    if raw.len() > MAX_PAIRING_LEDGER_BYTES {
+        bail!("pairing ledger is unexpectedly large");
+    }
+    if !old_config.is_absolute()
+        || !new_config.is_absolute()
+        || old_config.file_name() != new_config.file_name()
+        || [old_config, new_config].iter().any(|path| {
+            path.components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        })
+    {
+        bail!("migration requires canonical absolute config paths with unchanged filename");
+    }
+    let target = new_config
+        .parent()
+        .context("migration target has no parent")?;
+    let mut ledger: PairingCredentialLedger =
+        serde_json::from_slice(raw).context("parse migration pairing ledger")?;
+    ledger.validate(old_config)?;
+    for record in &mut ledger.records {
+        if matches!(record.state, PairingCredentialState::Staged)
+            || record.state.has_uncertain_remote_state()
+            || record.cleanup_pending
+            || record.previous_cleanup_pending
+        {
+            bail!("resolve pending pairing and cleanup before migration");
+        }
+        record.credential_file = target.join(
+            record
+                .credential_file
+                .file_name()
+                .context("credential filename missing")?,
+        );
+        if let Some(previous) = &mut record.previous_credential_file {
+            *previous = target.join(
+                previous
+                    .file_name()
+                    .context("previous credential filename missing")?,
+            );
+        }
+    }
+    ledger.validate(new_config)?;
+    let bytes = serde_json::to_vec(&ledger).context("serialize migration pairing ledger")?;
+    if bytes.len() >= MAX_PAIRING_LEDGER_BYTES {
+        bail!("migration pairing ledger exceeds its protected storage bound");
+    }
+    Ok(bytes)
+}
+
 fn validate_credential_digest(value: &str) -> Result<()> {
     if value.len() != 64
         || !value
@@ -496,6 +619,7 @@ async fn pair_with_transport(
     transport: &dyn PairingTransport,
 ) -> Result<WorkerConfig> {
     let config_path = absolute_clean_path(config_path, "worker config")?;
+    crate::config::reject_pending_migration(&config_path)?;
     // This guard is intentionally kept across network awaits. Pairing is a
     // rare control-plane transaction; serializing it prevents two processes
     // from staging different secrets and last-writer-wins replacing config.
