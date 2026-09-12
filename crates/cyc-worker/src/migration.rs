@@ -319,8 +319,12 @@ pub fn relocate_identity_documents(
     let config = config.relocated(old_config, new_config, new_workspace)?;
     let pairing_ledger_json = relocate_pairing_ledger(ledger_json, old_config, new_config)?;
     let boot_generation = validate_boot_generation_document(boot_generation_json)?;
+    let config_json = serde_json::to_vec(&config).context("serialize migration config")?;
+    if config_json.len() >= 256 * 1024 {
+        bail!("migration config exceeds its protected storage bound");
+    }
     Ok(RelocatedIdentityDocuments {
-        config_json: serde_json::to_vec(&config).context("serialize migration config")?,
+        config_json,
         pairing_ledger_json,
         boot_generation_json: boot_generation_json.to_vec(),
         boot_generation,

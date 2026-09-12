@@ -533,7 +533,11 @@ pub fn relocate_pairing_ledger(
         }
     }
     ledger.validate(new_config)?;
-    serde_json::to_vec(&ledger).context("serialize migration pairing ledger")
+    let bytes = serde_json::to_vec(&ledger).context("serialize migration pairing ledger")?;
+    if bytes.len() >= MAX_PAIRING_LEDGER_BYTES {
+        bail!("migration pairing ledger exceeds its protected storage bound");
+    }
+    Ok(bytes)
 }
 
 fn validate_credential_digest(value: &str) -> Result<()> {
