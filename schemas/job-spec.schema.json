@@ -78,6 +78,26 @@
         }
       }
     },
+    "resourceRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "slots": { "type": "integer", "minimum": 1 },
+        "cpuCores": { "type": "integer", "minimum": 1 },
+        "memoryMiB": { "type": "integer", "minimum": 0 },
+        "diskMiB": { "type": "integer", "minimum": 0 },
+        "gpu": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "deviceId": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "vendor": { "enum": ["nvidia", "amd", "intel", "apple"] },
+            "vramMiB": { "type": "integer", "minimum": 0 },
+            "exclusive": { "type": "boolean" }
+          }
+        }
+      }
+    },
     "steps": {
       "type": "array",
       "minItems": 1,

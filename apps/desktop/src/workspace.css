@@ -78,6 +78,10 @@ button:focus-visible, summary:focus-visible, a:focus-visible {
 .node-main strong, .task-row strong { font-size: 13px; }
 .node-main > span, .task-row span, .task-row time, .resource-cell span { font-size: 11px; }
 .node-capabilities span { font-size: 10px; }
+.node-details { margin-top: 4px; font-size: 11px; color: var(--muted); }
+.node-details summary { cursor: pointer; }
+.node-details summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+.node-details[open] > span { display: block; margin-top: 6px; overflow-wrap: anywhere; }
 .provisioning-card, .provisioning-list button { box-shadow: none; border-radius: 6px; }
 .provisioning-timeline { row-gap: 16px; }
 .provisioning-card { font-size: 13px; }

@@ -34,8 +34,9 @@ export function rejectCredentialPayload(value: unknown, path = "payload"): void 
 export function parseJobDraft(value: unknown): JobSpec {
   if (!isRecord(value)) throw new Error("job must be an object");
   rejectCredentialPayload(value, "job");
+  const normalized = normalizeJobSpecMiBFields(value);
   assertOnlyKeys(
-    value,
+    normalized,
     [
       "apiVersion",
       "id",
@@ -53,34 +54,87 @@ export function parseJobDraft(value: unknown): JobSpec {
     "job",
   );
 
-  if (value.apiVersion !== undefined && value.apiVersion !== "cyc.dev/v1") {
+  if (normalized.apiVersion !== undefined && normalized.apiVersion !== "cyc.dev/v1") {
     throw new Error("job.apiVersion is unsupported");
   }
-  if (value.id !== undefined) validateUuid(value.id, "job.id");
-  validateOrigin(value.origin);
-  if (typeof value.kind !== "string" || !kinds.has(value.kind as JobKind)) {
+  if (normalized.id !== undefined) validateUuid(normalized.id, "job.id");
+  validateOrigin(normalized.origin);
+  if (typeof normalized.kind !== "string" || !kinds.has(normalized.kind as JobKind)) {
     throw new Error("job.kind is invalid");
   }
-  validateSource(value.source);
-  validateRequirements(value.requirements);
-  validateSteps(value.steps);
-  validateArtifacts(value.artifacts);
-  validateTimeout(value.timeoutSeconds, "job.timeoutSeconds");
+  validateSource(normalized.source);
+  validateRequirements(normalized.requirements);
+  validateSteps(normalized.steps);
+  validateArtifacts(normalized.artifacts);
+  validateTimeout(normalized.timeoutSeconds, "job.timeoutSeconds");
   if (
-    value.placementPolicy !== undefined &&
-    (typeof value.placementPolicy !== "string" || !placementPolicies.has(value.placementPolicy))
+    normalized.placementPolicy !== undefined &&
+    (typeof normalized.placementPolicy !== "string" || !placementPolicies.has(normalized.placementPolicy))
   ) {
     throw new Error("job.placementPolicy is invalid");
   }
-  if (value.preferredNodeId !== undefined) validateUuid(value.preferredNodeId, "job.preferredNodeId");
+  if (normalized.preferredNodeId !== undefined) validateUuid(normalized.preferredNodeId, "job.preferredNodeId");
 
-  const draft = value as unknown as JobDraft;
+  const draft = normalized as unknown as JobDraft;
   validateResourceRequest(draft.resourceRequest, draft.requirements);
   return {
     ...draft,
     apiVersion: "cyc.dev/v1",
     id: typeof draft.id === "string" ? draft.id : randomUUID(),
   };
+}
+
+/**
+ * Normalize preview-era `Mib` resource keys at the MCP boundary. Rust's
+ * protocol reader accepts the aliases too, but normalizing here makes every
+ * outbound request use the public `MiB` spelling and keeps old clients
+ * compatible without leaking legacy keys downstream.
+ */
+function normalizeJobSpecMiBFields(value: Record<string, unknown>): Record<string, unknown> {
+  const normalized: Record<string, unknown> = { ...value };
+  const requirements = cloneRecord(value.requirements);
+  if (requirements !== undefined) {
+    normalizeMiBField(requirements, "minMemoryMiB", "minMemoryMib", "job.requirements");
+    normalizeMiBField(requirements, "minDiskMiB", "minDiskMib", "job.requirements");
+    const gpu = cloneRecord(requirements.gpu);
+    if (gpu !== undefined) {
+      normalizeMiBField(gpu, "minVramMiB", "minVramMib", "job.requirements.gpu");
+      requirements.gpu = gpu;
+    }
+    normalized.requirements = requirements;
+  }
+
+  const resourceRequest = cloneRecord(value.resourceRequest);
+  if (resourceRequest !== undefined) {
+    normalizeMiBField(resourceRequest, "memoryMiB", "memoryMib", "job.resourceRequest");
+    normalizeMiBField(resourceRequest, "diskMiB", "diskMib", "job.resourceRequest");
+    const gpu = cloneRecord(resourceRequest.gpu);
+    if (gpu !== undefined) {
+      normalizeMiBField(gpu, "vramMiB", "vramMib", "job.resourceRequest.gpu");
+      resourceRequest.gpu = gpu;
+    }
+    normalized.resourceRequest = resourceRequest;
+  }
+  return normalized;
+}
+
+function cloneRecord(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? { ...value } : undefined;
+}
+
+function normalizeMiBField(
+  value: Record<string, unknown>,
+  canonical: string,
+  legacy: string,
+  path: string,
+): void {
+  if (value[canonical] !== undefined && value[legacy] !== undefined) {
+    throw new Error(`${path} must not contain both ${canonical} and ${legacy}`);
+  }
+  if (value[canonical] === undefined && value[legacy] !== undefined) {
+    value[canonical] = value[legacy];
+    delete value[legacy];
+  }
 }
 
 function validateOrigin(value: unknown): void {
