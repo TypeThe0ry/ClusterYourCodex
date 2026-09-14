@@ -1,0 +1,56 @@
+{
+  "schema": "cyc.dev/windows-controller-worker-roundtrip-result/v1",
+  "status": "passed",
+  "failure": null,
+  "sourceCommit": "0ac237d510cdee5036577a713a08a7da37320f05",
+  "hostOs": "Microsoft Windows NT 10.0.26200.0",
+  "hostArchitecture": "X64",
+  "jobRoot": "C:\\Users\\admin\\AppData\\Local\\Temp\\cyc-runnable-first\\cyc-windows-controller-worker-roundtrip.f174f4b9b4ad4e0c9db03381300cd3a4",
+  "checks": {
+    "privateJobRootAcl": true,
+    "controllerHealth": true,
+    "tlsIdentity": true,
+    "pairingReady": true,
+    "nodeReport": true,
+    "jobClaimed": true,
+    "heartbeatWindow": true,
+    "completion": true,
+    "logs": true,
+    "artifact": true,
+    "cleanup": true,
+    "routeTrace": true,
+    "processCleanup": true,
+    "secretScan": true
+  },
+  "observedStates": [
+    "queued",
+    "running",
+    "succeeded"
+  ],
+  "jobId": "aff76b20-69cd-4414-b1fc-1bfbc1054651",
+  "runId": "49aa5a57-19a0-4051-b544-91f172d61ab1",
+  "nodeId": "b3e28a92-dd5e-4028-9e52-a41c3383a1f9",
+  "runDurationSeconds": 8,
+  "cleanup": {
+    "apiVersion": "cyc.dev/cleanup/v1",
+    "jobId": "aff76b20-69cd-4414-b1fc-1bfbc1054651",
+    "runId": "49aa5a57-19a0-4051-b544-91f172d61ab1",
+    "status": "removed",
+    "jobRootDeleted": true,
+    "relativeRoot": "jobs/49aa5a57-19a0-4051-b544-91f172d61ab1",
+    "observedAt": "2026-09-14T20:01:17.379896400Z",
+    "receivedAt": "2026-09-14T20:01:17Z",
+    "terminalAck": {
+      "runId": "49aa5a57-19a0-4051-b544-91f172d61ab1",
+      "leaseId": "c10b7fa1-88b0-42b9-b27c-60574e0b149a",
+      "completionSha256": "937dfce5642dd02d95cae5c4b34b6686e30bc88a1fb8d48420aa8fa2237e2bf4",
+      "stateVersion": 4,
+      "finalState": "succeeded",
+      "acknowledgedAt": "2026-09-14T20:01:17Z"
+    },
+    "cleanupDeadlineAt": "2026-09-14T20:16:17Z",
+    "reservationReleasedAt": "2026-09-14T20:01:17Z",
+    "releaseReason": "removed_receipt"
+  },
+  "acceptanceBoundary": "same-host Windows live fixture; not clean-VM, production-signing, or cross-machine evidence"
+}
