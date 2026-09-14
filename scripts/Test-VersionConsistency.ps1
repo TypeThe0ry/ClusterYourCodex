@@ -227,6 +227,7 @@ function Assert-CycReleaseWorkflowIdentity {
     )
     if (-not $windows11AcceptanceJob.Success -or
         $windows11AcceptanceJob.Groups['body'].Value -notmatch '(?m)^\s*needs:\s*\[release-identity, windows-preview\]\s*$' -or
+        $windows11AcceptanceJob.Groups['body'].Value -notmatch '(?m)^\s*continue-on-error:\s*true\s*$' -or
         $windows11AcceptanceJob.Groups['body'].Value -notmatch '(?m)^\s*runs-on:\s*windows-11-arm\s*$' -or
         $windows11AcceptanceJob.Groups['body'].Value -notmatch '(?m)^\s*CYC_DISPOSABLE_WINDOWS:\s*["'']1["'']\s*$' -or
         $windows11AcceptanceJob.Groups['body'].Value -notmatch '(?m)^\s*-File\s+\.\\packaging\\windows\\Test-FreshDeployment\.ps1\s*`?\s*$' -or
@@ -241,8 +242,9 @@ function Assert-CycReleaseWorkflowIdentity {
         '(?ms)^  release-index:\s*\r?\n(?<body>.*?)(?=^  [0-9A-Za-z_-]+:\s*\r?$|\z)'
     )
     if (-not $releaseIndexJob.Success -or
-        $releaseIndexJob.Groups['body'].Value -notmatch '(?m)^\s*needs:\s*\[[^\]\r\n]*msrv[^\]\r\n]*windows11-acceptance[^\]\r\n]*\]\s*$') {
-        throw 'Release indexing and publication must be blocked by MSRV and Windows 11 compatibility acceptance.'
+        $releaseIndexJob.Groups['body'].Value -notmatch '(?m)^\s*needs:\s*\[[^\]\r\n]*msrv[^\]\r\n]*windows-preview[^\]\r\n]*\]\s*$' -or
+        $releaseIndexJob.Groups['body'].Value -match '(?m)^\s*needs:\s*\[[^\]\r\n]*windows11-acceptance[^\]\r\n]*\]\s*$') {
+        throw 'Release indexing must require MSRV and the Windows x64 installable preview without being blocked by optional ARM64 compatibility evidence.'
     }
 
     foreach ($workflowContract in @(

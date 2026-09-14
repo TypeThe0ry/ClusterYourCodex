@@ -894,11 +894,9 @@ jobs:
   windows-preview:
     name: Windows x64 self-contained preview
     needs: [release-identity, rust-artifacts, linux-arm64-worker-kit]
-    # Keep packaging and its disposable lifecycle checks bounded even when a
-    # runner-side process refuses to exit. The lifecycle scripts keep their
-    # own 900-second per-attempt ceiling; the larger job budget covers the
-    # complete self-contained build plus both bounded archive smoke paths.
-    timeout-minutes: 180
+    # The portable matrix already owns repository-wide lint and tests. Keep
+    # this job focused on producing and smoke-testing the installable payload.
+    timeout-minutes: 90
     env:
       CYC_PRODUCT_VERSION: ${{ needs.release-identity.outputs.product_version }}
     runs-on: windows-latest
@@ -975,16 +973,6 @@ jobs:
           node-version: 24.19.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Lint full Rust workspace
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Test full Rust workspace
-        run: cargo test --workspace --locked -- --test-threads=1
-      - run: pnpm -r lint
-      - run: pnpm -r test
-      - run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -- --test-threads=1
-      - run: cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
       - name: Validate Windows install lifecycle
         shell: powershell
         run: >-
@@ -1419,6 +1407,10 @@ jobs:
   windows11-acceptance:
     name: Clean Windows 11 ARM64 compatibility acceptance (x64 emulation)
     needs: [release-identity, windows-preview]
+    # ARM64 emulation is useful compatibility evidence, but Windows x64 is the
+    # supported controller target for this preview. Do not hold an otherwise
+    # runnable prerelease behind scarce or slow ARM runner capacity.
+    continue-on-error: true
     runs-on: windows-11-arm
     # A hung disposable lifecycle must never hold a hosted ARM runner
     # indefinitely or block downstream release gates without a terminal result.
@@ -1592,7 +1584,7 @@ jobs:
 
   release-index:
     name: Verify preview sidecars and build release index
-    needs: [release-identity, msrv, rust-artifacts, integration-artifact, windows-preview, windows11-acceptance]
+    needs: [release-identity, msrv, rust-artifacts, integration-artifact, windows-preview]
     permissions:
       contents: read
       id-token: write

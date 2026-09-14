@@ -1,6 +1,6 @@
 {
   "name": "@clusteryourcodex/desktop",
-  "version": "0.1.0-preview.101",
+  "version": "0.1.0-preview.102",
   "private": true,
   "type": "module",
   "scripts": {
