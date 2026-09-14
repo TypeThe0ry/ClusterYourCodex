@@ -7,6 +7,17 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+### Changed
+
+- Make tagged prerelease delivery runnable-first. Portable and integration
+  packaging jobs no longer repeat repository-wide formatting, lint, and test
+  suites already owned by pull-request CI; they build, launch, exercise the
+  native controller/worker round trip, and package the installable product.
+- Require the exact tagged commit to have a successful push CI run before
+  packaging starts, reusing source-quality results instead of rerunning them
+  in every release job. Keep local smoke output out of release provenance;
+  published lifecycle artifacts remain the authoritative runnable evidence.
+
 ## [0.1.0-preview.102] - 2026-09-15
 
 ### Changed

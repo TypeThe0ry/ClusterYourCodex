@@ -4984,7 +4984,7 @@ exit 0
     Assert-True ($setupSilentSource -match 'restores the pre-test Scheduled Task state') 'silent Setup smoke verifies Scheduled Task restoration'
     Assert-True ($setupSilentSource -match 'restores the pre-test firewall state') 'silent Setup smoke verifies firewall restoration'
     $releaseWorkflow = Get-Content -LiteralPath (Join-Path $repoRoot '.github\workflows\release.yml') -Raw
-    Assert-True (([regex]::Matches($releaseWorkflow, 'name:\s*Test full Rust workspace')).Count -eq 1) 'release runs the native workspace suite once in the platform matrix and does not repeat it during self-contained Windows packaging'
+    Assert-True (([regex]::Matches($releaseWorkflow, 'name:\s*Test full Rust workspace')).Count -eq 0) 'tagged release delivery does not repeat the workspace suite already owned by pull-request CI'
     Assert-True ($releaseWorkflow -match 'Get-Command\s+-Name [\x27\x22]makensis\.exe[\x27\x22].+CommandType Application') 'release workflow resolves the NSIS compiler through the runner command table'
     Assert-True ($releaseWorkflow -match 'NSIS\\Bin\\makensis\.exe') 'release workflow accepts the NSIS Bin compiler layout'
     Assert-True ($releaseWorkflow -match 'lib\\nsis\\tools\\makensis\.exe') 'release workflow accepts the Chocolatey NSIS tools layout'

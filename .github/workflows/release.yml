@@ -7,6 +7,7 @@ on:
       - "v*"
 
 permissions:
+  actions: read
   contents: read
 
 env:
@@ -65,6 +66,33 @@ jobs:
             echo "- annotated tag object: \`$tag_object\`"
             echo "- peeled commit: \`$tag_commit\`"
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Require successful CI for the exact tagged commit
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runs = @(
+            gh run list `
+              --repo $env:GITHUB_REPOSITORY `
+              --workflow ci.yml `
+              --commit $env:CYC_SOURCE_COMMIT `
+              --event push `
+              --status success `
+              --limit 20 `
+              --json headSha,conclusion,event |
+              ConvertFrom-Json
+          )
+          $success = @(
+            $runs | Where-Object {
+              [string]$_.headSha -ceq [string]$env:CYC_SOURCE_COMMIT -and
+              [string]$_.conclusion -ceq 'success' -and
+              [string]$_.event -ceq 'push'
+            }
+          )
+          if ($success.Count -lt 1) {
+            throw "The exact tagged commit has no successful push CI run: $env:CYC_SOURCE_COMMIT"
+          }
       - name: Verify every remote GitHub Action is commit-pinned
         shell: pwsh
         run: ./scripts/Test-GitHubActionPins.ps1
@@ -213,12 +241,9 @@ jobs:
           test -x "$openssl_prefix/bin/openssl"
           "$openssl_prefix/bin/openssl" version | grep -Eq '^OpenSSL 3\.'
           printf '%s\n' "$openssl_prefix/bin" >> "$GITHUB_PATH"
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Lint full Rust workspace
-        run: cargo clippy --workspace --all-targets --locked --target ${{ matrix.target }} -- -D warnings
-      - name: Test full Rust workspace
-        run: cargo test --workspace --locked --target ${{ matrix.target }} -- --test-threads=1
+      # Release jobs are delivery jobs. Repository-wide formatting, lint, and
+      # tests remain in ci.yml; repeating them once per target delays a usable
+      # installer without adding a runnable-product signal.
       - name: Build native release binaries
         run: >-
           cargo build --locked --release --target ${{ matrix.target }}
@@ -691,16 +716,8 @@ jobs:
           node-version: 24.19.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Lint full Rust workspace
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # The platform Rust matrix above already runs the complete workspace on
-      # Windows, Linux, and macOS. This job publishes renderer/plugin assets
-      # only, so repeating the slow native worker suite here adds no coverage
-      # and can make an unrelated PowerShell cold-start flake block the bundle.
-      - run: pnpm -r lint
-      - run: pnpm -r test
+      # CI owns source-quality checks. The tagged delivery path only needs to
+      # prove that the user-facing renderer and plugin can be built and staged.
       - run: pnpm -r build
       - name: Stage integration preview bundle
         shell: pwsh
