@@ -1,19 +1,20 @@
-# Windows controller/worker core round-trip — current HEAD
+# Windows controller/worker core round-trip evidence
 
-This record is bound to the current checkout after the active-run guard path
-fix. It is the highest-value usability evidence for the active core-loop goal
-and contains no credentials.
+This record contains two separately bound acceptance runs. The first is the
+historical same-host run for the active-run guard fix. The second is the later
+remote persistent-worker run for the preview.101 candidate. Neither record is
+presented as evidence for commits outside its stated source identity.
 
 ## Run identity
 
-- **Checkout:** `D:\Projects\ClusterYourCodex\ClusterYourCodex`
+- **Checkout:** a private Windows development checkout
 - **Source commit:** `456ce11307f7458304e369ad423cfffcb0ac6065`
 - **Product binaries:** `cyc`, `cyc-controller`, and `cyc-worker` rebuilt with
   `cargo build --locked -p cyc-cli -p cyc-controller -p cyc-worker --release`
 - **Probe:** `scripts/Test-WindowsControllerWorkerRoundTrip.ps1`
 - **Host:** Windows x64 development host
-- **Evidence root:**
-  `C:\Users\admin\AppData\Local\Temp\ClusterYourCodex-core-roundtrip-head-long-path-81f3bdf1259c400c8ffa81088545574c\cyc-windows-controller-worker-roundtrip.82666de838db4301aacf5877513fdb8f`
+- **Evidence root:** a private, long-path temporary directory retained on the
+  development host
 - **Result:** `status=passed`, observed states `queued → running → succeeded`,
   run duration 8 seconds, 14/14 checks true
 
