@@ -7,6 +7,24 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.1.0-preview.102] - 2026-09-15
+
+### Changed
+
+- Make prerelease delivery runnable-first: the Windows self-contained packaging
+  job now reuses the repository-wide validation completed by the portable build
+  matrix and performs only packaging-specific checks, builds, and native smoke.
+- Keep Windows 11 ARM64 x64-emulation acceptance as non-blocking compatibility
+  evidence. Windows x64 remains the supported controller and installable target
+  for this preview, so scarce ARM runner capacity cannot withhold a usable build.
+
+### Validation scope
+
+- The preview.101 Windows portable payload was downloaded from GitHub Actions
+  and its `cyc`, `cyc-controller`, and `cyc-worker` executables were launched on
+  Windows and reported the expected product version. The release workflow also
+  completed its native controller/worker round trip before packaging.
+
 ### Fixed
 
 - Repair exact legacy Windows worker tasks in place, replacing the malformed
@@ -1583,7 +1601,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.101...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.102...HEAD
+[0.1.0-preview.102]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.101...v0.1.0-preview.102
 [0.1.0-preview.101]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.100...v0.1.0-preview.101
 [0.1.0-preview.100]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.99...v0.1.0-preview.100
 [0.1.0-preview.99]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.98...v0.1.0-preview.99
