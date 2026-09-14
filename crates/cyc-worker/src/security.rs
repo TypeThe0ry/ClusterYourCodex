@@ -253,6 +253,19 @@ pub(crate) fn ensure_protected_directory(path: &Path) -> Result<()> {
     verify_private_directory(path)
 }
 
+/// Create a transaction root exclusively; a concurrent creator is never adopted.
+pub(crate) fn create_private_directory_new(path: &Path) -> Result<()> {
+    let absolute = absolute_path_without_following_links(path)?;
+    let parent = absolute
+        .parent()
+        .context("private transaction root has no parent")?;
+    prepare_private_directory(parent)?;
+    ensure_no_links_or_reparse_points(&absolute)?;
+    fs::create_dir(&absolute).context("exclusively create private transaction root")?;
+    harden_private_directory(&absolute)?;
+    verify_private_directory(&absolute)
+}
+
 fn sibling_temporary_path(path: &Path) -> Result<PathBuf> {
     path.file_name()
         .context("protected output must have a filename")?;
@@ -538,6 +551,11 @@ fn verify_windows_acl(path: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn run_windows_acl_operation(path: &Path, action: &str) -> Result<()> {
+    run_windows_acl_for_owner(path, action, &current_windows_user_sid()?)
+}
+
+#[cfg(windows)]
+fn run_windows_acl_for_owner(path: &Path, action: &str, sid: &str) -> Result<()> {
     ensure_no_links_or_reparse_points(path)?;
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("inspect Windows ACL target {}", path.display()))?;
@@ -554,7 +572,6 @@ fn run_windows_acl_operation(path: &Path, action: &str) -> Result<()> {
         bail!("invalid Windows credential ACL action");
     }
 
-    let sid = current_windows_user_sid()?;
     let operation = Command::new("powershell.exe")
         .args([
             "-NoLogo",
@@ -580,6 +597,97 @@ fn run_windows_acl_operation(path: &Path, action: &str) -> Result<()> {
         bail!("Windows credential ACL operation failed");
     }
     Ok(())
+}
+
+/// A read-only migration input pinned against Windows writes/deletes and
+/// ancestor renames. The supplied owner must come from verified installation
+/// metadata; this primitive neither discovers nor changes ownership.
+#[cfg(windows)]
+pub struct LockedMigrationSource {
+    file: File,
+    _ancestors: Vec<File>,
+}
+
+#[cfg(windows)]
+pub(crate) fn verify_migration_directory(path: &Path, expected_owner_sid: &str) -> Result<()> {
+    ensure_no_links_or_reparse_points(path)?;
+    if !fs::symlink_metadata(path)?.is_dir() {
+        bail!("migration workspace is not a directory");
+    }
+    run_windows_acl_for_owner(path, "verify", expected_owner_sid)
+}
+
+#[cfg(windows)]
+impl LockedMigrationSource {
+    pub fn open(path: &Path, expected_owner_sid: &str) -> Result<Self> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+            || !expected_owner_sid.starts_with("S-1-")
+            || !expected_owner_sid
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'S' || byte == b'-')
+        {
+            bail!("migration source requires an absolute path and explicit owner SID");
+        }
+        ensure_no_links_or_reparse_points(path)?;
+        let parent = path.parent().context("migration source has no parent")?;
+        let mut ancestors = Vec::new();
+        for directory in parent.ancestors().collect::<Vec<_>>().into_iter().rev() {
+            let handle = OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(directory)
+                .context("pin migration source ancestor")?;
+            let metadata = handle.metadata()?;
+            if !metadata.is_dir() || metadata_is_windows_reparse(&metadata) {
+                bail!("migration source ancestor is not a direct directory");
+            }
+            ancestors.push(handle);
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .context("open exclusive-read migration source")?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata_is_windows_reparse(&metadata) {
+            bail!("migration source is not a direct regular file");
+        }
+        // Paths cannot be rebound while the file and ancestor handles are held.
+        // Verify the old owner's contract without ever applying a replacement ACL.
+        run_windows_acl_for_owner(parent, "verify", expected_owner_sid)?;
+        run_windows_acl_for_owner(path, "verify", expected_owner_sid)?;
+        Ok(Self {
+            file,
+            _ancestors: ancestors,
+        })
+    }
+
+    pub fn read_bounded(&mut self, limit: usize) -> Result<Vec<u8>> {
+        use std::io::{Seek, SeekFrom};
+        if limit > 256 * 1024 {
+            bail!("migration source read bound is too large");
+        }
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        let result = (&mut self.file)
+            .take((limit + 1) as u64)
+            .read_to_end(&mut bytes);
+        if result.is_err() || bytes.len() > limit {
+            bytes.fill(0);
+            bail!("migration source read failed or exceeded its bound");
+        }
+        Ok(bytes)
+    }
 }
 
 #[cfg(windows)]
@@ -885,6 +993,34 @@ fn is_allowed_environment_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_source_pins_bytes_and_checks_owner_without_repair() {
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = temporary.path().join("private");
+        let path = parent.join("source.json");
+        write_protected_file(&path, b"migration-fixture").unwrap();
+        let sid = current_windows_user_sid().unwrap();
+        let mut source = LockedMigrationSource::open(&path, &sid).unwrap();
+        assert_eq!(source.read_bounded(64).unwrap(), b"migration-fixture");
+        assert!(source.read_bounded(1).is_err());
+        assert!(fs::write(&path, b"changed").is_err());
+        assert!(fs::rename(&path, parent.join("moved.json")).is_err());
+        assert!(fs::rename(&parent, temporary.path().join("moved")).is_err());
+        assert_eq!(source.read_bounded(64).unwrap(), b"migration-fixture");
+        drop(source);
+        let wrong_sid = if sid == "S-1-5-18" {
+            "S-1-5-19"
+        } else {
+            "S-1-5-18"
+        };
+        assert!(LockedMigrationSource::open(&path, wrong_sid).is_err());
+        ensure_protected_input(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"migration-fixture");
+        fs::write(&path, b"after-release").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"after-release");
+    }
     use tempfile::tempdir;
 
     #[cfg(unix)]

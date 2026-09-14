@@ -778,13 +778,52 @@ pub fn normalize_job_spec(job: &JobSpec) -> JobSpec {
 ///
 /// This is the only supported digest algorithm for `ClaimAssignment.jobDigest`.
 /// It deliberately does not hash `serde_json::to_vec(job)` because Rust field
-/// order is not a cross-implementation canonicalization contract.
+/// order is not a cross-implementation canonicalization contract.  The digest
+/// projection retains the preview.100 resource-unit spellings (`*Mib`) even
+/// though the public wire representation now emits `*MiB`.  This keeps an
+/// in-flight assignment or persisted placement binding stable across the wire
+/// spelling-only migration.
 pub fn canonical_job_digest(job: &JobSpec) -> Result<String, serde_json::Error> {
-    let value = serde_json::to_value(normalize_job_spec(job))?;
+    let mut value = serde_json::to_value(normalize_job_spec(job))?;
+    project_preview100_resource_keys(&mut value);
     let mut canonical = Vec::new();
     write_canonical_json(&value, &mut canonical)?;
     let digest = Sha256::digest(canonical);
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Project resource-unit keys to the spelling used by preview.100 for the
+/// digest contract.  This is intentionally separate from serde serialization:
+/// normal API JSON continues to use the public `MiB` spellings.
+fn project_preview100_resource_keys(value: &mut Value) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                project_preview100_resource_keys(value);
+            }
+        }
+        Value::Object(values) => {
+            let keys = values.keys().cloned().collect::<Vec<_>>();
+            for key in keys {
+                if let Some(value) = values.remove(&key) {
+                    let projected_key = match key.as_str() {
+                        "minMemoryMiB" => "minMemoryMib",
+                        "minDiskMiB" => "minDiskMib",
+                        "minVramMiB" => "minVramMib",
+                        "memoryMiB" => "memoryMib",
+                        "diskMiB" => "diskMib",
+                        "vramMiB" => "vramMib",
+                        _ => key.as_str(),
+                    };
+                    values.insert(projected_key.to_owned(), value);
+                }
+            }
+            for value in values.values_mut() {
+                project_preview100_resource_keys(value);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
 }
 
 fn write_canonical_json(value: &Value, output: &mut Vec<u8>) -> Result<(), serde_json::Error> {
@@ -1778,6 +1817,74 @@ mod tests {
 
         let decoded: JobSpec = serde_json::from_value(value).expect("read preview Mib aliases");
         assert_eq!(decoded, job);
+    }
+
+    #[test]
+    fn preview100_resource_fixture_keeps_digest_across_mib_wire_migration() {
+        let mut job = sample_job();
+        job.id = Uuid::nil();
+        job.requirements.min_memory_mib = Some(8_192);
+        job.requirements.min_disk_mib = Some(20_000);
+        job.requirements.gpu = Some(GpuRequirement {
+            vendor: Some(GpuVendor::Nvidia),
+            min_vram_mib: Some(6_144),
+            exclusive: true,
+        });
+        job.resource_request = Some(ResourceRequest {
+            slots: 1,
+            cpu_cores: 4,
+            memory_mib: 8_192,
+            disk_mib: 20_000,
+            gpu: Some(GpuResourceRequest {
+                device_id: Some("GPU-4070".to_owned()),
+                vendor: Some(GpuVendor::Nvidia),
+                vram_mib: 6_144,
+                exclusive: true,
+            }),
+        });
+
+        let canonical_digest = canonical_job_digest(&job).expect("canonical digest");
+        let mut preview100_wire = serde_json::to_value(&job).expect("serialize fixture");
+        let requirements = preview100_wire["requirements"]
+            .as_object_mut()
+            .expect("requirements object");
+        for (canonical, legacy) in [
+            ("minMemoryMiB", "minMemoryMib"),
+            ("minDiskMiB", "minDiskMib"),
+        ] {
+            let value = requirements.remove(canonical).expect("fixture field");
+            requirements.insert(legacy.to_owned(), value);
+        }
+        let gpu = requirements["gpu"]
+            .as_object_mut()
+            .expect("GPU requirements object");
+        let value = gpu.remove("minVramMiB").expect("fixture GPU field");
+        gpu.insert("minVramMib".to_owned(), value);
+
+        let resource_request = preview100_wire["resourceRequest"]
+            .as_object_mut()
+            .expect("resource request object");
+        for (canonical, legacy) in [("memoryMiB", "memoryMib"), ("diskMiB", "diskMib")] {
+            let value = resource_request.remove(canonical).expect("fixture field");
+            resource_request.insert(legacy.to_owned(), value);
+        }
+        let gpu_request = resource_request["gpu"]
+            .as_object_mut()
+            .expect("GPU resource request object");
+        let value = gpu_request.remove("vramMiB").expect("fixture GPU field");
+        gpu_request.insert("vramMib".to_owned(), value);
+
+        let preview100_job: JobSpec =
+            serde_json::from_value(preview100_wire).expect("decode preview.100 fixture");
+        assert_eq!(preview100_job, job);
+        assert_eq!(
+            canonical_job_digest(&preview100_job).unwrap(),
+            canonical_digest
+        );
+        assert_eq!(
+            canonical_digest,
+            "9ac7f7d9694b0fbad5bf624e31ee1ec33e65762ac96f7339f72a7e32d571dd0a"
+        );
     }
 
     #[test]

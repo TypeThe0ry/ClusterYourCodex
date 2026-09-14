@@ -408,6 +408,63 @@ fn retryable_failure_checkpoints_and_reuses_operation_identity() {
 }
 
 #[test]
+fn ssh_retry_survives_restart_and_still_requires_host_approval() {
+    let temp = TempDir::new().expect("tempdir");
+    let database = temp.path().join("ssh-retry.db");
+    let engine = engine_at(&database);
+    let created = engine.create(new_computer()).expect("create");
+    let mut driver = FakeDriver {
+        fail_once: Some(ProvisioningAction::ProbeHostKey),
+        ..FakeDriver::default()
+    };
+    let failed = outcome_record(
+        engine
+            .drive_until_boundary(created.id, created.revision, &mut driver, 64)
+            .expect("persist transport failure"),
+    );
+    assert!(matches!(failed.state, ProvisioningState::Failed { .. }));
+    drop(engine);
+
+    let engine = engine_at(&database);
+    let retry = engine
+        .request_intent(failed.id, failed.revision, ProvisioningIntent::Retry)
+        .expect("retry after restart");
+    let pending = outcome_record(
+        engine
+            .drive_until_boundary(retry.id, retry.revision, &mut driver, 64)
+            .expect("retry connection"),
+    );
+    assert_eq!(pending.id, created.id);
+    assert_eq!(pending.intended_node_id, created.intended_node_id);
+    assert_eq!(pending.cycle, created.cycle);
+    assert_eq!(pending.state, ProvisioningState::HostKeyPending);
+    assert!(pending.host_key_approved_at.is_none());
+    assert!(pending.credential_reference.is_none());
+    assert_eq!(engine.list().expect("records").len(), 1);
+    let probes: Vec<_> = driver
+        .calls
+        .iter()
+        .filter(|(action, _)| *action == ProvisioningAction::ProbeHostKey)
+        .map(|(_, operation)| operation.clone())
+        .collect();
+    assert_eq!(probes.len(), 2);
+    assert_eq!(probes[0], probes[1]);
+    drop(engine);
+
+    let engine = engine_at(&database);
+    let call_count = driver.calls.len();
+    let waiting = engine
+        .drive_until_boundary(pending.id, pending.revision, &mut driver, 64)
+        .expect("reopen approval checkpoint");
+    assert!(matches!(waiting, DriveOutcome::AwaitingHostKeyApproval(_)));
+    assert_eq!(driver.calls.len(), call_count);
+    assert!(driver.calls.iter().all(|(action, _)| matches!(
+        action,
+        ProvisioningAction::BeginSsh | ProvisioningAction::ProbeHostKey
+    )));
+}
+
+#[test]
 fn rollback_and_remove_are_durable_intents() {
     let engine = ProvisioningEngine::new(ProvisioningStore::in_memory().expect("store"));
     let created = engine.create(new_computer()).expect("create");

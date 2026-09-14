@@ -14,7 +14,7 @@ if (-not $PrivateFunctionSource) {
     $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Install-Worker.ps1'), [ref]$tokens, [ref]$errors)
     if ($errors.Count) { throw 'Installer syntax invalid.' }
     $names = @('Resolve-NormalizedPath', 'Test-ReparsePoint', 'Assert-PathChainNoReparse',
-        'Assert-CreationPathNoReparse', 'Get-PrivatePrincipalSids', 'New-PrivateAcl',
+        'Assert-CreationPathNoReparse', 'Get-PrivatePrincipalSids', 'Get-PrivateOwnerSid', 'New-PrivateAcl',
         'Set-AclPortable', 'Assert-PrivateAcl', 'Protect-Directory', 'Protect-File')
     $PrivateFunctionSource = ($names | ForEach-Object {
         $name = $_

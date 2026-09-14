@@ -235,6 +235,8 @@ impl ResourcePolicy {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ComputerConfiguration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_instance_name: Option<String>,
     #[serde(default)]
     pub service_scope: ServiceScope,
     #[serde(default)]
@@ -253,6 +255,7 @@ impl Default for ComputerConfiguration {
     fn default() -> Self {
         Self {
             service_scope: ServiceScope::Auto,
+            windows_instance_name: None,
             workspace: None,
             priority: 0,
             resources: ResourcePolicy::default(),
@@ -270,6 +273,20 @@ impl Default for ComputerConfiguration {
 
 impl ComputerConfiguration {
     pub fn validate(&self) -> Result<(), RecordValidationError> {
+        if let Some(name) = &self.windows_instance_name {
+            if name.is_empty()
+                || name.len() > 32
+                || !name
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+                || name.starts_with('-')
+                || self.workspace.is_some()
+            {
+                return Err(RecordValidationError::InvalidField(
+                    "configuration.windowsInstanceName",
+                ));
+            }
+        }
         if !(-10_000..=10_000).contains(&self.priority) {
             return Err(RecordValidationError::InvalidField(
                 "configuration.priority",
@@ -1087,6 +1104,36 @@ mod tests {
     fn computer_configuration_requires_an_explicit_job_kind() {
         let mut configuration = ComputerConfiguration::default();
         configuration.allowed_job_kinds.clear();
+        assert!(configuration.validate().is_err());
+    }
+
+    #[test]
+    fn named_windows_configuration_round_trips_and_rejects_shared_workspace() {
+        let mut configuration = ComputerConfiguration::default();
+        let legacy = serde_json::to_value(&configuration).unwrap();
+        assert!(legacy.get("windowsInstanceName").is_none());
+        assert_eq!(
+            serde_json::from_value::<ComputerConfiguration>(legacy).unwrap(),
+            configuration
+        );
+        configuration.windows_instance_name = Some("alpha-1".into());
+        configuration.validate().unwrap();
+        let encoded = serde_json::to_value(&configuration).unwrap();
+        assert_eq!(encoded["windowsInstanceName"], "alpha-1");
+        assert_eq!(
+            serde_json::from_value::<ComputerConfiguration>(encoded).unwrap(),
+            configuration
+        );
+        configuration.workspace = Some("C:\\shared".into());
+        assert!(configuration.validate().is_err());
+        configuration.workspace = None;
+        for invalid in [
+            "", "Alpha", "-alpha", "../alpha", "a b", "a*", "a/b", "a\\b", "a\n",
+        ] {
+            configuration.windows_instance_name = Some(invalid.into());
+            assert!(configuration.validate().is_err(), "{invalid:?}");
+        }
+        configuration.windows_instance_name = Some("a".repeat(33));
         assert!(configuration.validate().is_err());
     }
 }
