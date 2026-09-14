@@ -165,4 +165,7 @@ if ($source -notmatch '\$recordedPath\s*=\s*Resolve-NormalizedPath' -or
     $source -notmatch '\$expectedPath\s*=\s*Resolve-NormalizedPath') {
     throw 'Legacy migration path binding does not normalize both comparison operands.'
 }
+if ($bindingFunction -match 'if \(Test-ReparsePoint \$markerItem -or') {
+    throw 'Legacy migration marker guard passes -or as a native function argument.'
+}
 Write-Output 'Legacy Windows worker task migration contract tests passed (mock scheduler; no live task changes).'

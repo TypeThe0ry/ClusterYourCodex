@@ -1189,7 +1189,7 @@ function Assert-WorkerLegacyMigrationBinding {
     }
     if (-not (Test-Path -LiteralPath $MarkerPath -PathType Leaf)) { throw 'Legacy worker migration marker is missing.' }
     $markerItem = Get-Item -LiteralPath $MarkerPath -Force
-    if (Test-ReparsePoint $markerItem -or (Get-Content -LiteralPath $MarkerPath -Raw).Trim() -cne $ExpectedMarker) {
+    if ((Test-ReparsePoint $markerItem) -or (Get-Content -LiteralPath $MarkerPath -Raw).Trim() -cne $ExpectedMarker) {
         throw 'Legacy worker migration marker does not match this instance.'
     }
     Assert-PrivateAcl -Item $markerItem -Directory $false
