@@ -168,4 +168,7 @@ if ($source -notmatch '\$recordedPath\s*=\s*Resolve-NormalizedPath' -or
 if ($bindingFunction -match 'if \(Test-ReparsePoint \$markerItem -or') {
     throw 'Legacy migration marker guard passes -or as a native function argument.'
 }
+if ($source -notmatch 'New-ScheduledTaskPrincipal\s+-UserId\s+\$identity\s+-LogonType\s+S4U\s+-RunLevel\s+Limited') {
+    throw 'User-scope workers still require an interactive desktop logon.'
+}
 Write-Output 'Legacy Windows worker task migration contract tests passed (mock scheduler; no live task changes).'

@@ -854,7 +854,10 @@ function Register-WorkerTask {
     } else {
         $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
-        $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
+        # Workers must survive an SSH-only controller session and start after
+        # reboot without requiring an interactive desktop logon. S4U keeps the
+        # task passwordless while running under the paired user's identity.
+        $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType S4U -RunLevel Limited
     }
     $settingsParameters = @{
         MultipleInstances = 'IgnoreNew'
