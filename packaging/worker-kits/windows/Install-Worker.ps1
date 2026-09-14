@@ -776,7 +776,8 @@ function Get-WorkerTaskSnapshot {
         [Parameter(Mandatory = $true)][string]$Executable,
         [Parameter(Mandatory = $true)][string]$Config,
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
-        [Parameter(Mandatory = $true)][ValidateSet('User', 'System')][string]$ResolvedScope
+        [Parameter(Mandatory = $true)][ValidateSet('User', 'System')][string]$ResolvedScope,
+        [switch]$AllowLegacyMigration
     )
     $tasks = @(Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue |
         Where-Object { $null -ne $_ })
@@ -788,15 +789,27 @@ function Get-WorkerTaskSnapshot {
         throw 'Worker scheduled task name is already claimed outside the installer-owned root task path.'
     }
     $task = $rootTasks[0]
-    Assert-WorkerTaskOwnership `
-        -Task $task `
-        -Executable $Executable `
-        -Config $Config `
-        -WorkingDirectory $WorkingDirectory `
-        -ResolvedScope $ResolvedScope
+    $taskKind = 'Native'
+    try {
+        Assert-WorkerTaskOwnership `
+            -Task $task `
+            -Executable $Executable `
+            -Config $Config `
+            -WorkingDirectory $WorkingDirectory `
+            -ResolvedScope $ResolvedScope
+    } catch {
+        if (-not $AllowLegacyMigration) { throw }
+        Assert-LegacyWorkerTask `
+            -Task $task `
+            -Config $Config `
+            -WorkingDirectory $WorkingDirectory `
+            -ResolvedScope $ResolvedScope
+        $taskKind = 'LegacyPowerShell'
+    }
     return [PSCustomObject]@{
         Xml = Export-ScheduledTask -TaskName $script:TaskName -TaskPath '\'
         WasRunning = ([string]$task.State -eq 'Running')
+        TaskKind = $taskKind
     }
 }
 
@@ -813,8 +826,13 @@ function Restore-WorkerTask {
         -Executable $Executable `
         -Config $Config `
         -WorkingDirectory $WorkingDirectory `
-        -ResolvedScope $ResolvedScope
+        -ResolvedScope $ResolvedScope `
+        -AllowLegacyMigration
     if ($null -eq $restored) { throw 'Worker scheduled task rollback did not restore an owned task.' }
+    $expectedTaskKind = if ($Snapshot.PSObject.Properties['TaskKind']) { [string]$Snapshot.TaskKind } else { 'Native' }
+    if ([string]$restored.TaskKind -cne $expectedTaskKind) {
+        throw 'Worker scheduled task rollback restored a different task kind.'
+    }
     if ($Snapshot.WasRunning) {
         Start-ScheduledTask -TaskName $script:TaskName -TaskPath '\'
         Wait-WorkerTaskRunning -TaskName $script:TaskName
@@ -836,7 +854,10 @@ function Register-WorkerTask {
     } else {
         $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
-        $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
+        # Workers must survive an SSH-only controller session and start after
+        # reboot without requiring an interactive desktop logon. S4U keeps the
+        # task passwordless while running under the paired user's identity.
+        $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType S4U -RunLevel Limited
     }
     $settingsParameters = @{
         MultipleInstances = 'IgnoreNew'
@@ -1090,6 +1111,110 @@ function Assert-WorkerTaskOwnership {
     }
 }
 
+function Assert-LegacyWorkerTask {
+    <#
+    Recognize only the legacy installer task emitted by the old Windows kit.
+    This is deliberately separate from native ownership validation: a task
+    that is merely named like ours must still fail closed before it can be
+    stopped or replaced.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Task,
+        [Parameter(Mandatory = $true)][string]$Config,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][ValidateSet('User', 'System')][string]$ResolvedScope
+    )
+    if ([string]$Task.TaskPath -cne '\') {
+        throw 'Legacy worker scheduled task is outside the installer-owned root task path.'
+    }
+    $actions = @($Task.Actions)
+    if ($actions.Count -ne 1) { throw 'Legacy worker scheduled task action set is not installer-owned.' }
+    $action = $actions[0]
+    # The legacy kit launched the real Windows PowerShell executable directly.
+    # `WindowsPowerShell.exe` is not a Windows file; accepting that spelling
+    # would make the migration detector unable to classify the task Helio has.
+    $powershell = Resolve-NormalizedPath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')
+    $actualExecutable = Resolve-NormalizedPath ([string]$action.Execute)
+    $actualWorkingDirectory = Resolve-NormalizedPath ([string]$action.WorkingDirectory)
+    $expectedArguments = 'run --config "' + $Config + '"'
+    if (-not [string]::Equals($actualExecutable, $powershell, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$action.Arguments, $expectedArguments, [System.StringComparison]::Ordinal) -or
+        -not [string]::Equals($actualWorkingDirectory, $WorkingDirectory, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Legacy worker scheduled task action is not the exact PowerShell compatibility action.'
+    }
+    $principal = if ($null -ne $Task.Principal) { [string]$Task.Principal.UserId } else { '' }
+    $actualPrincipalSid = Resolve-AccountSid $principal
+    # Legacy tasks were created by the account that owns the private worker
+    # roots.  This may differ from SYSTEM when an elevated repair is running
+    # on behalf of that account, so bind the compatibility task to the
+    # protected owner rather than to the current process token.
+    $expectedPrincipalSid = Get-PrivateOwnerSid
+    if ([string]::IsNullOrWhiteSpace($actualPrincipalSid) -or
+        -not [string]::Equals($actualPrincipalSid, $expectedPrincipalSid, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Legacy worker scheduled task principal is not bound to the current installer identity.'
+    }
+}
+
+function Assert-WorkerLegacyMigrationBinding {
+    <# Validate the protected installer identity before a legacy task can be
+       removed.  The task/action checks live in Assert-LegacyWorkerTask. #>
+    param(
+        [Parameter(Mandatory = $true)][bool]$OwnedInstallation,
+        [Parameter(Mandatory = $true)]$RecordedManifest,
+        [Parameter(Mandatory = $true)][string]$MarkerPath,
+        [Parameter(Mandatory = $true)][string]$ExpectedMarker,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$DataRoot,
+        [Parameter(Mandatory = $true)][string]$WorkspaceRoot,
+        [Parameter(Mandatory = $true)][string]$WorkerBinaryPath
+    )
+    if (-not $OwnedInstallation) { throw 'Legacy worker migration requires the installer ownership marker.' }
+    if ($null -eq $RecordedManifest) { throw 'Legacy worker migration requires an install manifest.' }
+    foreach ($propertyName in @('schemaVersion', 'installRoot', 'dataRoot', 'workspaceRoot', 'workerBinary')) {
+        if ($null -eq $RecordedManifest.PSObject.Properties[$propertyName]) {
+            throw "Legacy worker migration manifest is missing $propertyName."
+        }
+    }
+    if ($RecordedManifest.schemaVersion -cne $script:Schema) {
+        throw 'Legacy worker migration manifest schema is not supported.'
+    }
+    foreach ($binding in @(
+        @([string]$RecordedManifest.installRoot, $InstallRoot),
+        @([string]$RecordedManifest.dataRoot, $DataRoot),
+        @([string]$RecordedManifest.workspaceRoot, $WorkspaceRoot),
+        @([string]$RecordedManifest.workerBinary, $WorkerBinaryPath)
+    )) {
+        $recordedPath = Resolve-NormalizedPath ([string]$binding[0])
+        $expectedPath = Resolve-NormalizedPath ([string]$binding[1])
+        if (-not [string]::Equals($recordedPath, $expectedPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Legacy worker migration manifest is not bound to the current installer roots.'
+        }
+    }
+    if (-not (Test-Path -LiteralPath $MarkerPath -PathType Leaf)) { throw 'Legacy worker migration marker is missing.' }
+    $markerItem = Get-Item -LiteralPath $MarkerPath -Force
+    if ((Test-ReparsePoint $markerItem) -or (Get-Content -LiteralPath $MarkerPath -Raw).Trim() -cne $ExpectedMarker) {
+        throw 'Legacy worker migration marker does not match this instance.'
+    }
+    Assert-PrivateAcl -Item $markerItem -Directory $false
+    $ownerSids = @()
+    foreach ($path in @($InstallRoot, $DataRoot, $WorkspaceRoot, $MarkerPath)) {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if (Test-ReparsePoint $item) { throw 'Legacy worker migration root contains a reparse point.' }
+        $acl = if ($null -ne $item.PSObject.Methods['GetAccessControl']) {
+            $item.GetAccessControl()
+        } elseif ($item.PSIsContainer) {
+            [System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.DirectoryInfo]$item)
+        } else {
+            [System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.FileInfo]$item)
+        }
+        $ownerSids += $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    }
+    if (@($ownerSids | Sort-Object -Unique).Count -ne 1 -or
+        -not [string]::Equals([string]$ownerSids[0], (Get-PrivateOwnerSid), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Legacy worker migration roots do not share the installer owner.'
+    }
+}
+
 function Wait-WorkerTaskRunning {
     param(
         [Parameter(Mandatory = $true)][string]$TaskName,
@@ -1111,13 +1236,15 @@ function Stop-AndRemoveTask {
         [Parameter(Mandatory = $true)][string]$Executable,
         [Parameter(Mandatory = $true)][string]$Config,
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
-        [Parameter(Mandatory = $true)][ValidateSet('User', 'System')][string]$ResolvedScope
+        [Parameter(Mandatory = $true)][ValidateSet('User', 'System')][string]$ResolvedScope,
+        [switch]$AllowLegacyMigration
     )
     $snapshot = Get-WorkerTaskSnapshot `
         -Executable $Executable `
         -Config $Config `
         -WorkingDirectory $WorkingDirectory `
-        -ResolvedScope $ResolvedScope
+        -ResolvedScope $ResolvedScope `
+        -AllowLegacyMigration:$AllowLegacyMigration
     if ($null -ne $snapshot) {
         Stop-ScheduledTask -TaskName $script:TaskName -TaskPath '\' -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName $script:TaskName -TaskPath '\' -Confirm:$false
@@ -1125,7 +1252,8 @@ function Stop-AndRemoveTask {
                 -Executable $Executable `
                 -Config $Config `
                 -WorkingDirectory $WorkingDirectory `
-                -ResolvedScope $ResolvedScope)) {
+                -ResolvedScope $ResolvedScope `
+                -AllowLegacyMigration:$AllowLegacyMigration)) {
             throw 'Worker scheduled task remained after installer-owned removal.'
         }
     }
@@ -1301,6 +1429,7 @@ function New-WorkerTransaction {
             manifestExisted = [bool]$manifestExisted
             taskExisted = [bool]$taskExisted
             taskWasRunning = [bool]($taskExisted -and $TaskSnapshot.WasRunning)
+            taskKind = if ($taskExisted -and $TaskSnapshot.PSObject.Properties['TaskKind']) { [string]$TaskSnapshot.TaskKind } else { 'Native' }
         })
         [System.IO.Directory]::Move($stagingRoot, $TransactionRoot)
     } catch {
@@ -1335,7 +1464,9 @@ function Restore-WorkerTransaction {
         -Executable $WorkerBinaryPath `
         -Config (Join-Path $DataRoot 'config.json') `
         -WorkingDirectory $WorkspaceRoot `
-        -ResolvedScope $ResolvedScope
+        -ResolvedScope $ResolvedScope `
+        -AllowLegacyMigration:($null -ne $state.PSObject.Properties['taskKind'] -and
+            [string]$state.taskKind -eq 'LegacyPowerShell')
 
     foreach ($current in @(Get-WorkerIdentityFiles -DataRoot $DataRoot)) {
         if (Test-ReparsePoint $current) { throw 'Refusing to replace a reparse point in worker identity storage.' }
@@ -1386,6 +1517,7 @@ function Restore-WorkerTransaction {
         $taskSnapshot = [PSCustomObject]@{
             Xml = [System.IO.File]::ReadAllText($taskXmlPath)
             WasRunning = [bool]$state.taskWasRunning
+            TaskKind = if ($state.PSObject.Properties['taskKind']) { [string]$state.taskKind } else { 'Native' }
         }
         Restore-WorkerTask `
             -Snapshot $taskSnapshot `
@@ -1536,11 +1668,35 @@ if ($ownedInstallation -and (Test-Path -LiteralPath $manifestPath -PathType Leaf
         throw 'Installer paths do not match the existing owned installation.'
     }
 }
-$previousTask = Get-WorkerTaskSnapshot `
-    -Executable $workerPath `
-    -Config $configPath `
-    -WorkingDirectory $workspace `
-    -ResolvedScope $resolvedScope
+$previousTask = $null
+if ($Action -eq 'Repair' -and $ownedInstallation) {
+    # Repair is the only operation allowed to recognize the exact legacy
+    # PowerShell task.  Install and Uninstall remain fail-closed for any task
+    # that is not already a native installer task.
+    $previousTask = Get-WorkerTaskSnapshot `
+        -Executable $workerPath `
+        -Config $configPath `
+        -WorkingDirectory $workspace `
+        -ResolvedScope $resolvedScope `
+        -AllowLegacyMigration
+    if ($null -ne $previousTask -and [string]$previousTask.TaskKind -ceq 'LegacyPowerShell') {
+        Assert-WorkerLegacyMigrationBinding `
+            -OwnedInstallation $ownedInstallation `
+            -RecordedManifest $recordedManifest `
+            -MarkerPath $markerPath `
+            -ExpectedMarker $script:OwnerMarkerValue `
+            -InstallRoot $install `
+            -DataRoot $data `
+            -WorkspaceRoot $workspace `
+            -WorkerBinaryPath $workerPath
+    }
+} else {
+    $previousTask = Get-WorkerTaskSnapshot `
+        -Executable $workerPath `
+        -Config $configPath `
+        -WorkingDirectory $workspace `
+        -ResolvedScope $resolvedScope
+}
 
 if ($Action -eq 'Uninstall') {
     if (-not $ownedInstallation) {
@@ -1551,7 +1707,8 @@ if ($Action -eq 'Uninstall') {
         -Executable $workerPath `
         -Config $configPath `
         -WorkingDirectory $workspace `
-        -ResolvedScope $resolvedScope
+        -ResolvedScope $resolvedScope `
+        -AllowLegacyMigration:($null -ne $previousTask -and [string]$previousTask.TaskKind -ceq 'LegacyPowerShell')
     if (Test-Path -LiteralPath $workerPath -PathType Leaf) { Remove-Item -LiteralPath $workerPath -Force }
     if (Test-Path -LiteralPath $install -PathType Container) {
         $remaining = @(Get-ChildItem -LiteralPath $install -Force)
@@ -1617,7 +1774,8 @@ try {
         -Executable $workerPath `
         -Config $configPath `
         -WorkingDirectory $workspace `
-        -ResolvedScope $resolvedScope
+        -ResolvedScope $resolvedScope `
+        -AllowLegacyMigration:($null -ne $previousTask -and [string]$previousTask.TaskKind -ceq 'LegacyPowerShell')
     if (Test-Path -LiteralPath $workerPath) {
         $existingWorker = Get-Item -LiteralPath $workerPath -Force
         if ($existingWorker.PSIsContainer -or (Test-ReparsePoint $existingWorker)) {

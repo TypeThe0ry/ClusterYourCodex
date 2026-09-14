@@ -5,7 +5,7 @@ the current checkout and live GitHub state, rather than on chat history. Update
 it in the same pull request as every implementation, CI, packaging, or release
 change.
 
-- **Snapshot date:** 2026-09-12
+- **Snapshot date:** 2026-09-14
 - **Repository:** [TypeThe0ry/ClusterYourCodex](https://github.com/TypeThe0ry/ClusterYourCodex)
 - **Snapshot baseline:** published `v0.1.0-preview.100`, source commit `2c269842dbc15934b5cfcf6a4cb3e0844cec3ed5`. Documentation and merge reconciliation may advance beyond this immutable release SHA.
 - **Latest published preview:** [`v0.1.0-preview.100`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.100), published 2026-09-07 17:42:22 UTC by successful tagged workflow [`34128668756`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/34128668756). GitHub reports `isPrerelease=true`, `isDraft=false`, and 23 assets. Windows self-contained and clean Windows 11 ARM64 compatibility acceptance both passed.
@@ -13,6 +13,24 @@ change.
 - **Release channels:** preview.100 is the current public prerelease; preview.95 remains an immutable fallback. Certified GA remains separate from operator testing; open Issues #2, #3, and #5 retain their unverified platform, signing, and isolation gates.
 
 ### Current checkpoint — 2026-09-12
+
+### Usable remote Windows loop — 2026-09-14
+
+PR #62 carries the preview.101 candidate. Its head
+`bd46c360d2587da05410ce9f64e5ec1ed2a9fd8b` repaired the live remote Windows
+worker from the legacy malformed scheduled-task action to the native worker
+binary, retained its pairing, and changed user-scope task registration to S4U
+for unattended SSH-controller operation. Fresh preview.101 heartbeat,
+inventory, and telemetry reached the installed preview.100 controller.
+
+A new controller-planned job selected that worker and completed
+`queued → succeeded` with exit code 0. Both log streams were reconstructed and
+downloaded. The returned `preview101-proof.txt` artifact had SHA-256
+`6156e217602d2345ba1f57d86f74175487ecef71cb8a28ab9372485e401ab3c8`,
+matching the controller record. The minimum real Add/paired-worker → schedule
+→ execute → logs/artifact loop is therefore usable on the current Windows
+controller/Windows worker path. Nonblocking polish and exhaustive GA matrices
+remain deferred; the release channel remains prerelease.
 
 PR #58 was merged at 2026-09-12 12:56:44 UTC as merge commit
 `36d3deeddf50620dba072ac59ead78e07f4f6e04`. Its final head

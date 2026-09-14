@@ -736,6 +736,48 @@ button { color: inherit; }
   .hero-visual { display: none; }
 }
 
+/* Keep the compact workspace usable on phones. Grid rows are intentionally
+   fluid here; wide desktop columns otherwise force a horizontal page scroll. */
+@media (max-width: 600px) {
+  body { min-width: 0; }
+  .app-shell { display: block; min-width: 0; }
+  .main-content, .page-content, .page-panel, .panel { min-width: 0; max-width: 100%; }
+  .topbar, .page-content { padding-left: 16px; padding-right: 16px; }
+  .hero-card { padding: 24px 20px; }
+  .node-row {
+    grid-template-columns: 35px minmax(0, 1fr) 30px;
+    gap: 9px;
+    align-items: start;
+  }
+  .node-capabilities, .node-row > .resource-cell, .node-row > .icon-button { display: none; }
+  .node-main > span { white-space: normal; overflow-wrap: anywhere; }
+  .task-table { padding: 0 14px; overflow-x: auto; }
+  .table-head, .table-row {
+    min-width: 0;
+    grid-template-columns: minmax(130px, 1.5fr) minmax(90px, 1fr) 82px;
+    gap: 10px;
+  }
+  .table-head > span:last-child, .table-row > time { display: none; }
+  .provisioning-workspace { min-width: 0; grid-template-columns: 1fr; }
+  .provisioning-record-list { max-height: 220px; overflow: auto; }
+  .provisioning-detail { padding: 18px 14px; }
+  .provisioning-timeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .computer-wizard { width: calc(100vw - 24px); max-width: none; padding: 18px; }
+
+  /* Routing rows keep the controls usable without carrying the desktop
+     priority column past the phone viewport. Priority remains represented by
+     the row order and the desktop layout keeps the full label. */
+  .rule-list { padding-left: 12px; padding-right: 12px; }
+  .rule-row {
+    grid-template-columns: 17px 30px minmax(0, 1fr) 31px 34px;
+    gap: 8px;
+  }
+  .rule-row > div { min-width: 0; }
+  .rule-row > .stat-icon { width: 30px; height: 30px; flex-basis: 30px; }
+  .rule-row > .rule-order { display: none; }
+  .rule-row > .icon-button { width: 34px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
