@@ -43,3 +43,29 @@ This proves the same-host Windows controller/worker core loop for the current
 source commit. It does not close clean-VM, production Authenticode, live
 cross-machine GUI Add Computer, real macOS LaunchAgent, or hostile-workload
 GA gates. Public builds therefore remain prereleases.
+
+## Remote persistent-worker acceptance — 2026-09-14
+
+The preview.101 candidate also completed the first real cross-machine Windows
+controller/worker loop on the LAN. The candidate source was
+`bd46c360d2587da05410ce9f64e5ec1ed2a9fd8b`.
+
+- An owned preview.100 user-scope installation was repaired in place. Its
+  legacy task incorrectly launched Windows PowerShell with worker arguments;
+  Repair replaced it with the installed `cyc-worker.exe` action and preserved
+  the existing pairing/configuration.
+- The user task now uses passwordless `S4U`, so it remains runnable from an
+  SSH-only controller session without an interactive desktop logon.
+- After Repair the task remained `Running`, one worker process persisted, and
+  the controller received fresh preview.101 inventory and telemetry.
+- A performance-planned test job selected the remote Windows worker, moved
+  from `queued` to `succeeded`, and returned native exit code 0.
+- Reconstructed stdout contained `CYC_PREVIEW101_EXECUTED`; stderr contained
+  `CYC_PREVIEW101_STDERR`.
+- Downloaded artifact `preview101-proof.txt` contained `CYC_PREVIEW101_OK` and
+  SHA-256 `6156e217602d2345ba1f57d86f74175487ecef71cb8a28ab9372485e401ab3c8`,
+  exactly matching the controller artifact record.
+
+This closes the minimum usable Windows controller-to-remote-worker execution
+loop. It does not claim stable-GA signing, clean-machine upgrade matrices, or
+live macOS worker acceptance; preview.101 remains a prerelease.

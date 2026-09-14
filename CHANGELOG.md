@@ -9,6 +9,13 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Repair exact legacy Windows worker tasks in place, replacing the malformed
+  PowerShell action with the installed native worker while retaining paired
+  state. User-scope workers now use passwordless S4U so they can run from an
+  SSH-only controller session without a desktop logon.
+- Preserve preview.100 canonical job digests when public resource-unit field
+  names use the newer `MiB` spelling, avoiding assignment digest mismatches
+  for persisted or in-flight v1 jobs.
 - Bind Windows named-instance and service-scope discovery to the same workspace
   layout used by worker installation, so capacity probes no longer fall back to
   the SSH user's default profile volume.
