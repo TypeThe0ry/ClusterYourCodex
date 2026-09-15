@@ -1,5 +1,13 @@
 # ClusterYourCodex project status
 
+## X.509 parser update — 2026-09-15
+
+The current-main replacement for #19 updates x509-parser to 0.18.1.
+All 19 cyc-cli tests passed locally, including forged SAN type/collision rejection,
+exact SAN matching, host bounds and identity generation. This change does not
+alter identity policy. Cross-platform CI is required before merge.
+
+
 ## Windows dependency reconciliation — 2026-09-15
 
 The replacement for dependency PRs #13 and #16 updates secrets and worker
