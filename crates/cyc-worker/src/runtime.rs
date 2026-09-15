@@ -1589,6 +1589,10 @@ async fn process_assignment(
     })
     .await
     .context("job-root cleanup task panicked")??;
+    // The controller acknowledgement and worker observation come from
+    // different wall clocks. Preserve the causal ordering required by the
+    // cleanup protocol even when the worker clock trails the controller.
+    let observed_at = Utc::now().max(terminal_ack.acknowledged_at);
     let receipt = CleanupReceiptV1 {
         api_version: CLEANUP_API_VERSION.to_owned(),
         run_id: assignment.run_id,
@@ -1596,7 +1600,7 @@ async fn process_assignment(
         relative_root: assignment.workspace.relative_root.clone(),
         outcome: cleanup_outcome,
         job_root_deleted: matches!(cleanup_outcome, JobRootCleanupOutcomeV1::Removed),
-        observed_at: Utc::now(),
+        observed_at,
         terminal_ack,
     };
     session
@@ -3003,6 +3007,13 @@ mod tests {
     use cyc_protocol::{JobKind, JobSpec, JobStep, SourceSpec};
     use tempfile::tempdir;
     use uuid::Uuid;
+
+    #[test]
+    fn cleanup_timestamp_preserves_ack_order_across_clock_skew() {
+        let acknowledged_at = Utc::now();
+        let worker_now = acknowledged_at - chrono::Duration::seconds(2);
+        assert_eq!(worker_now.max(acknowledged_at), acknowledged_at);
+    }
 
     // The first transport callback follows several protected-file operations.
     // On Windows each ACL apply/verify launches PowerShell, and cold hosted
