@@ -1,5 +1,13 @@
 # ClusterYourCodex project status
 
+## SQLite dependency reconciliation — 2026-09-15
+
+Replacement for PRs #9/#14 updates workspace and desktop rusqlite to 0.40 and
+keeps both lockfiles synchronized. Windows workspace and desktop all-target
+checks passed. Provisioning tests (45) and controller tests (121) passed, with
+database migrations, WAL, pairing, cleanup, and concurrency coverage. CI remains
+required before merge; v0.0.1 artifacts are unchanged.
+
 This is the repository's durable progress record. It is intentionally based on
 the current checkout and live GitHub state, rather than on chat history. Update
 it in the same pull request as every implementation, CI, packaging, or release
