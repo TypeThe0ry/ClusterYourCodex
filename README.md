@@ -22,6 +22,14 @@ Download [Windows Setup](https://github.com/TypeThe0ry/ClusterYourCodex/releases
 
 Windows binaries are currently code-unsigned; verify the sidecar before running Setup. The supported execution boundary is trusted, single-user workloads. Hostile-workload isolation is tracked in [Issue #5](https://github.com/TypeThe0ry/ClusterYourCodex/issues/5).
 
+## Platform status
+
+| Platform | Current delivery |
+| --- | --- |
+| Windows x64 | Desktop, Controller and Worker; full clean-VM Repair/rollback acceptance remains tracked in [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and [#68](https://github.com/TypeThe0ry/ClusterYourCodex/issues/68). |
+| Linux x64 | Worker packages; see the [Linux setup guide](docs/add-linux-computer.md). |
+| macOS x64 / arm64 | Worker Kit packages; live managed execution acceptance is still open in [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). |
+
 ## Fast start on Windows
 
 1. Download Setup and the `.sha256` sidecar.
@@ -69,7 +77,7 @@ pnpm -r test
 pnpm -r build
 ```
 
-Run the desktop with `pnpm dev`. Packaging and acceptance details live in [docs/packaging.md](docs/packaging.md).
+Run the browser renderer with `pnpm dev`; it is not the installed native app. For the native desktop use `pnpm --filter @clusteryourcodex/desktop tauri:dev` (Rust and the Tauri Windows build prerequisites are required). Packaging and acceptance details live in [docs/packaging.md](docs/packaging.md).
 
 ## Documentation
 
