@@ -22,7 +22,7 @@ Live remote tag audit: v0.0.1 tag object is
 e4fbaef04b764268fa038311d85573b18b549f9f, peeled commit is
 a64e3a59124e14b165861b86775847e961474b81. This differs from the old chat
 summary's ffb6794 assumption. This integration does not move the tag or modify
-release assets. Issues #5 and #68 remain open. The overall goal is incomplete.
+release assets. Issues #5 and #68 remain open. The overall goal is incomplete. CI workflow cancellation/retry is documented; no cancelled run is counted as passing.
 
 
 ## Windows dependency reconciliation — 2026-09-15
