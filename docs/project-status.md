@@ -1,5 +1,15 @@
 # ClusterYourCodex project status
 
+## Windows dependency reconciliation — 2026-09-15
+
+The replacement for dependency PRs #13 and #16 updates secrets and worker
+Windows bindings to 0.61 together with both Cargo lockfiles. Local Windows
+checks passed for secrets/worker (all targets) and the locked desktop host.
+Secrets tests passed (5 passed, 2 ignored); the explicitly selected native
+cross-process Credential Manager acceptance also passed (1 test).
+Formatting and diff checks passed. CI and merge remain pending; no released
+v0.0.1 artifact has been replaced.
+
 This is the repository's durable progress record. It is intentionally based on
 the current checkout and live GitHub state, rather than on chat history. Update
 it in the same pull request as every implementation, CI, packaging, or release
