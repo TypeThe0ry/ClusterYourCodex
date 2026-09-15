@@ -1,5 +1,15 @@
 # ClusterYourCodex project status
 
+## Base64 dependency reconciliation — 2026-09-15
+
+The replacement for PRs #8 and #15 upgrades workspace and desktop base64
+dependencies together and updates both lockfiles. Windows workspace all-target
+and desktop compilation checks passed; all 15 SSH library tests passed,
+including fingerprint, quoting, and redaction checks. Formatting and diff
+checks passed. The linker reported missing OpenSSL debug PDB warnings, not
+test failures. Cross-platform CI and merge remain required. No published
+v0.0.1 artifacts were changed.
+
 This is the repository's durable progress record. It is intentionally based on
 the current checkout and live GitHub state, rather than on chat history. Update
 it in the same pull request as every implementation, CI, packaging, or release

@@ -9,6 +9,8 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Synchronize the base64 0.23 upgrade across workspace and desktop manifests
+  and lockfiles so both locked dependency graphs stay consistent.
 - Keep Controller lifecycle timestamps authoritative when accepting managed
   completions, so a worker clock that trails the Controller no longer turns a
   successful remote execution into `invalid_run_evidence`.
