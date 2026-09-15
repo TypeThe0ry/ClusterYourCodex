@@ -4691,7 +4691,7 @@ function Wait-CycTaskStable {
             if (([DateTime]::UtcNow - $runningSince).TotalSeconds -ge $StableSeconds) {
                 $taskInfo = Get-ScheduledTaskInfo -TaskName $Name -TaskPath '\' -ErrorAction Stop
                 $lastResult = [long]$taskInfo.LastTaskResult
-                # SCHED_E_START_ATTEMPTED can describe a rejected duplicate
+                # 0x800710e0 can describe a rejected duplicate
                 # start, not failure of the instance that is still running.
                 # Accept it only with the exact registered executable alive;
                 # caller readiness probes still verify Controller/Worker health.

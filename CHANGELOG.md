@@ -9,6 +9,9 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Avoid failing Windows task readiness on a rejected duplicate start
+  (`0x800710e0`) when the exact registered executable is still running.
+  Controller and Worker readiness probes remain required after this check.
 - Keep Controller lifecycle timestamps authoritative when accepting managed
   completions, so a worker clock that trails the Controller no longer turns a
   successful remote execution into `invalid_run_evidence`.
