@@ -660,8 +660,9 @@ try {
     Assert-FreshTest ($plan.exitCode -eq 0) 'manifest-bound install plan succeeds'
     $previewManifest = Read-FreshUtf8Json -Path $manifestPath
     Assert-FreshTest ([string]$previewManifest.schemaVersion -eq 'cyc.dev/windows-preview/v1') 'preview manifest schema is recognized'
-    Assert-FreshTest ([string]$previewManifest.productVersion -match '^[0-9]+\.[0-9]+\.[0-9]+-(preview|alpha|beta|rc)\.[0-9]+$') 'preview manifest carries a strict prerelease product version'
-    Assert-FreshTest ([string]$previewManifest.releaseChannel -ceq 'prerelease') 'preview manifest release channel remains prerelease'
+    Assert-FreshTest ([string]$previewManifest.productVersion -match '^[0-9]+\.[0-9]+\.[0-9]+(?:-(preview|alpha|beta|rc)\.[0-9]+)?$') 'package manifest carries a strict release product version'
+    $expectedReleaseChannel = if ([string]$previewManifest.productVersion -match '-') { 'prerelease' } else { 'stable' }
+    Assert-FreshTest ([string]$previewManifest.releaseChannel -ceq $expectedReleaseChannel) 'package manifest release channel matches its product version'
     Assert-FreshTest ($null -eq $previewManifest.sourceTag -or [string]$previewManifest.sourceTag -ceq "v$($previewManifest.productVersion)") 'preview manifest source tag is absent or exactly vPRODUCT_VERSION'
 
     # The child can commit a task/manifest and then fail before returning.

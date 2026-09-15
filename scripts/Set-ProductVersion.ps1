@@ -17,8 +17,8 @@ function Assert-CycStrictSemVer {
     if ($Value -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?<pre>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$') {
         throw "Product version must be canonical SemVer without build metadata: $Value"
     }
-    if ($Matches.pre) {
-        foreach ($identifier in $Matches.pre.Split('.')) {
+    if ($Matches.ContainsKey('pre') -and $Matches['pre']) {
+        foreach ($identifier in ([string]$Matches['pre']).Split('.')) {
             if ($identifier -cmatch '^[0-9]+$' -and $identifier.Length -gt 1 -and $identifier.StartsWith('0')) {
                 throw "Numeric prerelease identifiers must not have leading zeroes: $Value"
             }

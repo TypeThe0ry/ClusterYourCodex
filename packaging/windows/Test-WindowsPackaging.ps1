@@ -2499,8 +2499,9 @@ exit 4
     Assert-True ((Get-FileHash -LiteralPath $sourceMcpManifest -Algorithm SHA256).Hash -eq $sourceMcpHash) 'source MCP manifest remains unchanged'
     $previewManifest = Get-Content -LiteralPath (Join-Path $preview 'preview-manifest.json') -Raw | ConvertFrom-Json
     Assert-True ([string]$previewManifest.productVersion -ceq $productVersion) 'preview manifest binds root product VERSION'
-    Assert-True ([string]$previewManifest.releaseChannel -ceq 'prerelease') 'preview manifest records prerelease channel'
-    Assert-True ([string]$previewManifest.sourceTag -ceq "v$productVersion") 'preview manifest binds the exact prerelease source tag'
+    $expectedReleaseChannel = if ($productVersion.Contains('-')) { 'prerelease' } else { 'stable' }
+    Assert-True ([string]$previewManifest.releaseChannel -ceq $expectedReleaseChannel) 'package manifest records the version-derived release channel'
+    Assert-True ([string]$previewManifest.sourceTag -ceq "v$productVersion") 'package manifest binds the exact source tag'
     Assert-True (@($previewManifest.workerKits).Count -eq $allWorkerKitTargets.Count) 'preview manifest binds all worker kits'
     foreach ($workerKit in @($previewManifest.workerKits)) {
         Assert-True ([string]$workerKit.version -ceq $productVersion) "preview rejects worker-kit product-version drift for $($workerKit.target)"

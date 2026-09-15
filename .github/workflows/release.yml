@@ -1,4 +1,4 @@
-name: Developer-preview release artifacts
+name: Release artifacts
 
 on:
   workflow_dispatch:
@@ -12,12 +12,12 @@ permissions:
 
 env:
   CYC_REF_NAME: ${{ github.ref_name }}
-  CYC_RELEASE_CHANNEL: prerelease
+  CYC_RELEASE_CHANNEL: ${{ contains(github.ref_name, '-') && 'prerelease' || 'stable' }}
   CYC_SOURCE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
 
 jobs:
   release-identity:
-    name: Fail-closed prerelease identity gate
+    name: Fail-closed release identity gate
     runs-on: windows-latest
     outputs:
       product_version: ${{ steps.identity.outputs.product_version }}
@@ -27,16 +27,16 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - name: Verify annotated prerelease tag and checked-out source commit
+      - name: Verify annotated release tag and checked-out source commit
         shell: bash
         run: |
           set -euo pipefail
           if [[ -z "$CYC_SOURCE_TAG" ]]; then
-            echo 'source_tag is required for a tagged prerelease' >&2
+            echo 'source_tag is required for a tagged release' >&2
             exit 1
           fi
-          if [[ ! "$CYC_SOURCE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-(preview|alpha|beta|rc)\.(0|[1-9][0-9]*)$ ]]; then
-            echo 'source_tag must be a strict preview.N, alpha.N, beta.N, or rc.N tag' >&2
+          if [[ ! "$CYC_SOURCE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-(preview|alpha|beta|rc)\.(0|[1-9][0-9]*)$ && ! "$CYC_SOURCE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'source_tag must be a strict stable or preview.N/alpha.N/beta.N/rc.N tag' >&2
             exit 1
           fi
           # actions/checkout first fetches the annotated tag, then force-updates
@@ -60,7 +60,7 @@ jobs:
           printf 'CYC_SOURCE_COMMIT=%s\n' "$head_commit" >> "$GITHUB_ENV"
           printf 'CYC_SOURCE_TAG_OBJECT=%s\n' "$tag_object" >> "$GITHUB_ENV"
           {
-            echo '## Preview source'
+            echo '## Release source'
             echo
             echo "- tag: \`$CYC_SOURCE_TAG\`"
             echo "- annotated tag object: \`$tag_object\`"
@@ -103,7 +103,7 @@ jobs:
         shell: pwsh
         run: ./scripts/Test-WindowsAuthenticodeBoundary.ps1
       - id: identity
-        name: Require strict prerelease VERSION and exact vVERSION tag
+        name: Require strict VERSION and exact vVERSION tag
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -113,20 +113,19 @@ jobs:
           }
           $arguments = @{
             RepositoryRoot = $PWD
-            RequirePrerelease = $true
             Json = $true
           }
           if (-not [string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)) {
             $arguments.SourceTag = [string]$env:CYC_SOURCE_TAG
           }
           $identity = (& ./scripts/Test-VersionConsistency.ps1 @arguments) | ConvertFrom-Json
-          if ([string]$identity.releaseChannel -cne 'prerelease') {
-            throw 'This workflow is prerelease-only; stable releases require a separate GA gate.'
+          if ([string]$identity.releaseChannel -cne [string]$env:CYC_RELEASE_CHANNEL) {
+            throw "Release channel does not match the validated VERSION: $($identity.releaseChannel)"
           }
           "product_version=$([string]$identity.productVersion)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          'release_channel=prerelease' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "release_channel=$([string]$identity.releaseChannel)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "source_tag=$([string]$identity.sourceTag)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-      - name: Verify changelog links match the tagged preview
+      - name: Verify changelog links match the tagged release
         shell: pwsh
         run: ./scripts/Test-ChangelogConsistency.ps1
 
@@ -450,7 +449,8 @@ jobs:
           $notice = @"
           # ClusterYourCodex developer preview
 
-          This is a code-unsigned portable developer-preview archive, not a stable installer.
+          This is a code-unsigned portable ClusterYourCodex archive. Its release
+          channel is recorded in platform-status.json and release-manifest.json.
           Included Windows/Linux/macOS worker kits carry a controller-verified Ed25519 publisher signature.
 
           Platform: ${{ matrix.platform }}
@@ -470,7 +470,7 @@ jobs:
 
           $platformStatus = [ordered]@{
             schemaVersion = 'cyc.dev/platform-status/v1'
-            releaseKind = 'developer-preview'
+            releaseKind = if ([string]$env:CYC_RELEASE_CHANNEL -ceq 'stable') { 'stable' } else { 'developer-preview' }
             productVersion = [string]$env:CYC_PRODUCT_VERSION
             releaseChannel = [string]$env:CYC_RELEASE_CHANNEL
             sourceTag = if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)) { $null } else { [string]$env:CYC_SOURCE_TAG }
@@ -509,7 +509,7 @@ jobs:
             })
           $manifest = [ordered]@{
             schemaVersion = 'cyc.dev/release-manifest/v1'
-            releaseKind = 'developer-preview'
+            releaseKind = if ([string]$env:CYC_RELEASE_CHANNEL -ceq 'stable') { 'stable' } else { 'developer-preview' }
             productVersion = [string]$env:CYC_PRODUCT_VERSION
             releaseChannel = [string]$env:CYC_RELEASE_CHANNEL
             sourceTag = if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)) { $null } else { [string]$env:CYC_SOURCE_TAG }
@@ -765,7 +765,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'deployed MCP runtime smoke test failed' }
 
           @'
-          # ClusterYourCodex integration developer preview
+          # ClusterYourCodex integration assets
 
           This archive contains the compiled renderer and Codex marketplace/plugin assets.
           It is not a native desktop application, controller, worker, CLI, or installer.
@@ -776,7 +776,7 @@ jobs:
           '@ | Set-Content -LiteralPath (Join-Path $stage 'PREVIEW-NOTICE.md') -Encoding UTF8
           [ordered]@{
             schemaVersion = 'cyc.dev/platform-status/v1'
-            releaseKind = 'developer-preview'
+            releaseKind = if ([string]$env:CYC_RELEASE_CHANNEL -ceq 'stable') { 'stable' } else { 'developer-preview' }
             productVersion = [string]$env:CYC_PRODUCT_VERSION
             releaseChannel = [string]$env:CYC_RELEASE_CHANNEL
             sourceTag = if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)) { $null } else { [string]$env:CYC_SOURCE_TAG }
@@ -807,7 +807,7 @@ jobs:
             })
           [ordered]@{
             schemaVersion = 'cyc.dev/release-manifest/v1'
-            releaseKind = 'developer-preview'
+            releaseKind = if ([string]$env:CYC_RELEASE_CHANNEL -ceq 'stable') { 'stable' } else { 'developer-preview' }
             productVersion = [string]$env:CYC_PRODUCT_VERSION
             releaseChannel = [string]$env:CYC_RELEASE_CHANNEL
             sourceTag = if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)) { $null } else { [string]$env:CYC_SOURCE_TAG }
@@ -1149,13 +1149,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'failed to stage Windows preview payload' }
 
           @'
-          # ClusterYourCodex Windows developer preview
+          # ClusterYourCodex Windows package
 
           This self-contained ZIP contains the Windows GUI, controller, local managed
           worker, CLI, per-user bootstrap lifecycle, Codex marketplace/plugin, private
           Node runtime, and integrity-bound Windows x64/Linux x64/Linux arm64/macOS
-          x64/macOS arm64 Worker Kits for SSH provisioning. It is a developer preview
-          for trusted single-user jobs. Submitted steps execute as the worker account;
+          x64/macOS arm64 Worker Kits for SSH provisioning. It is intended for trusted
+          single-user jobs. Submitted steps execute as the worker account;
           this is not a hostile-workload sandbox. Both macOS kits remain fail-closed
           with runtimeGated=true and containmentReady=false; live macOS execution is
           not claimed.
@@ -1164,13 +1164,13 @@ jobs:
           exact manifest-bound payload. The ZIP, bootstrap, and Setup.exe remain
           code-unsigned; tagged release assets receive a release-level CycloneDX SBOM
           and GitHub build-provenance attestation, while manually dispatched artifacts
-          remain explicitly indexed as unattested. Automatic update and stable-release
-          support are not claimed. Managed Worker Kits inside the payload have detached
+          remain explicitly indexed as unattested. Automatic update support is not
+          claimed. Managed Worker Kits inside the payload have detached
           Ed25519 publisher signatures. The installer registers its own repair-safe uninstaller.
           '@ | Set-Content -LiteralPath (Join-Path $preview 'PREVIEW-NOTICE.md') -Encoding UTF8
           [ordered]@{
             schemaVersion = 'cyc.dev/platform-status/v1'
-            releaseKind = 'developer-preview'
+            releaseKind = if ([string]$env:CYC_RELEASE_CHANNEL -ceq 'stable') { 'stable' } else { 'developer-preview' }
             productVersion = [string]$env:CYC_PRODUCT_VERSION
             releaseChannel = [string]$env:CYC_RELEASE_CHANNEL
             sourceTag = if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)) { $null } else { [string]$env:CYC_SOURCE_TAG }
@@ -1218,7 +1218,7 @@ jobs:
             })
           [ordered]@{
             schemaVersion = 'cyc.dev/release-manifest/v1'
-            releaseKind = 'developer-preview'
+            releaseKind = if ([string]$env:CYC_RELEASE_CHANNEL -ceq 'stable') { 'stable' } else { 'developer-preview' }
             productVersion = [string]$env:CYC_PRODUCT_VERSION
             releaseChannel = [string]$env:CYC_RELEASE_CHANNEL
             sourceTag = if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)) { $null } else { [string]$env:CYC_SOURCE_TAG }
@@ -1823,7 +1823,7 @@ jobs:
           $indexPath = Join-Path $outputRoot 'release-index.json'
           [ordered]@{
             schemaVersion = 'cyc.dev/release-index/v1'
-            releaseKind = 'developer-preview'
+            releaseKind = if ([string]$env:CYC_RELEASE_CHANNEL -ceq 'stable') { 'stable' } else { 'developer-preview' }
             productVersion = [string]$env:CYC_PRODUCT_VERSION
             releaseChannel = [string]$env:CYC_RELEASE_CHANNEL
             sourceTag = if ([string]::IsNullOrWhiteSpace([string]$env:CYC_SOURCE_TAG)) { $null } else { [string]$env:CYC_SOURCE_TAG }
@@ -1907,7 +1907,7 @@ jobs:
           if-no-files-found: error
 
   github-release:
-    name: Publish tagged developer preview
+    name: Publish tagged release
     if: github.ref_type == 'tag' && needs.release-identity.outputs.source_tag != ''
     needs: [release-identity, release-index]
     runs-on: ubuntu-latest
@@ -1925,9 +1925,8 @@ jobs:
           path: release-assets
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          # Every tagged build is immediately visible, but remains explicitly
-          # prerelease until the separate protected GA workflow is approved.
           draft: false
-          prerelease: true
+          prerelease: ${{ needs.release-identity.outputs.release_channel != 'stable' }}
+          make_latest: ${{ needs.release-identity.outputs.release_channel == 'stable' }}
           generate_release_notes: true
           files: release-assets/*

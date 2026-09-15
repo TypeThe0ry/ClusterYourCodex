@@ -20,8 +20,8 @@ function Assert-CycStrictSemVer {
     if ($Value -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?<pre>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$') {
         throw "Product version must be canonical SemVer without build metadata: $Value"
     }
-    if ($Matches.pre) {
-        foreach ($identifier in $Matches.pre.Split('.')) {
+    if ($Matches.ContainsKey('pre') -and $Matches['pre']) {
+        foreach ($identifier in ([string]$Matches['pre']).Split('.')) {
             if ($identifier -cmatch '^[0-9]+$' -and $identifier.Length -gt 1 -and $identifier.StartsWith('0')) {
                 throw "Numeric prerelease identifiers must not have leading zeroes: $Value"
             }
@@ -71,14 +71,15 @@ function Assert-CycReleaseIdentity {
         throw "Prerelease workflow versions must use preview.N, alpha.N, beta.N, or rc.N: $Version"
     }
     if (-not [string]::IsNullOrWhiteSpace($Tag)) {
-        if (-not $isPrerelease) {
-            throw "Stable tags are forbidden by the prerelease workflow: $Tag"
-        }
         if ($Tag -cne "v$Version") {
             throw "Source tag does not match VERSION: expected v$Version, got $Tag"
         }
-        if ($Tag -cnotmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-(preview|alpha|beta|rc)\.(0|[1-9][0-9]*)$') {
-            throw "Source tag is not a strict prerelease SemVer tag: $Tag"
+        if ($isPrerelease) {
+            if ($Tag -cnotmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-(preview|alpha|beta|rc)\.(0|[1-9][0-9]*)$') {
+                throw "Source tag is not a strict prerelease SemVer tag: $Tag"
+            }
+        } elseif ($Tag -cnotmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw "Source tag is not a strict stable SemVer tag: $Tag"
         }
     }
     if ($isPrerelease) { return 'prerelease' }
@@ -192,21 +193,21 @@ function Assert-CycReleaseWorkflowIdentity {
         throw 'Protected stable GA readiness gate contract failed.'
     }
     $sourceTagBinding = 'CYC_SOURCE_TAG: ${{ github.ref_type == ''tag'' && github.ref_name || '''' }}'
-    if ($workflow -notmatch '(?m)^\s*CYC_RELEASE_CHANNEL:\s*prerelease\s*$' -or
+    if ($workflow -notmatch '(?m)^\s*CYC_RELEASE_CHANNEL:\s*\$\{\{\s*contains\(github\.ref_name, ''-''\)\s*&&\s*''prerelease''\s*\|\|\s*''stable''\s*\}\}\s*$' -or
         -not $workflow.Contains($sourceTagBinding) -or
         $workflow -notmatch '(?m)^\s*-?\s*.*Test-VersionConsistency\.ps1' -or
-        $workflow -notmatch '(?m)^\s*RequirePrerelease\s*=\s*\$true\s*$' -or
         $workflow -notmatch '(?m)^\s*\$arguments\.SourceTag\s*=\s*\[string\]\$env:CYC_SOURCE_TAG\s*$') {
-        throw 'Release workflow is missing its fail-closed prerelease identity gate.'
+        throw 'Release workflow is missing its fail-closed tagged release identity gate.'
     }
     # Keep the shell-side source-tag check in lockstep with
     # Assert-CycReleaseIdentity.  A preview workflow must accept every
     # supported prerelease channel (preview/alpha/beta/rc) while rejecting
     # leading-zero identifiers and stable/dev tags before provenance fetch.
     $strictPrereleaseTagPattern = '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-(preview|alpha|beta|rc)\.(0|[1-9][0-9]*)$'
-    $strictPrereleaseTagGate = 'if [[ ! "$CYC_SOURCE_TAG" =~ ' + $strictPrereleaseTagPattern + ' ]]; then'
-    if (-not $workflow.Contains($strictPrereleaseTagGate)) {
-        throw 'Release workflow source-tag validation is not aligned with the strict prerelease channel contract.'
+    $strictStableTagPattern = '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+    $strictStableTagGate = 'if [[ ! "$CYC_SOURCE_TAG" =~ ' + $strictPrereleaseTagPattern + ' && ! "$CYC_SOURCE_TAG" =~ ' + $strictStableTagPattern + ' ]]; then'
+    if (-not $workflow.Contains($strictStableTagGate)) {
+        throw 'Release workflow source-tag validation is not aligned with the strict prerelease/stable channel contract.'
     }
 
     $releaseJob = [System.Text.RegularExpressions.Regex]::Match(
@@ -217,8 +218,8 @@ function Assert-CycReleaseWorkflowIdentity {
         $releaseJob.Groups['body'].Value -notmatch "(?m)^\s*if:\s*github\.ref_type\s*==\s*'tag'\s*&&\s*needs\.release-identity\.outputs\.source_tag\s*!=\s*''\s*$" -or
         $releaseJob.Groups['body'].Value -notmatch '(?m)^\s*environment:\s*preview-publication\s*$' -or
         $releaseJob.Groups['body'].Value -notmatch '(?m)^\s*draft:\s*false\s*$' -or
-        $releaseJob.Groups['body'].Value -notmatch '(?m)^\s*prerelease:\s*true\s*$') {
-        throw 'GitHub preview publishing must remain preview-publication-environment-bound, tag-bound, public, and prerelease-only.'
+        $releaseJob.Groups['body'].Value -notmatch '(?m)^\s*prerelease:\s*\$\{\{\s*needs\.release-identity\.outputs\.release_channel\s*!=\s*''stable''\s*\}\}\s*$') {
+        throw 'GitHub publishing must remain preview-publication-environment-bound, tag-bound, public, and channel-aware.'
     }
 
     $windows11AcceptanceJob = [System.Text.RegularExpressions.Regex]::Match(
@@ -405,8 +406,11 @@ if (-not $SkipNegativeTests) {
         -Description 'mismatched prerelease tag' `
         -Action { Assert-CycReleaseIdentity -Version $result.productVersion -Tag 'v9.9.9-preview.9' -PrereleaseRequired $true }
     Assert-CycExpectedFailure `
-        -Description 'stable tag in prerelease workflow' `
+        -Description 'stable tag in explicitly prerelease-only validation' `
         -Action { Assert-CycReleaseIdentity -Version '1.0.0' -Tag 'v1.0.0' -PrereleaseRequired $true }
+    if ((Assert-CycReleaseIdentity -Version '1.0.0' -Tag 'v1.0.0' -PrereleaseRequired $false) -cne 'stable') {
+        throw 'Stable release identity did not resolve to the stable channel.'
+    }
     Assert-CycExpectedFailure `
         -Description 'unsupported prerelease channel' `
         -Action { Assert-CycReleaseIdentity -Version '1.0.0-dev.1' -Tag 'v1.0.0-dev.1' -PrereleaseRequired $true }
@@ -443,7 +447,7 @@ if (-not $SkipNegativeTests) {
         [System.IO.File]::WriteAllText($mismatchPath, $mismatch, (New-Object System.Text.UTF8Encoding($false)))
         Assert-CycExpectedFailure `
             -Description 'one product manifest differs from VERSION' `
-            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired $true }
+            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired ([bool]$RequirePrerelease) }
 
         Copy-Item `
             -LiteralPath (Join-Path $RepositoryRoot 'plugins/cluster-your-codex/mcp/package.json') `
@@ -466,7 +470,7 @@ if (-not $SkipNegativeTests) {
         )
         Assert-CycExpectedFailure `
             -Description 'release metadata does not derive productVersion from the validated VERSION' `
-            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired $true }
+            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired ([bool]$RequirePrerelease) }
         Copy-Item `
             -LiteralPath (Join-Path $RepositoryRoot '.github/workflows/release.yml') `
             -Destination $fixtureWorkflowPath `
@@ -488,7 +492,7 @@ if (-not $SkipNegativeTests) {
         Assert-CycExpectedFailure `
             -Description 'a remote GitHub Action is not commit-pinned' `
             -ExpectedMessagePattern 'GitHub Actions pin validation failed:' `
-            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired $true }
+            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired ([bool]$RequirePrerelease) }
         Copy-Item `
             -LiteralPath (Join-Path $RepositoryRoot '.github/workflows/release.yml') `
             -Destination $fixtureWorkflowPath `
@@ -511,7 +515,7 @@ if (-not $SkipNegativeTests) {
         Assert-CycExpectedFailure `
             -Description 'stable GA workflow is not manual and fail-closed' `
             -ExpectedMessagePattern "GA workflow contains 'workflow_dispatch:'" `
-            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired $true }
+            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired ([bool]$RequirePrerelease) }
         Copy-Item `
             -LiteralPath (Join-Path $RepositoryRoot '.github/workflows/ga.yml') `
             -Destination $fixtureGaWorkflowPath `
@@ -533,7 +537,7 @@ if (-not $SkipNegativeTests) {
         )
         Assert-CycExpectedFailure `
             -Description 'tagged release index remains hard-coded as unattested' `
-            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired $true }
+            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired ([bool]$RequirePrerelease) }
         Copy-Item `
             -LiteralPath (Join-Path $RepositoryRoot '.github/workflows/release.yml') `
             -Destination $fixtureWorkflowPath `
@@ -553,7 +557,7 @@ if (-not $SkipNegativeTests) {
         Assert-CycExpectedFailure `
             -Description 'CI MSRV toolchain differs from the declared Rust 1.88 baseline' `
             -ExpectedMessagePattern 'CI workflow is missing the exact Rust 1\.88\.0 workspace/desktop MSRV gates' `
-            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired $true }
+            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired ([bool]$RequirePrerelease) }
         Copy-Item `
             -LiteralPath (Join-Path $RepositoryRoot '.github/workflows/ci.yml') `
             -Destination $fixtureCiPath `
@@ -567,7 +571,7 @@ if (-not $SkipNegativeTests) {
         )
         Assert-CycExpectedFailure `
             -Description 'VERSION uses CRLF instead of its canonical single LF' `
-            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired $true }
+            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired ([bool]$RequirePrerelease) }
 
         $versionPayload = (New-Object System.Text.UTF8Encoding($false)).GetBytes($result.productVersion + "`n")
         $bomPayload = New-Object byte[] ($versionPayload.Length + 3)
@@ -578,7 +582,7 @@ if (-not $SkipNegativeTests) {
         [System.IO.File]::WriteAllBytes($fixtureVersionPath, $bomPayload)
         Assert-CycExpectedFailure `
             -Description 'VERSION contains a UTF-8 BOM' `
-            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired $true }
+            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired ([bool]$RequirePrerelease) }
 
         [System.IO.File]::WriteAllText(
             $fixtureVersionPath,
@@ -587,7 +591,7 @@ if (-not $SkipNegativeTests) {
         )
         Assert-CycExpectedFailure `
             -Description 'VERSION omits its required terminal LF' `
-            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired $true }
+            -Action { Invoke-CycConsistencyCheck -Root $fixture -Tag '' -PrereleaseRequired ([bool]$RequirePrerelease) }
     } finally {
         if (Test-Path -LiteralPath $fixture) { Remove-Item -LiteralPath $fixture -Recurse -Force }
     }
