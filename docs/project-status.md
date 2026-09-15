@@ -1,5 +1,23 @@
 # ClusterYourCodex project status
 
+## Current checkpoint — 2026-09-15
+
+- Published stable: [v0.0.1](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1),
+  source `ffb6794ed6416b606b3f4ccc260e0ab021da534b`. Its artifacts remain immutable.
+- PR #69 contains task-start readiness recovery, cleanup clock-skew changes,
+  and a shorter README. It is pending CI and is not yet a shipped fix.
+- Issues #2, #3, #5, and #68 remain open. In particular, packaged macOS kits
+  do not establish unrestricted managed runtime support; hostile isolation is
+  not a completed feature; same-version Repair needs live verification.
+- Dependency PRs #64, #61, and #51 were reviewed, had their branches updated
+  against main, and have auto-merge enabled subject to required checks.
+- Remaining dependency PRs include failed MSRV, desktop, and version-identity
+  checks. They must be repaired or explicitly dispositioned, not bulk merged.
+- Local Windows packaging test execution was blocked by antivirus before
+  running. No local pass is claimed and no protection was disabled.
+
+The dated records below are historical evidence, not the current release state.
+
 This is the repository's durable progress record. It is intentionally based on
 the current checkout and live GitHub state, rather than on chat history. Update
 it in the same pull request as every implementation, CI, packaging, or release
