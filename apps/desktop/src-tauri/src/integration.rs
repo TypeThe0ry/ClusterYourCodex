@@ -18,6 +18,16 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
+fn lower_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        result.push(DIGITS[(byte >> 4) as usize] as char);
+        result.push(DIGITS[(byte & 15) as usize] as char);
+    }
+    result
+}
+
 const PLUGIN_ID: &str = "cluster-your-codex@clusteryourcodex";
 const MARKETPLACE_NAME: &str = "clusteryourcodex";
 const MAX_PROCESS_OUTPUT: usize = 2 * 1024 * 1024;
@@ -959,7 +969,7 @@ fn sha256_reader(file: &mut File) -> Result<String, IntegrationError> {
     }
     file.seek(SeekFrom::Start(0))
         .map_err(|_| IntegrationError::AgentsIntegrationFailed)?;
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(lower_hex(&hasher.finalize()))
 }
 
 #[cfg(test)]
@@ -1012,7 +1022,7 @@ fn catalog_digest<'a>(receipts: impl Iterator<Item = &'a InstalledFileReceipt>) 
         hasher.update(receipt.length.to_string().as_bytes());
         hasher.update(b"\n");
     }
-    format!("{:x}", hasher.finalize())
+    lower_hex(&hasher.finalize())
 }
 
 fn validate_path_chain(root: &Path, target: &Path, target_is_file: bool) -> bool {
@@ -1074,7 +1084,7 @@ fn read_verified_installed_file(
     file.read_to_end(&mut bytes)
         .map_err(|_| IntegrationError::AgentsIntegrationFailed)?;
     if bytes.len() as u64 != expected.length
-        || format!("{:x}", Sha256::digest(&bytes)) != expected.sha256
+        || lower_hex(&Sha256::digest(&bytes)) != expected.sha256
     {
         return Err(IntegrationError::AgentsIntegrationFailed);
     }
@@ -1243,7 +1253,7 @@ fn validate_install_manifest(
     Ok(VerifiedInstall {
         install_root: install_root.to_path_buf(),
         data_root: data_root.to_path_buf(),
-        manifest_sha256: format!("{:x}", Sha256::digest(bytes)),
+        manifest_sha256: lower_hex(&Sha256::digest(bytes)),
         build_catalog_sha256,
         payload_catalog_sha256,
         files,
@@ -1477,7 +1487,7 @@ fn verify_agents_integration(
         .read_to_end(&mut bytes)
         .map_err(|_| IntegrationError::AgentsIntegrationFailed)?;
     if bytes.len() as u64 != record.installed_file_length
-        || format!("{:x}", Sha256::digest(&bytes)) != record.installed_file_sha256
+        || lower_hex(&Sha256::digest(&bytes)) != record.installed_file_sha256
     {
         return Err(IntegrationError::AgentsIntegrationFailed);
     }
@@ -1501,13 +1511,13 @@ fn verify_agents_integration(
     let end = ends[0] + AGENTS_END_MARKER.len();
     let block = &text[begin..end];
     let block_bytes = encode_agents_text(block, encoding, false);
-    if format!("{:x}", Sha256::digest(&block_bytes)) != record.block_sha256 {
+    if lower_hex(&Sha256::digest(&block_bytes)) != record.block_sha256 {
         return Err(IntegrationError::AgentsIntegrationFailed);
     }
     let prefix_bytes = base64::engine::general_purpose::STANDARD
         .decode(record.owned_prefix_base64.as_bytes())
         .map_err(|_| IntegrationError::AgentsIntegrationFailed)?;
-    if format!("{:x}", Sha256::digest(&prefix_bytes)) != record.prefix_sha256 {
+    if lower_hex(&Sha256::digest(&prefix_bytes)) != record.prefix_sha256 {
         return Err(IntegrationError::AgentsIntegrationFailed);
     }
     let prefix_text = match encoding {
@@ -1526,13 +1536,13 @@ fn verify_agents_integration(
     }
     let owned_range = format!("{prefix_text}{block}");
     let owned_range_bytes = encode_agents_text(&owned_range, encoding, false);
-    if format!("{:x}", Sha256::digest(&owned_range_bytes)) != record.owned_range_sha256 {
+    if lower_hex(&Sha256::digest(&owned_range_bytes)) != record.owned_range_sha256 {
         return Err(IntegrationError::AgentsIntegrationFailed);
     }
     let external_text = format!("{}{}", &text[..prefix_start], &text[end..]);
     let external_bytes = encode_agents_text(&external_text, encoding, true);
     if external_bytes.len() as u64 != record.external_length
-        || format!("{:x}", Sha256::digest(&external_bytes)) != record.external_sha256
+        || lower_hex(&Sha256::digest(&external_bytes)) != record.external_sha256
     {
         return Err(IntegrationError::AgentsIntegrationFailed);
     }
@@ -3460,6 +3470,19 @@ fn run_self_test(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn digest_hex_matches_sha256_known_vectors() {
+        use sha2::{Digest, Sha256};
+        assert_eq!(super::lower_hex(&[0, 1, 15, 16, 255]), "00010f10ff");
+        assert_eq!(
+            super::lower_hex(&Sha256::digest(b"")),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            super::lower_hex(&Sha256::digest(b"abc")),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
     use super::*;
 
     fn fixture_root(label: &str) -> PathBuf {
@@ -4027,7 +4050,7 @@ mod tests {
         std::fs::write(&agents_path, &document).unwrap();
         std::fs::write(&template_path, &template).unwrap();
 
-        let sha = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
+        let sha = |bytes: &[u8]| lower_hex(&Sha256::digest(bytes));
         let template_receipt = InstalledFileReceipt {
             relative_path: AGENTS_TEMPLATE_RELATIVE_PATH.to_owned(),
             sha256: sha(&template),

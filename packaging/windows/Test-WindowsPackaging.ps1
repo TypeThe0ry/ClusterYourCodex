@@ -1767,10 +1767,16 @@ exit 4
     }
 
     $script:FakeTaskResult = 267009
-    function Get-ScheduledTask { [PSCustomObject]@{ State = 'Running' } }
-    function Get-ScheduledTaskInfo { [PSCustomObject]@{ LastTaskResult = $script:FakeTaskResult } }
+    $script:FakeProcessPath = 'C:\fixture\cyc-controller.exe'
+    function Get-ScheduledTask { [PSCustomObject]@{ State = 'Running'; Actions = @([PSCustomObject]@{Execute='C:\fixture\cyc-controller.exe'; Arguments=''}) } }
+    function Get-ScheduledTaskInfo { [PSCustomObject]@{ LastTaskResult = $script:FakeTaskResult; LastRunTime = Get-Date } }
+    function Get-Process { [PSCustomObject]@{ Id=123; Path=$script:FakeProcessPath } }
     try {
         Wait-CycTaskStable -Name 'fixture-task' -TimeoutSeconds 1 -StableSeconds 0
+        $script:FakeTaskResult = 2147946720
+        Wait-CycTaskStable -Name 'fixture-task' -TimeoutSeconds 1 -StableSeconds 0
+        $script:FakeProcessPath = 'C:\foreign\cyc-controller.exe'
+        Assert-ThrowsLike { Wait-CycTaskStable -Name 'fixture-task' -TimeoutSeconds 1 -StableSeconds 0 } 'reported failure' 'duplicate start requires the registered executable, not a same-name process'
         $script:FakeTaskResult = 5
         $taskFailureDetected = $false
         try { Wait-CycTaskStable -Name 'fixture-task' -TimeoutSeconds 1 -StableSeconds 0 } catch { $taskFailureDetected = $true }
@@ -1778,6 +1784,8 @@ exit 4
     } finally {
         Remove-Item Function:\Get-ScheduledTask -Force
         Remove-Item Function:\Get-ScheduledTaskInfo -Force
+        Remove-Item Function:\Get-Process -Force
+        Remove-Variable FakeProcessPath -Scope Script -ErrorAction SilentlyContinue
         Remove-Variable FakeTaskResult -Scope Script -ErrorAction SilentlyContinue
     }
 

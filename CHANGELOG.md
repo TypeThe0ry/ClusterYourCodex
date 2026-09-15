@@ -9,9 +9,16 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
+- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
+- Rewrite README with direct downloads, platform status and separate browser/native development commands.
+
 - Update Windows bindings to 0.61 in secrets and worker crates with both
   workspace and desktop lockfiles synchronized, avoiding partial dependency
   upgrades that fail locked builds.
+- Upgrade SHA-256 dependencies together across workspace and desktop; replace
+  digest-array hex formatting with explicit lowercase bytes to preserve receipt
+  and manifest hashes with sha2 0.11.
 - Keep Controller lifecycle timestamps authoritative when accepting managed
   completions, so a worker clock that trails the Controller no longer turns a
   successful remote execution into `invalid_run_evidence`.
