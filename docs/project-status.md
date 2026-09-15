@@ -9,6 +9,15 @@ Secrets tests passed (5 passed, 2 ignored); the explicitly selected native
 cross-process Credential Manager acceptance also passed (1 test).
 Formatting and diff checks passed. CI and merge remain pending; no released
 v0.0.1 artifact has been replaced.
+## SHA-256 dependency reconciliation — 2026-09-15
+
+Replacement for PRs #7/#21 synchronizes sha2 0.11 manifests and both lockfiles.
+The upgrade exposed nine desktop LowerHex compilation errors; explicit lowercase
+byte encoding resolves them. Empty/abc SHA-256 vectors and leading-zero encoding
+are tested. Windows workspace and desktop all-target checks passed, protocol
+tests passed (68), and desktop integration tests passed (33). OpenSSL debug PDB
+linker warnings persist, without test failures. Cross-platform/MSRV CI remains
+required before merge. Published v0.0.1 artifacts are unchanged.
 
 This is the repository's durable progress record. It is intentionally based on
 the current checkout and live GitHub state, rather than on chat history. Update
