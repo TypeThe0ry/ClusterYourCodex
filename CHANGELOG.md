@@ -7,6 +7,22 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep Controller lifecycle timestamps authoritative when accepting managed
+  completions, so a worker clock that trails the Controller no longer turns a
+  successful remote execution into `invalid_run_evidence`.
+- Preserve cleanup causal ordering across controller/worker clock skew, so a
+  successful terminal acknowledgement can be followed by workspace cleanup,
+  capacity release, and the next claimed job without quarantining the Worker.
+
+### Validation scope
+
+- A live Windows Controller dispatched a snapshot-backed job to Helio, received
+  exit code 0 and `CYC_V0_0_1_HELIO_EXECUTED`, downloaded the expected artifact,
+  and verified SHA-256
+  `f810d045e9eb399baab1ca544b818821595a64234d38a65ad54907a8e112e23e`.
+
 ## [0.0.1] - 2026-09-15
 
 ### Changed
