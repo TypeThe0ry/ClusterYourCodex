@@ -13,7 +13,6 @@ are versioned independently from the product.
 - Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
 - Rewrite README with direct downloads, platform status and separate browser/native development commands.
 
-
 - Update Windows bindings to 0.61 in secrets and worker crates with both
   workspace and desktop lockfiles synchronized, avoiding partial dependency
   upgrades that fail locked builds.
@@ -71,11 +70,6 @@ are versioned independently from the product.
   completed its native controller/worker round trip before packaging.
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Repair exact legacy Windows worker tasks in place, replacing the malformed
   PowerShell action with the installed native worker while retaining paired
@@ -135,11 +129,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Reuse an existing SSH identity's algorithm preference during host-key probes
   after rollback, not only authentication reconnects; retain full key checks.
 
@@ -186,11 +175,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Keep the Windows packaging contract aligned with the bounded 180-minute
   hosted-runner budget used by the self-contained and clean ARM64 preview
   jobs. The `.99` run failed closed on this stale exact-`120` assertion before
@@ -206,11 +190,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.99] - 2026-09-07
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Increase the hosted Windows self-contained and clean Windows 11 acceptance
   job budgets from 120 to 180 minutes. The per-attempt lifecycle scripts keep
@@ -230,11 +209,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Align the Codex plugin-list verification timeout contract with the bounded
   child-process runner. A 60-second Windows install/repair action no longer
   fails parameter binding against an accidental 30-second validation ceiling.
@@ -248,11 +222,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.97] - 2026-09-07
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Make Codex plugin registration and cleanup use the same bounded child-process
   runner as verification. Repeated Windows Repair now reuses an already active
@@ -275,11 +244,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.96] - 2026-09-07
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Harden the Windows worker active-run guard for long local and UNC workspace
   paths by using the extended-length Win32 namespace during the atomic rename.
@@ -319,11 +283,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Enable HTTP/2 in the shared rustls-backed reqwest client. Current OpenSSH
   controller/worker TLS endpoints can negotiate HTTP/2; without the feature,
   worker pairing could panic inside hyper-util before the first enrollment
@@ -341,11 +300,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.93] - 2026-09-07
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Make the native WebView2 bridge trust gate treat `undefined` URL credentials
   as the empty-credential case exposed by `tauri.localhost`, so the packaged
@@ -376,11 +330,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Promote the core usability candidate from merged PR #54: the Add Computer
   wizard keeps provisioning failures visible in the active modal without a
   duplicate page-level alert, and Windows credential staging uses short,
@@ -407,11 +356,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.90] - 2026-09-06
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Complete the Spanish and Japanese desktop catalogs so controller errors,
   provisioning recovery, Full Run Check evidence, stale-pass reasons, and
@@ -459,11 +403,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Complete the Spanish and Japanese translations for the core desktop flow:
   dashboard, task history, routing rules, Codex integration, computer
   provisioning, actions, and status labels no longer fall back to English.
@@ -481,11 +420,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.87] - 2026-09-06
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Localize controller, integration, and worker-provisioning runtime errors so
   failed setup and recovery states do not fall back to English in the Chinese
@@ -525,11 +459,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Complete the desktop English/Simplified Chinese localization across the
   dashboard, task history, routing rules, Codex integration evidence, and
   Add Computer provisioning timeline, credential recovery, inventory, and
@@ -551,11 +480,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.85] - 2026-09-05
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Simplify the desktop first-run experience into one three-step path, move
   optional SSH display-name and port fields behind Advanced options, collapse
@@ -605,11 +529,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Harden Issue #5 native marker validation across the readiness verifier,
   raw-log downloader, and protected workflow contract: fixed values now require
   an exact ordinal match, while Linux `uid=`/`gid=` values accept only unsigned
@@ -625,11 +544,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.83] - 2026-09-05
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Bind stable GA readiness to a fresh, complete paginated GitHub open-issue
   snapshot, with a 24-hour freshness limit and canonical issue/label
@@ -665,11 +579,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Give the Windows controller/worker live acceptance fixture bounded cold-start
   headroom by raising its disposable JobSpec timeout from 60 to 300 seconds;
   the production worker and step timeout semantics remain unchanged.
@@ -690,11 +599,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Align the tagged developer-preview workflow with the repository's strict
   `preview.N`, `alpha.N`, `beta.N`, and `rc.N` prerelease contract, including
   rejection of leading-zero identifiers and stable/dev tags.
@@ -711,11 +615,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Allow the Linux controller/worker live round-trip probe to consume three
   prebuilt executable binaries through `CYC_BIN`, `CYC_CONTROLLER_BIN`, and
   `CYC_WORKER_BIN` without requiring Cargo on the acceptance host.
@@ -728,11 +627,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.79] - 2026-09-04
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Verify annotated prerelease tags through an isolated fetched ref because the
   GitHub checkout action rewrites the normal tag ref to the detached commit.
@@ -751,11 +645,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.78] - 2026-09-04
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Bind Issue #2 and Issue #3 raw-log gate records to their manifest provenance,
   including source commit, execution host, run identity, command, timestamps,
@@ -777,11 +666,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.77] - 2026-09-04
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Make Linux worker-service uninstall transactional: stop the owned service,
   stage its unit beside the original, restore the exact bytes when
@@ -810,11 +694,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Bind the external hostile-guard runner to a shell-free, bounded helper
   lifecycle with native exit-status checks, timeout termination/reaping, and
   identity-bound protected receipts.
@@ -833,11 +712,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.75] - 2026-09-04
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Serialize the direct worker-helper process tests with the Linux child-process
   guard so test-only subprocesses cannot be mistaken for managed descendants
@@ -871,11 +745,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Allow `scripts/Test-GARawLogs.ps1 -ContractOnly` to run without runtime
   evidence/download parameters, while retaining explicit validation for all
   required inputs during a real raw-log verification run.
@@ -884,11 +753,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.72] - 2026-09-03
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Bound the development controller proxy to the same native route allowlist,
   validating raw request targets before URL normalization and rejecting encoded
@@ -907,11 +771,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Made the Windows profile-matrix task-helper IPC tolerate transient
   `File.Replace` sharing violations on ARM64 x64 emulation with a bounded,
   fail-closed retry window, preserving atomic evidence and response commits.
@@ -924,11 +783,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Pinned the transitive `qs` runtime dependency to `6.16.0` through the
   workspace override and refreshed the lockfile, closing the published
   denial-of-service advisories for `qs` parsing and stringification.
@@ -936,11 +790,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.69] - 2026-09-02
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Hardened Linux user-systemd and macOS LaunchAgent lifecycle paths so
   pre-existing service directories, units, and plists are verify-only: weak,
@@ -954,11 +803,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Kept the worker isolation code clean under the minimum supported Rust 1.88
   clippy profile by using captured format arguments in external-guard and
   Linux identity diagnostics. This removes an MSRV-only lint failure without
@@ -967,11 +811,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.67] - 2026-09-02
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Made Issue #5 marker validation type-sensitive and fail-closed across the
   PowerShell, raw-log, Python, and stable-publisher paths: marker fields must
@@ -985,11 +824,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Closed the GA evidence contract for legacy Issue #2/#3 boolean gate maps:
   unknown keys are rejected by both readiness validators and the stable
   publisher contract.
@@ -1001,11 +835,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Made the Windows worker-kit installer independent of PowerShell module
   auto-loading by routing every manifest, signature, payload, and staged-copy
   digest through a streaming .NET SHA-256 helper. The managed-worker
@@ -1015,11 +844,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.64] - 2026-09-02
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Made Windows package, fresh-deployment, and silent-Setup integrity checks
   independent of PowerShell module auto-loading by using a streaming .NET
@@ -1033,11 +857,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Bounded every Windows fresh-deployment and profile-matrix child process,
   including process-tree termination and receipt-backed exit handling, so a
   hung acceptance child cannot strand a hosted runner or suppress diagnostics.
@@ -1050,11 +869,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.62] - 2026-09-02
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Hardened Windows worker-kit installation and lifecycle transactions against
   reparse-point ancestors when a destination or rollback path is created.
@@ -1072,11 +886,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Made Linux and macOS worker-kit first-install rollback crash-recoverable:
   transaction journals are retired through an atomic intermediate path and a
   tombstone preserves recovery intent if the process stops after ownership
@@ -1091,11 +900,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.60] - 2026-09-02
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Terminated Codex and MCP child processes on pipe extraction, reader-thread,
   wait, and timeout failures so native desktop integration cannot strand a
@@ -1124,11 +928,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Stabilized the concurrent controller reservation regression test by refreshing
   its fixture heartbeat after independent SQLite connections finish opening;
   slow Windows runners no longer turn the reservation-atomicity test into an
@@ -1137,11 +936,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.58] - 2026-09-01
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Hardened Issue #5 provenance schema parity by rejecting non-string run
   identifiers, nodes, providers, and host types before normalization.
@@ -1154,11 +948,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.57] - 2026-09-01
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Fixed Issue #5 raw-log verification for matrix gates by applying provenance
   matching only to single-platform gate records and retaining array shape for
@@ -1173,11 +962,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Hardened Issue #5 GA evidence so every platform gate/run carries a
   source-bound run identifier, external node/provider metadata, successful
   exit status, test counts, and chronological timestamps; raw-log verification
@@ -1187,11 +971,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Converted the Windows Credential Manager `CredReadW` result to `NonNull`
   before dereferencing so malformed native output fails closed.
 - Removed the MCP runtime-receipt test's filesystem check-then-use pattern so
@@ -1200,11 +979,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.54] - 2026-09-01
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Hardened hostile-workload isolation receipts so Linux claim-time checks use
   live cgroup, identity, control-boundary, and resource evidence instead of
@@ -1237,11 +1011,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Decoded Windows PowerShell 5.1 profile-matrix IPC, manifests, receipts, and
   evidence as strict UTF-8, preserving non-ASCII user/profile paths on the
   Windows 11 ARM64 x64-emulation acceptance path.
@@ -1257,11 +1026,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Resolved production Scheduled Task identities from immutable account SIDs
   with SID round-trip validation and a fail-closed CIM fallback, so non-ASCII
   account display-name mojibake cannot reach Task Scheduler.
@@ -1272,11 +1036,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Kept the profile-matrix helper's legacy request path StrictMode-safe when an
   older child omits the optional `accountSid` field, while retaining the
   SID-bound account evidence for current requests.
@@ -1284,11 +1043,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.49] - 2026-09-01
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Bound Windows profile-matrix task registration and disposable-user
   credentials to the immutable account SID, with a translation fallback for
@@ -1303,11 +1057,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Raised the Windows-only PowerShell containment integration-test ceiling to
   five minutes to absorb hosted-runner Defender/JIT cold-start variance while
   keeping production step timeouts unchanged.
@@ -1315,11 +1064,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.47] - 2026-09-01
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Cross-check administrator profile cases against the well-known local
   Administrators SID when ARM64/x64-emulated filtered tokens omit that group
@@ -1332,11 +1076,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Bound Windows profile-matrix administrator setup to the created local-user
   SID and wait for consecutive Administrators-group observations before
   creating the child logon token, eliminating ARM64 x64-emulation races that
@@ -1348,11 +1087,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Closed a Windows silent-Setup cleanup race by stopping only tasks proven to
   belong to the disposable install root, then re-enumerating owned processes
   after the Scheduled Task restart policy has been quiesced.
@@ -1363,11 +1097,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Made the Windows self-contained preview resolve the NSIS compiler through
   PATH/Chocolatey shims and all supported package layouts, so Setup.exe
   staging no longer assumes a single Program Files location.
@@ -1377,11 +1106,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.43] - 2026-08-31
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Bound Linux and macOS worker lifecycle cleanup to the install manifest's
   authoritative install, data, workspace, log, and LaunchAgent roots; requests
@@ -1409,22 +1133,12 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Hardened Windows profile-matrix exit-code handling so a null parent Process.ExitCode is reconciled from the validated child receipt and fails closed when the receipt is missing or malformed.
 - Kept all public preview artifacts prerelease while GA readiness remains gated by independently verifiable Issue #2, #3, and #5 evidence.
 
 ## [0.1.0-preview.41] - 2026-08-31
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Hardened the protected GA workflow with an indentation-aware semantic
   contract, exact manual inputs and job dependencies, explicit helper exit-code
@@ -1444,11 +1158,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.40] - 2026-08-31
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Hardened Windows profile-matrix task registration and rollback with a
   structured v2 IPC contract, operation-bound responses, schema-validated
@@ -1472,11 +1181,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Separated public prerelease publication into the dedicated
   `preview-publication` environment. Tagged previews no longer deadlock on
   the stable `production` environment's prevent-self-review rule, while the
@@ -1487,11 +1191,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.38] - 2026-08-30
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Tightened the worker API schema for `stateUpdateResponse.run` by binding it
   to the concrete `Run` wire contract, including strict run-state,
@@ -1506,11 +1205,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Reaped the installed `cyc.exe` CLI probe before the Repair tamper fixture;
   Windows reports its executable as ProcessName `cyc`, so the lifecycle smoke
   now inventories and stops it alongside the controller and worker binaries.
@@ -1522,11 +1216,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.36] - 2026-08-30
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Accepted the Windows 11 `AppData\Local\History` compatibility junction
   emitted by a fresh profile, binding it to the exact in-profile
@@ -1541,11 +1230,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Closed the Windows packaging regression-coverage gap by explicitly locking
   the nested `AppData\Roaming\Application Data` compatibility junction in the
   static Profile Matrix guard alongside the Local and LocalLow aliases.
@@ -1555,11 +1239,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.34] - 2026-08-30
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Extended the Windows profile-matrix compatibility-junction allow-list to
   cover the nested `AppData\Local`, `AppData\LocalLow`, and `AppData\Roaming`
@@ -1577,11 +1256,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Added a fail-closed canonical GA evidence contract for Issue #3 and Issue
   #5. Readiness and the protected stable publisher now require source-bound,
   externally retained evidence with HTTPS/SHA-256 raw logs and every
@@ -1596,11 +1270,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.32] - 2026-08-30
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Corrected Windows profile-matrix atomic JSON persistence for Windows
   PowerShell/.NET Framework by pre-creating a same-volume backup file before
@@ -1617,11 +1286,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.31] - 2026-08-30
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Fixed Windows profile-matrix IPC persistence on Windows PowerShell/.NET by
   using a flushed, create-new temporary file and a real same-directory backup
@@ -1642,11 +1306,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Hardened the protected stable GA path: branch protection snapshots now use
   the authoritative branch endpoint and fail closed on API errors.
 - Bound stable bundles to an exact top-level asset set, complete `SHA256SUMS`,
@@ -1664,21 +1323,11 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Strengthened stable bundle verification so every `SHA256SUMS` entry is parsed, unique, present, and digest-checked before publication.
 
 ## [0.1.0-preview.28] - 2026-08-30
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Replaced Windows `Compress-Archive` integration packaging with explicit hidden-entry ZIP creation so `.agents`, `.codex-plugin`, and `.mcp.json` survive extraction.
 - Added post-archive integration tree, byte, and required-hidden-entry verification before any preview artifact is uploaded.
@@ -1689,11 +1338,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Restored Windows 11 ARM64 disposable-profile acceptance by registering the production Interactive Scheduled Task principal without starting it from the non-interactive harness.
 - Narrowed profile cleanup compatibility handling to the OS-owned Documents `My Music`, `My Pictures`, and `My Videos` junctions after exact native mount-point target validation.
 - Hardened Linux hostile-isolation claim, execution, and reconciliation checks against residual processes sharing the dedicated execution identity and writable ancestor cgroup controls.
@@ -1703,11 +1347,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Added explicit macOS native process-group inventory so controller payloads distinguish macOS lifecycle reconciliation from unsupported containment.
 - Kept hostile-workload isolation fail-closed while preserving platform-specific worker capability reporting.
 
@@ -1715,22 +1354,12 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Fixed Linux hostile-isolation startup ordering so the disposable cgroup-v2 child is created and its control boundary is validated before worker/credential boundary checks.
 - Expanded the Linux native acceptance probe to prove dedicated identity execution, credential/guard protection, cgroup escape blocking, residual reconciliation, and cleanup when run on a configured worker.
 
 ## [0.1.0-preview.24] - 2026-08-29
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Hardened the Windows profile/path matrix for PowerShell 5.1 and Windows 11
   ARM64 x64 emulation by validating compatibility junctions through the native
@@ -1744,11 +1373,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Normalized Windows profile compatibility junction targets across Win32 and
   NT namespace projections, while keeping unknown reparse points fail-closed.
 - Preserved the primary profile-matrix case failure when cleanup also fails and
@@ -1758,11 +1382,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Kept the Windows profile-matrix reparse-point guard fail-closed while
   allowing only the operating system's known legacy compatibility junctions
   during disposable profile cleanup.
@@ -1770,11 +1389,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.21] - 2026-08-26
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Shortened the disposable profile-matrix local-user description to stay within
   Windows `New-LocalUser`'s 48-character limit, restoring the clean Windows 11
@@ -1784,11 +1398,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Fixed the clean Windows 11 profile-matrix release invocation so Windows
   PowerShell receives all four `CaseName` values as one quoted argument instead
   of expanding them into positional arguments under x64 emulation.
@@ -1796,11 +1405,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.19] - 2026-08-26
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Added regression coverage proving every macOS hostile-isolation runtime gate
   fails closed when native containment and external reconciliation are absent.
@@ -1822,11 +1426,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.17] - 2026-08-26
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Release identity now validates that the current preview has a changelog
   heading, exact predecessor comparison link, and a complete set of version
@@ -1851,11 +1450,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Windows silent Setup now launches the non-elevated lifecycle through the
   hidden `nsExec` process boundary instead of NSIS `ExecWait`, which could
   briefly expose a PowerShell console under Windows 11 ARM64 x64 emulation.
@@ -1867,11 +1461,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Corrected the Windows packaging regression guard for the elevated helper's
   hidden-host argument so the PowerShell 5.1 static test evaluates the literal
   `$encodedLoader` token without runtime variable interpolation.
@@ -1879,11 +1468,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.13] - 2026-08-26
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Windows firewall-only elevation now passes an explicit `-WindowStyle Hidden`
   argument in addition to the hidden process-start setting. This prevents a
@@ -1896,11 +1480,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Windows fresh-deployment repair smoke now waits for an exclusive handle on
   the installed CLI before applying its deliberate corruption fixture. This
   removes the transient executable-lock race observed under clean Windows 11
@@ -1910,11 +1489,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.11] - 2026-08-26
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Windows silent Setup now passes `-WindowStyle Hidden` to the nested
   Windows PowerShell bootstrap process as well as the NSIS coordinator. This
@@ -1927,11 +1501,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Windows controller readiness now tolerates the slower first start and HTTP
   response path of the x64 binaries under clean Windows 11 ARM64 emulation,
   while retaining bounded connect, I/O, and overall readiness deadlines.
@@ -1941,11 +1510,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.9] - 2026-08-26
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Windows installer controller readiness now sends the validated loopback
   authority (`127.0.0.1:47831`) in its direct TCP health probe. The controller
@@ -1958,11 +1522,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Windows installer controller readiness now probes the loopback health
   endpoint through a direct TCP request instead of inheriting ambient HTTP
   proxy behavior from PowerShell. This keeps the clean Windows 11 ARM64
@@ -1973,11 +1532,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.7] - 2026-08-26
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - Windows silent Setup uninstall now passes a null managed-worker plan to the
   core cleanup path instead of dereferencing the absent Install/Repair plan
@@ -2019,11 +1573,6 @@ are versioned independently from the product.
 
 ### Fixed
 
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
-
 - Windows worker boot-generation allocation now allows enough bounded time
   for the serialized, ACL-protected state replacements performed by multiple
   legitimate concurrent daemon starts. The `v0.1.0-preview.4` release
@@ -2033,11 +1582,6 @@ are versioned independently from the product.
 ## [0.1.0-preview.4] - 2026-08-25
 
 ### Fixed
-
-- Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
-- Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
-- Rewrite README with direct downloads, platform status and separate browser/native development commands.
-
 
 - macOS x64 and arm64 release runners now provision and verify Homebrew
   OpenSSL 3 before generating Ed25519-signed Worker Kits; both macOS jobs in
