@@ -8,14 +8,14 @@ preserved when resolving conflicts; Windows bindings remain synchronized.
 
 Current-source verification: workspace and desktop `cargo check --locked`
 (all targets), workspace formatting and diff checks passed. Desktop integration
-tests are running. Local Test-WindowsPackaging.ps1 was blocked before execution
+tests passed (33 passed, 0 failed); OpenSSL missing-PDB linker warnings remain. Local Test-WindowsPackaging.ps1 was blocked before execution
 by antivirus (ScriptContainedMaliciousContent); no packaging PASS is claimed.
 The amended PR requires fresh CI; earlier green checks cover a different head.
 
 Issues #2 and #3 were prematurely closed and have been reopened: clean Windows
 Repair/rollback and live macOS acceptance remain required. The blanket closure
 of dependency PRs was also unsupported: #74 does not replace #6/#11/#17/#18/
-#19/#20/#22/#30/#31/#51/#61/#64. Their original branches are being restored and
+#19/#20/#22/#30/#31/#51/#61/#64. Their original branches have been restored and
 PRs reopened for individual review, not counted as completed fixes.
 
 Live remote tag audit: v0.0.1 tag object is
