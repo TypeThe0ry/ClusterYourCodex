@@ -22,8 +22,8 @@ $changelogPath = Join-Path $RepositoryRoot 'CHANGELOG.md'
 $version = (Read-Utf8NoBom $versionPath).Trim()
 $changelog = Read-Utf8NoBom $changelogPath
 
-if ($version -notmatch '^\d+\.\d+\.\d+-(?:alpha|beta|preview|rc)\.\d+$') {
-    throw "VERSION must be a prerelease SemVer for this workflow: $version"
+if ($version -notmatch '^\d+\.\d+\.\d+(?:-(?:alpha|beta|preview|rc)\.\d+)?$') {
+    throw "VERSION must be a release SemVer for this workflow: $version"
 }
 
 $versionHeading = "## [$version] - "

@@ -327,7 +327,6 @@ function Copy-ValidatedWorkerKits {
 $repo = Resolve-FullPath $RepositoryRoot
 $versionCheckArguments = @{
     RepositoryRoot = $repo
-    RequirePrerelease = $true
     SkipNegativeTests = $true
     Json = $true
 }

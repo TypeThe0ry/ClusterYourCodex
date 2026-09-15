@@ -104,7 +104,7 @@ if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
 }
 
 $script:ManifestSchema = 'cyc.dev/windows-install-manifest/v1'
-$script:ProductVersion = '0.1.0-preview.102'
+$script:ProductVersion = '0.0.1'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:MaxInstallManifestBytes = 16MB
 $script:ControllerTaskName = 'ClusterYourCodex Controller'
@@ -2183,10 +2183,11 @@ function Assert-CycPackageManifest {
     $productVersionProperty = $manifest.PSObject.Properties['productVersion']
     $releaseChannelProperty = $manifest.PSObject.Properties['releaseChannel']
     $sourceTagProperty = $manifest.PSObject.Properties['sourceTag']
+    $expectedReleaseChannel = if ($script:ProductVersion.Contains('-')) { 'prerelease' } else { 'stable' }
     if ($null -eq $productVersionProperty -or
         [string]$productVersionProperty.Value -cne $script:ProductVersion -or
         $null -eq $releaseChannelProperty -or
-        [string]$releaseChannelProperty.Value -cne 'prerelease' -or
+        [string]$releaseChannelProperty.Value -cne $expectedReleaseChannel -or
         $null -eq $sourceTagProperty) {
         throw 'Windows package manifest release identity is invalid.'
     }

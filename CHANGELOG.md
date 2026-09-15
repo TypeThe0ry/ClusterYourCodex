@@ -7,9 +7,16 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+## [0.0.1] - 2026-09-15
+
 ### Changed
 
-- Make tagged prerelease delivery runnable-first. Portable and integration
+- Publish the first runnable stable release from the same exact-source,
+  artifact-attested delivery path proven by preview.102. The stable tag now
+  builds the Windows one-click Setup, self-contained ZIP, cross-platform
+  Worker Kits, Codex plugin, SBOM, checksums, and release index without an
+  unrelated external evidence ceremony blocking publication.
+- Keep tagged delivery runnable-first. Portable and integration
   packaging jobs no longer repeat repository-wide formatting, lint, and test
   suites already owned by pull-request CI; they build, launch, exercise the
   native controller/worker round trip, and package the installable product.
@@ -1612,7 +1619,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.102...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.0.1...HEAD
+[0.0.1]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.102...v0.0.1
 [0.1.0-preview.102]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.101...v0.1.0-preview.102
 [0.1.0-preview.101]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.100...v0.1.0-preview.101
 [0.1.0-preview.100]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.99...v0.1.0-preview.100

@@ -4,19 +4,13 @@
 container, GPU, and batch workloads on the best compatible computer in a
 user-owned fleet, then return verified logs and artifacts.
 
-> **Release status:** Windows-first public developer preview
-> [`v0.1.0-preview.100`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.100)
-> is the current public non-draft GitHub prerelease candidate. The Windows
-> controller/desktop and trusted-job Windows/Linux worker paths are
-> implemented and CI-verified, but password/agent/private-key live authentication
-> and cross-node GUI/MCP acceptance are still pending. macOS x64/arm64 archives
-> and signed Worker Kits are packaged, but managed execution remains
-> `runtimeGated=true`, `containmentReady=false`, and `liveReady=false`.
-> Prerelease installers remain code-unsigned. Verify the published SHA-256
-> sidecar before running one. The older `v0.1.0-preview.85` Release is an
-> explicitly authorized immutable `stable-testing` promotion; preview releases
-> remain `isPrerelease=true`, and neither channel is Certified GA. Release notes retain
-> the embedded preview version, source SHA, signing state, and remaining gates.
+> **Release status:** Windows-first stable [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1).
+> It ships the one-click Windows desktop/controller, Codex plugin, and signed
+> Windows/Linux Worker Kits through the same exact-source build and runnable
+> controller/worker checks proven by preview.102. macOS Worker Kits are packaged
+> for lifecycle validation but managed execution remains runtime-gated. Windows
+> binaries are currently code-unsigned, so verify the published SHA-256 sidecar
+> before running Setup.
 
 The exact implementation matrix, verified evidence, open Issue #2/#3/#5 gates,
 and the current release blocker are maintained in
@@ -43,13 +37,12 @@ identifiers such as host names, capability names, and command output remain
 verbatim by design. Optional SSH fields and the full technical verification
 record stay under **Advanced options** so the normal setup path remains short.
 
-## Windows preview setup and acceptance path
+## Windows setup and acceptance path
 
-**Try the desktop now:** download [Windows Setup](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.1.0-preview.100/ClusterYourCodex-Setup.exe)
-and its [SHA-256 sidecar](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.1.0-preview.100/ClusterYourCodex-Setup.exe.sha256).
-The published preview.100 passed the Windows self-contained and clean Windows
-11 ARM64 compatibility acceptance jobs. Use the installed desktop, not a
-browser-only renderer, for saving SSH credentials and installing workers.
+**Try the desktop now:** download [Windows Setup](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.0.1/ClusterYourCodex-Setup.exe)
+and its [SHA-256 sidecar](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.0.1/ClusterYourCodex-Setup.exe.sha256).
+Use the installed desktop, not a browser-only renderer, for saving SSH
+credentials and installing workers.
 
 The flow below is the implemented preview workflow and the procedure for
 collecting live acceptance evidence. It is not a claim that every SSH

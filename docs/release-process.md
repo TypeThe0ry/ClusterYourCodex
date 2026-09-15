@@ -2,7 +2,7 @@
 
 ## Release channels
 
-All intermediate public versions use:
+Intermediate public versions use:
 
 ```text
 vX.Y.Z-preview.N
@@ -11,10 +11,13 @@ vX.Y.Z-beta.N
 vX.Y.Z-rc.N
 ```
 
-and are initially published with `prerelease: true`. The prerelease workflow
-rejects stable `vX.Y.Z` tags.
+and are published with `prerelease: true`. A stable `vX.Y.Z` tag is published
+with `prerelease: false` only after the exact tagged commit has a successful
+main push CI run and the release workflow completes its native build,
+controller/worker round trip, installer lifecycle, checksum, SBOM, provenance,
+and release-index checks.
 
-There are two deliberately different meanings of "stable":
+There are two deliberately different historical meanings of "stable":
 
 - **Stable-testing promotion** is a maintainer-authorized GitHub Release state
   for an exact, already-published prerelease candidate. It changes only the
@@ -24,14 +27,12 @@ There are two deliberately different meanings of "stable":
   `stable-testing`, name the embedded prerelease product version, and list the
   missing certification gates. A promotion must never rename or hand-repack
   an asset.
-- **Certified GA** is a stable `vX.Y.Z` product build. It is enabled only
-  through the separate protected GA workflow after every applicable item in
-  `RELEASE.md` passes, including external platform, signing, governance, and
-  post-download evidence.
+- **Stable release** is a stable `vX.Y.Z` product build produced by the tagged
+  release workflow. It is the supported installable channel; unsupported or
+  runtime-gated platform claims remain explicit in its metadata and notes.
 
-A stable-testing promotion is therefore a distribution convenience, not
-evidence that Certified GA gates passed. The protected GA workflow remains the
-only authority allowed to claim Certified GA.
+A stable-testing promotion is therefore a historical distribution convenience,
+not a new product version.
 
 ## Repository update contract
 
@@ -63,8 +64,8 @@ SemVer changes do not alter protocol schema identifiers.
 Before a tag:
 
 ```powershell
-./scripts/Set-ProductVersion.ps1 -Version 0.1.0-preview.14
-./scripts/Test-VersionConsistency.ps1 -ExpectedTag v0.1.0-preview.14
+./scripts/Set-ProductVersion.ps1 -Version 0.0.1
+./scripts/Test-VersionConsistency.ps1 -ExpectedTag v0.0.1
 ```
 
 The tag, binaries' `--version`, Tauri/package/plugin/MCP versions, installer

@@ -28,9 +28,7 @@ jobs:
         run: ./scripts/Test-ReleaseSigningBoundary.ps1
       - name: Verify VERSION and every published product surface
         shell: pwsh
-        run: >-
-          ./scripts/Test-VersionConsistency.ps1
-          -RequirePrerelease
+        run: ./scripts/Test-VersionConsistency.ps1
       - name: Install the pinned Pester 3.4 test runner
         shell: powershell
         run: |
