@@ -20,7 +20,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 serde_json.workspace = true
 sha2.workspace = true
 tar = "0.4"
-time = "=0.3.47"
+time = "=0.3.55"
 tokio.workspace = true
 uuid.workspace = true
 walkdir = "2.5"
