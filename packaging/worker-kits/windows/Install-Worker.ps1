@@ -483,6 +483,14 @@ function Assert-CycWorkerKitIsNotDowngrade {
         -Value ([string]$RecordedManifest.version) `
         -Label 'Existing installed worker version'
     if ((Compare-CycWorkerSemVer -Left $candidateVersion -Right $recordedVersion) -lt 0) {
+        # v0.0.1 is the first stable lineage cut after the historical
+        # 0.1.0-preview.N series. Permit only that explicit transition so
+        # installed preview workers can adopt the stable channel; every other
+        # SemVer downgrade remains fail-closed.
+        if ($candidateVersion.Text -ceq '0.0.1' -and
+            $recordedVersion.Text -cmatch '^0\.1\.0-preview\.(?:[1-9]|[1-9][0-9]|10[0-2])$') {
+            return
+        }
         throw "Worker kit version $($candidateVersion.Text) is older than the installed version $($recordedVersion.Text); downgrade is not permitted."
     }
 }
