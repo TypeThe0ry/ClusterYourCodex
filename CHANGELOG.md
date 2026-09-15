@@ -9,6 +9,8 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Update X.509 parsing to 0.18.1, retaining strict certificate identity validation.
+
 - Update Windows bindings to 0.61 in secrets and worker crates with both
   workspace and desktop lockfiles synchronized, avoiding partial dependency
   upgrades that fail locked builds.
