@@ -2868,7 +2868,19 @@ impl Store {
         if stored.run.transition(completion.final_state).is_err() {
             return Err(worker_state_conflict(&stored));
         }
-        completion.evidence.apply_to_run(&mut stored.run);
+        // Controller timestamps are authoritative for the public run lifecycle.
+        // Managed workers may have a small wall-clock skew, so copying their
+        // startedAt/finishedAt values into the persisted Run can make an
+        // otherwise valid completion appear to start before the controller
+        // created it. The exact worker timestamps remain preserved in the
+        // immutable RunCompletion document and are validated against the step
+        // evidence above; only terminal result fields belong on the Run.
+        stored.run.exit_code = completion.evidence.exit_code;
+        stored.run.error.clone_from(&completion.evidence.error);
+        stored
+            .run
+            .artifact_ids
+            .clone_from(&completion.evidence.artifact_ids);
         stored
             .run
             .validate()
@@ -7468,13 +7480,17 @@ mod tests {
             JobState::Cancelled => (None, None, TerminationReason::CancelRequested, Vec::new()),
             _ => unreachable!("terminal state asserted above"),
         };
+        let worker_started_at = running.run.created_at - chrono::Duration::seconds(2);
         let completion = RunCompletion {
             run_id: running.run.id,
             lease_id: claim.lease_id,
             expected_version: running.version,
             final_state,
             evidence: WorkerRunEvidence {
-                started_at: Some(started_at),
+                // A worker clock can trail the controller. This timestamp is
+                // valid relative to the worker's own execution evidence but
+                // deliberately predates the controller-created Run.
+                started_at: Some(worker_started_at),
                 finished_at: Some(finished_at),
                 exit_code,
                 error,
@@ -12430,6 +12446,9 @@ mod tests {
             .worker_complete_managed(&paired.credential, &claim.run_credential, &completion)
             .unwrap();
         assert_eq!(completed.run.state, JobState::Succeeded);
+        assert_eq!(completed.run.started_at, running.run.started_at);
+        assert!(completed.run.started_at.unwrap() >= completed.run.created_at);
+        assert!(completed.run.finished_at.unwrap() >= completed.run.started_at.unwrap());
         // Terminal evidence is durable, but capacity remains reserved until
         // the exact post-ACK `removed` cleanup receipt (or deadline recovery).
         assert_eq!(store.active_lease_count(worker.id).unwrap(), 1);
