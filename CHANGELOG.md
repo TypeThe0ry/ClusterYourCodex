@@ -9,6 +9,8 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Declare Node ambient types for the MCP bridge under TypeScript 7; validate both frontend and MCP builds/tests.
+
 - Update Windows bindings to 0.61 in secrets and worker crates with both
   workspace and desktop lockfiles synchronized, avoiding partial dependency
   upgrades that fail locked builds.

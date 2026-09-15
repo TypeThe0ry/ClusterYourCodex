@@ -1,4 +1,14 @@
 # ClusterYourCodex project status
+## TypeScript 7 validation — 2026-09-15
+
+PR #76 replaces #6 with explicit Node ambient types in the MCP tsconfig.
+The original TypeScript 7 branch reproduced TS2591 errors for node: imports,
+Buffer and process; declaring types: [node] fixes the actual Node entrypoint.
+On source 01ba603, pnpm frozen install, recursive lint and recursive build
+passed. Desktop Vitest: 105 tests passed; MCP Vitest: 48 tests passed.
+These are Node/frontend tests, not native installer or live fleet acceptance.
+Cross-platform CI and merge remain pending. No release tags/assets changed.
+
 
 ## Windows dependency reconciliation — 2026-09-15
 
