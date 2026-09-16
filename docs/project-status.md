@@ -1,4 +1,29 @@
 # ClusterYourCodex project status
+## Integration correction and acceptance audit — 2026-09-15
+
+PR #74 originally contained only base64/rusqlite upgrades despite a broader
+PR description. The branch now also includes the installer task-race fix,
+sha2 migration and README rewrite. Both original documentation sections were
+preserved when resolving conflicts; Windows bindings remain synchronized.
+
+Current-source verification: workspace and desktop `cargo check --locked`
+(all targets), workspace formatting and diff checks passed. Desktop integration
+tests passed (33 passed, 0 failed); OpenSSL missing-PDB linker warnings remain. Local Test-WindowsPackaging.ps1 was blocked before execution
+by antivirus (ScriptContainedMaliciousContent); no packaging PASS is claimed.
+The amended PR requires fresh CI; earlier green checks cover a different head.
+
+Issues #2 and #3 were prematurely closed and have been reopened: clean Windows
+Repair/rollback and live macOS acceptance remain required. The blanket closure
+of dependency PRs was also unsupported: #74 does not replace #6/#11/#17/#18/
+#19/#20/#22/#30/#31/#51/#61/#64. Their original branches have been restored and
+PRs reopened for individual review, not counted as completed fixes.
+
+Live remote tag audit: v0.0.1 tag object is
+e4fbaef04b764268fa038311d85573b18b549f9f, peeled commit is
+a64e3a59124e14b165861b86775847e961474b81. This differs from the old chat
+summary's ffb6794 assumption. This integration does not move the tag or modify
+release assets. Issues #5 and #68 remain open. The overall goal is incomplete. CI workflow cancellation/retry is documented; no cancelled run is counted as passing.
+
 
 ## Windows dependency reconciliation — 2026-09-15
 
@@ -9,6 +34,15 @@ Secrets tests passed (5 passed, 2 ignored); the explicitly selected native
 cross-process Credential Manager acceptance also passed (1 test).
 Formatting and diff checks passed. CI and merge remain pending; no released
 v0.0.1 artifact has been replaced.
+## SHA-256 dependency reconciliation — 2026-09-15
+
+Replacement for PRs #7/#21 synchronizes sha2 0.11 manifests and both lockfiles.
+The upgrade exposed nine desktop LowerHex compilation errors; explicit lowercase
+byte encoding resolves them. Empty/abc SHA-256 vectors and leading-zero encoding
+are tested. Windows workspace and desktop all-target checks passed, protocol
+tests passed (68), and desktop integration tests passed (33). OpenSSL debug PDB
+linker warnings persist, without test failures. Cross-platform/MSRV CI remains
+required before merge. Published v0.0.1 artifacts are unchanged.
 
 This is the repository's durable progress record. It is intentionally based on
 the current checkout and live GitHub state, rather than on chat history. Update

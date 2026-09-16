@@ -4648,6 +4648,7 @@ function Wait-CycTaskStable {
     $lastObservedAction = $null
     $lastObservedProcess = $null
     do {
+        $matchingActionProcess = $false
         $task = Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction SilentlyContinue
         if ($task) {
             $lastObservedState = [string]$task.State
@@ -4659,6 +4660,13 @@ function Wait-CycTaskStable {
                     $executableName = Split-Path -Leaf ([string]$action[0].Execute)
                     if (-not [string]::IsNullOrWhiteSpace($executableName)) {
                         $executableName = [System.IO.Path]::GetFileNameWithoutExtension($executableName)
+                        foreach ($process in @(Get-Process -Name $executableName -ErrorAction SilentlyContinue)) {
+                            try {
+                                if ([string]::Equals([string]$process.Path, [string]$action[0].Execute, [StringComparison]::OrdinalIgnoreCase)) {
+                                    $matchingActionProcess = $true
+                                }
+                            } catch { }
+                        }
                         $lastObservedProcess = (@(Get-Process -Name $executableName -ErrorAction SilentlyContinue |
                             Select-Object -First 5 |
                             ForEach-Object { "#$($_.Id)" })) -join ','
@@ -4683,7 +4691,12 @@ function Wait-CycTaskStable {
             if (([DateTime]::UtcNow - $runningSince).TotalSeconds -ge $StableSeconds) {
                 $taskInfo = Get-ScheduledTaskInfo -TaskName $Name -TaskPath '\' -ErrorAction Stop
                 $lastResult = [long]$taskInfo.LastTaskResult
-                if ($lastResult -notin @(0, 267009)) {
+                # SCHED_E_START_ATTEMPTED can describe a rejected duplicate
+                # start, not failure of the instance that is still running.
+                # Accept it only with the exact registered executable alive;
+                # caller readiness probes still verify Controller/Worker health.
+                $duplicateStartWithLiveAction = $lastResult -eq 2147946720 -and $matchingActionProcess
+                if ($lastResult -notin @(0, 267009) -and -not $duplicateStartWithLiveAction) {
                     throw "Scheduled Task reported failure while running: $Name (result=$lastResult, state=$lastObservedState, lastRun=$lastObservedRunTime, process=$lastObservedProcess, action=$lastObservedAction)"
                 }
                 return
