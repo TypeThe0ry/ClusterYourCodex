@@ -1748,3 +1748,10 @@ are versioned independently from the product.
 [0.1.0-preview.4]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.3...v0.1.0-preview.4
 [0.1.0-preview.3]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.2...v0.1.0-preview.3
 [0.1.0-preview.2]: https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.2
+## Unreleased
+
+- Fixed desktop integration integrity checks for installed Windows builds where
+  the launcher directory (`AppData\\Local\\ClusterYourCodex`) differs from the
+  verified payload directory (`AppData\\Local\\Programs\\ClusterYourCodex`).
+  The verifier now reads `installRoot` from the signed install manifest instead
+  of assuming it is the current executable's parent directory.

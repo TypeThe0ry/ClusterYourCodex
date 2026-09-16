@@ -1266,14 +1266,20 @@ fn load_verified_install(
 ) -> Result<VerifiedInstall, IntegrationError> {
     let executable =
         std::env::current_exe().map_err(|_| IntegrationError::AgentsIntegrationFailed)?;
-    let install_root = executable
+    // The desktop launcher is installed beside the data root, while the
+    // verified payload lives under the manifest's installRoot (the Programs
+    // directory).  Do not assume current_exe().parent() is the payload root.
+    let launcher_root = executable
         .parent()
         .ok_or(IntegrationError::AgentsIntegrationFailed)?
         .to_path_buf();
-    if !is_real_directory_without_reparse(&install_root) {
+    if !is_real_directory_without_reparse(&launcher_root) {
         return Err(IntegrationError::AgentsIntegrationFailed);
     }
     let data_root = inner.data_root.clone();
+    if !same_path(&launcher_root, &data_root) {
+        return Err(IntegrationError::AgentsIntegrationFailed);
+    }
     if !is_real_directory_without_reparse(&data_root) {
         return Err(IntegrationError::AgentsIntegrationFailed);
     }
@@ -1292,6 +1298,12 @@ fn load_verified_install(
         .read_to_end(&mut manifest_bytes)
         .map_err(|_| IntegrationError::AgentsIntegrationFailed)?;
     if manifest_bytes.len() as u64 != manifest_metadata.len() {
+        return Err(IntegrationError::AgentsIntegrationFailed);
+    }
+    let manifest: InstalledManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|_| IntegrationError::AgentsIntegrationFailed)?;
+    let install_root = manifest.install_root;
+    if !is_real_directory_without_reparse(&install_root) {
         return Err(IntegrationError::AgentsIntegrationFailed);
     }
     validate_install_manifest(&manifest_bytes, &install_root, &data_root)
