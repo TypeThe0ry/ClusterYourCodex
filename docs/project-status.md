@@ -1,4 +1,18 @@
 # ClusterYourCodex project status
+
+## GitHub reconciliation — 2026-09-17
+
+- PR #74 is merged after a complete successful CI run, including Windows
+  Desktop host/Codex bridge, Windows Rust, install lifecycle, managed worker
+  kits, and live controller/worker round-trip checks.
+- PRs #75 and #76 were closed as obsolete conflicting branches. Their proposed
+  changes were not silently counted as merged; a future replacement must be
+  rebased onto current `main` and pass fresh CI.
+- Issues #2, #3, #5, and #68 remain open because their clean-machine,
+  live-macOS, hostile-workload, and clean Repair/Rollback acceptance gates are
+  not all proven. No cancelled or pending check is counted as success.
+- Published `v0.0.1` tag and release assets remain untouched.
+
 ## Integration correction and acceptance audit — 2026-09-15
 
 PR #74 originally contained only base64/rusqlite upgrades despite a broader
