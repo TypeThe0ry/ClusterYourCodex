@@ -1,0 +1,88 @@
+name: Windows Setup acceptance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/setup-acceptance.yml'
+      - 'packaging/windows/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: setup-acceptance-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  setup:
+    name: Packaged silent install and running-controller repair
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.0.8
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r build
+      - run: cargo build --locked --release -p cyc-cli -p cyc-controller -p cyc-worker
+      - run: pnpm --filter @clusteryourcodex/desktop exec tauri build --no-bundle
+      - name: Compile Setup from current source
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install nsis --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed' }
+          $plugin = Join-Path $env:RUNNER_TEMP 'setup-native-plugin'
+          ./scripts/Prepare-NativeCodexPlugin.ps1 -OutputRoot $plugin
+          $node = (Get-Command node.exe -CommandType Application).Source
+          $package = Join-Path $env:RUNNER_TEMP 'setup-package'
+          ./packaging/windows/New-PreviewPayload.ps1 `
+            -McpDeployRoot (Join-Path $plugin 'plugins/cluster-your-codex/mcp') `
+            -NodeExecutable $node `
+            -NodeLicense (Join-Path (Split-Path $node -Parent) 'LICENSE') `
+            -OutputRoot $package
+          ./packaging/windows/New-SetupExecutable.ps1 `
+            -PackageRoot $package `
+            -OutputPath (Join-Path $env:RUNNER_TEMP 'ClusterYourCodex-Setup.exe') `
+            -MakeNsisPath (Join-Path ${env:ProgramFiles(x86)} 'NSIS/makensis.exe')
+      - name: Run disposable packaged lifecycle
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $evidence = Join-Path $PWD 'setup-evidence'
+          New-Item -ItemType Directory -Path $evidence | Out-Null
+          $work = Join-Path $env:TEMP ('clusteryourcodex-setup-silent-' + [Guid]::NewGuid().ToString('N'))
+          try {
+            & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+              -File ./packaging/windows/Test-SetupSilent.ps1 `
+              -SetupPath (Join-Path $env:RUNNER_TEMP 'ClusterYourCodex-Setup.exe') `
+              -PackageRoot (Join-Path $env:RUNNER_TEMP 'setup-package') `
+              -WorkRoot $work -DisposableEnvironment -KeepWorkRoot `
+              1> (Join-Path $evidence 'result.json') 2> (Join-Path $evidence 'stderr.log')
+            if ($LASTEXITCODE -ne 0) { throw "Setup acceptance failed: exit $LASTEXITCODE" }
+          } finally {
+            if (Test-Path (Join-Path $work 'cleanup.json')) {
+              Copy-Item -LiteralPath (Join-Path $work 'cleanup.json') -Destination $evidence
+            }
+            git rev-parse HEAD | Set-Content (Join-Path $evidence 'source-commit.txt')
+          }
+      - name: Retain lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-setup-acceptance
+          path: setup-evidence/
+          if-no-files-found: warn
