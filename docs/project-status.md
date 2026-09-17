@@ -1,5 +1,15 @@
 # ClusterYourCodex project status
 
+## Source plugin deployment — 2026-09-18
+
+Added `Prepare-NativeCodexPlugin.ps1` to package the source plugin with locked
+production dependencies rather than registering a workspace containing links.
+Prepared a fresh standalone marketplace, registered it with the native CLI,
+installed the plugin, and passed the MCP startup/eight-tool probe against the
+installed cache without a manual dependency install. Plugin registration reports
+enabled version 0.0.1. This supersedes the cache-only dependency workaround below.
+The existing-output guard refuses to overwrite a previous source directory.
+
 ## Native plugin integration correction - 2026-09-17
 
 - The desktop integration now discovers and validates the plugin registered by
@@ -7,10 +17,32 @@
   integrity-checked install/repair source, not a prerequisite for a healthy
   native registration.
 - The false bundled-payload failure is now separated from native plugin health.
-- Active `cluster-orchestrator` skill directories were disabled in the two
-  local skill homes; timestamped backup directories were preserved.
-- Verification: desktop Rust integration tests 33/33, MCP package tests 48/48,
-  and desktop integration API tests 14/14 passed.
+- The active and `.disabled` `cluster-orchestrator` directories were removed
+  from both local skill discovery roots; timestamped backup directories were
+  moved outside the discovery roots for rollback. Runtime dispatch uses the native `cluster-your-codex`
+  plugin and its MCP tools.
+- PR #77 was merged to `main` as `d9e8167a7654e9e8c5cfc505c6c0e877c4a02d5a`.
+  Its CI passed the Windows installer lifecycle, managed worker-kit validation,
+  Windows controller/worker live round trip, desktop Rust tests, and all
+  Linux/macOS checks.
+- Verification: desktop Rust integration tests 34/34, native desktop check,
+  and the merged PR's full CI matrix passed.
+- Local follow-up on 2026-09-18: installed and enabled native plugin 0.0.1
+  through `codex plugin add`. The source-checkout install omitted MCP SDK
+  dependencies; installing production dependencies in its cache restored
+  startup. MCP initialize/tools-list exposed eight tools; an actual
+  `fleet_info` call returned healthy Controller/database status and one online
+  Windows worker. MCP unit tests passed 48/48. This verifies the bridge, not a
+  newly dispatched worker job or installation of the updated desktop binary.
+  Source-checkout reinstallation still requires deploying production dependencies.
+- A live plugin submission was also exercised against the local Controller on
+  2026-09-18. `fleet_info`, `fleet_plan`, and `fleet_plan_submit` succeeded and
+  selected the online Windows node with current telemetry. The run remained in
+  `queued` and accumulated `dispatch_lease_expired` attempts with no worker
+  claim recorded for this run. The worker continued sending fresh telemetry;
+  the claim failure's cause remains unverified. The probe was cancelled and
+  the Controller confirmed terminal `cancelled` state. This is bridge/scheduler evidence,
+  not worker execution evidence.
 ## Integration correction and acceptance audit — 2026-09-15
 
 PR #74 originally contained only base64/rusqlite upgrades despite a broader

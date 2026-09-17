@@ -9,6 +9,11 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Add `scripts/Prepare-NativeCodexPlugin.ps1` for source-checkout users. It
+  deploys locked production dependencies into a standalone marketplace and
+  tests MCP startup before native installation, avoiding missing-SDK failures
+  after the plugin is copied into the Codex cache.
+
 - Prefer the Codex-native registered `cluster-your-codex` plugin for status,
   MCP sessions, and connection checks. Bundled marketplace files are now a
   repair source rather than a runtime prerequisite, so a healthy native
