@@ -656,7 +656,6 @@ function IntegrationPage({
 
   const pluginConnected = statusFresh && status?.state === "connected" && status.agentsIntegrated;
   const pluginInstalled = statusFresh && status?.pluginEnabled && status.agentsIntegrated &&
-    Boolean(status.payloadCatalogSha256) && Boolean(status.buildCatalogSha256) &&
     status.installedVersion === status.desiredVersion &&
     ["installed", "restart_required", "connected", "stale"].includes(status.state);
   const installLabel = status?.state === "not_installed" || status?.state === "not_found"
