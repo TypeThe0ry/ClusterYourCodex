@@ -39,7 +39,10 @@ try {
     }
     $mcpConfiguration.mcpServers.cluster_your_codex.command = './mcp/runtime/node.exe'
     $mcpConfiguration | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $mcpManifest -Encoding UTF8
-    $nodeExecutable = (Get-Command node.exe -CommandType Application -ErrorAction Stop).Source
+    $nodeCommand = @(Get-Command node.exe -CommandType Application -All -ErrorAction Stop |
+        Select-Object -First 1)
+    if ($nodeCommand.Count -ne 1) { throw 'node.exe was not resolved to exactly one executable.' }
+    [string]$nodeExecutable = $nodeCommand[0].Source
     $nodeLicense = if ([string]::IsNullOrWhiteSpace($NodeLicense)) {
         Join-Path (Split-Path -Parent $nodeExecutable) 'LICENSE'
     } else {
@@ -56,7 +59,7 @@ try {
     $links = @(Get-ChildItem -LiteralPath $destination -Recurse -Force |
         Where-Object { ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 })
     if ($links.Count -ne 0) { throw 'Deployment contains links instead of portable files.' }
-    & node (Join-Path $repo 'packaging/windows/Test-McpDeployment.mjs') $mcp
+    & (Join-Path $runtime 'node.exe') (Join-Path $repo 'packaging/windows/Test-McpDeployment.mjs') $mcp
     if ($LASTEXITCODE -ne 0) { throw 'Prepared plugin failed the MCP startup/tools-list probe.' }
     & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
         -File (Join-Path $repo 'scripts/Test-NativeCodexPlugin.ps1') `
