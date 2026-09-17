@@ -60,7 +60,7 @@ jobs:
           ./packaging/windows/New-SetupExecutable.ps1 `
             -PackageRoot $package `
             -OutputPath (Join-Path $env:RUNNER_TEMP 'ClusterYourCodex-Setup.exe') `
-            -MakeNsisPath ([string](@(Get-Command makensis.exe -CommandType Application -All -ErrorAction Stop | Select-Object -First 1)[0].Source)
+            -MakeNsisPath ([string](@(Get-Command makensis.exe -CommandType Application -All -ErrorAction Stop | Select-Object -First 1)[0].Source))
       - name: Run disposable packaged lifecycle
         run: |
           $ErrorActionPreference = 'Stop'
