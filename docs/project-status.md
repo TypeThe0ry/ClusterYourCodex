@@ -16,6 +16,22 @@
 
 ## Native plugin remote execution recovered — 2026-09-18
 
+### Native CLI reinstall and payload repair — 2026-09-18
+
+The Codex CLI cache had a stale source-style copy of the plugin without the
+bundled MCP runtime, which caused the desktop message that the built-in Codex
+payload was missing or incomplete. The installed Windows marketplace payload
+was verified to contain `.codex-plugin/plugin.json`, `.mcp.json`, the compiled
+MCP bridge, `mcp/runtime/node.exe`, and `mcp/runtime/LICENSE.node.txt`.
+
+The local marketplace was re-registered with the native CLI and the plugin was
+reinstalled with `codex plugin add cluster-your-codex@clusteryourcodex`. The
+native CLI now reports version `0.0.1`, source `local`, and `enabled: true`.
+The installed cache contains the private runtime, and the eight-tool MCP probe
+plus a real `fleet_info` → `fleet_plan` → `fleet_plan_submit` Helio execution
+completed with exit code 0. No legacy `cluster-orchestrator` skill remains in
+either active Codex discovery root; old copies are outside discovery paths.
+
 The queued-run investigation found a Windows credential ACL PowerShell helper
 stalled under the remote worker. The independent telemetry loop still reported
 the node online. After verifying the helper's parent and command, terminating
