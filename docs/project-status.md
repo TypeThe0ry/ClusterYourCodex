@@ -1,5 +1,15 @@
 # ClusterYourCodex project status
 
+## Source plugin deployment — 2026-09-18
+
+Added `Prepare-NativeCodexPlugin.ps1` to package the source plugin with locked
+production dependencies rather than registering a workspace containing links.
+Prepared a fresh standalone marketplace, registered it with the native CLI,
+installed the plugin, and passed the MCP startup/eight-tool probe against the
+installed cache without a manual dependency install. Plugin registration reports
+enabled version 0.0.1. This supersedes the cache-only dependency workaround below.
+The existing-output guard refuses to overwrite a previous source directory.
+
 ## Native plugin integration correction - 2026-09-17
 
 - The desktop integration now discovers and validates the plugin registered by
