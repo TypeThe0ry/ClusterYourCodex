@@ -7,10 +7,16 @@
   integrity-checked install/repair source, not a prerequisite for a healthy
   native registration.
 - The false bundled-payload failure is now separated from native plugin health.
-- Active `cluster-orchestrator` skill directories were disabled in the two
-  local skill homes; timestamped backup directories were preserved.
-- Verification: desktop Rust integration tests 33/33, MCP package tests 48/48,
-  and desktop integration API tests 14/14 passed.
+- The active and `.disabled` `cluster-orchestrator` directories were removed
+  from both local skill discovery roots; timestamped backup directories were
+  preserved for rollback. Runtime dispatch uses the native `cluster-your-codex`
+  plugin and its MCP tools.
+- PR #77 was merged to `main` as `d9e8167a7654e9e8c5cfc505c6c0e877c4a02d5a`.
+  Its CI passed the Windows installer lifecycle, managed worker-kit validation,
+  Windows controller/worker live round trip, desktop Rust tests, and all
+  Linux/macOS checks.
+- Verification: desktop Rust integration tests 34/34, native desktop check,
+  and the merged PR's full CI matrix passed.
 ## Integration correction and acceptance audit — 2026-09-15
 
 PR #74 originally contained only base64/rusqlite upgrades despite a broader
