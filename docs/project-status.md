@@ -35,6 +35,13 @@ The existing-output guard refuses to overwrite a previous source directory.
   Windows worker. MCP unit tests passed 48/48. This verifies the bridge, not a
   newly dispatched worker job or installation of the updated desktop binary.
   Source-checkout reinstallation still requires deploying production dependencies.
+- A live plugin submission was also exercised against the local Controller on
+  2026-09-18. `fleet_info`, `fleet_plan`, and `fleet_plan_submit` succeeded and
+  selected the online Windows node with current telemetry. The run remained in
+  `queued` and accumulated `dispatch_lease_expired` attempts because this
+  machine had no running `cyc-worker.exe` process; it was cancelled rather than
+  claimed as a successful execution. This is valid bridge/scheduler evidence,
+  not worker execution evidence.
 ## Integration correction and acceptance audit — 2026-09-15
 
 PR #74 originally contained only base64/rusqlite upgrades despite a broader
