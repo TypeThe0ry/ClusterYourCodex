@@ -1,5 +1,19 @@
 # ClusterYourCodex project status
 
+## Open-issue acceptance audit — 2026-09-18
+
+- Issue #5 was closed as not planned for the current trusted-workload product,
+  not as implemented. Hostile-tier readiness remains fail-closed.
+- Issue #68 remains open. Its earlier closure was corrected: a successful
+  native-plugin remote job is not evidence of installer upgrade/repair success.
+- The silent Setup harness previously stopped Controller before both Repair
+  calls. It now restarts the owned task and verifies the installed Controller's
+  live endpoints before each Repair, exercising the running-process precondition
+  of #68. PowerShell parsing and diff checks pass; executing the changed harness
+  on a disposable packaged Windows environment remains required.
+- Issues #2 and #3 retain their Windows installation and macOS runtime acceptance
+  requirements. Published v0.0.1 assets and tag are unchanged by this work.
+
 ## Native plugin remote execution recovered — 2026-09-18
 
 The queued-run investigation found a Windows credential ACL PowerShell helper
