@@ -38,9 +38,10 @@ The existing-output guard refuses to overwrite a previous source directory.
 - A live plugin submission was also exercised against the local Controller on
   2026-09-18. `fleet_info`, `fleet_plan`, and `fleet_plan_submit` succeeded and
   selected the online Windows node with current telemetry. The run remained in
-  `queued` and accumulated `dispatch_lease_expired` attempts because this
-  machine had no running `cyc-worker.exe` process; it was cancelled rather than
-  claimed as a successful execution. This is valid bridge/scheduler evidence,
+  `queued` and accumulated `dispatch_lease_expired` attempts with no worker
+  claim recorded for this run. The worker continued sending fresh telemetry;
+  the claim failure's cause remains unverified. The probe was cancelled and
+  the Controller confirmed terminal `cancelled` state. This is bridge/scheduler evidence,
   not worker execution evidence.
 ## Integration correction and acceptance audit — 2026-09-15
 
