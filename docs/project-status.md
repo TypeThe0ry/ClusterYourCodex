@@ -9,7 +9,7 @@
 - The false bundled-payload failure is now separated from native plugin health.
 - The active and `.disabled` `cluster-orchestrator` directories were removed
   from both local skill discovery roots; timestamped backup directories were
-  preserved for rollback. Runtime dispatch uses the native `cluster-your-codex`
+  moved outside the discovery roots for rollback. Runtime dispatch uses the native `cluster-your-codex`
   plugin and its MCP tools.
 - PR #77 was merged to `main` as `d9e8167a7654e9e8c5cfc505c6c0e877c4a02d5a`.
   Its CI passed the Windows installer lifecycle, managed worker-kit validation,
@@ -17,6 +17,14 @@
   Linux/macOS checks.
 - Verification: desktop Rust integration tests 34/34, native desktop check,
   and the merged PR's full CI matrix passed.
+- Local follow-up on 2026-09-18: installed and enabled native plugin 0.0.1
+  through `codex plugin add`. The source-checkout install omitted MCP SDK
+  dependencies; installing production dependencies in its cache restored
+  startup. MCP initialize/tools-list exposed eight tools; an actual
+  `fleet_info` call returned healthy Controller/database status and one online
+  Windows worker. MCP unit tests passed 48/48. This verifies the bridge, not a
+  newly dispatched worker job or installation of the updated desktop binary.
+  Source-checkout reinstallation still requires deploying production dependencies.
 ## Integration correction and acceptance audit — 2026-09-15
 
 PR #74 originally contained only base64/rusqlite upgrades despite a broader
