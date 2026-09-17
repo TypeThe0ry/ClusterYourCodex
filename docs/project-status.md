@@ -1,5 +1,20 @@
 # ClusterYourCodex project status
 
+## Native plugin integration correction — 2026-09-17
+
+- The desktop integration now discovers and validates the plugin registered by
+  the native Codex CLI first. The installed marketplace payload is retained as
+  an integrity-checked install/repair source, not a prerequisite for an
+  already-healthy native registration.
+- The false `内置 Codex 插件载荷缺失或不完整` condition is replaced with an
+  actionable distinction between native plugin availability and repair-source
+  availability.
+- Active `cluster-orchestrator` skill directories were disabled in
+  `C:\Users\admin\.agents\skills` and `C:\Users\admin\.codex\skills`;
+  timestamped backup directories were preserved.
+- Verification: desktop Rust integration tests 33/33 passed, MCP package
+  tests 48/48 passed, and desktop integration API tests 14/14 passed.
+
 ## GitHub reconciliation — 2026-09-17
 
 - PR #74 is merged after a complete successful CI run, including Windows

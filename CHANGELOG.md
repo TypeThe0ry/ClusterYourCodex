@@ -9,6 +9,14 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Prefer the Codex-native registered `cluster-your-codex` plugin for status,
+  MCP sessions, and connection checks. Bundled marketplace files are now a
+  repair source rather than a runtime prerequisite, so a healthy native
+  plugin is not reported as a missing or incomplete payload.
+- Removed the active legacy `cluster-orchestrator` skill registrations from
+  the local Codex skill homes; timestamped backups remain available for
+  rollback.
+
 - Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
 - Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.
 - Rewrite README with direct downloads, platform status and separate browser/native development commands.
