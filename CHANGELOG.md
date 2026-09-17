@@ -9,6 +9,11 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Make native plugin preparation resilient to Windows Node distributions that
+  omit their top-level `LICENSE`: use the checked-in attribution fallback while
+  preserving the exact selected `node.exe`, and apply the same fallback in
+  Setup and preview release workflows.
+
 - Add `scripts/Prepare-NativeCodexPlugin.ps1` for source-checkout users. It
   deploys locked production dependencies into a standalone marketplace and
   tests MCP startup before native installation, avoiding missing-SDK failures

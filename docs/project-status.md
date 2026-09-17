@@ -16,6 +16,16 @@
 
 ## Native plugin remote execution recovered — 2026-09-18
 
+### Missing Node license recovery — 2026-09-18
+
+Some local Windows Node installations contain `node.exe` without the adjacent
+top-level `LICENSE`, causing source marketplace preparation to abort before the
+native plugin could be installed. Preparation now falls back to the checked-in
+`packaging/windows/LICENSE.node.txt` attribution notice; release and Setup
+workflows use the same conditional path. A fresh native marketplace build on
+Windows completed the MCP startup probe (8 tools) and native payload integrity
+probe successfully.
+
 ### Native payload integrity guard — 2026-09-18
 
 Added `scripts/Test-NativeCodexPlugin.ps1` and wired it into both native
