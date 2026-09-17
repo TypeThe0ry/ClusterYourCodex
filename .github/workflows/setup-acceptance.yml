@@ -48,7 +48,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed' }
           $plugin = Join-Path $env:RUNNER_TEMP 'setup-native-plugin'
           ./scripts/Prepare-NativeCodexPlugin.ps1 -OutputRoot $plugin
-          $node = (Get-Command node.exe -CommandType Application).Source
+          $nodeCommand = @(Get-Command node.exe -CommandType Application -All -ErrorAction Stop | Select-Object -First 1)
+          if ($nodeCommand.Count -ne 1) { throw 'node.exe was not resolved to exactly one executable' }
+          [string]$node = $nodeCommand[0].Source
           $package = Join-Path $env:RUNNER_TEMP 'setup-package'
           ./packaging/windows/New-PreviewPayload.ps1 `
             -McpDeployRoot (Join-Path $plugin 'plugins/cluster-your-codex/mcp') `
@@ -58,7 +60,7 @@ jobs:
           ./packaging/windows/New-SetupExecutable.ps1 `
             -PackageRoot $package `
             -OutputPath (Join-Path $env:RUNNER_TEMP 'ClusterYourCodex-Setup.exe') `
-            -MakeNsisPath (Get-Command makensis.exe -CommandType Application -ErrorAction Stop).Source
+            -MakeNsisPath ([string](@(Get-Command makensis.exe -CommandType Application -All -ErrorAction Stop | Select-Object -First 1)[0].Source)
       - name: Run disposable packaged lifecycle
         run: |
           $ErrorActionPreference = 'Stop'
