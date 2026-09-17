@@ -1,5 +1,28 @@
 # ClusterYourCodex project status
 
+## Native plugin remote execution recovered — 2026-09-18
+
+The queued-run investigation found a Windows credential ACL PowerShell helper
+stalled under the remote worker. The independent telemetry loop still reported
+the node online. After verifying the helper's parent and command, terminating
+that helper and restarting the worker's scheduled task restored execution.
+ACL verification was not disabled or relaxed.
+
+The installed native plugin submitted job `6250d337-81ff-402b-8e16-2004eed71d5c`
+through `fleet_plan` and `fleet_plan_submit`. Run
+`09cc9657-d727-41d0-92dc-3a4352eb0039` completed with exit code 0. Its stdout
+reported the product version consistency check passed. The downloaded 48-byte
+`native-plugin-result.txt` matched the Controller's SHA-256:
+`1569eb6ce381bc37c1ef3fc7ccb27acf1c36cacb3bd6ef4aa663eb2e7bfbf190`.
+This tests the installed native MCP bridge and real remote execution; the probe
+used self-test mode and does not assert a Codex runtime attestation receipt.
+
+PR #80 merged the standalone native plugin deployment workflow. PR #81 bounds
+Windows ACL/SID helpers to 30 seconds and fails closed on timeout. Local helper
+regressions (2/2), existing security tests (9/9), worker Clippy, and formatting
+passed. The live recovery above used the existing worker binary; deployment of
+the timeout fix and the remaining full CI checks are separate acceptance steps.
+
 ## Source plugin deployment — 2026-09-18
 
 Added `Prepare-NativeCodexPlugin.ps1` to package the source plugin with locked
