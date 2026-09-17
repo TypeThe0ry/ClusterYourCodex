@@ -4982,6 +4982,8 @@ exit 0
     Assert-True ($setupSilentSource -match 'primaryFailure\s*=\s*if\s*\(\$primaryFailure\)') 'silent Setup cleanup receipt preserves the primary failure independently of cleanup'
     Assert-True ($setupSilentSource.IndexOf('if ($primaryFailure) { throw $primaryFailure }', [StringComparison]::Ordinal) -lt $setupSilentSource.IndexOf('if ($cleanupFailures.Count -gt 0)', [StringComparison]::Ordinal)) 'silent Setup preserves the primary lifecycle exception ahead of secondary cleanup failures'
     Assert-True ($setupSilentSource -match 'CYC_DISPOSABLE_WINDOWS') 'silent Setup smoke requires an explicit disposable-environment sentinel'
+    $setupAcceptanceWorkflow = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) '..\.github\workflows\setup-acceptance.yml') -Raw
+    Assert-True ($setupAcceptanceWorkflow -match 'CYC_DISPOSABLE_WINDOWS:\s*["'']1["''][\s\S]+Test-SetupSilent\.ps1[\s\S]+-DisposableEnvironment') 'dedicated Setup acceptance runs only inside the explicitly marked disposable Windows runner'
     Assert-True ($setupSilentSource -match '\[string\]\$PackageRoot') 'silent Setup smoke binds Repair to the matching staged package'
     Assert-True ($setupSilentSource -match "ArgumentList\s+@?\('?'/S") 'silent Setup smoke executes the real case-sensitive NSIS /S path'
     Assert-True ($setupSilentSource -match 'does not launch the GUI') 'silent Setup smoke rejects an unexpected GUI launch'

@@ -77,6 +77,8 @@ jobs:
             -OutputPath (Join-Path $env:RUNNER_TEMP 'ClusterYourCodex-Setup.exe') `
             -MakeNsisPath $nsis
       - name: Run disposable packaged lifecycle
+        env:
+          CYC_DISPOSABLE_WINDOWS: "1"
         run: |
           $ErrorActionPreference = 'Stop'
           $evidence = Join-Path $PWD 'setup-evidence'
