@@ -1132,7 +1132,10 @@ jobs:
           $node = Get-ValidatedNodeExecutable
           $nodeLicense = Join-Path (Split-Path -Parent $node) 'LICENSE'
           if (-not (Test-Path -LiteralPath $nodeLicense -PathType Leaf)) {
-            throw "actions/setup-node runtime did not include its LICENSE at $nodeLicense"
+            $nodeLicense = Join-Path $PWD 'packaging/windows/LICENSE.node.txt'
+            if (-not (Test-Path -LiteralPath $nodeLicense -PathType Leaf)) {
+              throw "Node runtime license is unavailable and repository fallback is missing"
+            }
           }
 
           $safeRef = [string]$env:CYC_REF_NAME -replace '[^0-9A-Za-z._-]', '-'

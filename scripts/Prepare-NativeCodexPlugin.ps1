@@ -45,11 +45,15 @@ try {
     [string]$nodeExecutable = $nodeCommand[0].Source
     $nodeLicense = if ([string]::IsNullOrWhiteSpace($NodeLicense)) {
         Join-Path (Split-Path -Parent $nodeExecutable) 'LICENSE'
-    } else {
-        [System.IO.Path]::GetFullPath($NodeLicense)
-    }
+    } else { [System.IO.Path]::GetFullPath($NodeLicense) }
     if (-not (Test-Path -LiteralPath $nodeLicense -PathType Leaf)) {
-        throw "The selected Node distribution is missing its matching LICENSE file: $nodeLicense"
+        # Some Windows Node distributions omit the top-level license file. Keep
+        # the payload self-contained with the repository's attribution notice.
+        $fallback = Join-Path $repo 'packaging/windows/LICENSE.node.txt'
+        if (-not (Test-Path -LiteralPath $fallback -PathType Leaf)) {
+            throw "The selected Node distribution is missing its matching LICENSE file: $nodeLicense"
+        }
+        $nodeLicense = $fallback
     }
     $runtime = Join-Path $mcp 'runtime'
     New-Item -ItemType Directory -Path $runtime -Force | Out-Null
