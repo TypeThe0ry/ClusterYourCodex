@@ -175,6 +175,30 @@ function Assert-ValidMcpDeploy {
     }
 }
 
+function Remove-PnpmDeployMetadata {
+    param([Parameter(Mandatory = $true)][string]$DeployRoot)
+
+    $metadataPath = Join-Path $DeployRoot 'node_modules\.pnpm'
+    if (-not (Test-Path -LiteralPath $metadataPath)) { return }
+    $metadataDirectory = Get-Item -LiteralPath $metadataPath -Force
+    if (-not $metadataDirectory.PSIsContainer -or
+        (Test-ReparsePoint $metadataDirectory)) {
+        throw "Unexpected pnpm metadata directory in $metadataPath"
+    }
+    $metadataEntries = @(Get-ChildItem -LiteralPath $metadataPath -Force)
+    if ($metadataEntries.Count -ne 1 -or
+        $metadataEntries[0].PSIsContainer -or
+        $metadataEntries[0].Name -cne 'lock.yaml' -or
+        (Test-ReparsePoint $metadataEntries[0])) {
+        throw "Unexpected pnpm metadata layout in $metadataPath"
+    }
+    Remove-Item -LiteralPath $metadataEntries[0].FullName -Force
+    Remove-Item -LiteralPath $metadataDirectory.FullName -Force
+    if (Test-Path -LiteralPath $metadataPath) {
+        throw "Failed to remove pnpm metadata directory: $metadataPath"
+    }
+}
+
 function Copy-ValidatedWorkerKits {
     param(
         [Parameter(Mandatory = $true)][string]$SourceRoot,
@@ -345,6 +369,7 @@ $nodeExecutablePath = Resolve-FullPath $NodeExecutable
 $nodeLicensePath = Resolve-FullPath $NodeLicense
 $output = Resolve-FullPath $OutputRoot
 $mcpPackageManifest = Join-Path $repo 'plugins\cluster-your-codex\mcp\package.json'
+Remove-PnpmDeployMetadata -DeployRoot $mcpDeploy
 Assert-ValidMcpDeploy -DeployRoot $mcpDeploy -SourcePackageManifest $mcpPackageManifest
 if (-not (Test-Path -LiteralPath $nodeExecutablePath -PathType Leaf) -or
     -not (Test-Path -LiteralPath $nodeLicensePath -PathType Leaf)) {
