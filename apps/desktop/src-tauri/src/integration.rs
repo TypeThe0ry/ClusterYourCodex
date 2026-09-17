@@ -1735,8 +1735,20 @@ fn integrate_global_agents(
     Ok(receipt)
 }
 
-fn locate_payload() -> Result<Payload, IntegrationError> {
-    let installed = std::env::current_exe()
+fn locate_payload(inner: &IntegrationManagerInner) -> Result<Payload, IntegrationError> {
+    // The Windows launcher lives beside the data root, while the immutable
+    // native marketplace is installed under the manifest's installRoot. Use
+    // the already verified manifest first so a healthy install is not reported
+    // as a missing/incomplete payload merely because current_exe() is the
+    // launcher copy.
+    let verified_install_root = load_verified_install(inner)
+        .ok()
+        .map(|verified| verified.install_root);
+    let installed = verified_install_root.map(|root| {
+        root.join("integrations").join("codex-marketplace")
+    });
+
+    let launcher = std::env::current_exe()
         .ok()
         .and_then(|executable| executable.parent().map(Path::to_path_buf))
         .map(|root| root.join("integrations").join("codex-marketplace"));
@@ -1744,6 +1756,9 @@ fn locate_payload() -> Result<Payload, IntegrationError> {
     let mut candidates = Vec::new();
     if let Some(installed) = installed {
         candidates.push(installed);
+    }
+    if let Some(launcher) = launcher {
+        candidates.push(launcher);
     }
     if cfg!(debug_assertions) {
         candidates.push(
@@ -1766,7 +1781,7 @@ fn locate_payload() -> Result<Payload, IntegrationError> {
 fn locate_verified_payload(
     inner: &IntegrationManagerInner,
 ) -> Result<(Payload, VerifiedInstall), IntegrationError> {
-    let payload = locate_payload()?;
+    let payload = locate_payload(inner)?;
     let integrity = load_verified_install(inner)?;
     let expected_marketplace = integrity.install_root.join(CODEX_MARKETPLACE_RELATIVE_ROOT);
     let expected_plugin = expected_marketplace
@@ -2493,7 +2508,7 @@ fn status_message(state: IntegrationState) -> &'static str {
 
 fn collect_status(inner: &IntegrationManagerInner) -> Result<IntegrationStatus, IntegrationError> {
     let checked_at_ms = now_ms()?;
-    let structural_payload = locate_payload().ok();
+    let structural_payload = locate_payload(inner).ok();
     let bundled_desired_version = structural_payload
         .as_ref()
         .map(|value| value.desired_version.clone());

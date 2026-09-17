@@ -14,6 +14,14 @@
 - Issues #2 and #3 retain their Windows installation and macOS runtime acceptance
   requirements. Published v0.0.1 assets and tag are unchanged by this work.
 
+## Windows native plugin discovery fix — 2026-09-18
+
+Windows desktop builds now resolve `integrations/codex-marketplace` from the
+verified install manifest's `installRoot` before checking the launcher folder.
+This matches the installer layout (`Programs` payload plus `Local` data) and
+prevents a healthy native plugin from being reported as missing or incomplete.
+The desktop integration regression tests and native plugin payload probe pass.
+
 ## Native plugin remote execution recovered — 2026-09-18
 
 ### Missing Node license recovery — 2026-09-18

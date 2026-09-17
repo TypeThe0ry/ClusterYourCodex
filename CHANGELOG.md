@@ -9,6 +9,12 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Fix Windows desktop native Codex plugin discovery when the launcher is
+  installed beside the data directory. Payload verification now resolves the
+  immutable marketplace from the verified install manifest before probing the
+  launcher directory, eliminating false "payload missing or incomplete"
+  reports after installation or repair.
+
 - Make native plugin preparation resilient to Windows Node distributions that
   omit their top-level `LICENSE`: use the checked-in attribution fallback while
   preserving the exact selected `node.exe`, and apply the same fallback in
