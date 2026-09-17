@@ -5226,21 +5226,35 @@ exit 0
     [void](New-Item -ItemType Directory -Path (Join-Path $forbiddenPnpmDeploy 'node_modules\.pnpm') -Force)
     [System.IO.File]::WriteAllText((Join-Path $forbiddenPnpmDeploy 'node_modules\.pnpm\lock.yaml'), 'fixture')
     $forbiddenPnpmOutput = Join-Path $testRoot 'forbidden-pnpm-preview'
-    Assert-ThrowsLike `
-        -Action {
-            & (Join-Path $PSScriptRoot 'New-PreviewPayload.ps1') `
-                -RepositoryRoot $repoRoot `
-                -RootCargoTarget $rootTarget `
-                -DesktopCargoTarget $desktopTarget `
-                -McpDeployRoot $forbiddenPnpmDeploy `
-                -NodeExecutable $nodeRuntime `
-                -NodeLicense $nodeLicense `
-                -WorkerKitsRoot $workerKits `
-                -OutputRoot $forbiddenPnpmOutput | Out-Null
-        } `
-        -Pattern 'forbidden \.pnpm entry' `
-        -Message 'preview staging rejects pnpm virtual-store metadata before copying inputs'
-    Assert-True (-not (Test-Path -LiteralPath $forbiddenPnpmOutput)) 'invalid MCP deploy is rejected before creating the preview output root'
+    & (Join-Path $PSScriptRoot 'New-PreviewPayload.ps1') `
+        -RepositoryRoot $repoRoot `
+        -RootCargoTarget $rootTarget `
+        -DesktopCargoTarget $desktopTarget `
+        -McpDeployRoot $forbiddenPnpmDeploy `
+        -NodeExecutable $nodeRuntime `
+        -NodeLicense $nodeLicense `
+        -WorkerKitsRoot $workerKits `
+        -OutputRoot $forbiddenPnpmOutput | Out-Null
+    Assert-True (Test-Path -LiteralPath $forbiddenPnpmOutput -PathType Container) 'preview staging accepts deploy metadata after cleanup'
+    $cleanedPnpmMcp = Join-Path $forbiddenPnpmOutput 'payload\integrations\codex-marketplace\plugins\cluster-your-codex\mcp'
+    Assert-True (Test-Path -LiteralPath (Join-Path $cleanedPnpmMcp 'dist\server.js') -PathType Leaf) 'metadata cleanup preserves the staged MCP entrypoint'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $cleanedPnpmMcp 'node_modules\.pnpm'))) 'preview staging removes pnpm deploy lock metadata before copying inputs'
+
+    # A real virtual store contains packages, not just deploy lock metadata.
+    # Reject it without deleting packages or creating an output tree.
+    $virtualStore = Join-Path $forbiddenPnpmDeploy 'node_modules\.pnpm'
+    [void](New-Item -ItemType Directory -Path (Join-Path $virtualStore 'fixture-package') -Force)
+    [System.IO.File]::WriteAllText((Join-Path $virtualStore 'lock.yaml'), 'fixture')
+    $virtualStoreOutput = Join-Path $testRoot 'virtual-store-rejected-preview'
+    Assert-ThrowsLike -Action {
+        & (Join-Path $PSScriptRoot 'New-PreviewPayload.ps1') `
+            -RepositoryRoot $repoRoot -RootCargoTarget $rootTarget `
+            -DesktopCargoTarget $desktopTarget -McpDeployRoot $forbiddenPnpmDeploy `
+            -NodeExecutable $nodeRuntime -NodeLicense $nodeLicense `
+            -WorkerKitsRoot $workerKits -OutputRoot $virtualStoreOutput | Out-Null
+    } -Pattern 'Unexpected pnpm metadata layout' -Message 'preview rejects a real pnpm virtual store'
+    Assert-True (Test-Path -LiteralPath (Join-Path $virtualStore 'fixture-package') -PathType Container) 'rejected virtual-store packages remain untouched'
+    Assert-True (-not (Test-Path -LiteralPath $virtualStoreOutput)) 'virtual-store rejection happens before output creation'
 
     $forbiddenDevelopmentDeploy = Join-Path $testRoot 'mcp-deploy-forbidden-development-dependency'
     Copy-Item -LiteralPath $mcpDeploy -Destination $forbiddenDevelopmentDeploy -Recurse
