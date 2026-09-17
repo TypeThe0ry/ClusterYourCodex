@@ -572,21 +572,23 @@ fn run_windows_acl_for_owner(path: &Path, action: &str, sid: &str) -> Result<()>
         bail!("invalid Windows credential ACL action");
     }
 
-    let operation = Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            WINDOWS_CREDENTIAL_ACL_SCRIPT,
-        ])
-        .env("CYC_WORKER_ACL_PATH", path)
-        .env("CYC_WORKER_ACL_SID", sid)
-        .env("CYC_WORKER_ACL_ACTION", action)
-        .output()
-        .context("launch Windows credential ACL operation")?;
+    let operation = bounded_security_output(
+        Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                WINDOWS_CREDENTIAL_ACL_SCRIPT,
+            ])
+            .env("CYC_WORKER_ACL_PATH", path)
+            .env("CYC_WORKER_ACL_SID", sid)
+            .env("CYC_WORKER_ACL_ACTION", action),
+        std::time::Duration::from_secs(30),
+    )
+    .context("launch Windows credential ACL operation")?;
     if !operation.status.success() {
         if let Some(detail) = bounded_windows_acl_diagnostic(
             &operation.stderr,
@@ -721,11 +723,72 @@ fn bounded_windows_acl_diagnostic(stderr: &[u8], expected_prefix: &str) -> Optio
 }
 
 #[cfg(windows)]
+fn bounded_security_output(
+    command: &mut Command,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output> {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = child.stdout.take().context("missing helper stdout")?;
+    let stderr = child.stderr.take().context("missing helper stderr")?;
+    let read = |stream: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stream.take(65536).read_to_end(&mut bytes).map(|_| bytes)
+        })
+    };
+    let out = read(Box::new(stdout));
+    let err = read(Box::new(stderr));
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(25))
+            }
+            result => {
+                child.kill().context("terminate stalled security helper")?;
+                child.wait().context("reap stalled security helper")?;
+                // Do not join readers on failure: an inherited pipe must not defeat the deadline.
+                if let Err(error) = result {
+                    return Err(error.into());
+                }
+                bail!(
+                    "Windows security helper timed out; refusing to proceed without verified ACLs"
+                );
+            }
+        }
+    };
+    // Helpers do not launch descendants. A bounded wait also protects against inherited pipes.
+    while !out.is_finished() || !err.is_finished() {
+        if started.elapsed() >= timeout {
+            bail!("Windows security helper output timed out");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Ok(std::process::Output {
+        status,
+        stdout: out
+            .join()
+            .map_err(|_| anyhow::anyhow!("security stdout reader failed"))??,
+        stderr: err
+            .join()
+            .map_err(|_| anyhow::anyhow!("security stderr reader failed"))??,
+    })
+}
+
+#[cfg(windows)]
 fn current_windows_user_sid() -> Result<String> {
-    let identity_output = Command::new("whoami.exe")
-        .args(["/user", "/fo", "csv", "/nh"])
-        .output()
-        .context("query current Windows SID for credential ACL")?;
+    let identity_output = bounded_security_output(
+        Command::new("whoami.exe").args(["/user", "/fo", "csv", "/nh"]),
+        std::time::Duration::from_secs(30),
+    )
+    .context("query current Windows SID for credential ACL")?;
     if !identity_output.status.success() {
         bail!("whoami failed while querying the current Windows SID");
     }
@@ -740,6 +803,36 @@ fn current_windows_user_sid() -> Result<String> {
         })
         .context("whoami did not return a valid Windows SID")?;
     Ok(sid.to_owned())
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn security_helper_timeout_fails_closed() {
+    let started = std::time::Instant::now();
+    let error = bounded_security_output(
+        Command::new("powershell.exe").args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Start-Sleep -Seconds 60",
+        ]),
+        std::time::Duration::from_millis(500),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("timed out"), "{error:#}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn security_helper_preserves_output_and_failure_status() {
+    let output = bounded_security_output(
+        Command::new("cmd.exe").args(["/d", "/c", "echo helper-output & exit /b 7"]),
+        std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("helper-output"));
 }
 
 #[cfg(windows)]
