@@ -82,6 +82,9 @@ The existing-output guard refuses to overwrite a previous source directory.
   integrity-checked install/repair source, not a prerequisite for a healthy
   native registration.
 - The false bundled-payload failure is now separated from native plugin health.
+- Install/Repair also reuses a valid native registration when an older desktop
+  package omitted the optional repair marketplace, so the missing-payload error
+  no longer blocks an already-usable plugin.
 - The active and `.disabled` `cluster-orchestrator` directories were removed
   from both local skill discovery roots; timestamped backup directories were
   moved outside the discovery roots for rollback. Runtime dispatch uses the native `cluster-your-codex`
