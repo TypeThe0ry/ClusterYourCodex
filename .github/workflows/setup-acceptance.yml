@@ -42,7 +42,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r build
       - run: cargo build --locked --release -p cyc-cli -p cyc-controller -p cyc-worker
-      - run: pnpm --filter @clusteryourcodex/desktop exec tauri build --no-bundle
+      # The frontend was built by pnpm -r build above. Build the Tauri Rust
+      # target directly so Setup receives the same cyc-desktop.exe without
+      # leaving the Tauri CLI wrapper waiting indefinitely on Windows runners.
+      - run: cargo build --locked --release --manifest-path apps/desktop/src-tauri/Cargo.toml
       - name: Compile Setup from current source
         run: |
           $ErrorActionPreference = 'Stop'
