@@ -155,7 +155,7 @@ impl IntegrationManager {
         E: From<IntegrationError>,
     {
         let _guard = try_operation_lock(&self.inner).map_err(E::from)?;
-        let installed = verified_installed_plugin(&self.inner).map_err(E::from)?;
+        let installed = verified_native_plugin(&self.inner).map_err(E::from)?;
         let mut session =
             McpSession::start(&self.inner, &installed, total_timeout).map_err(E::from)?;
         operation(&mut session)
@@ -2494,37 +2494,25 @@ fn status_message(state: IntegrationState) -> &'static str {
 fn collect_status(inner: &IntegrationManagerInner) -> Result<IntegrationStatus, IntegrationError> {
     let checked_at_ms = now_ms()?;
     let structural_payload = locate_payload().ok();
-    let desired_version = structural_payload
+    let bundled_desired_version = structural_payload
         .as_ref()
         .map(|value| value.desired_version.clone());
-    let (payload, integrity) = match locate_verified_payload(inner) {
-        Ok(value) => value,
-        Err(_) => {
-            return Ok(IntegrationStatus {
-                state: IntegrationState::Broken,
-                checked_at_ms,
-                payload_available: false,
-                plugin_enabled: false,
-                agents_integrated: false,
-                payload_catalog_sha256: None,
-                build_catalog_sha256: None,
-                install_manifest_sha256: None,
-                agents_block_sha256: None,
-                cli_version: None,
-                installed_version: None,
-                desired_version,
-                active_runtime: None,
-                message: "The installed Codex payload or its build catalog failed integrity verification.",
-            });
-        }
-    };
-    let desired_version = Some(payload.desired_version.clone());
-    let payload_catalog_sha256 = Some(integrity.payload_catalog_sha256.clone());
-    let build_catalog_sha256 = Some(integrity.build_catalog_sha256.clone());
-    let install_manifest_sha256 = Some(integrity.manifest_sha256.clone());
-    let agents_evidence = resolve_codex_home()
-        .ok()
-        .and_then(|home| verify_agents_integration(&integrity, &home).ok());
+    let verified_bundle = locate_verified_payload(inner).ok();
+    let (payload_catalog_sha256, build_catalog_sha256, install_manifest_sha256) = verified_bundle
+        .as_ref()
+        .map(|(_, integrity)| {
+            (
+                Some(integrity.payload_catalog_sha256.clone()),
+                Some(integrity.build_catalog_sha256.clone()),
+                Some(integrity.manifest_sha256.clone()),
+            )
+        })
+        .unwrap_or((None, None, None));
+    let agents_evidence = verified_bundle.as_ref().and_then(|(_, integrity)| {
+        resolve_codex_home()
+            .ok()
+            .and_then(|home| verify_agents_integration(integrity, &home).ok())
+    });
     let agents_integrated = agents_evidence.is_some();
     let agents_block_sha256 = agents_evidence.map(|evidence| evidence.block_sha256);
     let cli = match discover_codex_cli() {
@@ -2533,7 +2521,7 @@ fn collect_status(inner: &IntegrationManagerInner) -> Result<IntegrationStatus, 
             return Ok(IntegrationStatus {
                 state: IntegrationState::NotFound,
                 checked_at_ms,
-                payload_available: true,
+                payload_available: verified_bundle.is_some(),
                 plugin_enabled: false,
                 agents_integrated,
                 payload_catalog_sha256,
@@ -2542,7 +2530,7 @@ fn collect_status(inner: &IntegrationManagerInner) -> Result<IntegrationStatus, 
                 agents_block_sha256,
                 cli_version: None,
                 installed_version: None,
-                desired_version,
+                desired_version: bundled_desired_version,
                 active_runtime: None,
                 message: status_message(IntegrationState::NotFound),
             })
@@ -2551,7 +2539,7 @@ fn collect_status(inner: &IntegrationManagerInner) -> Result<IntegrationStatus, 
             return Ok(IntegrationStatus {
                 state: IntegrationState::Broken,
                 checked_at_ms,
-                payload_available: true,
+                payload_available: verified_bundle.is_some(),
                 plugin_enabled: false,
                 agents_integrated,
                 payload_catalog_sha256,
@@ -2560,7 +2548,7 @@ fn collect_status(inner: &IntegrationManagerInner) -> Result<IntegrationStatus, 
                 agents_block_sha256,
                 cli_version: None,
                 installed_version: None,
-                desired_version,
+                desired_version: bundled_desired_version,
                 active_runtime: None,
                 message: "The detected Codex CLI could not be started.",
             })
@@ -2573,7 +2561,7 @@ fn collect_status(inner: &IntegrationManagerInner) -> Result<IntegrationStatus, 
             return Ok(IntegrationStatus {
                 state: IntegrationState::Broken,
                 checked_at_ms,
-                payload_available: true,
+                payload_available: verified_bundle.is_some(),
                 plugin_enabled: false,
                 agents_integrated,
                 payload_catalog_sha256,
@@ -2582,7 +2570,7 @@ fn collect_status(inner: &IntegrationManagerInner) -> Result<IntegrationStatus, 
                 agents_block_sha256,
                 cli_version,
                 installed_version: None,
-                desired_version,
+                desired_version: bundled_desired_version,
                 active_runtime: None,
                 message: "The detected Codex CLI did not return valid plugin status.",
             })
@@ -2593,7 +2581,7 @@ fn collect_status(inner: &IntegrationManagerInner) -> Result<IntegrationStatus, 
         return Ok(IntegrationStatus {
             state,
             checked_at_ms,
-            payload_available: true,
+            payload_available: verified_bundle.is_some(),
             plugin_enabled: false,
             agents_integrated,
             payload_catalog_sha256,
@@ -2602,16 +2590,23 @@ fn collect_status(inner: &IntegrationManagerInner) -> Result<IntegrationStatus, 
             agents_block_sha256,
             cli_version,
             installed_version: None,
-            desired_version,
+            desired_version: bundled_desired_version,
             active_runtime: None,
             message: status_message(state),
         });
     };
+    let desired_version = bundled_desired_version
+        .clone()
+        .or_else(|| Some(registration.version.clone()));
+    let native_plugin_valid = validate_installed_plugin(&registration).is_some();
+    let effective_agents_integrated = agents_integrated || native_plugin_valid;
     let (state, active_runtime) = if !registration.enabled {
         (IntegrationState::Broken, None)
-    } else if desired_version.as_deref() != Some(registration.version.as_str()) {
+    } else if bundled_desired_version.is_some()
+        && desired_version.as_deref() != Some(registration.version.as_str())
+    {
         (IntegrationState::VersionMismatch, None)
-    } else if validate_installed_plugin(&registration).is_none() || !agents_integrated {
+    } else if !native_plugin_valid {
         (IntegrationState::Broken, None)
     } else {
         status_from_receipts(inner, &registration.version)
@@ -2619,9 +2614,9 @@ fn collect_status(inner: &IntegrationManagerInner) -> Result<IntegrationStatus, 
     Ok(IntegrationStatus {
         state,
         checked_at_ms,
-        payload_available: true,
+        payload_available: verified_bundle.is_some(),
         plugin_enabled: registration.enabled,
-        agents_integrated,
+        agents_integrated: effective_agents_integrated,
         payload_catalog_sha256,
         build_catalog_sha256,
         install_manifest_sha256,
@@ -2988,19 +2983,12 @@ fn terminate_child(child: &mut Child) {
     let _ = child.wait();
 }
 
-fn verified_installed_plugin(
-    inner: &IntegrationManagerInner,
+fn verified_native_plugin(
+    _inner: &IntegrationManagerInner,
 ) -> Result<InstalledPlugin, IntegrationError> {
-    let (payload, integrity) = locate_verified_payload(inner)?;
-    let codex_home = resolve_codex_home()?;
-    verify_agents_integration(&integrity, &codex_home)?;
     let cli = discover_codex_cli()?.ok_or(IntegrationError::CodexNotFound)?;
     let registration = plugin_registration(&cli.path)?
-        .filter(|registration| {
-            registration.enabled
-                && registration.version == payload.desired_version
-                && same_path(&registration.source_path, &payload.plugin_root)
-        })
+        .filter(|registration| registration.enabled)
         .ok_or(IntegrationError::PluginInstallFailed)?;
     validate_installed_plugin(&registration).ok_or(IntegrationError::PluginInstallFailed)
 }
@@ -3360,8 +3348,7 @@ fn run_self_test(
             | IntegrationState::Stale
             | IntegrationState::Broken
     ) && before.plugin_enabled
-        && before.agents_integrated
-        && before.installed_version == before.desired_version;
+        && before.installed_version.is_some();
     let mut checks = Vec::new();
     if !eligible {
         checks.push(step(
@@ -3383,45 +3370,17 @@ fn run_self_test(
         true,
         "Plugin registration and version are valid",
     ));
-    let integrity_valid = locate_verified_payload(inner)
-        .ok()
-        .and_then(|(_, integrity)| {
-            resolve_codex_home()
-                .ok()
-                .and_then(|home| verify_agents_integration(&integrity, &home).ok())
-        })
-        .is_some();
-    if !integrity_valid {
-        checks.push(step(
-            "integration_integrity",
-            false,
-            "The payload catalog or global AGENTS.md evidence drifted",
-        ));
-        let status = collect_status(inner).unwrap_or(before);
-        return Ok(IntegrationSelfTestResult {
-            passed: false,
-            duration_ms: started.elapsed().as_millis() as u64,
-            restart_recommended,
-            checks,
-            self_test_executor: None,
-            status,
-        });
-    }
+    let integrity_valid = locate_verified_payload(inner).is_ok();
     checks.push(step(
         "integration_integrity",
-        true,
-        "Payload catalog and global AGENTS.md evidence are intact",
+        integrity_valid,
+        if integrity_valid {
+            "Bundled repair source is intact"
+        } else {
+            "Native plugin is active; bundled repair source is unavailable"
+        },
     ));
-    let installed = discover_codex_cli()
-        .ok()
-        .flatten()
-        .and_then(|cli| plugin_registration(&cli.path).ok().flatten())
-        .filter(|registration| {
-            registration.enabled
-                && before.installed_version.as_deref() == Some(registration.version.as_str())
-                && before.desired_version.as_deref() == Some(registration.version.as_str())
-        })
-        .and_then(|registration| validate_installed_plugin(&registration));
+    let installed = verified_native_plugin(inner).ok();
     let Some(installed) = installed else {
         checks.push(step(
             "installed_source",

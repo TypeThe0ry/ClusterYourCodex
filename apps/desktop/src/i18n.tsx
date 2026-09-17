@@ -514,7 +514,7 @@ const zhCN = {
   "error.integrationInvalidResponse": "桌面主机返回了无效的集成响应",
   "error.codexNotFound": "找不到 Codex Desktop 或 Codex CLI",
   "error.codexCliBroken": "检测到的 Codex CLI 无法完成请求",
-  "error.integrationPayloadUnavailable": "内置 Codex 插件载荷缺失或不完整",
+  "error.integrationPayloadUnavailable": "Codex 原生插件不可用，内置修复文件缺失或不完整",
   "error.marketplaceInstallFailed": "无法注册本地 ClusterYourCodex marketplace",
   "error.pluginInstallFailed": "无法安装 ClusterYourCodex 插件",
   "error.integrationStateUnavailable": "无法保存集成健康状态",
