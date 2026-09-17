@@ -2837,6 +2837,45 @@ fn integration_action_flags(
 fn install_or_repair(
     inner: &IntegrationManagerInner,
 ) -> Result<IntegrationActionResult, IntegrationError> {
+    // Native Codex plugin installs are self-sufficient.  Older packaged
+    // desktop builds may not contain the optional repair marketplace, but a
+    // valid native registration can still be used and tested directly.
+    if let Err(IntegrationError::PayloadUnavailable) = locate_verified_payload(inner) {
+        let cli = discover_codex_cli()?.ok_or(IntegrationError::CodexNotFound)?;
+        let registration = plugin_registration(&cli.path)?;
+        if registration.filter(|value| {
+            value.enabled && validate_installed_plugin(value).is_some()
+        }).is_some() {
+            let status = collect_status(inner)?;
+            let restart_required = matches!(
+                status.state,
+                IntegrationState::RestartRequired | IntegrationState::Stale
+            );
+            return Ok(IntegrationActionResult {
+                changed: false,
+                restart_required,
+                steps: vec![
+                    step(
+                        "codex_cli",
+                        true,
+                        "Codex CLI detected",
+                    ),
+                    step(
+                        "plugin",
+                        true,
+                        "Native ClusterYourCodex plugin is installed and enabled",
+                    ),
+                    step(
+                        "native_source",
+                        true,
+                        "Installed native plugin source and MCP runtime are valid",
+                    ),
+                ],
+                status,
+            });
+        }
+        return Err(IntegrationError::PayloadUnavailable);
+    }
     // This is the mutation gate: the entire installed marketplace must match
     // the manifest one-for-one before any Codex CLI command can change state.
     let (payload, initial_integrity) = locate_verified_payload(inner)?;
