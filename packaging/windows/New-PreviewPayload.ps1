@@ -443,6 +443,19 @@ Copy-RequiredFile `
     -Source $nodeLicensePath `
     -Destination (Join-Path $pluginTarget 'mcp\runtime\LICENSE.node.txt')
 
+# Fail before manifest generation if the Codex plugin is not a complete,
+# self-contained native payload. This catches the exact class of install error
+# that otherwise appears only when Codex verifies its plugin cache.
+$integrityProbe = Join-Path $repo 'scripts\Test-NativeCodexPlugin.ps1'
+if (-not (Test-Path -LiteralPath $integrityProbe -PathType Leaf)) {
+    throw "Native Codex plugin integrity probe is missing: $integrityProbe"
+}
+$probeOutput = @(& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+    -File $integrityProbe -PluginRoot $pluginTarget 2>&1)
+if ($LASTEXITCODE -ne 0) {
+    throw "Native Codex plugin integrity probe failed: $($probeOutput -join [Environment]::NewLine)"
+}
+
 $workerKitRecords = @()
 if (-not [string]::IsNullOrWhiteSpace($WorkerKitsRoot)) {
     $workerKitRecords = @(Copy-ValidatedWorkerKits `

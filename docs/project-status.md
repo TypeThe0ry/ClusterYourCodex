@@ -16,6 +16,18 @@
 
 ## Native plugin remote execution recovered — 2026-09-18
 
+### Native payload integrity guard — 2026-09-18
+
+Added `scripts/Test-NativeCodexPlugin.ps1` and wired it into both native
+marketplace preparation and Windows preview staging. The guard requires the
+manifest, MCP manifest, skill entrypoint, compiled bridge, bundled Node runtime,
+and matching Node license; it also rejects legacy orchestrator content. Native
+preparation now rewrites `.mcp.json` to the bundled runtime and copies the
+runtime/license into the standalone marketplace, so a source-style install
+cannot produce the desktop “payload missing or incomplete” error. The installed
+cache and a freshly prepared marketplace both pass the guard and the eight-tool
+MCP smoke test.
+
 ### Native CLI reinstall and payload repair — 2026-09-18
 
 The Codex CLI cache had a stale source-style copy of the plugin without the
