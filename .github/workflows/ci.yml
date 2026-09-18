@@ -276,10 +276,20 @@ jobs:
         # the observed cold-start cost so the check reports compiler failures
         # instead of being killed mid-build.
         timeout-minutes: 20
-        run: pnpm --filter @clusteryourcodex/desktop native:check
+        shell: pwsh
+        run: >-
+          ./scripts/Invoke-BoundedWindowsProcess.ps1
+          -FilePath (Get-Command cargo.exe -CommandType Application).Source
+          -ArgumentList 'check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml'
+          -TimeoutSeconds 900 -WorkingDirectory $PWD -EvidenceRoot $env:RUNNER_TEMP
       - name: Test desktop Rust host
         timeout-minutes: 15
-        run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -- --test-threads=1
+        shell: pwsh
+        run: >-
+          ./scripts/Invoke-BoundedWindowsProcess.ps1
+          -FilePath (Get-Command cargo.exe -CommandType Application).Source
+          -ArgumentList 'test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -- --test-threads=1'
+          -TimeoutSeconds 840 -WorkingDirectory $PWD -EvidenceRoot $env:RUNNER_TEMP
       - name: Lint desktop Rust host
         timeout-minutes: 10
         run: cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
