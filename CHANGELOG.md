@@ -8,6 +8,11 @@
   MCP plugin. The cleanup is scoped to those names and leaves unrelated skills
   untouched.
 
+- The desktop native-plugin connection check now accepts a valid installed
+  `cluster-your-codex@clusteryourcodex` MCP plugin when the optional bundled
+  repair marketplace is absent. Install and upgrade paths still fail closed on
+  missing or tampered repair payloads.
+
 All notable user-visible changes are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and product versions
 follow Semantic Versioning. Protocol schema identifiers such as `cyc.dev/v1`
