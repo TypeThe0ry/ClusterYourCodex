@@ -8,6 +8,8 @@ on:
       - 'packaging/windows/**'
       - 'scripts/Prepare-NativeCodexPlugin.ps1'
       - 'scripts/Test-NativeCodexPlugin.ps1'
+      - 'scripts/Install-NativeCodexPlugin.ps1'
+      - 'scripts/Remove-LegacyCodexSkills.ps1'
 
 permissions:
   contents: read
