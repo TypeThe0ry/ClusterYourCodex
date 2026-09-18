@@ -39,6 +39,21 @@ and no code-signing certificate in `Cert:\CurrentUser\My`. This does not prove
 that no VM or signing service exists elsewhere; it establishes only that
 these local acceptance routes were unavailable at this checkpoint.
 
+### macOS implementation gap
+
+Issue #3 is not blocked solely on access to a Mac. The shipped
+`packaging/worker-kits/macos/install-worker.sh` hard-codes
+`MACOS_WORKER_CONTAINMENT_READY=0`; `require_worker_containment` exits with
+code 78 before activating a paired worker. Preinstall and pair-only operations
+are available, but managed LaunchAgent startup is not.
+
+The current CI invokes `Test-WorkerKitsNative.sh --skip-live`. Even without
+that flag the script only checks whether `launchctl` exists; it does not
+bootstrap a service or execute a controller/worker job. To close the issue,
+reconcile the installer gate with the trusted-workload runtime contract and
+validate actual install/start/stop/restart, job execution, and cleanup on native
+macOS. Merely changing the flag or removing `--skip-live` proves none of these.
+
 ### PR #90 verification
 
 Source commit `791e6585e66d410dc917cc49798aeab70ef8c287`:

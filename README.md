@@ -17,7 +17,7 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 | Native Codex plugin | Ready | Registration, bundled runtime integrity, and MCP 8-tool smoke pass on Windows |
 | Windows controller/worker | Preview-ready | Hosted CI controller/worker round-trip is green; clean-VM GA evidence remains open |
 | Linux worker kit | Preview-ready | Native Linux kit build and contract verification pass |
-| macOS worker kits | Package-ready | Intel and Apple Silicon kits build and verify; live managed execution remains gated |
+| macOS worker kits | Preinstall / pair only | Intel and Apple Silicon kits build and verify; the installer currently blocks LaunchAgent activation |
 | Stable release | `v0.0.1` unchanged | New work stays prerelease until the real GA gates in Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) are evidenced |
 
 For installation fixes and their verification, see the
@@ -85,7 +85,7 @@ timestamped recoverable backup before registering the native plugin. See the rec
 | --- | --- |
 | Windows x64 | Desktop, Controller and Worker; full clean-VM Repair/rollback acceptance remains tracked in [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2). The running-Controller repair race from #68 is fixed and closed. |
 | Linux x64 | Worker packages; see the [Linux setup guide](docs/add-linux-computer.md). |
-| macOS x64 / arm64 | Worker Kit packages; live managed execution acceptance is still open in [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). |
+| macOS x64 / arm64 | Worker Kit preinstall and pair-only support. The installer disables LaunchAgent activation; live managed execution is not yet supported. Follow [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). |
 
 ## Fast start on Windows
 
