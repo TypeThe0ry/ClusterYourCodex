@@ -21,6 +21,13 @@ runtime, and Node license. No active `clustor` or `cluster-orchestrator` skill
 directory exists in the Codex skill roots. The only ClusterYourCodex skill is
 the skill shipped by the native plugin itself.
 
+The local Codex home also had nine historical `cluster-*.toml` agent routes
+and `rules/cluster.rules`; each referenced the removed `cluster-orchestrator`
+skill or the obsolete `C:\\CodexCluster\\cluster.ps1` runner. Those active
+entries were disabled with timestamped `.disabled-*` backups. The native
+plugin and its MCP tools are now the only active ClusterYourCodex execution
+path.
+
 ## Evidence
 
 - `scripts/Test-NativeCodexPlugin.ps1`: pass (`cyc.dev/native-plugin-integrity/v1`)
