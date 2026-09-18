@@ -28,10 +28,16 @@ if (Test-Path -LiteralPath $marketplace) {
     if (-not $Repair -and -not $completeMarketplace) {
         throw "MarketplaceRoot exists but is incomplete; rerun with -Repair to preserve it as a backup and rebuild: $marketplace"
     }
-    if (-not $completeMarketplace) {
+    # Repair is deliberately a full replacement, even when the previous tree
+    # looks structurally complete. A complete tree can still be stale (for
+    # example, its build/payload catalog may belong to an older release), and
+    # reusing it is what produces the opaque integrity-verification failure.
+    # Move the entire tree first so the operation remains recoverable.
+    if ($Repair -or -not $completeMarketplace) {
         $backup = "$marketplace.incomplete-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
         Move-Item -LiteralPath $marketplace -Destination $backup
-        Write-Output "Moved incomplete marketplace to recoverable backup: $backup"
+        $kind = if ($completeMarketplace) { 'previous' } else { 'incomplete' }
+        Write-Output "Moved $kind marketplace to recoverable backup: $backup"
     }
 }
 
