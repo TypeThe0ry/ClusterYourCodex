@@ -1,5 +1,14 @@
 # ClusterYourCodex project status
 
+## Native-only status contract — 2026-09-18
+
+The desktop renderer now accepts `installed`/`restart_required` status from a
+valid native `cluster-your-codex` registration even when a packaged repair
+marketplace is unavailable. This removes the false “payload missing or
+incomplete” error. `connected` and Full Run Check remain fail-closed on the
+complete AGENTS receipt, fresh MCP handshake, controller round trip, worker
+execution, logs, artifacts, and cleanup evidence.
+
 ## Open-issue acceptance audit — 2026-09-18
 
 - The integration-preview release path now stages the same self-contained native
