@@ -10,6 +10,20 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 > current fixes are delivered as prerelease candidates until their acceptance
 > evidence is complete. The published `v0.0.1` tag and assets are immutable.
 
+## Status at a glance
+
+| Area | State | Evidence |
+| --- | --- | --- |
+| Native Codex plugin | Ready | Registration, bundled runtime integrity, and MCP 8-tool smoke pass on Windows |
+| Windows controller/worker | Preview-ready | Hosted CI controller/worker round-trip is green; clean-VM GA evidence remains open |
+| Linux worker kit | Preview-ready | Native Linux kit build and contract verification pass |
+| macOS worker kits | Package-ready | Intel and Apple Silicon kits build and verify; live managed execution remains gated |
+| Stable release | `v0.0.1` unchanged | New work stays prerelease until the real GA gates in Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) are evidenced |
+
+The latest merged native-plugin recovery work is tracked in [PR #85](https://github.com/TypeThe0ry/ClusterYourCodex/pull/85).
+The working tree also preserves any local, uncommitted user changes; release
+automation never moves or rewrites the `v0.0.1` tag.
+
 ## What you get
 
 - **One Windows-first desktop flow:** add a computer, connect Codex, run a check.
@@ -49,7 +63,7 @@ codex plugin list --json
 ```
 
 The recovery path uses the bundled MCP runtime and does not install or depend
-on `clustor` or `cluster-orchestrator` skills. See the recorded verification in
+on legacy `clustor` or `cluster-orchestrator` skills. See the recorded verification in
 [`docs/native-plugin-recovery-20260918.md`](docs/native-plugin-recovery-20260918.md).
 
 ## Platform status

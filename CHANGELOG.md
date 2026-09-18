@@ -7,6 +7,15 @@ are versioned independently from the product.
 
 ## [Unreleased]
 
+### Status
+
+- Re-audited the GitHub project after PR #85: no pull requests remain open;
+  Issues #2 and #3 remain open because clean Windows lifecycle evidence and
+  live macOS managed-execution evidence are still real acceptance gates.
+- Re-verified the native `cluster-your-codex@clusteryourcodex` installation,
+  bundled Node runtime, and MCP deployment smoke (protocol `2025-06-18`, eight
+  tools). The immutable `v0.0.1` tag remains unchanged.
+
 ### Fixed
 
 - Accept a healthy native Codex plugin registration when the optional bundled
