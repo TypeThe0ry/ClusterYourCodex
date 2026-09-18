@@ -17,7 +17,7 @@ def validate_report(report, manifest):
     resources = report.get("resources", {})
     for field in ("logicalCpuCores", "memoryMib", "diskMib"):
         value = resources.get(field)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        if type(value) is not int or value <= 0:
             raise ValueError(f"probe has invalid {field}")
 
 
