@@ -2,8 +2,8 @@
 
 ## Current GitHub audit — 2026-09-18
 
-The repository state on `origin/main` is authoritative for this audit. PR #88
-(`478d646`) is merged and there are no open pull requests. Open Issues #2 and
+The repository state on `origin/main` is authoritative for this audit. PR #89
+(`16c12ce`) is merged and there are no open pull requests. Open Issues #2 and
 #3 remain intentionally open because their final clean-environment gates are
 not evidenced. Issue #68 is closed: its running-Controller repair race and
 rollback filename collision are covered by the merged lifecycle fixes and the
@@ -18,7 +18,7 @@ Current evidence:
 - The native MCP package test suite passes 48/48 tests across seven files, and
   the GA readiness contract-only check passes. The installed active skill roots
   contain no legacy `clustor`, `cluster-orchestrator`, or `orchestrator` skill.
-- PR #88 CI passed the Windows desktop/bridge job, Windows Rust job, Linux and
+- PR #89 CI passed the Windows desktop/bridge job, Windows Rust job, Linux and
   macOS Rust jobs, all three native worker-kit jobs, MSRV, CodeQL, RustSec,
   Cargo deny, and pnpm audit.
 - `v0.0.1` remains immutable at
