@@ -3,8 +3,9 @@
 ## Current GitHub audit — 2026-09-18
 
 The repository state on `origin/main` is authoritative for this audit. PR #89
-(`16c12ce`) is merged and there are no open pull requests. Open Issues #2 and
-#3 remain intentionally open because their final clean-environment gates are
+(`16c12ce`) is merged. PR #90 tracks legacy-skill cleanup during native plugin
+installation and increased Windows Rust CI time budgets; consult its live
+GitHub checks for merge status. Open Issues #2 and #3 remain open because their final clean-environment gates are
 not evidenced. Issue #68 is closed: its running-Controller repair race and
 rollback filename collision are covered by the merged lifecycle fixes and the
 hosted regression run. Do not count the historical notes below as current open
@@ -24,11 +25,30 @@ Current evidence:
 - `v0.0.1` remains immutable at
   `e4fbaef04b764268fa038311d85573b18b549f9f` locally and on `origin`.
 
-Remaining gates are exactly the acceptance checkboxes in Issues #2 and #3:
+Remaining issue acceptance includes the checkboxes in Issues #2 and #3:
 an independently retained clean Windows 11 lifecycle with production signing
 and tray/one-click evidence, plus a live managed macOS LaunchAgent run. The
 available hosted CI and package tests are strong preview evidence but do not
 prove those independent gates, so those issues remain open.
+
+### PR #90 verification
+
+Source commit `791e6585e66d410dc917cc49798aeab70ef8c287`:
+
+- [CI 35350401402](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35350401402):
+  Windows/Linux/macOS Rust, MSRV, and all native Worker Kit build jobs passed.
+  The Desktop/Windows bridge job was still running at this audit checkpoint;
+  this record does not claim the entire workflow passed.
+- [Windows Setup acceptance 35350401457](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35350401457):
+  packaged silent installation and running-controller repair passed.
+- Local native payload integrity passed; MCP tests passed 48/48.
+- Remote `refs/tags/v0.0.1` remained
+  `e4fbaef04b764268fa038311d85573b18b549f9f`.
+
+The previous Windows Rust test step was cancelled at its 25-minute deadline.
+Its replacement passed with a 45-minute step budget and a 55-minute job budget.
+Increasing a timeout alone was not proof of recovery; the completed Windows
+Rust job supplies that evidence.
 
 ## Native-only status contract — 2026-09-18
 
