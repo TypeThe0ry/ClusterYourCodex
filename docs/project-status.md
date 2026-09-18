@@ -2,6 +2,13 @@
 
 ## Open-issue acceptance audit — 2026-09-18
 
+- The integration-preview release path now stages the same self-contained native
+  Codex plugin as Setup: it rewrites the MCP command to the bundled Node runtime,
+  includes the runtime/license, and runs the native payload integrity probe before
+  archiving. Local preparation reproduced the eight-tool MCP probe and passed the
+  integrity guard; the change is in PR #82 and remains prerelease until CI and
+  retained acceptance evidence finish.
+
 - Issue #5 was closed as not planned for the current trusted-workload product,
   not as implemented. Hostile-tier readiness remains fail-closed.
 - Issue #68 remains open. Its earlier closure was corrected: a successful
