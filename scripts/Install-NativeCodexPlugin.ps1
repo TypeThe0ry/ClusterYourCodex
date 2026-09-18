@@ -87,6 +87,18 @@ $preparedPlugin = Join-Path $marketplace 'plugins/cluster-your-codex'
     -PluginRoot $preparedPlugin
 if ($LASTEXITCODE -ne 0) { throw 'Prepared native plugin failed integrity verification.' }
 
+# Codex caches local plugin payloads by marketplace/plugin/version.  Re-adding
+# the same version without removing it first can leave a stale partial cache in
+# place, which surfaces as "payload missing or incomplete" even when the source
+# marketplace is complete.  Remove the exact plugin registration first; a
+# missing registration is harmless and does not abort repair.
+& $codex plugin remove 'cluster-your-codex@clusteryourcodex' --json 2>$null
+if ($LASTEXITCODE -ne 0) {
+    # Older Codex builds return non-zero when the plugin is not installed.  The
+    # subsequent add is still the authoritative operation, so continue.
+    Write-Output 'No existing native plugin registration to remove; continuing with a clean add.'
+}
+
 & $codex plugin marketplace add $marketplace --json
 if ($LASTEXITCODE -ne 0) { throw 'Codex native marketplace registration failed.' }
 & $codex plugin add 'cluster-your-codex@clusteryourcodex' --json
@@ -100,6 +112,9 @@ $installed = @(@($registration.installed) | Where-Object {
 if ($installed.Count -ne 1) { throw 'Native plugin registration is missing or disabled.' }
 
 $installedRoot = [System.IO.Path]::GetFullPath([string]$installed[0].source.path)
+if (-not ($installedRoot -eq [System.IO.Path]::GetFullPath($preparedPlugin))) {
+    throw "Codex registered an unexpected native plugin source: $installedRoot"
+}
 & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
     -File (Join-Path $repo 'scripts/Test-NativeCodexPlugin.ps1') `
     -PluginRoot $installedRoot

@@ -1,5 +1,25 @@
 # Native Codex plugin recovery — 2026-09-18
 
+## 2026-09-19 cache-repair follow-up
+
+The installer now removes the exact `cluster-your-codex@clusteryourcodex`
+registration before adding the rebuilt marketplace again. Codex caches local
+plugin payloads by plugin/version, so re-adding a damaged same-version entry
+could otherwise keep returning the opaque `payload missing or incomplete`
+error even when the marketplace source was complete. The installer also
+rejects a registration whose source path is not the freshly prepared native
+plugin and then runs the bundled-runtime MCP probe against the installed path.
+
+Verified on the local Windows controller:
+
+- native plugin registration: enabled, version `0.0.1`;
+- required payload files: 6/6 present and non-empty;
+- MCP protocol: `2025-06-18`;
+- MCP tools: 8 listed by the bundled Node runtime;
+- MCP package tests: 7 files, 48 tests passed;
+- active legacy `clustor`, `cluster-orchestrator`, and `orchestrator` skill
+  directories: 0.
+
 The desktop error `The built-in Codex plugin payload is missing or incomplete`
 was reproduced as an unregistered native plugin, not as an MCP bridge or
 payload integrity failure. The Codex CLI returned no

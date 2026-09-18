@@ -29,6 +29,7 @@ $requiredInstallFragments = @(
     "Test-NativeCodexPlugin.ps1",
     "Test-McpDeployment.mjs",
     "mcp/runtime/node.exe",
+    "plugin remove",
     "plugin marketplace add",
     "plugin add"
 )
@@ -54,4 +55,5 @@ Write-Output ([ordered]@{
     nativePluginId = 'cluster-your-codex@clusteryourcodex'
     legacyNamesCovered = @('clustor', 'cluster-orchestrator', 'orchestrator')
     mcpProbe = 'packaging/windows/Test-McpDeployment.mjs'
+    reinstall = 'remove-before-add'
 } | ConvertTo-Json -Compress)
