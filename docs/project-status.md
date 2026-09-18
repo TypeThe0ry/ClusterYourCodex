@@ -2,8 +2,8 @@
 
 ## Current GitHub audit — 2026-09-18
 
-The repository state on `origin/main` is authoritative for this audit. PR #87
-(`cf33e3e6`) is merged and there are no open pull requests. Open Issues #2 and
+The repository state on `origin/main` is authoritative for this audit. PR #88
+(`478d646`) is merged and there are no open pull requests. Open Issues #2 and
 #3 remain intentionally open because their final clean-environment gates are
 not evidenced. Issue #68 is closed: its running-Controller repair race and
 rollback filename collision are covered by the merged lifecycle fixes and the
@@ -15,7 +15,10 @@ Current evidence:
 - Native `cluster-your-codex@clusteryourcodex` 0.0.1 is installed and enabled
   from the persistent local marketplace. Payload integrity and the MCP
   protocol/tools-list smoke both pass (protocol `2025-06-18`, eight tools).
-- PR #87 CI passed the Windows desktop/bridge job, Windows Rust job, Linux and
+- The native MCP package test suite passes 48/48 tests across seven files, and
+  the GA readiness contract-only check passes. The installed active skill roots
+  contain no legacy `clustor`, `cluster-orchestrator`, or `orchestrator` skill.
+- PR #88 CI passed the Windows desktop/bridge job, Windows Rust job, Linux and
   macOS Rust jobs, all three native worker-kit jobs, MSRV, CodeQL, RustSec,
   Cargo deny, and pnpm audit.
 - `v0.0.1` remains immutable at
@@ -42,8 +45,8 @@ execution, logs, artifacts, and cleanup evidence.
   Codex plugin as Setup: it rewrites the MCP command to the bundled Node runtime,
   includes the runtime/license, and runs the native payload integrity probe before
   archiving. Local preparation reproduced the eight-tool MCP probe and passed the
-  integrity guard; the change is in PR #82 and remains prerelease until CI and
-  retained acceptance evidence finish.
+  integrity guard; the change was merged through PR #82 and remains part of the
+  prerelease line until retained acceptance evidence finishes.
 
 - Issue #5 was closed as not planned for the current trusted-workload product,
   not as implemented. Hostile-tier readiness remains fail-closed.
