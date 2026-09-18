@@ -256,7 +256,11 @@ jobs:
         timeout-minutes: 15
         run: pnpm -r build
       - name: Check desktop native integration
-        timeout-minutes: 10
+        # Windows hosted runners may need to download and compile the full
+        # Tauri dependency graph on a cold cache. Keep this bounded, but above
+        # the observed cold-start cost so the check reports compiler failures
+        # instead of being killed mid-build.
+        timeout-minutes: 20
         run: pnpm --filter @clusteryourcodex/desktop native:check
       - name: Test desktop Rust host
         timeout-minutes: 15
