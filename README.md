@@ -4,7 +4,7 @@
 
 ClusterYourCodex is a Codex-first controller and worker fleet for distributing builds, tests, batch jobs, containers, and GPU work across computers you own. The Controller chooses a compatible worker from current telemetry and reservations, then returns verified logs and artifact hashes to the Codex session.
 
-[![Stable release](https://img.shields.io/github/v/release/TypeThe0ry/ClusterYourCodex?label=stable&sort=semver)](https://github.com/TypeThe0ry/ClusterYourCodex/releases) [![CI](https://github.com/TypeThe0ry/ClusterYourCodex/actions/workflows/ci.yml/badge.svg)](https://github.com/TypeThe0ry/ClusterYourCodex/actions) [![License](https://img.shields.io/github/license/TypeThe0ry/ClusterYourCodex)](LICENSE)
+[![Stable release](https://img.shields.io/github/v/release/TypeThe0ry/ClusterYourCodex?label=stable&sort=semver)](https://github.com/TypeThe0ry/ClusterYourCodex/releases) [![Latest prerelease](https://img.shields.io/github/v/release/TypeThe0ry/ClusterYourCodex?include_prereleases&label=latest%20preview&sort=semver)](https://github.com/TypeThe0ry/ClusterYourCodex/releases) [![CI](https://github.com/TypeThe0ry/ClusterYourCodex/actions/workflows/ci.yml/badge.svg)](https://github.com/TypeThe0ry/ClusterYourCodex/actions) [![License](https://img.shields.io/github/license/TypeThe0ry/ClusterYourCodex)](LICENSE)
 
 > **Repository snapshot:** `main` contains the published `v0.0.1` stable line;
 > current fixes are delivered as prerelease candidates until their acceptance
@@ -20,6 +20,14 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 | macOS worker kits | Package-ready | Intel and Apple Silicon kits build and verify; live managed execution remains gated |
 | Stable release | `v0.0.1` unchanged | New work stays prerelease until the real GA gates in Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) are evidenced |
 
+### Choose the right channel
+
+| You need | Use | What it means |
+| --- | --- | --- |
+| A published baseline | [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1) | Immutable stable assets; no native-plugin recovery fixes |
+| The current Windows/Codex integration | [latest prerelease](https://github.com/TypeThe0ry/ClusterYourCodex/releases) | Native plugin registration, repair, MCP probes, and ongoing acceptance work |
+| Source development | `main` or a feature branch | Run the checks below before packaging; do not call a preview stable |
+
 For installation fixes and their verification, see the
 [native plugin recovery record](docs/native-plugin-recovery-20260918.md).
 For current acceptance gaps, see [project status](docs/project-status.md).
@@ -31,6 +39,20 @@ For current acceptance gaps, see [project status](docs/project-status.md).
 - **Evidence by default:** every run records placement, native exit status, logs, cleanup state, and artifact SHA-256 values.
 - **Portable workers:** Linux and macOS Worker Kits share the same protocol; managed runtime support remains platform-gated.
 - **Credential boundaries:** passwords, keys, and bearer tokens stay behind native vault/config references and never enter JobSpec payloads or Codex calls.
+
+## The shortest useful mental model
+
+```text
+Codex session
+    -> native ClusterYourCodex plugin + MCP bridge
+    -> local Controller (typed requirements, reservations, receipts)
+    -> Windows / Linux / macOS Worker
+    -> exit status + logs + SHA-256 artifact evidence
+```
+
+The Controller owns placement. The model supplies requirements and consumes
+verified results; it does not pick a worker from a stale snapshot or receive
+worker credentials.
 
 ## Current release
 
