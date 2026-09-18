@@ -6,6 +6,10 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 
 [![Stable release](https://img.shields.io/github/v/release/TypeThe0ry/ClusterYourCodex?label=stable&sort=semver)](https://github.com/TypeThe0ry/ClusterYourCodex/releases) [![CI](https://github.com/TypeThe0ry/ClusterYourCodex/actions/workflows/ci.yml/badge.svg)](https://github.com/TypeThe0ry/ClusterYourCodex/actions) [![License](https://img.shields.io/github/license/TypeThe0ry/ClusterYourCodex)](LICENSE)
 
+> **Repository snapshot:** `main` contains the published `v0.0.1` stable line;
+> current fixes are delivered as prerelease candidates until their acceptance
+> evidence is complete. The published `v0.0.1` tag and assets are immutable.
+
 ## What you get
 
 - **One Windows-first desktop flow:** add a computer, connect Codex, run a check.
@@ -21,6 +25,16 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 Download [Windows Setup](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.0.1/ClusterYourCodex-Setup.exe) and its [SHA-256 sidecar](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.0.1/ClusterYourCodex-Setup.exe.sha256). The release includes the Windows desktop/controller, Codex plugin, self-contained ZIP, Linux/macOS Worker Kits, SBOM, checksums, and provenance.
 
 Windows binaries are currently code-unsigned; verify the sidecar before running Setup. The supported execution boundary is trusted, single-user workloads. Hostile-workload isolation is outside the current product scope; see the decision in [Issue #5](https://github.com/TypeThe0ry/ClusterYourCodex/issues/5). Closing that proposal does not enable the isolated tier.
+
+### Codex plugin integrity
+
+The Windows installer and integration-preview bundle both ship the native
+`cluster-your-codex@clusteryourcodex` plugin with its private Node runtime. The
+installer validates the manifest, MCP bridge, runtime, marketplace binding, and
+file hashes before registering the plugin. If Codex reports that the payload is
+missing or incomplete, remove the old preview, install the newest candidate,
+and run the desktop **Repair** action; do not copy a plugin directory from a
+different build.
 
 ## Platform status
 
@@ -91,6 +105,12 @@ Run the browser renderer with `pnpm dev`; it is not the installed native app. Fo
 - [Release process](docs/release-process.md)
 - [Changelog](CHANGELOG.md)
 - [Project status](docs/project-status.md)
+
+Open acceptance work is tracked in [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2),
+[#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3), and
+[#68](https://github.com/TypeThe0ry/ClusterYourCodex/issues/68). Hosted CI and
+portable archives do not substitute for the native Windows/macOS runtime gates
+called out in those issues.
 
 ## Project boundary
 
