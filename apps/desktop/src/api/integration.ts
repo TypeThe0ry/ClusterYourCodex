@@ -321,7 +321,7 @@ function parseStatus(value: unknown): IntegrationStatus {
       !buildCatalogSha256 || !shaPattern.test(buildCatalogSha256) ||
       !installManifestSha256 || !shaPattern.test(installManifestSha256))) ||
     (value.agentsIntegrated && (!agentsBlockSha256 || !shaPattern.test(agentsBlockSha256))) ||
-    (exactInstalledState && (!value.payloadAvailable || !value.pluginEnabled || !value.agentsIntegrated ||
+    (exactInstalledState && (!value.pluginEnabled || !value.agentsIntegrated ||
       !installedVersion || !desiredVersion || installedVersion !== desiredVersion)) ||
     (value.state === "connected" && (!value.pluginEnabled || !value.agentsIntegrated || !activeRuntime ||
       activeRuntime.bridgeVersion !== installedVersion)) ||

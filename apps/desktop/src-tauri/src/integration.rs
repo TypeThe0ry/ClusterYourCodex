@@ -1736,14 +1736,14 @@ fn integrate_global_agents(
 }
 
 fn locate_payload() -> Result<Payload, IntegrationError> {
-    let installed = std::env::current_exe()
+    let launcher = std::env::current_exe()
         .ok()
         .and_then(|executable| executable.parent().map(Path::to_path_buf))
         .map(|root| root.join("integrations").join("codex-marketplace"));
 
     let mut candidates = Vec::new();
-    if let Some(installed) = installed {
-        candidates.push(installed);
+    if let Some(launcher) = launcher {
+        candidates.push(launcher);
     }
     if cfg!(debug_assertions) {
         candidates.push(
@@ -1766,9 +1766,17 @@ fn locate_payload() -> Result<Payload, IntegrationError> {
 fn locate_verified_payload(
     inner: &IntegrationManagerInner,
 ) -> Result<(Payload, VerifiedInstall), IntegrationError> {
-    let payload = locate_payload()?;
     let integrity = load_verified_install(inner)?;
+    let payload = payload_from_verified_install(&integrity)?;
+    Ok((payload, integrity))
+}
+
+fn payload_from_verified_install(integrity: &VerifiedInstall) -> Result<Payload, IntegrationError> {
+    // The launcher is in dataRoot; the catalog-bound payload is in installRoot.
+    // Never select a different marketplace from the launcher or checkout here.
     let expected_marketplace = integrity.install_root.join(CODEX_MARKETPLACE_RELATIVE_ROOT);
+    let payload =
+        validate_payload_root(&expected_marketplace).ok_or(IntegrationError::PayloadUnavailable)?;
     let expected_plugin = expected_marketplace
         .join("plugins")
         .join("cluster-your-codex");
@@ -1777,7 +1785,7 @@ fn locate_verified_payload(
     {
         return Err(IntegrationError::PayloadUnavailable);
     }
-    Ok((payload, integrity))
+    Ok(payload)
 }
 
 fn validate_payload_root(root: &Path) -> Option<Payload> {
@@ -2493,11 +2501,17 @@ fn status_message(state: IntegrationState) -> &'static str {
 
 fn collect_status(inner: &IntegrationManagerInner) -> Result<IntegrationStatus, IntegrationError> {
     let checked_at_ms = now_ms()?;
-    let structural_payload = locate_payload().ok();
-    let bundled_desired_version = structural_payload
-        .as_ref()
-        .map(|value| value.desired_version.clone());
     let verified_bundle = locate_verified_payload(inner).ok();
+    let structural_payload = if verified_bundle.is_none() {
+        locate_payload().ok()
+    } else {
+        None
+    };
+    let bundled_desired_version = verified_bundle
+        .as_ref()
+        .map(|(payload, _)| payload)
+        .or(structural_payload.as_ref())
+        .map(|value| value.desired_version.clone());
     let (payload_catalog_sha256, build_catalog_sha256, install_manifest_sha256) = verified_bundle
         .as_ref()
         .map(|(_, integrity)| {
@@ -2837,6 +2851,42 @@ fn integration_action_flags(
 fn install_or_repair(
     inner: &IntegrationManagerInner,
 ) -> Result<IntegrationActionResult, IntegrationError> {
+    // Native Codex plugin installs are self-sufficient.  Older packaged
+    // desktop builds may not contain the optional repair marketplace, but a
+    // valid native registration can still be used and tested directly.
+    if let Err(IntegrationError::PayloadUnavailable) = locate_verified_payload(inner) {
+        let cli = discover_codex_cli()?.ok_or(IntegrationError::CodexNotFound)?;
+        let registration = plugin_registration(&cli.path)?;
+        if registration
+            .filter(|value| value.enabled && validate_installed_plugin(value).is_some())
+            .is_some()
+        {
+            let status = collect_status(inner)?;
+            let restart_required = matches!(
+                status.state,
+                IntegrationState::RestartRequired | IntegrationState::Stale
+            );
+            return Ok(IntegrationActionResult {
+                changed: false,
+                restart_required,
+                steps: vec![
+                    step("codex_cli", true, "Codex CLI detected"),
+                    step(
+                        "plugin",
+                        true,
+                        "Native ClusterYourCodex plugin is installed and enabled",
+                    ),
+                    step(
+                        "native_source",
+                        true,
+                        "Installed native plugin source and MCP runtime are valid",
+                    ),
+                ],
+                status,
+            });
+        }
+        return Err(IntegrationError::PayloadUnavailable);
+    }
     // This is the mutation gate: the entire installed marketplace must match
     // the manifest one-for-one before any Codex CLI command can change state.
     let (payload, initial_integrity) = locate_verified_payload(inner)?;
@@ -3856,6 +3906,37 @@ mod tests {
         assert!(!install_manifest_size_is_supported(
             MAX_INSTALL_MANIFEST + 1
         ));
+    }
+
+    #[test]
+    fn split_install_payload_uses_verified_catalog_and_rejects_tampering() {
+        let root = fixture_root("split-install-payload");
+        let (install, data, receipts) = install_catalog_fixture(&root);
+        let bytes =
+            serde_json::to_vec(&install_manifest_value(&install, &data, &receipts)).unwrap();
+        let verified = validate_install_manifest(&bytes, &install, &data).unwrap();
+        assert!(!data.join(CODEX_MARKETPLACE_RELATIVE_ROOT).exists());
+        let payload = payload_from_verified_install(&verified).unwrap();
+        assert!(same_path(
+            &payload.marketplace_root,
+            &install.join(CODEX_MARKETPLACE_RELATIVE_ROOT)
+        ));
+
+        // A structurally valid decoy by the launcher must not win discovery.
+        write_marketplace_fixture(&data.join(CODEX_MARKETPLACE_RELATIVE_ROOT), "9.9.9");
+        assert_eq!(
+            payload_from_verified_install(&verified)
+                .unwrap()
+                .desired_version,
+            "0.1.0"
+        );
+
+        let server = payload.plugin_root.join("mcp/dist/server.js");
+        std::fs::write(&server, "tampered bridge").unwrap();
+        assert!(validate_install_manifest(&bytes, &install, &data).is_err());
+        std::fs::remove_file(server).unwrap();
+        assert!(payload_from_verified_install(&verified).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -1651,6 +1651,11 @@ try {
     $tamperedHash = (Get-CycFileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-SetupSilent ($tamperedHash -cne ([string]$cliRecord.sha256).ToLowerInvariant()) 'Repair fixture actually changes the installed CLI'
 
+    # Reproduce #68: Repair must replace a healthy, already-running Controller,
+    # not merely start a task that the harness stopped for the tamper fixture.
+    Start-ScheduledTask -TaskName $script:ControllerTaskName -TaskPath '\'
+    [void](Assert-SetupSilentControllerRuntime -InstallRoot $installRoot -Manifest $manifest)
+
     $operations.Add((Invoke-SetupSilentBoundedProcess `
         -FilePath $windowsPowerShell `
         -ArgumentList @(
@@ -1713,6 +1718,9 @@ try {
     try { $secondTamperStream.Write($secondTamperBytes, 0, $secondTamperBytes.Length) } finally { $secondTamperStream.Dispose() }
     $secondTamperedHash = (Get-CycFileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-SetupSilent ($secondTamperedHash -cne ([string]$cliRecord.sha256).ToLowerInvariant()) 'second Repair fixture changes the installed CLI again'
+
+    Start-ScheduledTask -TaskName $script:ControllerTaskName -TaskPath '\'
+    [void](Assert-SetupSilentControllerRuntime -InstallRoot $installRoot -Manifest $manifestAfterRepair)
 
     $operations.Add((Invoke-SetupSilentBoundedProcess `
         -FilePath $windowsPowerShell `
@@ -1909,8 +1917,10 @@ try {
             'worker-probe',
             'cli-help',
             'repair-corrupted-file',
+            'repair-running-controller',
             'repair-preserves-tls-identity',
             'repair-repeat-corrupted-file',
+            'repair-repeat-running-controller',
             'repair-repeat-preserves-tls-identity',
             'lifecycle-transaction-receipts',
             'lifecycle-complete-journal-retirement',

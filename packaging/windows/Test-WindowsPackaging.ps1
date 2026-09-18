@@ -4982,6 +4982,8 @@ exit 0
     Assert-True ($setupSilentSource -match 'primaryFailure\s*=\s*if\s*\(\$primaryFailure\)') 'silent Setup cleanup receipt preserves the primary failure independently of cleanup'
     Assert-True ($setupSilentSource.IndexOf('if ($primaryFailure) { throw $primaryFailure }', [StringComparison]::Ordinal) -lt $setupSilentSource.IndexOf('if ($cleanupFailures.Count -gt 0)', [StringComparison]::Ordinal)) 'silent Setup preserves the primary lifecycle exception ahead of secondary cleanup failures'
     Assert-True ($setupSilentSource -match 'CYC_DISPOSABLE_WINDOWS') 'silent Setup smoke requires an explicit disposable-environment sentinel'
+    $setupAcceptanceWorkflow = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) '..\.github\workflows\setup-acceptance.yml') -Raw
+    Assert-True ($setupAcceptanceWorkflow -match 'CYC_DISPOSABLE_WINDOWS:\s*["'']1["''][\s\S]+Test-SetupSilent\.ps1[\s\S]+-DisposableEnvironment') 'dedicated Setup acceptance runs only inside the explicitly marked disposable Windows runner'
     Assert-True ($setupSilentSource -match '\[string\]\$PackageRoot') 'silent Setup smoke binds Repair to the matching staged package'
     Assert-True ($setupSilentSource -match "ArgumentList\s+@?\('?'/S") 'silent Setup smoke executes the real case-sensitive NSIS /S path'
     Assert-True ($setupSilentSource -match 'does not launch the GUI') 'silent Setup smoke rejects an unexpected GUI launch'
@@ -5224,21 +5226,35 @@ exit 0
     [void](New-Item -ItemType Directory -Path (Join-Path $forbiddenPnpmDeploy 'node_modules\.pnpm') -Force)
     [System.IO.File]::WriteAllText((Join-Path $forbiddenPnpmDeploy 'node_modules\.pnpm\lock.yaml'), 'fixture')
     $forbiddenPnpmOutput = Join-Path $testRoot 'forbidden-pnpm-preview'
-    Assert-ThrowsLike `
-        -Action {
-            & (Join-Path $PSScriptRoot 'New-PreviewPayload.ps1') `
-                -RepositoryRoot $repoRoot `
-                -RootCargoTarget $rootTarget `
-                -DesktopCargoTarget $desktopTarget `
-                -McpDeployRoot $forbiddenPnpmDeploy `
-                -NodeExecutable $nodeRuntime `
-                -NodeLicense $nodeLicense `
-                -WorkerKitsRoot $workerKits `
-                -OutputRoot $forbiddenPnpmOutput | Out-Null
-        } `
-        -Pattern 'forbidden \.pnpm entry' `
-        -Message 'preview staging rejects pnpm virtual-store metadata before copying inputs'
-    Assert-True (-not (Test-Path -LiteralPath $forbiddenPnpmOutput)) 'invalid MCP deploy is rejected before creating the preview output root'
+    & (Join-Path $PSScriptRoot 'New-PreviewPayload.ps1') `
+        -RepositoryRoot $repoRoot `
+        -RootCargoTarget $rootTarget `
+        -DesktopCargoTarget $desktopTarget `
+        -McpDeployRoot $forbiddenPnpmDeploy `
+        -NodeExecutable $nodeRuntime `
+        -NodeLicense $nodeLicense `
+        -WorkerKitsRoot $workerKits `
+        -OutputRoot $forbiddenPnpmOutput | Out-Null
+    Assert-True (Test-Path -LiteralPath $forbiddenPnpmOutput -PathType Container) 'preview staging accepts deploy metadata after cleanup'
+    $cleanedPnpmMcp = Join-Path $forbiddenPnpmOutput 'payload\integrations\codex-marketplace\plugins\cluster-your-codex\mcp'
+    Assert-True (Test-Path -LiteralPath (Join-Path $cleanedPnpmMcp 'dist\server.js') -PathType Leaf) 'metadata cleanup preserves the staged MCP entrypoint'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $cleanedPnpmMcp 'node_modules\.pnpm'))) 'preview staging removes pnpm deploy lock metadata before copying inputs'
+
+    # A real virtual store contains packages, not just deploy lock metadata.
+    # Reject it without deleting packages or creating an output tree.
+    $virtualStore = Join-Path $forbiddenPnpmDeploy 'node_modules\.pnpm'
+    [void](New-Item -ItemType Directory -Path (Join-Path $virtualStore 'fixture-package') -Force)
+    [System.IO.File]::WriteAllText((Join-Path $virtualStore 'lock.yaml'), 'fixture')
+    $virtualStoreOutput = Join-Path $testRoot 'virtual-store-rejected-preview'
+    Assert-ThrowsLike -Action {
+        & (Join-Path $PSScriptRoot 'New-PreviewPayload.ps1') `
+            -RepositoryRoot $repoRoot -RootCargoTarget $rootTarget `
+            -DesktopCargoTarget $desktopTarget -McpDeployRoot $forbiddenPnpmDeploy `
+            -NodeExecutable $nodeRuntime -NodeLicense $nodeLicense `
+            -WorkerKitsRoot $workerKits -OutputRoot $virtualStoreOutput | Out-Null
+    } -Pattern 'Unexpected pnpm metadata layout' -Message 'preview rejects a real pnpm virtual store'
+    Assert-True (Test-Path -LiteralPath (Join-Path $virtualStore 'fixture-package') -PathType Container) 'rejected virtual-store packages remain untouched'
+    Assert-True (-not (Test-Path -LiteralPath $virtualStoreOutput)) 'virtual-store rejection happens before output creation'
 
     $forbiddenDevelopmentDeploy = Join-Path $testRoot 'mcp-deploy-forbidden-development-dependency'
     Copy-Item -LiteralPath $mcpDeploy -Destination $forbiddenDevelopmentDeploy -Recurse

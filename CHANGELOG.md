@@ -9,6 +9,25 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Fix integration-preview packaging to rewrite the native Codex MCP command to
+  the bundled Node runtime, include that runtime and license, and run the same
+  payload completeness probe used by the Windows installer. This prevents Codex
+  from rejecting the installed plugin as missing or incomplete.
+
+- Fix Windows desktop native Codex plugin discovery when the launcher is
+  installed beside the data directory. Payload verification now resolves the
+  immutable marketplace from the verified install manifest before probing the
+  launcher directory, eliminating false "payload missing or incomplete"
+  reports after installation or repair.
+
+- Add a split-install regression covering a launcher-side decoy marketplace and
+  tampered files in the manifest-bound install payload.
+
+- Make native plugin preparation resilient to Windows Node distributions that
+  omit their top-level `LICENSE`: use the checked-in attribution fallback while
+  preserving the exact selected `node.exe`, and apply the same fallback in
+  Setup and preview release workflows.
+
 - Add `scripts/Prepare-NativeCodexPlugin.ps1` for source-checkout users. It
   deploys locked production dependencies into a standalone marketplace and
   tests MCP startup before native installation, avoiding missing-SDK failures

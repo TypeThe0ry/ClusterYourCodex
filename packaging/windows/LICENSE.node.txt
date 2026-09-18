@@ -1,0 +1,9 @@
+Node.js licensing notice
+
+Node.js is distributed under the MIT License. The Node.js project and its
+third-party components retain their respective copyright and license notices.
+Source and complete notices: https://github.com/nodejs/node/blob/main/LICENSE
+
+This fallback notice is included when a system Node.js installation does not
+ship its top-level LICENSE file. The bundled executable remains the exact
+runtime selected by the build.

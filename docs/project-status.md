@@ -1,6 +1,76 @@
 # ClusterYourCodex project status
 
+## Open-issue acceptance audit — 2026-09-18
+
+- The integration-preview release path now stages the same self-contained native
+  Codex plugin as Setup: it rewrites the MCP command to the bundled Node runtime,
+  includes the runtime/license, and runs the native payload integrity probe before
+  archiving. Local preparation reproduced the eight-tool MCP probe and passed the
+  integrity guard; the change is in PR #82 and remains prerelease until CI and
+  retained acceptance evidence finish.
+
+- Issue #5 was closed as not planned for the current trusted-workload product,
+  not as implemented. Hostile-tier readiness remains fail-closed.
+- Issue #68 remains open. Its earlier closure was corrected: a successful
+  native-plugin remote job is not evidence of installer upgrade/repair success.
+- The silent Setup harness previously stopped Controller before both Repair
+  calls. It now restarts the owned task and verifies the installed Controller's
+  live endpoints before each Repair, exercising the running-process precondition
+  of #68. PowerShell parsing and diff checks pass; executing the changed harness
+  on a disposable packaged Windows environment remains required.
+- Issues #2 and #3 retain their Windows installation and macOS runtime acceptance
+  requirements. Published v0.0.1 assets and tag are unchanged by this work.
+
+## Windows native plugin discovery fix — 2026-09-18
+
+Windows desktop builds now resolve `integrations/codex-marketplace` from the
+verified install manifest's `installRoot` before checking the launcher folder.
+This matches the installer layout (`Programs` payload plus `Local` data) and
+prevents a healthy native plugin from being reported as missing or incomplete.
+The desktop integration regression tests and native plugin payload probe pass.
+The regression explicitly covers a split install with a launcher-side decoy
+marketplace and verifies that tampering in the manifest-bound payload fails
+closed.
+
 ## Native plugin remote execution recovered — 2026-09-18
+
+### Missing Node license recovery — 2026-09-18
+
+Some local Windows Node installations contain `node.exe` without the adjacent
+top-level `LICENSE`, causing source marketplace preparation to abort before the
+native plugin could be installed. Preparation now falls back to the checked-in
+`packaging/windows/LICENSE.node.txt` attribution notice; release and Setup
+workflows use the same conditional path. A fresh native marketplace build on
+Windows completed the MCP startup probe (8 tools) and native payload integrity
+probe successfully.
+
+### Native payload integrity guard — 2026-09-18
+
+Added `scripts/Test-NativeCodexPlugin.ps1` and wired it into both native
+marketplace preparation and Windows preview staging. The guard requires the
+manifest, MCP manifest, skill entrypoint, compiled bridge, bundled Node runtime,
+and matching Node license; it also rejects legacy orchestrator content. Native
+preparation now rewrites `.mcp.json` to the bundled runtime and copies the
+runtime/license into the standalone marketplace, so a source-style install
+cannot produce the desktop “payload missing or incomplete” error. The installed
+cache and a freshly prepared marketplace both pass the guard and the eight-tool
+MCP smoke test.
+
+### Native CLI reinstall and payload repair — 2026-09-18
+
+The Codex CLI cache had a stale source-style copy of the plugin without the
+bundled MCP runtime, which caused the desktop message that the built-in Codex
+payload was missing or incomplete. The installed Windows marketplace payload
+was verified to contain `.codex-plugin/plugin.json`, `.mcp.json`, the compiled
+MCP bridge, `mcp/runtime/node.exe`, and `mcp/runtime/LICENSE.node.txt`.
+
+The local marketplace was re-registered with the native CLI and the plugin was
+reinstalled with `codex plugin add cluster-your-codex@clusteryourcodex`. The
+native CLI now reports version `0.0.1`, source `local`, and `enabled: true`.
+The installed cache contains the private runtime, and the eight-tool MCP probe
+plus a real `fleet_info` → `fleet_plan` → `fleet_plan_submit` Helio execution
+completed with exit code 0. No legacy `cluster-orchestrator` skill remains in
+either active Codex discovery root; old copies are outside discovery paths.
 
 The queued-run investigation found a Windows credential ACL PowerShell helper
 stalled under the remote worker. The independent telemetry loop still reported
@@ -40,6 +110,9 @@ The existing-output guard refuses to overwrite a previous source directory.
   integrity-checked install/repair source, not a prerequisite for a healthy
   native registration.
 - The false bundled-payload failure is now separated from native plugin health.
+- Install/Repair also reuses a valid native registration when an older desktop
+  package omitted the optional repair marketplace, so the missing-payload error
+  no longer blocks an already-usable plugin.
 - The active and `.disabled` `cluster-orchestrator` directories were removed
   from both local skill discovery roots; timestamped backup directories were
   moved outside the discovery roots for rollback. Runtime dispatch uses the native `cluster-your-codex`

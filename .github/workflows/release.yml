@@ -737,7 +737,12 @@ jobs:
           Copy-Item -LiteralPath .agents/plugins/marketplace.json -Destination (Join-Path $marketplace '.agents/plugins/marketplace.json')
           Copy-Item -Recurse -LiteralPath plugins/cluster-your-codex/.codex-plugin -Destination $plugin
           Copy-Item -Recurse -LiteralPath plugins/cluster-your-codex/skills -Destination $plugin
-          Copy-Item -LiteralPath plugins/cluster-your-codex/.mcp.json -Destination $plugin
+          $sourceMcp = Get-Content -Raw -LiteralPath plugins/cluster-your-codex/.mcp.json | ConvertFrom-Json
+          if ($null -eq $sourceMcp.mcpServers.cluster_your_codex) {
+            throw 'Plugin .mcp.json is missing mcpServers.cluster_your_codex.'
+          }
+          $sourceMcp.mcpServers.cluster_your_codex.command = './mcp/runtime/node.exe'
+          $sourceMcp | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $plugin '.mcp.json') -Encoding UTF8
           $mcpDeploy = Join-Path $plugin 'mcp'
           pnpm --filter @clusteryourcodex/codex-mcp deploy --prod --config.node-linker=hoisted --config.inject-workspace-packages=true --frozen-lockfile $mcpDeploy
           if ($LASTEXITCODE -ne 0) { throw 'failed to deploy MCP production dependencies' }
@@ -763,13 +768,25 @@ jobs:
           }
           node packaging/windows/Test-McpDeployment.mjs $mcpDeploy
           if ($LASTEXITCODE -ne 0) { throw 'deployed MCP runtime smoke test failed' }
+          $nodePath = (Get-Command node.exe -CommandType Application -ErrorAction Stop).Source
+          $runtime = Join-Path $mcpDeploy 'runtime'
+          New-Item -ItemType Directory -Force -Path $runtime | Out-Null
+          Copy-Item -LiteralPath $nodePath -Destination (Join-Path $runtime 'node.exe') -Force
+          $nodeLicense = Join-Path (Split-Path -Parent $nodePath) 'LICENSE'
+          if (-not (Test-Path -LiteralPath $nodeLicense -PathType Leaf)) {
+            $nodeLicense = Join-Path $PWD 'packaging/windows/LICENSE.node.txt'
+          }
+          Copy-Item -LiteralPath $nodeLicense -Destination (Join-Path $runtime 'LICENSE.node.txt') -Force
+          ./scripts/Test-NativeCodexPlugin.ps1 -PluginRoot $plugin
+          if ($LASTEXITCODE -ne 0) { throw 'integration preview native Codex plugin integrity probe failed' }
 
           @'
           # ClusterYourCodex integration assets
 
           This archive contains the compiled renderer and Codex marketplace/plugin assets.
           It is not a native desktop application, controller, worker, CLI, or installer.
-          The MCP bridge in this archive requires Node.js 20 or newer on PATH.
+          The MCP bridge includes a private Node.js runtime and does not require
+          Node.js on PATH.
           It is code-unsigned. Tagged release assets are published only after the
           release-level CycloneDX SBOM and GitHub build-provenance gate succeeds;
           manually dispatched artifacts remain explicitly indexed as unattested.
@@ -1132,7 +1149,10 @@ jobs:
           $node = Get-ValidatedNodeExecutable
           $nodeLicense = Join-Path (Split-Path -Parent $node) 'LICENSE'
           if (-not (Test-Path -LiteralPath $nodeLicense -PathType Leaf)) {
-            throw "actions/setup-node runtime did not include its LICENSE at $nodeLicense"
+            $nodeLicense = Join-Path $PWD 'packaging/windows/LICENSE.node.txt'
+            if (-not (Test-Path -LiteralPath $nodeLicense -PathType Leaf)) {
+              throw "Node runtime license is unavailable and repository fallback is missing"
+            }
           }
 
           $safeRef = [string]$env:CYC_REF_NAME -replace '[^0-9A-Za-z._-]', '-'
