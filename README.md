@@ -72,7 +72,9 @@ powershell -ExecutionPolicy Bypass -File scripts/Install-NativeCodexPlugin.ps1 `
 ```
 
 The recovery path uses the bundled MCP runtime and does not install or depend
-on legacy `clustor` or `cluster-orchestrator` skills. See the recorded verification in
+on legacy `clustor`, `cluster-orchestrator`, or `orchestrator` skills. Each install
+also removes exact-name legacy skill directories from the Codex home into a
+timestamped recoverable backup before registering the native plugin. See the recorded verification in
 [`docs/native-plugin-recovery-20260918.md`](docs/native-plugin-recovery-20260918.md).
 
 ## Platform status

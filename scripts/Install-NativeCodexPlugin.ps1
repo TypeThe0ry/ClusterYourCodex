@@ -45,6 +45,12 @@ if (-not (Test-Path -LiteralPath $codex -PathType Leaf)) {
     throw "Codex CLI does not exist: $codex"
 }
 
+# Remove only the exact legacy skill names before registering the native plugin.
+# The cleanup is recoverable and leaves unrelated user skills untouched.
+& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+    -File (Join-Path $repo 'scripts/Remove-LegacyCodexSkills.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'Legacy Codex skill cleanup failed.' }
+
 if (-not (Test-Path -LiteralPath (Join-Path $marketplace 'plugins/cluster-your-codex/.codex-plugin/plugin.json') -PathType Leaf)) {
     & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
         -File (Join-Path $repo 'scripts/Prepare-NativeCodexPlugin.ps1') `
