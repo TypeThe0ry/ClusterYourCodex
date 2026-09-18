@@ -51,15 +51,24 @@ reports that the payload is missing or incomplete, install the newest candidate
 and run the desktop **Repair** action; do not copy a plugin directory from a
 different build.
 
-For a source-checkout recovery, use the native Codex CLI registration path:
+For a source-checkout recovery, use the native Codex CLI registration path. Keep
+the generated marketplace under a persistent Codex-owned directory; a temporary
+marketplace can be deleted by cleanup jobs and make an otherwise healthy plugin
+look missing on the next launch:
 
 ```powershell
-$marketplace = Join-Path $PWD ('.tmp/native-marketplace-' + [guid]::NewGuid())
-powershell -ExecutionPolicy Bypass -File scripts/Prepare-NativeCodexPlugin.ps1 `
-  -OutputRoot $marketplace
-codex plugin marketplace add $marketplace
-codex plugin add cluster-your-codex@clusteryourcodex
-codex plugin list --json
+$marketplace = Join-Path $env:USERPROFILE '.codex/marketplaces/clusteryourcodex'
+powershell -ExecutionPolicy Bypass -File scripts/Install-NativeCodexPlugin.ps1 `
+  -MarketplaceRoot $marketplace
+```
+
+If that directory was left empty or partial by an interrupted install, add
+`-Repair`. The installer moves the incomplete directory to a timestamped
+backup, rebuilds the native payload, and runs the integrity and MCP probes:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/Install-NativeCodexPlugin.ps1 `
+  -MarketplaceRoot $marketplace -Repair
 ```
 
 The recovery path uses the bundled MCP runtime and does not install or depend

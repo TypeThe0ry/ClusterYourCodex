@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$MarketplaceRoot,
-    [string]$CodexPath
+    [string]$CodexPath,
+    [switch]$Repair
 )
 
 $ErrorActionPreference = 'Stop'
@@ -9,7 +10,29 @@ Set-StrictMode -Version Latest
 $repo = Split-Path $PSScriptRoot -Parent
 $marketplace = [System.IO.Path]::GetFullPath($MarketplaceRoot)
 if (Test-Path -LiteralPath $marketplace) {
-    throw "MarketplaceRoot must be a new directory; refusing to overwrite: $marketplace"
+    $marketplaceManifest = Join-Path $marketplace '.agents/plugins/marketplace.json'
+    $marketplacePlugin = Join-Path $marketplace 'plugins/cluster-your-codex'
+    $requiredMarketplaceFiles = @(
+        $marketplaceManifest,
+        (Join-Path $marketplacePlugin '.codex-plugin/plugin.json'),
+        (Join-Path $marketplacePlugin '.mcp.json'),
+        (Join-Path $marketplacePlugin 'skills/cluster-your-codex/SKILL.md'),
+        (Join-Path $marketplacePlugin 'mcp/dist/server.js'),
+        (Join-Path $marketplacePlugin 'mcp/runtime/node.exe'),
+        (Join-Path $marketplacePlugin 'mcp/runtime/LICENSE.node.txt')
+    )
+    $completeMarketplace = (@($requiredMarketplaceFiles | Where-Object {
+        -not (Test-Path -LiteralPath $_ -PathType Leaf) -or
+        (Get-Item -LiteralPath $_).Length -le 0
+    }).Count -eq 0)
+    if (-not $Repair -and -not $completeMarketplace) {
+        throw "MarketplaceRoot exists but is incomplete; rerun with -Repair to preserve it as a backup and rebuild: $marketplace"
+    }
+    if (-not $completeMarketplace) {
+        $backup = "$marketplace.incomplete-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        Move-Item -LiteralPath $marketplace -Destination $backup
+        Write-Output "Moved incomplete marketplace to recoverable backup: $backup"
+    }
 }
 
 $codex = if ([string]::IsNullOrWhiteSpace($CodexPath)) {
@@ -22,10 +45,18 @@ if (-not (Test-Path -LiteralPath $codex -PathType Leaf)) {
     throw "Codex CLI does not exist: $codex"
 }
 
+if (-not (Test-Path -LiteralPath (Join-Path $marketplace 'plugins/cluster-your-codex/.codex-plugin/plugin.json') -PathType Leaf)) {
+    & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+        -File (Join-Path $repo 'scripts/Prepare-NativeCodexPlugin.ps1') `
+        -OutputRoot $marketplace
+    if ($LASTEXITCODE -ne 0) { throw 'Native plugin preparation failed.' }
+}
+
+$preparedPlugin = Join-Path $marketplace 'plugins/cluster-your-codex'
 & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-    -File (Join-Path $repo 'scripts/Prepare-NativeCodexPlugin.ps1') `
-    -OutputRoot $marketplace
-if ($LASTEXITCODE -ne 0) { throw 'Native plugin preparation failed.' }
+    -File (Join-Path $repo 'scripts/Test-NativeCodexPlugin.ps1') `
+    -PluginRoot $preparedPlugin
+if ($LASTEXITCODE -ne 0) { throw 'Prepared native plugin failed integrity verification.' }
 
 & $codex plugin marketplace add $marketplace --json
 if ($LASTEXITCODE -ne 0) { throw 'Codex native marketplace registration failed.' }
