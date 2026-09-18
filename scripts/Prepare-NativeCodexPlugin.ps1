@@ -70,7 +70,8 @@ try {
         -PluginRoot $plugin
     if ($LASTEXITCODE -ne 0) { throw 'Prepared plugin failed the native payload integrity probe.' }
     Write-Output "Prepared native marketplace: $destination"
-    Write-Output 'Register this persistent directory with codex plugin marketplace add, then codex plugin add cluster-your-codex@clusteryourcodex.'
+    Write-Output 'This directory is self-contained and may be registered with codex plugin marketplace add.'
+    Write-Output 'For one-command registration and post-install verification, run Install-NativeCodexPlugin.ps1.'
 } finally {
     Pop-Location
 }

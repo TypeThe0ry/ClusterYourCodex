@@ -21,6 +21,12 @@ runtime, and Node license. No active `clustor` or `cluster-orchestrator` skill
 directory exists in the Codex skill roots. The only ClusterYourCodex skill is
 the skill shipped by the native plugin itself.
 
+The supported installation path is now `scripts/Install-NativeCodexPlugin.ps1`.
+It creates a self-contained marketplace, registers it with the native Codex
+CLI, installs the plugin, and runs both integrity and MCP tools-list probes.
+Installing directly from `plugins/cluster-your-codex` is not sufficient because
+the repository source intentionally does not contain the bundled Node runtime.
+
 The local Codex home also had nine historical `cluster-*.toml` agent routes
 and `rules/cluster.rules`; each referenced the removed `cluster-orchestrator`
 skill or the obsolete `C:\\CodexCluster\\cluster.ps1` runner. Those active
