@@ -5,8 +5,8 @@
 - Native plugin recovery PR [#83](https://github.com/TypeThe0ry/ClusterYourCodex/pull/83)
   merged at `2026-09-18T04:38:51Z` as `5bff3de0ca00918e554406ab74912be33406ee72`.
   Its CI run `35305044212`, CodeQL, and dependency checks passed. The separate
-  Setup acceptance run `35305044214` was still running at this audit; merging
-  does not prove that additional check passed.
+  Setup acceptance run `35305044214` subsequently completed successfully,
+  verifying packaged silent installation and running-controller repair.
 - Issue #68 is closed (GitHub records `2026-09-18T03:42:08Z`). The older notes
   below describe historical states and do not override this current status.
 - Issues #2 and #3 remain open: independent clean Windows acceptance and live
