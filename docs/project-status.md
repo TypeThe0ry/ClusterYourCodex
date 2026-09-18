@@ -1,11 +1,11 @@
 # ClusterYourCodex project status
 
-## Current GitHub audit — 2026-09-18
+## Current GitHub audit — 2026-09-19
 
-The repository state on `origin/main` is authoritative for this audit. PR #89
-(`16c12ce`) is merged. PR #90 tracks legacy-skill cleanup during native plugin
-installation and increased Windows Rust CI time budgets; consult its live
-GitHub checks for merge status. Open Issues #2 and #3 remain open because their final clean-environment gates are
+The repository state on `origin/main` is authoritative for this audit. PRs #90,
+#91, and #92 are merged; the inspected main commit is `7acf9b5`. PR #92 includes
+automatic recovery of incomplete native marketplaces and passed its CI,
+security, and packaged Windows installation checks. Open Issues #2 and #3 remain open because their final clean-environment gates are
 not evidenced. Issue #68 is closed: its running-Controller repair race and
 rollback filename collision are covered by the merged lifecycle fixes and the
 hosted regression run. Do not count the historical notes below as current open
@@ -25,11 +25,19 @@ Current evidence:
 - `v0.0.1` remains immutable at
   `e4fbaef04b764268fa038311d85573b18b549f9f` locally and on `origin`.
 
-Remaining issue acceptance includes the checkboxes in Issues #2 and #3:
-an independently retained clean Windows 11 lifecycle with production signing
-and tray/one-click evidence, plus a live managed macOS LaunchAgent run. The
+Remaining original issue acceptance includes the clean Windows 11 VM smoke
+in Issue #2 and the live macOS run in Issue #3. Production Authenticode,
+signed upgrade acceptance, and Developer ID/notarization were discussed in
+later GA comments; they are additional certification work, not checkboxes in
+either original issue. Do not treat them as evidence that implemented
+installer or worker-package features are missing. The
 available hosted CI and package tests are strong preview evidence but do not
 prove those independent gates, so those issues remain open.
+
+Local checks on 2026-09-19 found no `Get-VM`, `VBoxManage`, or `vmrun` command
+and no code-signing certificate in `Cert:\CurrentUser\My`. This does not prove
+that no VM or signing service exists elsewhere; it establishes only that
+these local acceptance routes were unavailable at this checkpoint.
 
 ### PR #90 verification
 
