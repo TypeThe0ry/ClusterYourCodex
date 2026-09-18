@@ -9,7 +9,7 @@ are versioned independently from the product.
 
 ### Status
 
-- Re-audited the GitHub project after PR #85: no pull requests remain open;
+- Re-audited the GitHub project after PR #87: no pull requests remain open;
   Issues #2 and #3 remain open because clean Windows lifecycle evidence and
   live macOS managed-execution evidence are still real acceptance gates.
 - Re-verified the native `cluster-your-codex@clusteryourcodex` installation,
@@ -60,6 +60,10 @@ are versioned independently from the product.
 - Removed the active legacy `cluster-orchestrator` skill registrations from
   the local Codex skill homes; timestamped backups remain available for
   rollback.
+
+- Closed Issue #68 after the running-Controller repair race, health probe,
+  and collision-safe rollback regression were covered by the Windows lifecycle
+  harness and merged fixes. It is no longer an open acceptance item.
 
 - Consolidate base64 0.23 and rusqlite 0.40 across both dependency graphs.
 - Accept duplicate Scheduled Task starts only when the registered executable is running; retain readiness probes.

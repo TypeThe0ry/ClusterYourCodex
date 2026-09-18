@@ -1,5 +1,32 @@
 # ClusterYourCodex project status
 
+## Current GitHub audit — 2026-09-18
+
+The repository state on `origin/main` is authoritative for this audit. PR #87
+(`cf33e3e6`) is merged and there are no open pull requests. Open Issues #2 and
+#3 remain intentionally open because their final clean-environment gates are
+not evidenced. Issue #68 is closed: its running-Controller repair race and
+rollback filename collision are covered by the merged lifecycle fixes and the
+hosted regression run. Do not count the historical notes below as current open
+items; they are retained as an evidence ledger.
+
+Current evidence:
+
+- Native `cluster-your-codex@clusteryourcodex` 0.0.1 is installed and enabled
+  from the persistent local marketplace. Payload integrity and the MCP
+  protocol/tools-list smoke both pass (protocol `2025-06-18`, eight tools).
+- PR #87 CI passed the Windows desktop/bridge job, Windows Rust job, Linux and
+  macOS Rust jobs, all three native worker-kit jobs, MSRV, CodeQL, RustSec,
+  Cargo deny, and pnpm audit.
+- `v0.0.1` remains immutable at
+  `e4fbaef04b764268fa038311d85573b18b549f9f` locally and on `origin`.
+
+Remaining gates are exactly the acceptance checkboxes in Issues #2 and #3:
+an independently retained clean Windows 11 lifecycle with production signing
+and tray/one-click evidence, plus a live managed macOS LaunchAgent run. The
+available hosted CI and package tests are strong preview evidence but do not
+prove those independent gates, so those issues remain open.
+
 ## Native-only status contract — 2026-09-18
 
 The desktop renderer now accepts `installed`/`restart_required` status from a
@@ -20,8 +47,10 @@ execution, logs, artifacts, and cleanup evidence.
 
 - Issue #5 was closed as not planned for the current trusted-workload product,
   not as implemented. Hostile-tier readiness remains fail-closed.
-- Issue #68 remains open. Its earlier closure was corrected: a successful
-  native-plugin remote job is not evidence of installer upgrade/repair success.
+- Issue #68 is closed after the running-Controller repair race and
+  collision-safe rollback fixes were merged and exercised by the Windows
+  lifecycle regression. Its historical acceptance discussion remains below
+  as evidence context.
 - The silent Setup harness previously stopped Controller before both Repair
   calls. It now restarts the owned task and verifies the installed Controller's
   live endpoints before each Repair, exercising the running-process precondition
