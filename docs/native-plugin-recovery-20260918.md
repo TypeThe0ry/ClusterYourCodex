@@ -36,6 +36,14 @@ path.
 
 ## Evidence
 
+The follow-up installation check found the plugin absent from the active CLI
+registration and reinstalled it. Its source was then moved out of the temporary
+directory into a persistent marketplace and re-registered. The CLI reported
+`installed=true` and `enabled=true`; both the source payload and plugin cache
+passed the integrity and MCP startup probes. Keep the marketplace directory
+after installation. These probes do not establish a new remote-worker run or
+prove that an already-open desktop session has reloaded the plugin.
+
 - `scripts/Test-NativeCodexPlugin.ps1`: pass (`cyc.dev/native-plugin-integrity/v1`)
 - `packaging/windows/Test-McpDeployment.mjs`: pass, protocol
   `2025-06-18`, eight tools listed

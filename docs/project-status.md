@@ -1,5 +1,22 @@
 # ClusterYourCodex project status
 
+## Current GitHub state — 2026-09-18
+
+- Native plugin recovery PR [#83](https://github.com/TypeThe0ry/ClusterYourCodex/pull/83)
+  merged at `2026-09-18T04:38:51Z` as `5bff3de0ca00918e554406ab74912be33406ee72`.
+  Its CI run `35305044212`, CodeQL, and dependency checks passed. The separate
+  Setup acceptance run `35305044214` was still running at this audit; merging
+  does not prove that additional check passed.
+- Issue #68 is closed (GitHub records `2026-09-18T03:42:08Z`). The older notes
+  below describe historical states and do not override this current status.
+- Issues #2 and #3 remain open: independent clean Windows acceptance and live
+  macOS managed-worker acceptance are not established by package builds alone.
+- The native plugin was reinstalled from a persistent marketplace source;
+  registration was enabled, the payload probe passed, and eight MCP tools were
+  enumerated. See the [recovery record](native-plugin-recovery-20260918.md).
+- The published `v0.0.1` tag still resolves to
+  `a64e3a59124e14b165861b86775847e961474b81`; it was not modified.
+
 ## Open-issue acceptance audit — 2026-09-18
 
 - The integration-preview release path now stages the same self-contained native

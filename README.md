@@ -37,16 +37,20 @@ reports that the payload is missing or incomplete, install the newest candidate
 and run the desktop **Repair** action; do not copy a plugin directory from a
 different build.
 
-For a source-checkout recovery, use the native Codex CLI registration path:
+For a source-checkout recovery, run the one-command native plugin installer:
 
 ```powershell
-$marketplace = Join-Path $PWD ('.tmp/native-marketplace-' + [guid]::NewGuid())
-powershell -ExecutionPolicy Bypass -File scripts/Prepare-NativeCodexPlugin.ps1 `
-  -OutputRoot $marketplace
-codex plugin marketplace add $marketplace
-codex plugin add cluster-your-codex@clusteryourcodex
-codex plugin list --json
+pnpm install --frozen-lockfile
+$marketplace = Join-Path $env:LOCALAPPDATA ('ClusterYourCodex/marketplaces/' + [guid]::NewGuid())
+powershell -ExecutionPolicy Bypass -File scripts/Install-NativeCodexPlugin.ps1 `
+  -MarketplaceRoot $marketplace
 ```
+
+Keep this directory: Codex records it as the marketplace source. The command
+builds, registers, installs, and checks the payload and all eight MCP tools.
+It requires Node, pnpm, and the Codex CLI for source builds; packaged Setup
+includes the runtime. A successful tools-list probe verifies bridge startup,
+not a completed remote job.
 
 The recovery path uses the bundled MCP runtime and does not install or depend
 on `clustor` or `cluster-orchestrator` skills. See the recorded verification in
@@ -56,7 +60,7 @@ on `clustor` or `cluster-orchestrator` skills. See the recorded verification in
 
 | Platform | Current delivery |
 | --- | --- |
-| Windows x64 | Desktop, Controller and Worker; full clean-VM Repair/rollback acceptance remains tracked in [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and [#68](https://github.com/TypeThe0ry/ClusterYourCodex/issues/68). |
+| Windows x64 | Desktop, Controller and Worker; full clean-VM acceptance remains tracked in [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2). Running-controller repair [#68](https://github.com/TypeThe0ry/ClusterYourCodex/issues/68) is closed. |
 | Linux x64 | Worker packages; see the [Linux setup guide](docs/add-linux-computer.md). |
 | macOS x64 / arm64 | Worker Kit packages; live managed execution acceptance is still open in [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). |
 

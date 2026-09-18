@@ -14,19 +14,19 @@ compare-and-swap, and drift checks.
 
 ## Verify
 
-For development from a source checkout, prepare a standalone marketplace first:
+For development from a source checkout, install a self-contained native plugin:
 
 ```powershell
 pnpm install --frozen-lockfile
-./scripts/Prepare-NativeCodexPlugin.ps1 -OutputRoot D:/CycPluginBuilds/build-001
-codex plugin marketplace add D:/CycPluginBuilds/build-001
-codex plugin add cluster-your-codex@clusteryourcodex
+./scripts/Install-NativeCodexPlugin.ps1 -MarketplaceRoot D:/CycPluginBuilds/build-001
 codex plugin list --marketplace clusteryourcodex --json
 ```
 
 Choose a new persistent output directory for each build. Keep it after installing;
 Codex records the marketplace source there. The preparation command includes locked
 production dependencies and probes MCP startup and all eight tool registrations.
+The install command also registers the marketplace, enables the plugin, and
+checks its registered source after installation.
 Registering the raw checkout can leave the copied plugin cache without the MCP SDK.
 The normal packaged installer already includes these dependencies. Preparation
 does not install the desktop app or prove a worker job completed.
