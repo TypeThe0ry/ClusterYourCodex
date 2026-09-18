@@ -12,9 +12,19 @@ $marketplace = [System.IO.Path]::GetFullPath($MarketplaceRoot)
 if (Test-Path -LiteralPath $marketplace) {
     $marketplaceManifest = Join-Path $marketplace '.agents/plugins/marketplace.json'
     $marketplacePlugin = Join-Path $marketplace 'plugins/cluster-your-codex'
-    $completeMarketplace = (Test-Path -LiteralPath $marketplaceManifest -PathType Leaf) -and
-        (Test-Path -LiteralPath (Join-Path $marketplacePlugin '.codex-plugin/plugin.json') -PathType Leaf) -and
-        (Test-Path -LiteralPath (Join-Path $marketplacePlugin '.mcp.json') -PathType Leaf)
+    $requiredMarketplaceFiles = @(
+        $marketplaceManifest,
+        (Join-Path $marketplacePlugin '.codex-plugin/plugin.json'),
+        (Join-Path $marketplacePlugin '.mcp.json'),
+        (Join-Path $marketplacePlugin 'skills/cluster-your-codex/SKILL.md'),
+        (Join-Path $marketplacePlugin 'mcp/dist/server.js'),
+        (Join-Path $marketplacePlugin 'mcp/runtime/node.exe'),
+        (Join-Path $marketplacePlugin 'mcp/runtime/LICENSE.node.txt')
+    )
+    $completeMarketplace = (@($requiredMarketplaceFiles | Where-Object {
+        -not (Test-Path -LiteralPath $_ -PathType Leaf) -or
+        (Get-Item -LiteralPath $_).Length -le 0
+    }).Count -eq 0)
     if (-not $Repair -and -not $completeMarketplace) {
         throw "MarketplaceRoot exists but is incomplete; rerun with -Repair to preserve it as a backup and rebuild: $marketplace"
     }
@@ -41,6 +51,12 @@ if (-not (Test-Path -LiteralPath (Join-Path $marketplace 'plugins/cluster-your-c
         -OutputRoot $marketplace
     if ($LASTEXITCODE -ne 0) { throw 'Native plugin preparation failed.' }
 }
+
+$preparedPlugin = Join-Path $marketplace 'plugins/cluster-your-codex'
+& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+    -File (Join-Path $repo 'scripts/Test-NativeCodexPlugin.ps1') `
+    -PluginRoot $preparedPlugin
+if ($LASTEXITCODE -ne 0) { throw 'Prepared native plugin failed integrity verification.' }
 
 & $codex plugin marketplace add $marketplace --json
 if ($LASTEXITCODE -ne 0) { throw 'Codex native marketplace registration failed.' }
