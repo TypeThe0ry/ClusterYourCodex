@@ -87,7 +87,10 @@ jobs:
           - graph: desktop
             os: windows-latest
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    # Windows cold-cache workspace tests compile substantially more slowly
+    # than Linux/macOS. Keep the matrix bounded without cutting off the
+    # Windows test process at its previous 15-minute step deadline.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b # 1.88.0
@@ -126,7 +129,7 @@ jobs:
       # Worker process-lifecycle fixtures intentionally touch process-global
       # state, so run native tests on one test thread for deterministic CI.
       - name: Test Rust workspace
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: cargo test --workspace --locked -- --test-threads=1
 
   native-worker-kits:
