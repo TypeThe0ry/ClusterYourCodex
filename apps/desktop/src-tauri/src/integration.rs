@@ -1752,6 +1752,25 @@ fn locate_payload() -> Result<Payload, IntegrationError> {
                 .join("..")
                 .join(".."),
         );
+
+        // Local development builds do not carry the signed installer bundle.
+        // Allow an explicitly staged native marketplace (or the user's
+        // prepared marketplace) to back the same strict payload validator.
+        // Release builds never enter this branch and remain install-root
+        // bound through `locate_verified_payload`.
+        if let Ok(root) = std::env::var("CYC_CODEX_MARKETPLACE_ROOT") {
+            if !root.trim().is_empty() {
+                candidates.push(PathBuf::from(root));
+            }
+        }
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            candidates.push(
+                PathBuf::from(profile)
+                    .join(".codex")
+                    .join("marketplaces")
+                    .join("clusteryourcodex"),
+            );
+        }
     }
 
     for candidate in candidates {
