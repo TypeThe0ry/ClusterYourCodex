@@ -1,5 +1,22 @@
 # Native Codex plugin recovery — 2026-09-18
 
+## 2026-09-19 reinstall verification
+
+The native repair path was rerun from the current repository after the desktop
+reported an incomplete built-in payload. The exact legacy skill directories
+(`clustor`, `cluster-orchestrator`, and `orchestrator`) were searched under the
+active Codex home and none remain. The installer then rebuilt the persistent
+marketplace, removed the existing native registration, and added
+`cluster-your-codex@clusteryourcodex` again.
+
+The installed cache now passes the six-file payload integrity check, includes
+the bundled Node runtime and license, and passes the MCP initialize/tools-list
+probe with protocol `2025-06-18` and all eight native tools. The MCP package
+suite passes 48/48 tests and the TypeScript production build succeeds.
+
+This verification uses the native Codex plugin registry and MCP bridge only;
+the removed legacy skill names are cleanup targets, not execution providers.
+
 ## 2026-09-19 cache-repair follow-up
 
 The installer now removes the exact `cluster-your-codex@clusteryourcodex`
