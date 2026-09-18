@@ -85,3 +85,24 @@ checkout:
 This confirms the repair path is native plugin registration plus integrity and
 MCP probes. It does not rely on a legacy orchestrator skill or a source-style
 plugin copy without its bundled runtime.
+
+## Re-registration after the desktop payload error — 2026-09-19
+
+The same local failure was reproduced after the Codex CLI no longer listed the
+native plugin. The repair command was rerun with `-Repair`, which moved the
+stale marketplace to a timestamped recoverable backup, rebuilt the bundled
+marketplace, removed legacy skill directories, and registered the native
+plugin again.
+
+Observed verification on the repaired machine:
+
+- `cluster-your-codex@clusteryourcodex`, version `0.0.1`, is installed and enabled;
+- the payload integrity probe passed for all six required files;
+- the native MCP bridge returned protocol `2025-06-18` and all eight tools;
+- no active `clustor`, `cluster-orchestrator`, or `orchestrator` directory remained;
+- the MCP package test suite passed: 7 files / 48 tests.
+
+This is the supported recovery for the desktop message “built-in Codex plugin
+payload is missing or incomplete”. It uses the native plugin registry and the
+bundled MCP runtime; legacy orchestrator skills are not part of the execution
+path.
