@@ -20,7 +20,7 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 | macOS worker kits | Package-ready | Intel and Apple Silicon kits build and verify; live managed execution remains gated |
 | Stable release | `v0.0.1` unchanged | New work stays prerelease until the real GA gates in Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) are evidenced |
 
-The latest merged native-plugin recovery work is tracked in [PR #87](https://github.com/TypeThe0ry/ClusterYourCodex/pull/87).
+The latest merged native-plugin recovery work is tracked in [PR #89](https://github.com/TypeThe0ry/ClusterYourCodex/pull/89); the implementation fix is in [PR #87](https://github.com/TypeThe0ry/ClusterYourCodex/pull/87).
 The working tree also preserves any local, uncommitted user changes; release
 automation never moves or rewrites the `v0.0.1` tag.
 
@@ -72,7 +72,9 @@ powershell -ExecutionPolicy Bypass -File scripts/Install-NativeCodexPlugin.ps1 `
 ```
 
 The recovery path uses the bundled MCP runtime and does not install or depend
-on legacy `clustor` or `cluster-orchestrator` skills. See the recorded verification in
+on legacy `clustor`, `cluster-orchestrator`, or `orchestrator` skills. Each install
+also removes exact-name legacy skill directories from the Codex home into a
+timestamped recoverable backup before registering the native plugin. See the recorded verification in
 [`docs/native-plugin-recovery-20260918.md`](docs/native-plugin-recovery-20260918.md).
 
 ## Platform status

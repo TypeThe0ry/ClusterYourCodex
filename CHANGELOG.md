@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Added an idempotent native-install cleanup step that moves exact-name legacy
+  `clustor`, `cluster-orchestrator`, and `orchestrator` skill directories out of
+  the active Codex home into a timestamped backup before registering the native
+  MCP plugin. The cleanup is scoped to those names and leaves unrelated skills
+  untouched.
+
 All notable user-visible changes are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and product versions
 follow Semantic Versioning. Protocol schema identifiers such as `cyc.dev/v1`
@@ -9,7 +17,7 @@ are versioned independently from the product.
 
 ### Status
 
-- Re-audited the GitHub project after PR #87: no pull requests remain open;
+- Re-audited the GitHub project after PR #89: no pull requests remain open;
   Issues #2 and #3 remain open because clean Windows lifecycle evidence and
   live macOS managed-execution evidence are still real acceptance gates.
 - Re-verified the native `cluster-your-codex@clusteryourcodex` installation,
