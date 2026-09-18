@@ -37,6 +37,21 @@ reports that the payload is missing or incomplete, install the newest candidate
 and run the desktop **Repair** action; do not copy a plugin directory from a
 different build.
 
+For a source-checkout recovery, use the native Codex CLI registration path:
+
+```powershell
+$marketplace = Join-Path $PWD ('.tmp/native-marketplace-' + [guid]::NewGuid())
+powershell -ExecutionPolicy Bypass -File scripts/Prepare-NativeCodexPlugin.ps1 `
+  -OutputRoot $marketplace
+codex plugin marketplace add $marketplace
+codex plugin add cluster-your-codex@clusteryourcodex
+codex plugin list --json
+```
+
+The recovery path uses the bundled MCP runtime and does not install or depend
+on `clustor` or `cluster-orchestrator` skills. See the recorded verification in
+[`docs/native-plugin-recovery-20260918.md`](docs/native-plugin-recovery-20260918.md).
+
 ## Platform status
 
 | Platform | Current delivery |
