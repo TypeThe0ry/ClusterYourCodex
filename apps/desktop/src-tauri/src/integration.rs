@@ -2007,14 +2007,7 @@ fn validate_installed_plugin(registration: &PluginRegistration) -> Option<Instal
     if !runtime_metadata.is_file() || runtime_metadata.len() == 0 {
         return None;
     }
-    let runtime_license = root
-        .join("mcp")
-        .join("runtime")
-        .join(if cfg!(target_os = "windows") {
-            "LICENSE.node.txt"
-        } else {
-            "LICENSE.node.txt"
-        });
+    let runtime_license = root.join("mcp").join("runtime").join("LICENSE.node.txt");
     let license_metadata = std::fs::metadata(runtime_license).ok()?;
     if !license_metadata.is_file() || license_metadata.len() == 0 {
         return None;
