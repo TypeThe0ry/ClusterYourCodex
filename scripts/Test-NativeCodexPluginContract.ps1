@@ -31,7 +31,9 @@ $requiredInstallFragments = @(
     "mcp/runtime/node.exe",
     "plugin remove",
     "plugin marketplace add",
-    "plugin add"
+    "plugin add",
+    "installedPath",
+    "Codex plugin cache failed integrity verification"
 )
 foreach ($fragment in $requiredInstallFragments) {
     if ($install.IndexOf($fragment, [System.StringComparison]::Ordinal) -lt 0) {
