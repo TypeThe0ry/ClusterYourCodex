@@ -25,13 +25,20 @@ if (Test-Path -LiteralPath $marketplace) {
         -not (Test-Path -LiteralPath $_ -PathType Leaf) -or
         (Get-Item -LiteralPath $_).Length -le 0
     }).Count -eq 0)
-    if (-not $Repair -and -not $completeMarketplace) {
-        throw "MarketplaceRoot exists but is incomplete; rerun with -Repair to preserve it as a backup and rebuild: $marketplace"
-    }
-    if (-not $completeMarketplace) {
+    # A partial marketplace is never usable. Recover it automatically so the
+    # user-facing installer can repair the opaque Codex "payload missing or
+    # incomplete" state without requiring a second command or a hidden flag.
+    # The old tree is moved aside before rebuilding and remains recoverable.
+    # Repair is deliberately a full replacement, even when the previous tree
+    # looks structurally complete. A complete tree can still be stale (for
+    # example, its build/payload catalog may belong to an older release), and
+    # reusing it is what produces the opaque integrity-verification failure.
+    # Move the entire tree first so the operation remains recoverable.
+    if ($Repair -or -not $completeMarketplace) {
         $backup = "$marketplace.incomplete-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
         Move-Item -LiteralPath $marketplace -Destination $backup
-        Write-Output "Moved incomplete marketplace to recoverable backup: $backup"
+        $kind = if ($completeMarketplace) { 'previous' } else { 'incomplete' }
+        Write-Output "Moved $kind marketplace to recoverable backup: $backup"
     }
 }
 
@@ -50,6 +57,22 @@ if (-not (Test-Path -LiteralPath $codex -PathType Leaf)) {
 & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
     -File (Join-Path $repo 'scripts/Remove-LegacyCodexSkills.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'Legacy Codex skill cleanup failed.' }
+
+# Verify the active Codex home is clean before registering the native plugin.
+# Backups are intentionally outside these active roots and remain recoverable.
+$codexRoot = Split-Path (Split-Path $marketplace -Parent) -Parent
+$activeLegacyRoots = @(
+    (Join-Path $codexRoot 'skills'),
+    (Join-Path $codexRoot 'marketplaces'),
+    (Join-Path $codexRoot 'plugins')
+) | Where-Object { Test-Path -LiteralPath $_ -PathType Container }
+$activeLegacy = @($activeLegacyRoots | ForEach-Object {
+    Get-ChildItem -LiteralPath $_ -Directory -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '(?i)^(clustor|cluster[\s_-]*orchestrator|orchestrator)([\s_-].*)?$' }
+})
+if ($activeLegacy.Count -ne 0) {
+    throw "Legacy Codex skill content remains active after cleanup: $($activeLegacy.FullName -join ', ')"
+}
 
 if (-not (Test-Path -LiteralPath (Join-Path $marketplace 'plugins/cluster-your-codex/.codex-plugin/plugin.json') -PathType Leaf)) {
     & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `

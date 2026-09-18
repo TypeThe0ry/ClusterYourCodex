@@ -28,10 +28,9 @@ Installing directly from `plugins/cluster-your-codex` is not sufficient because
 the repository source intentionally does not contain the bundled Node runtime.
 
 If Codex retained an empty or partial marketplace directory after a failed
-install, rerun the same command with `-Repair`. The installer moves the
-incomplete directory to a timestamped sibling backup, rebuilds the native
-payload, and then verifies the registered plugin. A complete marketplace is
-reused and is never overwritten.
+install, the installer automatically moves it to a timestamped sibling backup,
+rebuilds the native payload, and then verifies the registered plugin. Use
+`-Repair` to force the same rebuild for an otherwise complete directory.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/Install-NativeCodexPlugin.ps1 `
