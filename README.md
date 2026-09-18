@@ -28,11 +28,12 @@ Windows binaries are currently code-unsigned; verify the sidecar before running 
 
 ### Codex plugin integrity
 
-The Windows installer and integration-preview bundle both ship the native
+The current Windows installer and integration-preview pipeline ship the native
 `cluster-your-codex@clusteryourcodex` plugin with its private Node runtime. The
 installer validates the manifest, MCP bridge, runtime, marketplace binding, and
-file hashes before registering the plugin. If Codex reports that the payload is
-missing or incomplete, remove the old preview, install the newest candidate,
+file hashes before registering the plugin. These fixes are in the current
+prerelease candidate; the published `v0.0.1` assets are unchanged. If Codex
+reports that the payload is missing or incomplete, install the newest candidate
 and run the desktop **Repair** action; do not copy a plugin directory from a
 different build.
 
