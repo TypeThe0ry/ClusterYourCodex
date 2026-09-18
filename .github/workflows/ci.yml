@@ -227,6 +227,14 @@ jobs:
             --expected-version "$version" \
             --skip-live
 
+      - name: Execute packaged worker native inventory probe
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/test_packaged_worker_probe_contract.py
+          python3 scripts/test_packaged_worker_probe.py --kit-root "$CYC_NATIVE_KIT_ROOT"
+
   web:
     name: Desktop, Windows host, and Codex bridge
     needs: [version-identity]
