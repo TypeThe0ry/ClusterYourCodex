@@ -58,14 +58,17 @@ look missing on the next launch:
 
 ```powershell
 $marketplace = Join-Path $env:USERPROFILE '.codex/marketplaces/clusteryourcodex'
-if (Test-Path -LiteralPath $marketplace) {
-  throw "Refusing to overwrite an existing marketplace: $marketplace"
-}
-powershell -ExecutionPolicy Bypass -File scripts/Prepare-NativeCodexPlugin.ps1 `
-  -OutputRoot $marketplace
-codex plugin marketplace add $marketplace
-codex plugin add cluster-your-codex@clusteryourcodex
-codex plugin list --json
+powershell -ExecutionPolicy Bypass -File scripts/Install-NativeCodexPlugin.ps1 `
+  -MarketplaceRoot $marketplace
+```
+
+If that directory was left empty or partial by an interrupted install, add
+`-Repair`. The installer moves the incomplete directory to a timestamped
+backup, rebuilds the native payload, and runs the integrity and MCP probes:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/Install-NativeCodexPlugin.ps1 `
+  -MarketplaceRoot $marketplace -Repair
 ```
 
 The recovery path uses the bundled MCP runtime and does not install or depend

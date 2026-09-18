@@ -27,6 +27,18 @@ CLI, installs the plugin, and runs both integrity and MCP tools-list probes.
 Installing directly from `plugins/cluster-your-codex` is not sufficient because
 the repository source intentionally does not contain the bundled Node runtime.
 
+If Codex retained an empty or partial marketplace directory after a failed
+install, rerun the same command with `-Repair`. The installer moves the
+incomplete directory to a timestamped sibling backup, rebuilds the native
+payload, and then verifies the registered plugin. A complete marketplace is
+reused and is never overwritten.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/Install-NativeCodexPlugin.ps1 `
+  -MarketplaceRoot "$env:USERPROFILE/.codex/marketplaces/clusteryourcodex" `
+  -Repair
+```
+
 The local Codex home also had nine historical `cluster-*.toml` agent routes
 and `rules/cluster.rules`; each referenced the removed `cluster-orchestrator`
 skill or the obsolete `C:\\CodexCluster\\cluster.ps1` runner. Those active

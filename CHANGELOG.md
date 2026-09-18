@@ -18,6 +18,12 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Make native Codex plugin recovery repairable after an interrupted install:
+  `Install-NativeCodexPlugin.ps1 -Repair` preserves an incomplete marketplace
+  as a timestamped backup, rebuilds it, registers the native plugin, and runs
+  both payload-integrity and MCP tools-list probes. Complete marketplaces are
+  reused without being overwritten.
+
 - Accept a healthy native Codex plugin registration when the optional bundled
   repair marketplace is absent, instead of rejecting the valid installed state
   as an incomplete payload. The connected/full-run gates still require the

@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$MarketplaceRoot,
-    [string]$CodexPath
+    [string]$CodexPath,
+    [switch]$Repair
 )
 
 $ErrorActionPreference = 'Stop'
@@ -9,7 +10,19 @@ Set-StrictMode -Version Latest
 $repo = Split-Path $PSScriptRoot -Parent
 $marketplace = [System.IO.Path]::GetFullPath($MarketplaceRoot)
 if (Test-Path -LiteralPath $marketplace) {
-    throw "MarketplaceRoot must be a new directory; refusing to overwrite: $marketplace"
+    $marketplaceManifest = Join-Path $marketplace '.agents/plugins/marketplace.json'
+    $marketplacePlugin = Join-Path $marketplace 'plugins/cluster-your-codex'
+    $completeMarketplace = (Test-Path -LiteralPath $marketplaceManifest -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $marketplacePlugin '.codex-plugin/plugin.json') -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $marketplacePlugin '.mcp.json') -PathType Leaf)
+    if (-not $Repair -and -not $completeMarketplace) {
+        throw "MarketplaceRoot exists but is incomplete; rerun with -Repair to preserve it as a backup and rebuild: $marketplace"
+    }
+    if (-not $completeMarketplace) {
+        $backup = "$marketplace.incomplete-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        Move-Item -LiteralPath $marketplace -Destination $backup
+        Write-Output "Moved incomplete marketplace to recoverable backup: $backup"
+    }
 }
 
 $codex = if ([string]::IsNullOrWhiteSpace($CodexPath)) {
@@ -22,10 +35,12 @@ if (-not (Test-Path -LiteralPath $codex -PathType Leaf)) {
     throw "Codex CLI does not exist: $codex"
 }
 
-& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-    -File (Join-Path $repo 'scripts/Prepare-NativeCodexPlugin.ps1') `
-    -OutputRoot $marketplace
-if ($LASTEXITCODE -ne 0) { throw 'Native plugin preparation failed.' }
+if (-not (Test-Path -LiteralPath (Join-Path $marketplace 'plugins/cluster-your-codex/.codex-plugin/plugin.json') -PathType Leaf)) {
+    & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+        -File (Join-Path $repo 'scripts/Prepare-NativeCodexPlugin.ps1') `
+        -OutputRoot $marketplace
+    if ($LASTEXITCODE -ne 0) { throw 'Native plugin preparation failed.' }
+}
 
 & $codex plugin marketplace add $marketplace --json
 if ($LASTEXITCODE -ne 0) { throw 'Codex native marketplace registration failed.' }
