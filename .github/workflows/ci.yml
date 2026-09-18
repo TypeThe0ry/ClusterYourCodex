@@ -87,10 +87,7 @@ jobs:
           - graph: desktop
             os: windows-latest
     runs-on: ${{ matrix.os }}
-    # Windows cold-cache workspace tests compile substantially more slowly
-    # than Linux/macOS. Keep the matrix bounded without cutting off the
-    # Windows test process at its previous 15-minute step deadline.
-    timeout-minutes: 35
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b # 1.88.0
@@ -119,7 +116,10 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    # Windows cold-cache workspace tests compile substantially more slowly
+    # than Linux/macOS. Keep the matrix bounded without cutting off the
+    # Windows test process at its previous 15-minute step deadline.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
