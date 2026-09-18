@@ -9,6 +9,11 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Accept a healthy native Codex plugin registration when the optional bundled
+  repair marketplace is absent, instead of rejecting the valid installed state
+  as an incomplete payload. The connected/full-run gates still require the
+  complete AGENTS receipt and fresh MCP evidence.
+
 - Fix integration-preview packaging to rewrite the native Codex MCP command to
   the bundled Node runtime, include that runtime and license, and run the same
   payload completeness probe used by the Windows installer. This prevents Codex

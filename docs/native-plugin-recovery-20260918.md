@@ -45,3 +45,32 @@ path.
 
 The published `v0.0.1` tag and assets were not modified. The local
 `provisioning.rs` formatting change remains an uncommitted user change.
+
+## Re-registration after a lost native registration — 2026-09-18
+
+The desktop integration error was reproduced again after the Codex CLI lost
+the local plugin registration. The cache directory still existed, but
+`codex plugin list --json` contained no `cluster-your-codex@clusteryourcodex`
+entry. The cache alone is not an active native plugin installation.
+
+The recovery was repeated with a fresh marketplace directory at
+`D:\\Projects\\ClusterYourCodex\\.native-plugin-marketplace-repair-20260918`
+using `scripts/Install-NativeCodexPlugin.ps1`. The CLI now reports:
+
+- `cluster-your-codex@clusteryourcodex`, version `0.0.1`;
+- `installed: true`, `enabled: true`, source `local`;
+- the bundled `node.exe` and Node license present in the installed payload.
+
+Post-install evidence was collected from the installed cache, not the source
+checkout:
+
+- `Test-NativeCodexPlugin.ps1`: pass;
+- `Test-McpDeployment.mjs`: protocol `2025-06-18`, 8 tools listed;
+- `pnpm --filter @clusteryourcodex/codex-mcp test`: 48/48 passed;
+- `pnpm --filter @clusteryourcodex/codex-mcp build`: pass;
+- active Codex skill and plugin roots contain no `clustor`,
+  `cluster-orchestrator`, or legacy `orchestrator` content.
+
+This confirms the repair path is native plugin registration plus integrity and
+MCP probes. It does not rely on a legacy orchestrator skill or a source-style
+plugin copy without its bundled runtime.
