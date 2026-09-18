@@ -9,6 +9,11 @@ are versioned independently from the product.
 
 ### Fixed
 
+- Fix integration-preview packaging to rewrite the native Codex MCP command to
+  the bundled Node runtime, include that runtime and license, and run the same
+  payload completeness probe used by the Windows installer. This prevents Codex
+  from rejecting the installed plugin as missing or incomplete.
+
 - Fix Windows desktop native Codex plugin discovery when the launcher is
   installed beside the data directory. Payload verification now resolves the
   immutable marketplace from the verified install manifest before probing the
