@@ -10,6 +10,7 @@ on:
       - 'scripts/Test-NativeCodexPlugin.ps1'
       - 'scripts/Install-NativeCodexPlugin.ps1'
       - 'scripts/Remove-LegacyCodexSkills.ps1'
+      - 'scripts/Test-NativeCodexPluginContract.ps1'
 
 permissions:
   contents: read
@@ -42,6 +43,7 @@ jobs:
           node-version: 24.19.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: .\scripts\Test-NativeCodexPluginContract.ps1
       - run: pnpm -r build
       - run: cargo build --locked --release -p cyc-cli -p cyc-controller -p cyc-worker
       # The frontend was built by pnpm -r build above. Build the Tauri Rust

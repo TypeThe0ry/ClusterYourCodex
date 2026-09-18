@@ -56,6 +56,9 @@ jobs:
       - name: Run Issue #5 native selector guard unit tests
         shell: powershell
         run: python .\scripts\test_issue5_selector_guard.py
+      - name: Verify native Codex plugin install contract
+        shell: powershell
+        run: .\scripts\Test-NativeCodexPluginContract.ps1
       - name: Run Windows controller/worker round-trip contract tests
         shell: powershell
         run: >-
