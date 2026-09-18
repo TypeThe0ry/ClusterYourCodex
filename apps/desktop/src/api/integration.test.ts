@@ -167,6 +167,33 @@ describe("IntegrationClient", () => {
     expect(integrationStatusIsFresh({ checkedAtMs: 1_000 }, 61_001)).toBe(false);
   });
 
+  it("accepts native-only installation without bundled repair receipts", async () => {
+    const nativeOnly = {
+      ...status,
+      state: "restart_required",
+      payloadAvailable: false,
+      pluginEnabled: true,
+      agentsIntegrated: false,
+      payloadCatalogSha256: undefined,
+      buildCatalogSha256: undefined,
+      installManifestSha256: undefined,
+      desiredVersion: "0.1.0",
+      installedVersion: "0.1.0",
+      message: "Native plugin installed; restart required",
+    };
+    vi.stubGlobal("window", {
+      __CLUSTER_YOUR_CODEX__: {
+        integrationStatus: vi.fn(async () => nativeOnly),
+      },
+    });
+    await expect(new IntegrationClient().status()).resolves.toMatchObject({
+      state: "restart_required",
+      payloadAvailable: false,
+      pluginEnabled: true,
+      agentsIntegrated: false,
+    });
+  });
+
   it("marks an old PASS stale when controller, integration, or fleet evidence changes", () => {
     const connected = {
       ...status,
