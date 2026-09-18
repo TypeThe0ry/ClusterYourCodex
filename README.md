@@ -62,9 +62,11 @@ powershell -ExecutionPolicy Bypass -File scripts/Install-NativeCodexPlugin.ps1 `
   -MarketplaceRoot $marketplace
 ```
 
-If that directory was left empty or partial by an interrupted install, add
-`-Repair`. The installer moves the incomplete directory to a timestamped
-backup, rebuilds the native payload, and runs the integrity and MCP probes:
+If that directory was left empty or partial by an interrupted install, the
+installer automatically moves it to a timestamped recoverable backup,
+rebuilds the native payload, and runs the integrity and MCP probes. Pass
+`-Repair` when you also want to force-rebuild an otherwise complete directory
+(for example after an interrupted upgrade):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/Install-NativeCodexPlugin.ps1 `

@@ -25,9 +25,10 @@ if (Test-Path -LiteralPath $marketplace) {
         -not (Test-Path -LiteralPath $_ -PathType Leaf) -or
         (Get-Item -LiteralPath $_).Length -le 0
     }).Count -eq 0)
-    if (-not $Repair -and -not $completeMarketplace) {
-        throw "MarketplaceRoot exists but is incomplete; rerun with -Repair to preserve it as a backup and rebuild: $marketplace"
-    }
+    # A partial marketplace is never usable. Recover it automatically so the
+    # user-facing installer can repair the opaque Codex "payload missing or
+    # incomplete" state without requiring a second command or a hidden flag.
+    # The old tree is moved aside before rebuilding and remains recoverable.
     # Repair is deliberately a full replacement, even when the previous tree
     # looks structurally complete. A complete tree can still be stale (for
     # example, its build/payload catalog may belong to an older release), and
