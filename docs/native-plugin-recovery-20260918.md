@@ -126,3 +126,23 @@ This is the supported recovery for the desktop message “built-in Codex plugin
 payload is missing or incomplete”. It uses the native plugin registry and the
 bundled MCP runtime; legacy orchestrator skills are not part of the execution
 path.
+
+## Desktop verifier hardening — 2026-09-19
+
+The desktop verifier now uses the same completeness boundary as the native
+installer. A native registration is accepted only when the source contains a
+non-empty plugin skill, MCP bridge, bundled Node runtime, and
+`LICENSE.node.txt`, in addition to the manifests and bridge server. Missing
+skill or runtime-license files now return `integration_payload_unavailable`
+instead of allowing a partial payload to proceed.
+
+Regression evidence:
+
+- Rust integration tests: 35 passed;
+- native payload integrity: pass, 6/6 required files;
+- bundled MCP deployment probe: protocol `2025-06-18`, 8 tools;
+- MCP package tests: 7 files / 48 tests passed;
+- clean `-Repair` reinstall: plugin `cluster-your-codex@clusteryourcodex`,
+  version `0.0.1`, installed and enabled;
+- active legacy `clustor`, `cluster-orchestrator`, and `orchestrator` skill
+  directories: 0.
