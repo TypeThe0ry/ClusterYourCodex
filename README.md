@@ -20,7 +20,7 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 | macOS worker kits | Package-ready | Intel and Apple Silicon kits build and verify; live managed execution remains gated |
 | Stable release | `v0.0.1` unchanged | New work stays prerelease until the real GA gates in Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) are evidenced |
 
-The latest merged native-plugin recovery work is tracked in [PR #85](https://github.com/TypeThe0ry/ClusterYourCodex/pull/85).
+The latest merged native-plugin recovery work is tracked in [PR #87](https://github.com/TypeThe0ry/ClusterYourCodex/pull/87).
 The working tree also preserves any local, uncommitted user changes; release
 automation never moves or rewrites the `v0.0.1` tag.
 
@@ -79,7 +79,7 @@ on legacy `clustor` or `cluster-orchestrator` skills. See the recorded verificat
 
 | Platform | Current delivery |
 | --- | --- |
-| Windows x64 | Desktop, Controller and Worker; full clean-VM Repair/rollback acceptance remains tracked in [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and [#68](https://github.com/TypeThe0ry/ClusterYourCodex/issues/68). |
+| Windows x64 | Desktop, Controller and Worker; full clean-VM Repair/rollback acceptance remains tracked in [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2). The running-Controller repair race from #68 is fixed and closed. |
 | Linux x64 | Worker packages; see the [Linux setup guide](docs/add-linux-computer.md). |
 | macOS x64 / arm64 | Worker Kit packages; live managed execution acceptance is still open in [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). |
 
@@ -145,9 +145,8 @@ Run the browser renderer with `pnpm dev`; it is not the installed native app. Fo
 - [Changelog](CHANGELOG.md)
 - [Project status](docs/project-status.md)
 
-Open acceptance work is tracked in [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2),
-[#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3), and
-[#68](https://github.com/TypeThe0ry/ClusterYourCodex/issues/68). Hosted CI and
+Open acceptance work is tracked in [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
+and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). Hosted CI and
 portable archives do not substitute for the native Windows/macOS runtime gates
 called out in those issues.
 
