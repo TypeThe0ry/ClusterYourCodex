@@ -53,3 +53,31 @@ prove that an already-open desktop session has reloaded the plugin.
 
 The published `v0.0.1` tag and assets were not modified. The local
 `provisioning.rs` formatting change remains an uncommitted user change.
+
+## Packaged Setup evidence audit
+
+Downloaded artifact `windows-setup-acceptance` from
+[run 35305044214](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35305044214)
+after its successful completion. Artifact ID: `10531993072`; GitHub archive
+digest: `sha256:6dbef9dd789c577d02ddbc9d6895129ad02ee8bbafa71a3d3269f300dd153475`.
+
+- The retained checkout was PR merge ref
+  `d4416cdbf810746f747d8dda276d6173c56146ea`, not the PR head SHA. Its tree
+  `9a9cdf2b5710cff1344b83de0db453b4ad829a53` matches merged commit
+  `5bff3de0ca00918e554406ab74912be33406ee72` exactly.
+- `result.json` reports `status=passed`. All 11 recorded operations exited 0,
+  including silent Setup, two repairs with a running Controller, the installed
+  uninstaller, and repeated uninstall. The check list includes TLS identity
+  preservation, retired journals, restored tasks/firewall, and preserved data.
+- `cleanup.json` reports `productUninstallCompleted=true`, no primary failure,
+  no cleanup failures, and no uncertain process termination.
+- Downloaded `result.json` SHA-256:
+  `9bad7a7b9ba8b159c60b0f617288e1f0149b45d339f616932206626d1fc98c1d`.
+- Downloaded `cleanup.json` SHA-256:
+  `cc0cb2cf726e7a7b72e3bd8666094e97b1215dd2aff350a3cb16a7dbda5a1f3a`.
+
+The runner log identifies **Windows Server 2025** (`windows-2025-vs2026`).
+Setup was `NotSigned`. This proves the recorded hosted lifecycle, not Issue #2's
+clean Windows 11 smoke, GUI/tray behavior, or a signed upgrade/rollback path.
+The artifact retains summary receipts and runner-local log paths, not the full
+referenced operation logs; those paths are not downloadable evidence themselves.
