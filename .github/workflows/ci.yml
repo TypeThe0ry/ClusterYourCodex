@@ -233,13 +233,31 @@ jobs:
         with:
           node-version: 24.19.0
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm -r lint
-      - run: pnpm -r test
-      - run: pnpm -r build
-      - run: pnpm --filter @clusteryourcodex/desktop native:check
-      - run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -- --test-threads=1
-      - run: cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+      # Keep each potentially blocking tool invocation independently bounded.
+      # The job timeout alone leaves a required check looking pending while a
+      # child process is still alive; step deadlines make the failing command
+      # and its diagnostics visible to the runner.
+      - name: Install JavaScript dependencies
+        timeout-minutes: 10
+        run: pnpm install --frozen-lockfile
+      - name: Lint JavaScript workspaces
+        timeout-minutes: 10
+        run: pnpm -r lint
+      - name: Test JavaScript workspaces
+        timeout-minutes: 15
+        run: pnpm -r test
+      - name: Build JavaScript workspaces
+        timeout-minutes: 15
+        run: pnpm -r build
+      - name: Check desktop native integration
+        timeout-minutes: 10
+        run: pnpm --filter @clusteryourcodex/desktop native:check
+      - name: Test desktop Rust host
+        timeout-minutes: 15
+        run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -- --test-threads=1
+      - name: Lint desktop Rust host
+        timeout-minutes: 10
+        run: cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
       - name: Validate Windows install lifecycle
         shell: powershell
         run: >-
@@ -251,6 +269,7 @@ jobs:
           powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
           -File .\packaging\worker-kits\Test-WorkerKits.ps1
       - name: Run Windows controller/worker live round trip
+        timeout-minutes: 12
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -264,6 +283,18 @@ jobs:
             -TimeoutSeconds 360 `
             -KeepEvidence
           if ($LASTEXITCODE -ne 0) { throw "Windows controller/worker round trip failed with exit code $LASTEXITCODE." }
+      - name: Capture Windows runner diagnostics after a failure
+        if: failure()
+        shell: pwsh
+        run: |
+          Get-Date -Format o
+          Write-Host '--- active processes ---'
+          Get-Process | Sort-Object CPU -Descending | Select-Object -First 30 Id,ProcessName,CPU,WS,StartTime | Format-Table -AutoSize
+          Write-Host '--- cargo/rust/pnpm/node processes ---'
+          Get-Process cargo,rustc,pnpm,node -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,CPU,WS,StartTime | Format-Table -AutoSize
+          Write-Host '--- runner temp round-trip evidence ---'
+          Get-ChildItem -LiteralPath $env:RUNNER_TEMP -Filter 'cyc-windows-controller-worker-roundtrip.*' -Force -ErrorAction SilentlyContinue |
+            Select-Object FullName,LastWriteTime,Length
       - name: Upload Windows controller/worker round-trip evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
