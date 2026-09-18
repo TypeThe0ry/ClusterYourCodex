@@ -51,10 +51,16 @@ reports that the payload is missing or incomplete, install the newest candidate
 and run the desktop **Repair** action; do not copy a plugin directory from a
 different build.
 
-For a source-checkout recovery, use the native Codex CLI registration path:
+For a source-checkout recovery, use the native Codex CLI registration path. Keep
+the generated marketplace under a persistent Codex-owned directory; a temporary
+marketplace can be deleted by cleanup jobs and make an otherwise healthy plugin
+look missing on the next launch:
 
 ```powershell
-$marketplace = Join-Path $PWD ('.tmp/native-marketplace-' + [guid]::NewGuid())
+$marketplace = Join-Path $env:USERPROFILE '.codex/marketplaces/clusteryourcodex'
+if (Test-Path -LiteralPath $marketplace) {
+  throw "Refusing to overwrite an existing marketplace: $marketplace"
+}
 powershell -ExecutionPolicy Bypass -File scripts/Prepare-NativeCodexPlugin.ps1 `
   -OutputRoot $marketplace
 codex plugin marketplace add $marketplace
