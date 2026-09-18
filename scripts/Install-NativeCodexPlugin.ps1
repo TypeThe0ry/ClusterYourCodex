@@ -57,6 +57,22 @@ if (-not (Test-Path -LiteralPath $codex -PathType Leaf)) {
     -File (Join-Path $repo 'scripts/Remove-LegacyCodexSkills.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'Legacy Codex skill cleanup failed.' }
 
+# Verify the active Codex home is clean before registering the native plugin.
+# Backups are intentionally outside these active roots and remain recoverable.
+$codexRoot = Split-Path (Split-Path $marketplace -Parent) -Parent
+$activeLegacyRoots = @(
+    (Join-Path $codexRoot 'skills'),
+    (Join-Path $codexRoot 'marketplaces'),
+    (Join-Path $codexRoot 'plugins')
+) | Where-Object { Test-Path -LiteralPath $_ -PathType Container }
+$activeLegacy = @($activeLegacyRoots | ForEach-Object {
+    Get-ChildItem -LiteralPath $_ -Directory -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '(?i)^(clustor|cluster[\s_-]*orchestrator|orchestrator)([\s_-].*)?$' }
+})
+if ($activeLegacy.Count -ne 0) {
+    throw "Legacy Codex skill content remains active after cleanup: $($activeLegacy.FullName -join ', ')"
+}
+
 if (-not (Test-Path -LiteralPath (Join-Path $marketplace 'plugins/cluster-your-codex/.codex-plugin/plugin.json') -PathType Leaf)) {
     & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
         -File (Join-Path $repo 'scripts/Prepare-NativeCodexPlugin.ps1') `

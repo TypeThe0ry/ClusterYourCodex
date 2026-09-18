@@ -17,7 +17,16 @@ $backup = if ([string]::IsNullOrWhiteSpace($BackupRoot)) {
     Join-Path $codexRoot ('.legacy-skill-backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 } else { [System.IO.Path]::GetFullPath($BackupRoot) }
 
-$legacyNames = @('clustor', 'cluster-orchestrator', 'orchestrator')
+$normalizeName = {
+    param([string]$Name)
+    if ($null -eq $Name) { return '' }
+    return ([regex]::Replace($Name.ToLowerInvariant(), '[^a-z0-9]', ''))
+}
+$isLegacyName = {
+    param([string]$Name)
+    $normalized = & $normalizeName $Name
+    return $normalized -match '^(clustor|clusterorchestrator|orchestrator)([a-z0-9].*)?$'
+}
 $roots = @(
     (Join-Path $codexRoot 'skills'),
     (Join-Path $codexRoot 'marketplaces'),
@@ -27,7 +36,7 @@ $roots = @(
 $targets = @()
 foreach ($root in $roots) {
     $targets += @(Get-ChildItem -LiteralPath $root -Directory -Recurse -Force -ErrorAction SilentlyContinue |
-        Where-Object { $legacyNames -contains $_.Name.ToLowerInvariant() })
+        Where-Object { & $isLegacyName $_.Name })
 }
 
 $moved = @()

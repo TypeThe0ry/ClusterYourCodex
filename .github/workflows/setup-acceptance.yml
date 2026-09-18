@@ -81,6 +81,7 @@ jobs:
             -OutputPath (Join-Path $env:RUNNER_TEMP 'ClusterYourCodex-Setup.exe') `
             -MakeNsisPath $nsis
       - name: Run disposable packaged lifecycle
+        timeout-minutes: 30
         env:
           CYC_DISPOSABLE_WINDOWS: "1"
         run: |
@@ -93,7 +94,8 @@ jobs:
               -File ./packaging/windows/Test-SetupSilent.ps1 `
               -SetupPath (Join-Path $env:RUNNER_TEMP 'ClusterYourCodex-Setup.exe') `
               -PackageRoot (Join-Path $env:RUNNER_TEMP 'setup-package') `
-              -WorkRoot $work -DisposableEnvironment -KeepWorkRoot `
+              -WorkRoot $work -LifecycleTimeoutSeconds 1500 `
+              -DisposableEnvironment -KeepWorkRoot `
               1> (Join-Path $evidence 'result.json') 2> (Join-Path $evidence 'stderr.log')
             if ($LASTEXITCODE -ne 0) { throw "Setup acceptance failed: exit $LASTEXITCODE" }
           } finally {

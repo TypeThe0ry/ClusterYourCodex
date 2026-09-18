@@ -272,11 +272,13 @@ jobs:
         timeout-minutes: 10
         run: cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
       - name: Validate Windows install lifecycle
+        timeout-minutes: 15
         shell: powershell
         run: >-
           powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
           -File .\packaging\windows\Test-WindowsPackaging.ps1
       - name: Validate managed worker kits
+        timeout-minutes: 15
         shell: powershell
         run: >-
           powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
