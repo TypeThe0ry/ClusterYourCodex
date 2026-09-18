@@ -87,6 +87,7 @@ jobs:
           - graph: desktop
             os: windows-latest
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b # 1.88.0
@@ -100,9 +101,11 @@ jobs:
         run: ./scripts/Test-RustMsrv.ps1
       - name: Check the locked workspace at MSRV
         if: matrix.graph == 'workspace'
+        timeout-minutes: 15
         run: cargo check --workspace --locked
       - name: Check the locked Windows desktop host at MSRV
         if: matrix.graph == 'desktop'
+        timeout-minutes: 15
         run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
 
   rust:
@@ -113,6 +116,7 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
@@ -121,7 +125,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # Worker process-lifecycle fixtures intentionally touch process-global
       # state, so run native tests on one test thread for deterministic CI.
-      - run: cargo test --workspace --locked -- --test-threads=1
+      - name: Test Rust workspace
+        timeout-minutes: 15
+        run: cargo test --workspace --locked -- --test-threads=1
 
   native-worker-kits:
     name: Native Worker Kit (${{ matrix.label }})
