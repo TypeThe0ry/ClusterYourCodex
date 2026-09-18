@@ -21,6 +21,9 @@ verified install manifest's `installRoot` before checking the launcher folder.
 This matches the installer layout (`Programs` payload plus `Local` data) and
 prevents a healthy native plugin from being reported as missing or incomplete.
 The desktop integration regression tests and native plugin payload probe pass.
+The regression explicitly covers a split install with a launcher-side decoy
+marketplace and verifies that tampering in the manifest-bound payload fails
+closed.
 
 ## Native plugin remote execution recovered — 2026-09-18
 

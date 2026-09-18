@@ -15,6 +15,9 @@ are versioned independently from the product.
   launcher directory, eliminating false "payload missing or incomplete"
   reports after installation or repair.
 
+- Add a split-install regression covering a launcher-side decoy marketplace and
+  tampered files in the manifest-bound install payload.
+
 - Make native plugin preparation resilient to Windows Node distributions that
   omit their top-level `LICENSE`: use the checked-in attribution fallback while
   preserving the exact selected `node.exe`, and apply the same fallback in
