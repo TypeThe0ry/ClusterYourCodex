@@ -10,6 +10,15 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 > current fixes are delivered as prerelease candidates until their acceptance
 > evidence is complete. The published `v0.0.1` tag and assets are immutable.
 
+## Start here
+
+| Goal | Action |
+| --- | --- |
+| Use the published baseline | Install [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1) |
+| Use the current Codex integration fix | Use the [source-checkout repair](#codex-plugin-integrity); the published preview predates this fix |
+| Recover a broken native plugin | Run the [one-command repair](#codex-plugin-integrity) below |
+| Verify a checkout | Run the [native plugin checks](#native-plugin-checks) |
+
 ## Status at a glance
 
 | Area | State | Evidence |
@@ -25,7 +34,7 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 | You need | Use | What it means |
 | --- | --- | --- |
 | A published baseline | [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1) | Immutable stable assets; no native-plugin recovery fixes |
-| The current Windows/Codex integration | [latest prerelease](https://github.com/TypeThe0ry/ClusterYourCodex/releases) | Native plugin registration, repair, MCP probes, and ongoing acceptance work |
+| A published preview | [v0.1.0-preview.102](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.102) | Latest published preview as of 2026-09-19; predates the native-plugin repair below |
 | Source development | `main` or a feature branch | Run the checks below before packaging; do not call a preview stable |
 
 For installation fixes and their verification, see the
@@ -67,13 +76,17 @@ Windows binaries are currently code-unsigned; verify the sidecar before running 
 The current Windows installer and integration-preview pipeline ship the native
 `cluster-your-codex@clusteryourcodex` plugin with its private Node runtime. The
 installer validates the manifest, MCP bridge, runtime, marketplace binding, and
-file hashes before registering the plugin. These fixes are in the current
-prerelease candidate; the published `v0.0.1` assets are unchanged. If Codex
-reports that the payload is missing or incomplete, install the newest candidate
-and run the desktop **Repair** action; do not copy a plugin directory from a
+file hashes before registering the plugin. The recovery fixes are in the
+repository, not the published `v0.0.1` or `v0.1.0-preview.102` assets. As of
+2026-09-19, installing the latest published preview is not a verified remedy
+for this error. Use the source-checkout repair below until an installer built
+from the corrected source is published; do not copy a plugin directory from a
 different build.
 
-For a source-checkout recovery, use the native Codex CLI registration path. Keep
+For a source-checkout recovery, use an up-to-date checkout with the documented
+development dependencies installed and run from its root. This path requires
+build tools; it is not the dependency-free Setup experience. Use the native
+Codex CLI registration path. Keep
 the generated marketplace under a persistent Codex-owned directory; a temporary
 marketplace can be deleted by cleanup jobs and make an otherwise healthy plugin
 look missing on the next launch:
@@ -100,6 +113,22 @@ on legacy `clustor`, `cluster-orchestrator`, or `orchestrator` skills. Each inst
 also removes exact-name legacy skill directories from the Codex home into a
 timestamped recoverable backup before registering the native plugin. See the recorded verification in
 [`docs/native-plugin-recovery-20260918.md`](docs/native-plugin-recovery-20260918.md).
+
+### Native plugin checks
+
+From a repository checkout, these commands verify both the contract and the
+exact cached payload used by Codex:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/Test-NativeCodexPluginContract.ps1
+powershell -ExecutionPolicy Bypass -File scripts/Test-NativeCodexPlugin.ps1 `
+  -PluginRoot "$env:USERPROFILE/.codex/plugins/cache/clusteryourcodex/cluster-your-codex/0.0.1"
+pnpm --filter @clusteryourcodex/codex-mcp test -- --run
+```
+
+The current recovery record is [`docs/native-plugin-cache-verification-20260919.md`](docs/native-plugin-cache-verification-20260919.md); it records the
+6-file cache check, the MCP `2025-06-18` / 8-tool probe, and the 48-test MCP
+suite. A failed cache check should be repaired, not bypassed.
 
 ## Platform status
 
