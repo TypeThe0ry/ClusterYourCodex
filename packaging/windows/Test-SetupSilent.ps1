@@ -955,7 +955,18 @@ function Invoke-SetupSilentBoundedProcess {
             $script:BoundedProcessTerminationUncertain = $true
             throw "$Label exited but its redirected output did not close within 30 seconds (pid=$($process.Id), taskkillExit=$taskKillExit)."
         }
-        $process.WaitForExit(30000) | Out-Null
+        $processExited = $false
+        try { $processExited = [bool]$process.WaitForExit(30000) } catch { $processExited = $false }
+        if (-not $processExited) {
+            $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+            $taskKillExit = -1
+            try {
+                & $taskKill /PID $process.Id /T /F *> $null
+                $taskKillExit = [int]$LASTEXITCODE
+            } catch { }
+            $script:BoundedProcessTerminationUncertain = $true
+            throw "$Label did not exit within 30 seconds after redirected output closed (pid=$($process.Id), taskkillExit=$taskKillExit)."
+        }
         $stdout = [string]$stdoutTask.GetAwaiter().GetResult()
         $stderr = [string]$stderrTask.GetAwaiter().GetResult()
         $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList $false
