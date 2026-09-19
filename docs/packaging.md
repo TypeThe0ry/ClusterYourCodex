@@ -183,9 +183,13 @@ powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   exact-five-file macOS Worker Kits containing `cyc-worker`,
   `install-worker.sh`, `worker-kit.json`, `worker-kit.sig`, and `SHA256SUMS`.
   The lifecycle script uses the macOS LaunchAgent/Application Support/Logs
-  contract, but managed execution remains `runtimeGated=true`,
-  `containmentReady=false`, and `liveReady=false` until a containment backend
-  and native live acceptance prove complete process-tree termination.
+  contract. The worker already implements a `MacosProcessGroup` backend with
+  native process-inventory and process-group checks; this implementation is
+  not evidence of a completed LaunchAgent/controller live acceptance run.
+  Published package readiness metadata remains `runtimeGated=true`,
+  `containmentReady=false`, and `liveReady=false` pending native live acceptance,
+  including complete process-tree termination. Do not interpret those metadata
+  flags as proof that the current worker binary has no macOS execution backend.
 - A future standalone Linux GUI installer may reuse the Worker Kit's systemd
   lifecycle and XDG state contract. A future standalone macOS GUI installer may
   reuse the now-packaged Worker Kit lifecycle; the lifecycle itself does not
