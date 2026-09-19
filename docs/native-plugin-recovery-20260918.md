@@ -1,5 +1,42 @@
 # Native Codex plugin recovery — 2026-09-18
 
+## 2026-09-19 reinstall verification
+
+The native repair path was rerun from the current repository after the desktop
+reported an incomplete built-in payload. The exact legacy skill directories
+(`clustor`, `cluster-orchestrator`, and `orchestrator`) were searched under the
+active Codex home and none remain. The installer then rebuilt the persistent
+marketplace, removed the existing native registration, and added
+`cluster-your-codex@clusteryourcodex` again.
+
+The installed cache now passes the six-file payload integrity check, includes
+the bundled Node runtime and license, and passes the MCP initialize/tools-list
+probe with protocol `2025-06-18` and all eight native tools. The MCP package
+suite passes 48/48 tests and the TypeScript production build succeeds.
+
+This verification uses the native Codex plugin registry and MCP bridge only;
+the removed legacy skill names are cleanup targets, not execution providers.
+
+## 2026-09-19 cache-repair follow-up
+
+The installer now removes the exact `cluster-your-codex@clusteryourcodex`
+registration before adding the rebuilt marketplace again. Codex caches local
+plugin payloads by plugin/version, so re-adding a damaged same-version entry
+could otherwise keep returning the opaque `payload missing or incomplete`
+error even when the marketplace source was complete. The installer also
+rejects a registration whose source path is not the freshly prepared native
+plugin and then runs the bundled-runtime MCP probe against the installed path.
+
+Verified on the local Windows controller:
+
+- native plugin registration: enabled, version `0.0.1`;
+- required payload files: 6/6 present and non-empty;
+- MCP protocol: `2025-06-18`;
+- MCP tools: 8 listed by the bundled Node runtime;
+- MCP package tests: 7 files, 48 tests passed;
+- active legacy `clustor`, `cluster-orchestrator`, and `orchestrator` skill
+  directories: 0.
+
 The desktop error `The built-in Codex plugin payload is missing or incomplete`
 was reproduced as an unregistered native plugin, not as an MCP bridge or
 payload integrity failure. The Codex CLI returned no
@@ -85,3 +122,44 @@ checkout:
 This confirms the repair path is native plugin registration plus integrity and
 MCP probes. It does not rely on a legacy orchestrator skill or a source-style
 plugin copy without its bundled runtime.
+
+## Re-registration after the desktop payload error — 2026-09-19
+
+The same local failure was reproduced after the Codex CLI no longer listed the
+native plugin. The repair command was rerun with `-Repair`, which moved the
+stale marketplace to a timestamped recoverable backup, rebuilt the bundled
+marketplace, removed legacy skill directories, and registered the native
+plugin again.
+
+Observed verification on the repaired machine:
+
+- `cluster-your-codex@clusteryourcodex`, version `0.0.1`, is installed and enabled;
+- the payload integrity probe passed for all six required files;
+- the native MCP bridge returned protocol `2025-06-18` and all eight tools;
+- no active `clustor`, `cluster-orchestrator`, or `orchestrator` directory remained;
+- the MCP package test suite passed: 7 files / 48 tests.
+
+This is the supported recovery for the desktop message “built-in Codex plugin
+payload is missing or incomplete”. It uses the native plugin registry and the
+bundled MCP runtime; legacy orchestrator skills are not part of the execution
+path.
+
+## Desktop verifier hardening — 2026-09-19
+
+The desktop verifier now uses the same completeness boundary as the native
+installer. A native registration is accepted only when the source contains a
+non-empty plugin skill, MCP bridge, bundled Node runtime, and
+`LICENSE.node.txt`, in addition to the manifests and bridge server. Missing
+skill or runtime-license files now return `integration_payload_unavailable`
+instead of allowing a partial payload to proceed.
+
+Regression evidence:
+
+- Rust integration tests: 35 passed;
+- native payload integrity: pass, 6/6 required files;
+- bundled MCP deployment probe: protocol `2025-06-18`, 8 tools;
+- MCP package tests: 7 files / 48 tests passed;
+- clean `-Repair` reinstall: plugin `cluster-your-codex@clusteryourcodex`,
+  version `0.0.1`, installed and enabled;
+- active legacy `clustor`, `cluster-orchestrator`, and `orchestrator` skill
+  directories: 0.

@@ -31,6 +31,15 @@ Registering the raw checkout can leave the copied plugin cache without the MCP S
 The normal packaged installer already includes these dependencies. Preparation
 does not install the desktop app or prove a worker job completed.
 
+Debug desktop builds do not include the signed Windows installer bundle. They
+use the same strict native-plugin validator when
+`CYC_CODEX_MARKETPLACE_ROOT` points at a prepared marketplace, or when the
+prepared marketplace is at `%USERPROFILE%\\.codex\\marketplaces\\clusteryourcodex`.
+The validator requires the marketplace and plugin manifests, MCP bridge,
+compiled server, bundled Node runtime, and runtime license. Release builds do
+not use this development fallback; they remain bound to the verified install
+manifest and packaged payload.
+
 1. Open ClusterYourCodex and inspect **Codex integration**.
 2. If prompted, select **Install/Repair Plugin**.
 3. Restart Codex once after a plugin or managed-instruction change.

@@ -87,10 +87,31 @@ $preparedPlugin = Join-Path $marketplace 'plugins/cluster-your-codex'
     -PluginRoot $preparedPlugin
 if ($LASTEXITCODE -ne 0) { throw 'Prepared native plugin failed integrity verification.' }
 
+# Codex caches local plugin payloads by marketplace/plugin/version.  Re-adding
+# the same version without removing it first can leave a stale partial cache in
+# place, which surfaces as "payload missing or incomplete" even when the source
+# marketplace is complete.  Remove the exact plugin registration first; a
+# missing registration is harmless and does not abort repair.
+& $codex plugin remove 'cluster-your-codex@clusteryourcodex' --json 2>$null
+if ($LASTEXITCODE -ne 0) {
+    # Older Codex builds return non-zero when the plugin is not installed.  The
+    # subsequent add is still the authoritative operation, so continue.
+    Write-Output 'No existing native plugin registration to remove; continuing with a clean add.'
+}
+
 & $codex plugin marketplace add $marketplace --json
 if ($LASTEXITCODE -ne 0) { throw 'Codex native marketplace registration failed.' }
-& $codex plugin add 'cluster-your-codex@clusteryourcodex' --json
-if ($LASTEXITCODE -ne 0) { throw 'Codex native plugin installation failed.' }
+$addOutput = & $codex plugin add 'cluster-your-codex@clusteryourcodex' --json 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0) { throw "Codex native plugin installation failed: $addOutput" }
+$addRecord = $addOutput | ConvertFrom-Json
+$installedCacheRoot = [string]$addRecord.installedPath
+if ([string]::IsNullOrWhiteSpace($installedCacheRoot)) {
+    throw 'Codex native plugin installation returned no installedPath; refusing an unverified cache.'
+}
+$installedCacheRoot = [System.IO.Path]::GetFullPath($installedCacheRoot)
+if (-not (Test-Path -LiteralPath $installedCacheRoot -PathType Container)) {
+    throw "Codex native plugin cache does not exist: $installedCacheRoot"
+}
 
 $registration = & $codex plugin list --json | ConvertFrom-Json
 $installed = @(@($registration.installed) | Where-Object {
@@ -100,13 +121,24 @@ $installed = @(@($registration.installed) | Where-Object {
 if ($installed.Count -ne 1) { throw 'Native plugin registration is missing or disabled.' }
 
 $installedRoot = [System.IO.Path]::GetFullPath([string]$installed[0].source.path)
+if (-not ($installedRoot -eq [System.IO.Path]::GetFullPath($preparedPlugin))) {
+    throw "Codex registered an unexpected native plugin source: $installedRoot"
+}
 & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
     -File (Join-Path $repo 'scripts/Test-NativeCodexPlugin.ps1') `
     -PluginRoot $installedRoot
 if ($LASTEXITCODE -ne 0) { throw 'Installed native plugin failed integrity verification.' }
 
-$node = Join-Path $installedRoot 'mcp/runtime/node.exe'
-$mcp = Join-Path $installedRoot 'mcp'
+# Codex executes the copied cache payload, not the marketplace source. Verify
+# that exact cache path as well; a successful registration with a truncated
+# cache must never be reported as a healthy install.
+& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+    -File (Join-Path $repo 'scripts/Test-NativeCodexPlugin.ps1') `
+    -PluginRoot $installedCacheRoot
+if ($LASTEXITCODE -ne 0) { throw 'Codex plugin cache failed integrity verification.' }
+
+$node = Join-Path $installedCacheRoot 'mcp/runtime/node.exe'
+$mcp = Join-Path $installedCacheRoot 'mcp'
 & $node (Join-Path $repo 'packaging/windows/Test-McpDeployment.mjs') $mcp
 if ($LASTEXITCODE -ne 0) { throw 'Installed native MCP bridge failed the tools-list probe.' }
 
@@ -115,5 +147,6 @@ Write-Output ([ordered]@{
     status = 'pass'
     marketplaceRoot = $marketplace
     installedRoot = $installedRoot
+    installedCacheRoot = $installedCacheRoot
     pluginId = 'cluster-your-codex@clusteryourcodex'
 } | ConvertTo-Json -Compress)

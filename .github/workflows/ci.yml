@@ -56,6 +56,9 @@ jobs:
       - name: Run Issue #5 native selector guard unit tests
         shell: powershell
         run: python .\scripts\test_issue5_selector_guard.py
+      - name: Verify native Codex plugin install contract
+        shell: powershell
+        run: .\scripts\Test-NativeCodexPluginContract.ps1
       - name: Run Windows controller/worker round-trip contract tests
         shell: powershell
         run: >-
@@ -236,10 +239,11 @@ jobs:
     name: Desktop, Windows host, and Codex bridge
     needs: [version-identity]
     runs-on: windows-latest
-    # Keep a wedged hosted runner from leaving the required check pending
-    # indefinitely. The round-trip script has its own bounded lifecycle
-    # deadlines; this is only the outer safety net for toolchain startup.
-    timeout-minutes: 45
+    # Windows hosted runners can spend 30+ minutes on a cold Tauri/OpenSSL
+    # dependency graph before the live round-trip starts. Keep a finite outer
+    # bound, but leave enough budget for the complete required check instead
+    # of canceling a healthy compiler process at the old 45-minute ceiling.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
@@ -272,10 +276,20 @@ jobs:
         # the observed cold-start cost so the check reports compiler failures
         # instead of being killed mid-build.
         timeout-minutes: 20
-        run: pnpm --filter @clusteryourcodex/desktop native:check
+        shell: pwsh
+        run: >-
+          ./scripts/Invoke-BoundedWindowsProcess.ps1
+          -FilePath (Get-Command cargo.exe -CommandType Application).Source
+          -ArgumentList 'check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml'
+          -TimeoutSeconds 900 -WorkingDirectory $PWD -EvidenceRoot $env:RUNNER_TEMP
       - name: Test desktop Rust host
         timeout-minutes: 15
-        run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -- --test-threads=1
+        shell: pwsh
+        run: >-
+          ./scripts/Invoke-BoundedWindowsProcess.ps1
+          -FilePath (Get-Command cargo.exe -CommandType Application).Source
+          -ArgumentList 'test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -- --test-threads=1'
+          -TimeoutSeconds 840 -WorkingDirectory $PWD -EvidenceRoot $env:RUNNER_TEMP
       - name: Lint desktop Rust host
         timeout-minutes: 10
         run: cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
@@ -292,7 +306,7 @@ jobs:
           powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
           -File .\packaging\worker-kits\Test-WorkerKits.ps1
       - name: Run Windows controller/worker live round trip
-        timeout-minutes: 12
+        timeout-minutes: 25
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'

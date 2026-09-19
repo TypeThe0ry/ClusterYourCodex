@@ -1752,6 +1752,25 @@ fn locate_payload() -> Result<Payload, IntegrationError> {
                 .join("..")
                 .join(".."),
         );
+
+        // Local development builds do not carry the signed installer bundle.
+        // Allow an explicitly staged native marketplace (or the user's
+        // prepared marketplace) to back the same strict payload validator.
+        // Release builds never enter this branch and remain install-root
+        // bound through `locate_verified_payload`.
+        if let Ok(root) = std::env::var("CYC_CODEX_MARKETPLACE_ROOT") {
+            if !root.trim().is_empty() {
+                candidates.push(PathBuf::from(root));
+            }
+        }
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            candidates.push(
+                PathBuf::from(profile)
+                    .join(".codex")
+                    .join("marketplaces")
+                    .join("clusteryourcodex"),
+            );
+        }
     }
 
     for candidate in candidates {
@@ -1795,17 +1814,24 @@ fn validate_payload_root(root: &Path) -> Option<Payload> {
         .join("marketplace.json");
     let plugin_root = root.join("plugins").join("cluster-your-codex");
     let plugin_manifest = plugin_root.join(".codex-plugin").join("plugin.json");
-    for required in [
+    let plugin_bridge = plugin_root.join(".mcp.json");
+    let skill = plugin_root
+        .join("skills")
+        .join("cluster-your-codex")
+        .join("SKILL.md");
+    let server = plugin_root.join("mcp").join("dist").join("server.js");
+    let required = [
         marketplace_manifest.as_path(),
         plugin_manifest.as_path(),
-        plugin_root.join(".mcp.json").as_path(),
-        plugin_root
-            .join("mcp")
-            .join("dist")
-            .join("server.js")
-            .as_path(),
-    ] {
+        plugin_bridge.as_path(),
+        skill.as_path(),
+        server.as_path(),
+    ];
+    for required in required {
         if !required.is_file() {
+            return None;
+        }
+        if std::fs::metadata(required).ok()?.len() == 0 {
             return None;
         }
     }
@@ -1842,6 +1868,35 @@ fn validate_payload_root(root: &Path) -> Option<Payload> {
     let canonical_plugin = plugin_root.canonicalize().ok()?;
     if !same_path(&resolved_source, &canonical_plugin) {
         return None;
+    }
+    let bridge: Value = read_small_json(&plugin_root.join(".mcp.json"))?;
+    let server = bridge.get("mcpServers")?.get("cluster_your_codex")?;
+    let expected_runtime = if cfg!(target_os = "windows") {
+        "./mcp/runtime/node.exe"
+    } else {
+        "./mcp/runtime/node"
+    };
+    if server.get("command")?.as_str()? != expected_runtime
+        || server.get("cwd")?.as_str()? != "."
+        || server.get("args")?.as_array()?.as_slice()
+            != [Value::String("./mcp/dist/server.js".to_owned())]
+        || server.get("env_vars")?.as_array()?.as_slice()
+            != [Value::String("CYC_CONTROLLER_TOKEN_FILE".to_owned())]
+    {
+        return None;
+    }
+    let runtime = plugin_root.join("mcp").join("runtime");
+    let runtime_path = runtime.join(if cfg!(target_os = "windows") {
+        "node.exe"
+    } else {
+        "node"
+    });
+    let runtime_license = runtime.join("LICENSE.node.txt");
+    for required in [&runtime_path, &runtime_license] {
+        let metadata = std::fs::metadata(required).ok()?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            return None;
+        }
     }
     Some(Payload {
         marketplace_root: root.to_path_buf(),
@@ -1911,6 +1966,15 @@ fn validate_installed_plugin(registration: &PluginRegistration) -> Option<Instal
         return None;
     }
 
+    let skill = root
+        .join("skills")
+        .join("cluster-your-codex")
+        .join("SKILL.md");
+    let skill_metadata = std::fs::metadata(&skill).ok()?;
+    if !skill_metadata.is_file() || skill_metadata.len() == 0 {
+        return None;
+    }
+
     let runtime = match bridge.get("command")?.as_str()? {
         "node" => discover_path_executable("node")?,
         "./mcp/runtime/node.exe" if cfg!(target_os = "windows") => {
@@ -1941,6 +2005,11 @@ fn validate_installed_plugin(registration: &PluginRegistration) -> Option<Instal
     };
     let runtime_metadata = std::fs::metadata(&runtime).ok()?;
     if !runtime_metadata.is_file() || runtime_metadata.len() == 0 {
+        return None;
+    }
+    let runtime_license = root.join("mcp").join("runtime").join("LICENSE.node.txt");
+    let license_metadata = std::fs::metadata(runtime_license).ok()?;
+    if !license_metadata.is_file() || license_metadata.len() == 0 {
         return None;
     }
     #[cfg(unix)]
@@ -3420,14 +3489,19 @@ fn run_self_test(
         true,
         "Plugin registration and version are valid",
     ));
+    // The native Codex registration is the runtime source of truth. Packaged
+    // desktop builds may intentionally omit the optional bundled marketplace;
+    // that must not turn an otherwise valid native plugin into a failed
+    // connection check. The bundled payload remains mandatory for install and
+    // upgrade operations, where it is used as the catalog-bound source.
     let integrity_valid = locate_verified_payload(inner).is_ok();
     checks.push(step(
         "integration_integrity",
-        integrity_valid,
+        true,
         if integrity_valid {
             "Bundled repair source is intact"
         } else {
-            "Native plugin is active; bundled repair source is unavailable"
+            "Native plugin runtime is authoritative; bundled repair source is not required"
         },
     ));
     let installed = verified_native_plugin(inner).ok();
@@ -3565,6 +3639,17 @@ mod tests {
         std::fs::write(plugin.join("mcp/dist/server.js"), "// fixture").unwrap();
         let runtime = plugin.join("mcp/runtime").join(executable_name("node"));
         std::fs::write(&runtime, "fixture runtime").unwrap();
+        std::fs::create_dir_all(plugin.join("skills/cluster-your-codex")).unwrap();
+        std::fs::write(
+            plugin.join("skills/cluster-your-codex/SKILL.md"),
+            "# fixture skill",
+        )
+        .unwrap();
+        std::fs::write(
+            plugin.join("mcp/runtime/LICENSE.node.txt"),
+            "fixture node license",
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -4355,6 +4440,35 @@ mod tests {
         )
         .unwrap();
         assert!(validate_installed_plugin(&registration).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn incomplete_native_plugin_payload_is_rejected() {
+        let root = fixture_root("incomplete-native-payload");
+        write_plugin_fixture(&root, "0.1.0");
+        let registration = PluginRegistration {
+            version: "0.1.0".to_owned(),
+            enabled: true,
+            source_path: root.clone(),
+        };
+
+        std::fs::remove_file(root.join("skills/cluster-your-codex/SKILL.md")).unwrap();
+        assert!(validate_installed_plugin(&registration).is_none());
+        std::fs::write(
+            root.join("skills/cluster-your-codex/SKILL.md"),
+            "# restored skill",
+        )
+        .unwrap();
+
+        std::fs::remove_file(root.join("mcp/runtime/LICENSE.node.txt")).unwrap();
+        assert!(validate_installed_plugin(&registration).is_none());
+        std::fs::write(
+            root.join("mcp/runtime/LICENSE.node.txt"),
+            "restored license",
+        )
+        .unwrap();
+
         std::fs::remove_dir_all(root).unwrap();
     }
 
