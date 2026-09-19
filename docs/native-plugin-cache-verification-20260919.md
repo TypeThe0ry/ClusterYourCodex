@@ -83,3 +83,15 @@ The post-repair evidence was:
 
 This confirms the repair path uses the native plugin and its bundled runtime;
 legacy orchestrator skills are neither installed nor used as a fallback.
+
+## Follow-up verification at 10:52 local time
+
+The repair command completed again with exit code 0, preserving the previous
+marketplace as `clusteryourcodex.incomplete-20260919-105210`. Source and cache
+checks passed (6 required files each), the MCP handshake returned 8 tools,
+and `codex plugin list --json` confirmed the exact plugin installed and enabled.
+At 10:53 the MCP suite passed all 48 tests across 7 files; the native install
+contract check also passed. No legacy skill was found or moved in this run.
+
+These checks prove registration, payload structure, and MCP startup, not a
+successful remote job or that an already-open desktop error has disappeared.

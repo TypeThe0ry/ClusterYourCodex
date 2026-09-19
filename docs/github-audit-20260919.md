@@ -14,12 +14,27 @@ These are acceptance trackers, not stale implementation tickets. Closing them
 would make the stable-readiness record inaccurate, so the current evidence was
 added to the issue threads instead.
 
-## Open pull requests
+## Pull-request dispositions
 
 | Item | Decision | Reason |
 | --- | --- | --- |
 | [#94 native plugin recovery docs](https://github.com/TypeThe0ry/ClusterYourCodex/pull/94) | Superseded | Its documentation is retained and updated on the current branch; the later #96 integration contract covers the active installer/test path. |
-| [#96 native plugin cleanup and MCP contract](https://github.com/TypeThe0ry/ClusterYourCodex/pull/96) | Merge candidate | It is the active implementation line. CI and Windows Setup acceptance must finish before merge. |
+| [#96 native plugin cleanup and MCP contract](https://github.com/TypeThe0ry/ClusterYourCodex/pull/96) | Merged | GitHub reports merge commit `cc6452b2c365523b056f11fa9af7feb747e3545c`, merged at 2026-09-19 02:11:28 UTC. |
+| [#97 native plugin repair record](https://github.com/TypeThe0ry/ClusterYourCodex/pull/97) | Open; auto-merge enabled | At the follow-up audit, head `728b488` had 17 successful checks and one running desktop check. Run `35416205713`, job `105825486622`, was executing managed-worker-kit validation. This is not evidence of a failure or a completed merge. |
+
+## Acceptance versus release gates
+
+Issue #2 explicitly requires the desktop/tray, native controller proxy,
+per-user tasks, SID ACLs, bundled MCP/marketplace, reversible install lifecycle,
+and a clean Windows 11 VM smoke. Production Authenticode and signed upgrade
+evidence are additional GA requirements in `docs/packaging.md`, not additional
+checkboxes in the issue body. The missing clean-VM lifecycle evidence alone
+is sufficient to keep the issue open.
+
+Issue #3 explicitly requires Linux systemd and macOS LaunchAgent packages,
+three platform artifacts, native shells/process groups, path/ACL tests, and a
+live macOS run. Building a macOS kit on a hosted runner does not prove the last
+requirement. Neither issue is obsolete or superseded.
 
 ## Current native-plugin evidence
 
