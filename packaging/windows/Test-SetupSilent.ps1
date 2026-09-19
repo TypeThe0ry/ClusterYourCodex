@@ -937,7 +937,25 @@ function Invoke-SetupSilentBoundedProcess {
             }
             throw "$Label timed out after $TimeoutSeconds seconds (pid=$($process.Id))."
         }
-        $process.WaitForExit()
+        # A child that outlives the launcher can inherit the redirected pipe
+        # handles.  The launcher then exits, but ReadToEndAsync never
+        # completes and the hosted runner hangs until the job timeout.  Keep
+        # collection bounded and retain the same process-tree termination
+        # guarantee used by the lifecycle timeout path.
+        $outputReady = $stdoutTask.Wait(30000) -and $stderrTask.Wait(30000)
+        if (-not $outputReady) {
+            $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+            $taskKillExit = -1
+            try {
+                & $taskKill /PID $process.Id /T /F *> $null
+                $taskKillExit = [int]$LASTEXITCODE
+            } catch { }
+            try { [void]$stdoutTask.Wait(30000) } catch { }
+            try { [void]$stderrTask.Wait(30000) } catch { }
+            $script:BoundedProcessTerminationUncertain = $true
+            throw "$Label exited but its redirected output did not close within 30 seconds (pid=$($process.Id), taskkillExit=$taskKillExit)."
+        }
+        $process.WaitForExit(30000) | Out-Null
         $stdout = [string]$stdoutTask.GetAwaiter().GetResult()
         $stderr = [string]$stderrTask.GetAwaiter().GetResult()
         $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList $false

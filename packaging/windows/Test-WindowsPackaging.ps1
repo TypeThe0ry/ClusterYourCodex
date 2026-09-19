@@ -4976,6 +4976,8 @@ exit 0
     Assert-True ($setupSilentSource -match 'Invoke-SetupSilentProbes[\s\S]+Stop-SetupSilentOwnedProcesses[\s\S]+before Repair tamper') 'silent Setup smoke reaps probe processes before mutating the installed CLI'
     Assert-True ($setupSilentSource -match 'Get-ScheduledTask[\s\S]+Stop-ScheduledTask[\s\S]+installPrefix') 'silent Setup smoke stops only disposable install owned Scheduled Tasks before reaping processes'
     Assert-True ($setupSilentSource -match 'Re-enumerate after every termination[\s\S]+deadline[\s\S]+AddSeconds\(20\)') 'silent Setup smoke closes the Scheduled Task restart race with bounded process re-enumeration'
+    Assert-True ($setupSilentSource -match 'outputReady\s*=\s*\$stdoutTask\.Wait\(30000\)[\s\S]+redirected output did not close within 30 seconds') 'silent Setup smoke bounds redirected-output collection when a descendant inherits the pipe'
+    Assert-True ($setupSilentSource -notmatch 'while \(\$true\)[\s\S]+ReadToEndAsync\(\)\.GetAwaiter\(\)\.GetResult\(\)') 'silent Setup smoke has no unbounded redirected-output wait loop'
     Assert-True ($setupSilentSource -match 'EnvironmentVariables[\s\S]+CYC_SETUP_DIAGNOSTIC_LOG') 'silent Setup smoke injects the structured lifecycle diagnostic path into Setup.exe'
     Assert-True ($setupSilentSource -match 'Read-SetupSilentJson[\s\S]+ReadAllBytes[\s\S]+UTF8Encoding\(\$false,\s*\$true\)') 'silent Setup reads lifecycle diagnostics as strict UTF-8 independently of the Windows ANSI code page'
     Assert-True ($setupSilentSource -match 'Read-SetupSilentJson[\s\S]+\$offset[\s\S]+0xEF[\s\S]+0xBB[\s\S]+0xBF') 'silent Setup accepts both BOM-bearing and BOM-less strict UTF-8 JSON'
