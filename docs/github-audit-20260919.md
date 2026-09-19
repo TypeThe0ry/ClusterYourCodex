@@ -24,6 +24,9 @@ added to the issue threads instead.
 ## Current native-plugin evidence
 
 - `cluster-your-codex@clusteryourcodex`, version `0.0.1`, installed and enabled;
+- local marketplace registration is present after a clean remove-before-add
+  recovery; `codex plugin marketplace list` reports `clusteryourcodex` and the
+  installed record points to that local source;
 - native payload integrity: 6/6 required files present and non-empty;
 - MCP probe: protocol `2025-06-18`, 8 tools;
 - MCP package tests: 7 files / 48 tests passed;
