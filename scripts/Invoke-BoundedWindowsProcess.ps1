@@ -23,7 +23,16 @@ $argumentString = ($ArgumentList -join ' ')
 $process = Start-Process -FilePath $resolvedFile -ArgumentList $argumentString `
         -WorkingDirectory $resolvedWork -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+    $completed = $false
+    do {
+        $completed = [bool]$process.WaitForExit(5000)
+        if (-not $completed) {
+            $remaining = [Math]::Max(0, [Math]::Ceiling(($deadline - [DateTimeOffset]::UtcNow).TotalSeconds))
+            Write-Output "bounded process still running: pid=$($process.Id), remainingSeconds=$remaining"
+        }
+    } while (-not $completed -and [DateTimeOffset]::UtcNow -lt $deadline)
+    if (-not $completed) {
         $taskkill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
         $killExit = 1
         if (Test-Path -LiteralPath $taskkill -PathType Leaf) {
