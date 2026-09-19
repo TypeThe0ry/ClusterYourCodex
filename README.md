@@ -15,7 +15,7 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 | Goal | Action |
 | --- | --- |
 | Use the published baseline | Install [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1) |
-| Use the current Codex integration | Install the [latest prerelease](https://github.com/TypeThe0ry/ClusterYourCodex/releases) and run **Repair** once |
+| Use the current Codex integration fix | Use the [source-checkout repair](#codex-plugin-integrity); the published preview predates this fix |
 | Recover a broken native plugin | Run the [one-command repair](#codex-plugin-integrity) below |
 | Verify a checkout | Run the [native plugin checks](#native-plugin-checks) |
 
@@ -34,7 +34,7 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 | You need | Use | What it means |
 | --- | --- | --- |
 | A published baseline | [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1) | Immutable stable assets; no native-plugin recovery fixes |
-| The current Windows/Codex integration | [latest prerelease](https://github.com/TypeThe0ry/ClusterYourCodex/releases) | Native plugin registration, repair, MCP probes, and ongoing acceptance work |
+| A published preview | [v0.1.0-preview.102](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.102) | Latest published preview as of 2026-09-19; predates the native-plugin repair below |
 | Source development | `main` or a feature branch | Run the checks below before packaging; do not call a preview stable |
 
 For installation fixes and their verification, see the
@@ -76,13 +76,17 @@ Windows binaries are currently code-unsigned; verify the sidecar before running 
 The current Windows installer and integration-preview pipeline ship the native
 `cluster-your-codex@clusteryourcodex` plugin with its private Node runtime. The
 installer validates the manifest, MCP bridge, runtime, marketplace binding, and
-file hashes before registering the plugin. These fixes are in the current
-prerelease candidate; the published `v0.0.1` assets are unchanged. If Codex
-reports that the payload is missing or incomplete, install the newest candidate
-and run the desktop **Repair** action; do not copy a plugin directory from a
+file hashes before registering the plugin. The recovery fixes are in the
+repository, not the published `v0.0.1` or `v0.1.0-preview.102` assets. As of
+2026-09-19, installing the latest published preview is not a verified remedy
+for this error. Use the source-checkout repair below until an installer built
+from the corrected source is published; do not copy a plugin directory from a
 different build.
 
-For a source-checkout recovery, use the native Codex CLI registration path. Keep
+For a source-checkout recovery, use an up-to-date checkout with the documented
+development dependencies installed and run from its root. This path requires
+build tools; it is not the dependency-free Setup experience. Use the native
+Codex CLI registration path. Keep
 the generated marketplace under a persistent Codex-owned directory; a temporary
 marketplace can be deleted by cleanup jobs and make an otherwise healthy plugin
 look missing on the next launch:

@@ -38,6 +38,12 @@ requirement. Neither issue is obsolete or superseded.
 
 ## Current native-plugin evidence
 
+Release inventory rechecked on 2026-09-19: the latest published preview is
+`v0.1.0-preview.102` (published 2026-09-14 21:23:53 UTC), whose source does not
+contain merge `cc6452b`. README now points users to source-checkout repair
+instead of claiming that the latest published preview contains this fix.
+No release asset or tag was changed for this documentation correction.
+
 - `cluster-your-codex@clusteryourcodex`, version `0.0.1`, installed and enabled;
 - local marketplace registration is present after a clean remove-before-add
   recovery; `codex plugin marketplace list` reports `clusteryourcodex` and the
