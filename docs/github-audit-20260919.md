@@ -30,6 +30,11 @@ added to the issue threads instead.
 - native payload integrity: 6/6 required files present and non-empty;
 - MCP probe: protocol `2025-06-18`, 8 tools;
 - MCP package tests: 7 files / 48 tests passed;
+- 2026-09-19 10:17 local rerun: forced repair moved the previous marketplace
+  aside, rebuilt the native payload, verified the exact installed cache, and
+  passed the 8-tool MCP probe again;
+- the active Codex roots were checked after cleanup and contain no legacy
+  `clustor`, `cluster-orchestrator`, or `orchestrator` skill directories;
 - desktop Rust integration tests: 35 passed;
 - active legacy `clustor`, `cluster-orchestrator`, and `orchestrator` skill
   directories: 0.

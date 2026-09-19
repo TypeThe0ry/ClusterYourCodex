@@ -38,3 +38,25 @@ tests. The previous marketplace tree was retained as a timestamped
 
 The installed plugin remains native-only. Legacy orchestrator names are
 cleanup targets and are not execution providers.
+
+## Current rerun
+
+At 2026-09-19 10:17 (local time), the recovery path was run again with
+`-Repair` against the persistent Codex marketplace. The previous marketplace
+was moved to a timestamped recoverable backup before preparation. The rerun
+confirmed all of the following:
+
+- the active Codex home contains no `clustor`, `cluster-orchestrator`, or
+  `orchestrator` skill directory;
+- the native registration is installed and enabled as
+  `cluster-your-codex@clusteryourcodex`;
+- the exact Codex cache path returned by `plugin add` passes the 6-file
+  integrity check;
+- the bundled Node runtime starts the MCP bridge and exposes all 8 native
+  fleet tools; and
+- the MCP package suite passes 7 files / 48 tests.
+
+This is the supported repair path for the desktop error that reports a missing
+or incomplete built-in Codex plugin payload. It removes the stale registration
+before adding the rebuilt native plugin and validates the copied cache rather
+than trusting the marketplace source alone.
