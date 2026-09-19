@@ -41,7 +41,7 @@ cleanup targets and are not execution providers.
 
 ## Current rerun
 
-At 2026-09-19 10:17 (local time), the recovery path was run again with
+At 2026-09-19 10:34 (local time), the recovery path was run again with
 `-Repair` against the persistent Codex marketplace. The previous marketplace
 was moved to a timestamped recoverable backup before preparation. The rerun
 confirmed all of the following:
@@ -60,3 +60,26 @@ This is the supported repair path for the desktop error that reports a missing
 or incomplete built-in Codex plugin payload. It removes the stale registration
 before adding the rebuilt native plugin and validates the copied cache rather
 than trusting the marketplace source alone.
+
+## Latest repair rerun
+
+At 2026-09-19 10:34 (local time), the same `-Repair` flow was rerun after the
+desktop reported that the built-in plugin payload was missing or incomplete.
+The command completed with exit code 0. It moved the previous marketplace to
+`clusteryourcodex.incomplete-20260919-103449`, rebuilt the persistent native
+marketplace, removed and re-added the exact plugin registration, and returned
+the cache path under
+`~/.codex/plugins/cache/clusteryourcodex/cluster-your-codex/0.0.1`.
+
+The post-repair evidence was:
+
+- `codex plugin list --json`: the native plugin is installed and enabled;
+- `codex plugin marketplace list --json`: `clusteryourcodex` is registered;
+- source and cache integrity: 6/6 required files present and non-empty;
+- MCP deployment probe: protocol `2025-06-18`, all 8 native fleet tools;
+- MCP package suite: 7 files and 48 tests passed; and
+- active Codex roots: zero legacy `clustor`, `cluster-orchestrator`, or
+  `orchestrator` skill directories.
+
+This confirms the repair path uses the native plugin and its bundled runtime;
+legacy orchestrator skills are neither installed nor used as a fallback.
