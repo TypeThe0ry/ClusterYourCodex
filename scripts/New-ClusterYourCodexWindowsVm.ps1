@@ -45,8 +45,10 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $diskPath -PathType Lea
     Fail "VMware virtual disk creation failed (exit $LASTEXITCODE)."
 }
 
-$isoEscaped = $IsoPath.Replace('\', '\\')
-$diskEscaped = $diskPath.Replace('\', '\\')
+# VMware Workstation's VMX parser expects native Windows paths. Do not JSON-style
+# escape backslashes here; doubled separators make the guest disk/ISO unresolved.
+$isoEscaped = $IsoPath
+$diskEscaped = $diskPath
 $vmx = @"
 .encoding = "UTF-8"
 config.version = "8"
