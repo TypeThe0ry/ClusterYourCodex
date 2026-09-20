@@ -15,6 +15,11 @@ function Fail([string]$Message) {
     exit 2
 }
 
+function Write-Utf8NoBom([string]$Path, [string]$Content) {
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Content, $encoding)
+}
+
 $vmwareRoot = 'C:\Program Files\VMware\VMware Workstation'
 $vdisk = Join-Path $vmwareRoot 'vmware-vdiskmanager.exe'
 $vmrun = Join-Path $vmwareRoot 'vmrun.exe'
@@ -67,7 +72,7 @@ usb.present = "TRUE"
 tools.syncTime = "FALSE"
 snapshot.disabled = "FALSE"
 "@
-Set-Content -LiteralPath $vmxPath -Value $vmx -Encoding utf8NoBOM
+Write-Utf8NoBom -Path $vmxPath -Content $vmx
 
 $metadata = [ordered]@{
     schemaVersion = 1
@@ -79,5 +84,5 @@ $metadata = [ordered]@{
     vmrun = $vmrun
     state = 'created-not-started'
 }
-$metadata | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $VmRoot 'acceptance-vm.json') -Encoding utf8NoBOM
+$metadata | ConvertTo-Json | ForEach-Object { Write-Utf8NoBom -Path (Join-Path $VmRoot 'acceptance-vm.json') -Content $_ }
 Write-Output ("Created VM configuration: {0}`nISO SHA-256: {1}`nStart after review: vmrun -T ws start `"{0}`" gui" -f $vmxPath, $metadata.isoSha256)
