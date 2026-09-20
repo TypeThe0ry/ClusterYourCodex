@@ -31,4 +31,6 @@ The first bootstrap attempt exposed two Windows PowerShell/VMX portability defec
 1. `utf8NoBOM` is not a valid `Set-Content -Encoding` value in Windows PowerShell 5.1. The helper now writes UTF-8 without BOM through `System.IO.File`.
 2. VMX paths must use native Windows separators; JSON-style doubled backslashes made the disk/ISO unresolved. The helper now emits native paths.
 
-Both fixes are included in PR #99. The VM is powered on, but Windows installation and the full clean-VM lifecycle acceptance remain separate steps and are not claimed by this bootstrap record.
+Both fixes are included in PR #99. The VM was initially powered on, but later console/log inspection found an EFI CD-ROM boot timeout, VMware `Transport (VMDB) error -14`, and `No operating system was found`. `vmrun list` therefore proves only that the VMware process was registered, not that the guest booted. Windows installation and the full clean-VM lifecycle acceptance remain separate steps and are not claimed by this bootstrap record.
+
+The current VM state is a reproducible bootstrap failure requiring a new start/ISO attachment check before guest installation can proceed. No ClusterYourCodex installer was run inside the guest, and no clean-VM install, repair, rollback, upgrade, or uninstall result is recorded here.

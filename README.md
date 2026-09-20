@@ -35,19 +35,19 @@ The green cards above are backed by repeatable checks, not a decorative claim:
 
 This distinction keeps the README useful: a passing package test proves the package contract, while a clean-VM or live-worker claim requires the corresponding runtime evidence.
 
-### Latest candidate test effect
+### Recorded candidate test results
 
-The current PR candidate is validated by [CI run 35482026938](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35482026938). The visible result is intentionally split by evidence layer:
+The following snapshot refers to commit `c5123d5` and [CI run 35482026938](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35482026938), not every later candidate. That run was superseded and cancelled after a documentation update. Consult the [PR checks](https://github.com/TypeThe0ry/ClusterYourCodex/pull/99/checks) for the current head.
 
 | Test layer | Current result | What was observed |
 | --- | --- | --- |
 | Rust controller/workspace | PASS | Windows, Ubuntu, and macOS jobs completed successfully |
 | Native Worker Kits | PASS | Linux x64 plus macOS x64/arm64 package checks completed |
 | Security and dependency gates | PASS | CodeQL, RustSec, Cargo deny, and pnpm audit completed |
-| Windows controller/bridge job | RUNNING | The live controller/worker step is still executing in the hosted runner |
-| D-drive VMware acceptance | BOOTSTRAPPED | Windows 11 ISO hash and VM power-on are recorded in [`docs/vmware-acceptance-20260920.md`](docs/vmware-acceptance-20260920.md); guest install/repair/rollback is not yet claimed |
+| Windows controller/bridge job | INCOMPLETE | The run was cancelled before this job completed; no passing result is claimed for this snapshot |
+| D-drive VMware acceptance | BOOTSTRAP ONLY | ISO hash and VM power-on are recorded in [`docs/vmware-acceptance-20260920.md`](docs/vmware-acceptance-20260920.md). Subsequent inspection found an EFI CD-ROM boot timeout and `No operating system was found`; guest installation has not been verified |
 
-This is the test effect users should expect: green checks are linked to reproducible CI output, while orange acceptance items remain visible until their runtime evidence exists. The status graphic above is generated from this same evidence split.
+The diagrams summarize the evidence categories; they are not application screenshots or an automatically refreshed test dashboard. Runtime acceptance remains open until the corresponding evidence is recorded.
 
 | Area | State | Evidence |
 | --- | --- | --- |
