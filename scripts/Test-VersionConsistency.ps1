@@ -266,6 +266,18 @@ function Assert-CycReleaseWorkflowIdentity {
         }
     }
 
+    # Keep the provenance contract coupled to the workflow instead of pinning a
+    # historical commit SHA in this test. Dependabot (or a security refresh)
+    # may legitimately advance the action revision; the workflow itself remains
+    # the source of truth and must still use an immutable 40-hex commit pin.
+    $provenancePin = [System.Text.RegularExpressions.Regex]::Match(
+        $workflow,
+        '(?m)^\s*uses:\s*actions/attest-build-provenance@(?<sha>[0-9a-f]{40})\s+#\s*v3\.2\.0\s*$'
+    )
+    if (-not $provenancePin.Success) {
+        throw 'Release workflow must pin actions/attest-build-provenance v3.2.0 to an immutable commit SHA.'
+    }
+
     foreach ($requiredReleaseContract in @(
         'macos-x86_64',
         'macos-aarch64',
@@ -279,8 +291,7 @@ function Assert-CycReleaseWorkflowIdentity {
         'unattested = -not $taggedForAttestation',
         'provenanceSubjectRoot',
         'subject-path: provenance-subjects/*',
-        'bundleSha256 = $bundleHash',
-        'actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f'
+        'bundleSha256 = $bundleHash'
     )) {
         if (-not $workflow.Contains($requiredReleaseContract)) {
             throw "Release workflow is missing its macOS/SBOM/provenance contract: $requiredReleaseContract"
