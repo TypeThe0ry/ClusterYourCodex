@@ -97,8 +97,10 @@ sata0:1.present = "TRUE"
 sata0:1.deviceType = "cdrom-image"
 sata0:1.fileName = "$isoEscaped"
 sata0:1.startConnected = "TRUE"
-tpm.present = "TRUE"
-tpm.type = "software"
+# Workstation-managed software vTPM provisioning. Workstation creates the
+# required protected TPM state when the VM is first opened; do not hand-edit
+# encryption keys or put a password in this script or its metadata.
+managedVM.autoAddVTPM = "software"
 ethernet0.present = "TRUE"
 ethernet0.connectionType = "nat"
 usb.present = "TRUE"
@@ -115,6 +117,7 @@ $metadata = [ordered]@{
     isoSha256 = (Get-FileHash -LiteralPath $iso.FullName -Algorithm SHA256).Hash
     disk = $diskPath
     vmrun = $vmrun
+    tpmProvisioning = 'vmware-managed-software'
     state = 'created-not-started'
 }
 $metadata | ConvertTo-Json | ForEach-Object { Write-Utf8NoBom -Path $metadataPath -Content $_ }
