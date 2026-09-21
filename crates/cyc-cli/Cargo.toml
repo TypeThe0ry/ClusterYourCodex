@@ -26,7 +26,7 @@ uuid.workspace = true
 walkdir = "2.5"
 x509-parser = { version = "0.17", features = ["verify"] }
 zeroize.workspace = true
-zstd = "0.13"
+zstd = "0.14"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
