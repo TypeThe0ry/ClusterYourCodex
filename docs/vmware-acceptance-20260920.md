@@ -34,3 +34,21 @@ The first bootstrap attempt exposed two Windows PowerShell/VMX portability defec
 Both fixes are included in PR #99. The VM was initially powered on, but later console/log inspection found an EFI CD-ROM boot timeout, VMware `Transport (VMDB) error -14`, and `No operating system was found`. `vmrun list` therefore proves only that the VMware process was registered, not that the guest booted. Windows installation and the full clean-VM lifecycle acceptance remain separate steps and are not claimed by this bootstrap record.
 
 The current VM state is a reproducible bootstrap failure requiring a new start/ISO attachment check before guest installation can proceed. No ClusterYourCodex installer was run inside the guest, and no clean-VM install, repair, rollback, upgrade, or uninstall result is recorded here.
+
+## Command-line retry — 2026-09-21
+
+The retry was performed entirely with VMware CLI (`vmrun`), without GUI automation:
+
+- A fresh VM was created at `D:\ClusterYourCodex-validation\windows11-clean-retry-20260921` using `scripts/New-ClusterYourCodexWindowsVm.ps1`.
+- The original VM and the fresh VM both started with `vmrun -T ws start ... nogui` and returned exit code `0`.
+- The same ISO was tested from its D-drive path, from a C-drive temporary copy with the identical SHA-256, and as a mounted Windows virtual DVD (`F:`/raw CD-ROM configuration).
+- Every variant registered a running `vmware-vmx` process, but the guest log ended with:
+
+```text
+CDROM: Connecting sata0:1 ...
+Guest: Status upon boot failure: No Media
+Guest: About to do EFI boot: EFI VMware Virtual SATA CDROM Drive (1.0)
+Guest: Status upon boot failure: Timeout
+```
+
+After each attempt, `vmrun -T ws stop ... hard` returned the host to `Total running VMs: 0`. The Windows ISO itself is readable by Windows (`Mount-DiskImage` exposes `CCCOMA_X64FRE_ZH-CN_DV9` and `F:\efi\boot\bootx64.efi`), and its hash remains the Microsoft-published value above. This narrows the remaining blocker to VMware's optical-media path on this host; it is not evidence of a successful Windows guest boot. The Windows 11 clean-VM installer/lifecycle gate therefore remains open.
