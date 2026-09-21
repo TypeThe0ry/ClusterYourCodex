@@ -6,6 +6,8 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 
 [![Stable release](https://img.shields.io/github/v/release/TypeThe0ry/ClusterYourCodex?label=stable&sort=semver)](https://github.com/TypeThe0ry/ClusterYourCodex/releases) [![Latest prerelease](https://img.shields.io/github/v/release/TypeThe0ry/ClusterYourCodex?include_prereleases&label=latest%20preview&sort=semver)](https://github.com/TypeThe0ry/ClusterYourCodex/releases) [![CI](https://github.com/TypeThe0ry/ClusterYourCodex/actions/workflows/ci.yml/badge.svg)](https://github.com/TypeThe0ry/ClusterYourCodex/actions) [![License](https://img.shields.io/github/license/TypeThe0ry/ClusterYourCodex)](LICENSE)
 
+![ClusterYourCodex execution flow](docs/assets/cluster-your-codex-flow.svg)
+
 > **Repository snapshot:** `main` contains the published `v0.0.1` stable line;
 > current fixes are delivered as prerelease candidates until their acceptance
 > evidence is complete. The published `v0.0.1` tag and assets are immutable.
@@ -20,6 +22,32 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 | Verify a checkout | Run the [native plugin checks](#native-plugin-checks) |
 
 ## Status at a glance
+
+![Validation status](docs/assets/validation-status.svg)
+
+### What the test effect means
+
+The green cards above are backed by repeatable checks, not a decorative claim:
+
+- **Native plugin:** the integrity contract, bundled runtime, MCP protocol probe, and 48-test MCP suite pass on the Windows controller host. See the [cache verification record](docs/native-plugin-cache-verification-20260919.md).
+- **Hosted CI:** the current candidate exercises Rust on Windows/Linux/macOS, native Linux/macOS Worker Kits, dependency/security checks, and the Windows controller/bridge path. See [GitHub Actions](https://github.com/TypeThe0ry/ClusterYourCodex/actions) for the run history.
+- **Acceptance in progress:** a Microsoft-hash-matched Windows 11 ISO and a D-drive VMware VM are running, but the clean-VM install/repair/rollback lifecycle is not marked complete until the guest workflow is visibly finished. The live macOS managed-runtime gate remains tracked in [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3).
+
+This distinction keeps the README useful: a passing package test proves the package contract, while a clean-VM or live-worker claim requires the corresponding runtime evidence.
+
+### Recorded candidate test results
+
+The following snapshot refers to commit `c5123d5` and [CI run 35482026938](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35482026938), not every later candidate. That run was superseded and cancelled after a documentation update. Consult the [PR checks](https://github.com/TypeThe0ry/ClusterYourCodex/pull/99/checks) for the current head.
+
+| Test layer | Current result | What was observed |
+| --- | --- | --- |
+| Rust controller/workspace | PASS | Windows, Ubuntu, and macOS jobs completed successfully |
+| Native Worker Kits | PASS | Linux x64 plus macOS x64/arm64 package checks completed |
+| Security and dependency gates | PASS | CodeQL, RustSec, Cargo deny, and pnpm audit completed |
+| Windows controller/bridge job | INCOMPLETE | The run was cancelled before this job completed; no passing result is claimed for this snapshot |
+| D-drive VMware acceptance | BOOTSTRAP ONLY | ISO hash and VM power-on are recorded in [`docs/vmware-acceptance-20260920.md`](docs/vmware-acceptance-20260920.md). Subsequent inspection found an EFI CD-ROM boot timeout and `No operating system was found`; guest installation has not been verified |
+
+The diagrams summarize the evidence categories; they are not application screenshots or an automatically refreshed test dashboard. Runtime acceptance remains open until the corresponding evidence is recorded.
 
 | Area | State | Evidence |
 | --- | --- | --- |

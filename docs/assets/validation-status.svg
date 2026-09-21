@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-labelledby="title desc">
+  <title id="title">ClusterYourCodex validation status</title>
+  <desc id="desc">Native plugin and hosted platform checks pass; clean Windows VM and live macOS runtime acceptance remain in progress.</desc>
+  <rect width="1200" height="300" rx="28" fill="#f8fafc"/>
+  <text x="52" y="54" fill="#0f172a" font-family="Segoe UI,Arial" font-size="25" font-weight="700">Validation effect · evidence first</text>
+  <g font-family="Segoe UI,Arial">
+    <g transform="translate(52 88)"><rect width="330" height="150" rx="18" fill="#ecfdf5" stroke="#10b981" stroke-width="2"/><text x="24" y="40" fill="#065f46" font-size="19" font-weight="700">Native plugin</text><text x="24" y="78" fill="#047857" font-size="16">48 MCP tests · PASS</text><text x="24" y="107" fill="#047857" font-size="16">8-tool protocol probe · PASS</text><text x="24" y="136" fill="#047857" font-size="16">integrity contract · PASS</text></g>
+    <g transform="translate(435 88)"><rect width="330" height="150" rx="18" fill="#ecfdf5" stroke="#10b981" stroke-width="2"/><text x="24" y="40" fill="#065f46" font-size="19" font-weight="700">Hosted CI</text><text x="24" y="78" fill="#047857" font-size="16">Windows · Linux · macOS</text><text x="24" y="107" fill="#047857" font-size="16">worker kits · PASS</text><text x="24" y="136" fill="#047857" font-size="16">security checks · PASS</text></g>
+    <g transform="translate(818 88)"><rect width="330" height="150" rx="18" fill="#fff7ed" stroke="#f59e0b" stroke-width="2"/><text x="24" y="40" fill="#9a3412" font-size="19" font-weight="700">Acceptance in progress</text><text x="24" y="78" fill="#c2410c" font-size="16">Windows clean-VM lifecycle</text><text x="24" y="107" fill="#c2410c" font-size="16">live macOS execution</text><text x="24" y="136" fill="#c2410c" font-size="16">tracked in Issues #2 / #3</text></g>
+  </g>
+</svg>
