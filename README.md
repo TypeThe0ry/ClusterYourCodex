@@ -39,29 +39,34 @@ This distinction keeps the README useful: a passing package test proves the pack
 
 #### Current repository audit — 2026-09-22
 
-The current `main` contains merge commit `3b64e1a` from PR #113. Its fix
-raises the Windows-hosted Git Bash worker-kit lifecycle fixture budget from
-120 seconds to 300 seconds while retaining a bounded watchdog. The local
-`Test-WorkerKits.ps1` run passed, and both the pre-merge and latest-main CI
-matrices passed all required jobs, including the Desktop/Windows host/Codex
-bridge round trip. PR #112 (React/Vite runtime dependencies) is merged as
-`df63576`; the recovered independent Vitest 5 update is tracked in PR #115.
+The current `main` is `e3f1589` (PR #116). The completed candidate CI run
+[`35716663556`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35716663556)
+passed every required job: Windows/Linux/macOS Rust, MSRV, native Linux and
+macOS Worker Kits, the Windows install lifecycle, managed worker-kit lifecycle,
+and the Windows controller/worker live round trip. CodeQL and dependency
+security checks also passed.
 
-The stable `v0.0.1` tag and assets remain unchanged. PR #108 (Vitest 5)
-and #112 (React/Vite runtime) are separate dependency updates and remain
-independently tracked. Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
-and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) remain open:
-hosted CI does not replace clean Windows 11 VM lifecycle evidence or a native
-macOS LaunchAgent and managed controller/worker round trip.
+The current PR disposition is complete for applicable work: #112 (runtime
+dependencies), #114 (documentation audit), #115 (recovered Vitest 5 update),
+and #116 (worker-kit lifecycle budget) are merged. The #116 fix gives the
+sequential Windows-hosted worker-kit fixtures a 40-minute step budget while
+retaining bounded per-fixture watchdogs.
 
-The following snapshot refers to commit `c5123d5` and [CI run 35482026938](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35482026938), not every later candidate. That run was superseded and cancelled after a documentation update. Consult the [PR checks](https://github.com/TypeThe0ry/ClusterYourCodex/pull/99/checks) for the current head.
+The stable `v0.0.1` tag and assets remain unchanged at
+`e4fbaef04b764268fa038311d85573b18b549f9f`. Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
+and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) remain open
+because hosted CI is not a substitute for a clean Windows 11 VM lifecycle or
+a live macOS LaunchAgent and managed controller/worker round trip.
+
+Older candidate snapshots below are retained as an evidence ledger; they are
+not claims about the current head.
 
 | Test layer | Current result | What was observed |
 | --- | --- | --- |
 | Rust controller/workspace | PASS | Windows, Ubuntu, and macOS jobs completed successfully |
 | Native Worker Kits | PASS | Linux x64 plus macOS x64/arm64 package checks completed |
 | Security and dependency gates | PASS | CodeQL, RustSec, Cargo deny, and pnpm audit completed |
-| Windows controller/bridge job | INCOMPLETE | The run was cancelled before this job completed; no passing result is claimed for this snapshot |
+| Windows controller/bridge job | PASS | The current candidate run completed the Windows controller/worker live round trip |
 | D-drive VMware acceptance | BOOTSTRAP ONLY | ISO hash and VM power-on are recorded in [`docs/vmware-acceptance-20260920.md`](docs/vmware-acceptance-20260920.md). Subsequent inspection found an EFI CD-ROM boot timeout and `No operating system was found`; guest installation has not been verified |
 
 The diagrams summarize the evidence categories; they are not application screenshots or an automatically refreshed test dashboard. Runtime acceptance remains open until the corresponding evidence is recorded.
