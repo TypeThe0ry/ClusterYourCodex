@@ -120,3 +120,28 @@ has not been established. These remain separate checks, not a proven explanation
 for the currently observed product-key prompt. No hardware-check bypass or
 Windows activation workaround was applied. No ClusterYourCodex installer has
 run inside this guest yet, so Issue #2 remains open.
+
+### Confirmed next blocker: TPM 2.0
+
+CLI keyboard delivery was verified using `MKS sendKeyEvent 0x2b0007 0`
+(Tab) and `0x280007 0` (Enter). The HID encoding uses the keyboard usage
+in the upper word and usage page 7 in the lower word. `sendKeySequence`
+accepts literal text; `{TAB}` is not a verified special-key syntax.
+
+After selecting the built-in **I don't have a product key** option, Setup
+explicitly displayed **This PC must support TPM 2.0**. This establishes an
+actual hardware-requirement blocker, rather than an inference from disk size.
+
+A powered-off disposable-VM experiment added `vtpm.present = "TRUE"`.
+Power-on failed with these VMware log messages:
+
+```text
+msg.vtpm.poweron.notEncrypted: The virtual machine must be encrypted.
+msg.vtpm.initfail: Virtual TPM initialization failed.
+```
+
+The experimental setting was removed, and `vmrun list` confirmed zero running
+VMs. `vmcli VM Create` with `windows11-64` also produced a separate probe VM
+without TPM/encryption entries; selecting a guest type alone does not provision
+the required device. Next work requires a supported command-line provisioning
+path for encrypted vTPM state. No Windows hardware checks were bypassed.
