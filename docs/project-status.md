@@ -13,8 +13,12 @@ test completion. CodeQL and dependency-security checks passed on this PR.
 Issues #2 and #3 still require their respective clean Windows 11 lifecycle
 and live macOS managed-runtime evidence. These requirements are unchanged.
 The Windows VM reached Setup, which explicitly requested TPM 2.0; the
-remaining provisioning blocker is a usable encrypted vTPM through the
-CLI-only workflow, not the earlier optical-boot timeout. See the
+supported-hardware provisioning blocker is a usable encrypted vTPM through
+the CLI-only workflow, not the earlier optical-boot timeout. A subsequent
+disposable compatibility run applied a guest-only TPM-check exception and
+changed the disk attachment from legacy LSI Logic SCSI to SATA. Windows
+installation then began; neither completed OS installation nor the product
+lifecycle is claimed yet. See the
 [VMware evidence](vmware-acceptance-20260920.md).
 
 Issue #3 also has an implementation gap, not only missing hardware access:

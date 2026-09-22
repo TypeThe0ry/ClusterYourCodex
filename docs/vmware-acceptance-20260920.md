@@ -145,3 +145,28 @@ VMs. `vmcli VM Create` with `windows11-64` also produced a separate probe VM
 without TPM/encryption entries; selecting a guest type alone does not provision
 the required device. Next work requires a supported command-line provisioning
 path for encrypted vTPM state. No Windows hardware checks were bypassed.
+
+## Disposable compatibility installation — 2026-09-23
+
+The earlier no-bypass observations above describe earlier attempts. To unblock
+application testing without claiming supported Windows 11 hardware compliance,
+the disposable VM was subsequently booted through `vmrun ... start ... nogui`.
+Using `vmcli MKS sendKeyEvent`, Shift+F10 opened the guest WinPE command prompt.
+The following command succeeded **inside the disposable guest**, not the host:
+
+```text
+reg add HKLM\SYSTEM\Setup\LabConfig /v BypassTPMCheck /t REG_DWORD /d 1 /f
+```
+
+After choosing Setup's built-in no-product-key option, Setup passed the TPM
+screen but displayed no disks with the legacy `lsilogic` SCSI controller.
+The VM was stopped, its VMX backed up, and the same existing VMDK attached as
+`sata0:0` instead of `scsi0:0`. After reboot and reapplying the guest-only TPM
+exception, unattended Setup proceeded to **Installing Windows 11, 5%**.
+`New-ClusterYourCodexWindowsVm.ps1` now uses SATA for the installation disk.
+
+This proves installation began, not that the OS installation or application
+lifecycle finished. The VM remains a compatibility test environment with a
+documented TPM exception; it does not establish Windows 11 hardware compliance.
+No activation mechanism was changed. The original downloaded ISO, host OS,
+published release, and other VM disks were not modified by this experiment.
