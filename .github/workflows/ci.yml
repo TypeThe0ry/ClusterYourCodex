@@ -292,13 +292,13 @@ jobs:
         # Tauri dependency graph on a cold cache. Keep this bounded, but above
         # the observed cold-start cost so the check reports compiler failures
         # instead of being killed mid-build.
-        timeout-minutes: 20
+        timeout-minutes: 30
         shell: pwsh
         run: >-
           ./scripts/Invoke-BoundedWindowsProcess.ps1
           -FilePath (Get-Command cargo.exe -CommandType Application).Source
           -ArgumentList 'check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml'
-          -TimeoutSeconds 900 -WorkingDirectory $PWD -EvidenceRoot $env:RUNNER_TEMP
+          -TimeoutSeconds 1500 -WorkingDirectory $PWD -EvidenceRoot $env:RUNNER_TEMP
       - name: Test desktop Rust host
         timeout-minutes: 15
         shell: pwsh
