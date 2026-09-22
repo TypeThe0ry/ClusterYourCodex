@@ -1,17 +1,19 @@
 # ClusterYourCodex project status
 
-## Current GitHub audit — 2026-09-22 (updated after PR #116)
+## Current GitHub audit — 2026-09-23 (updated after PR #118)
 
-- The audited implementation baseline is `e3f1589`, the merge of PR #116.
-- PRs #112, #114, #115, and #116 are merged. This dated record does not
-  describe the live pull-request queue.
-- CI run [`35716663556`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35716663556)
+- The audited implementation baseline is `3249646`, the merge of PR #118.
+- There are no open pull requests at this audit point.
+- CI run [`35778999899`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35778999899)
   passed all required platform, worker-kit, Windows lifecycle, and live
   controller/worker round-trip jobs. CodeQL and dependency-security checks
   passed as well.
-- PR #116 raised the sequential managed worker-kit workflow step budget to 40
-  minutes while keeping bounded fixture watchdogs; the formerly recurring
-  Windows-hosted timeout completed successfully.
+- PR #118 raised the Windows Rust job and package timeout budgets after the
+  serialized ACL/PowerShell helper overhead was reproduced; the targeted
+  regression test and the full candidate CI passed.
+- The post-merge `main` checks [`35783783045`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35783783045)
+  and [`35783783039`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35783783039)
+  were still in progress at this audit point and are not counted as completed.
 - Issues #2 and #3 remain open. They still require independent clean Windows
   11 VM lifecycle evidence and live macOS LaunchAgent/managed-worker evidence;
   hosted CI is not being used as a substitute.

@@ -37,20 +37,23 @@ This distinction keeps the README useful: a passing package test proves the pack
 
 ### Recorded candidate test results
 
-#### Current repository audit — 2026-09-22
+#### Current repository audit — 2026-09-23
 
-The audited implementation baseline is `e3f1589` (PR #116). Its completed candidate CI run
-[`35716663556`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35716663556)
+The audited implementation baseline is `3249646`
+([PR #118](https://github.com/TypeThe0ry/ClusterYourCodex/pull/118)). Its completed
+candidate CI run [`35778999899`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35778999899)
 passed every required job: Windows/Linux/macOS Rust, MSRV, native Linux and
 macOS Worker Kits, the Windows install lifecycle, managed worker-kit lifecycle,
 and the Windows controller/worker live round trip. CodeQL and dependency
 security checks also passed.
 
-The current PR disposition is complete for applicable work: #112 (runtime
-dependencies), #114 (documentation audit), #115 (recovered Vitest 5 update),
-and #116 (worker-kit lifecycle budget) are merged. The #116 fix gives the
-sequential Windows-hosted worker-kit fixtures a 40-minute step budget while
-retaining bounded per-fixture watchdogs.
+The post-merge `main` checks (`35783783045` CI and `35783783039` CodeQL) were
+still running at the time of this audit. This README does not treat an in-progress
+run as a pass.
+
+The current pull-request queue is empty. PR #118 raised the bounded Windows
+worker-test/package budget after reproducing the serialized ACL/PowerShell
+helper overhead; the regression test passed locally before the merge.
 
 The stable `v0.0.1` tag and assets remain unchanged at
 `e4fbaef04b764268fa038311d85573b18b549f9f`. Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
