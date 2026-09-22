@@ -1,6 +1,23 @@
 # ClusterYourCodex project status
 
-## Current GitHub audit — 2026-09-22
+## Current GitHub audit — 2026-09-22 (updated after PR #116)
+
+- `origin/main` is `e3f1589`, the merge of PR #116.
+- PRs #112, #114, #115, and #116 are merged; there are no open pull requests.
+- CI run [`35716663556`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35716663556)
+  passed all required platform, worker-kit, Windows lifecycle, and live
+  controller/worker round-trip jobs. CodeQL and dependency-security checks
+  passed as well.
+- PR #116 raised the sequential managed worker-kit workflow step budget to 40
+  minutes while keeping bounded fixture watchdogs; the formerly recurring
+  Windows-hosted timeout completed successfully.
+- Issues #2 and #3 remain open. They still require independent clean Windows
+  11 VM lifecycle evidence and live macOS LaunchAgent/managed-worker evidence;
+  hosted CI is not being used as a substitute.
+- The published `v0.0.1` tag remains unchanged at
+  `e4fbaef04b764268fa038311d85573b18b549f9f`.
+
+The historical audit entries below are retained as an evidence ledger.
 
 - PR #113 (`3b64e1a`) is merged. The Windows-hosted Git Bash lifecycle fixture
   now allows a bounded 300-second setup budget; local `Test-WorkerKits.ps1`
