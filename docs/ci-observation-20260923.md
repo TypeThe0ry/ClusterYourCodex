@@ -30,10 +30,14 @@ successful checks. Its Windows jobs are 106973085337 (desktop), 106973085516
 (desktop MSRV), and 106973085752 (workspace). At observation they were running;
 no success or failure conclusion is claimed here.
 
-A local `cargo test --locked -p cyc-provision -- --test-threads=1` on the same
-commit was also started. Process inspection showed active `nmake.exe` and
-`cl.exe` descendants during dependency compilation. Its result is pending;
-compilation activity is not test completion.
+A local `cargo test --locked -p cyc-provision -- --test-threads=1` against the
+same code completed with exit code 0: 45 unit tests and 27 state-machine tests
+passed, with no failures or ignored tests. The cold test-profile build took
+6 minutes 57 seconds; the two suites took 0.94 and 0.38 seconds respectively.
+Process inspection during compilation showed active `nmake.exe` and `cl.exe`
+descendants. The build emitted LNK4099 warnings about missing OpenSSL debug
+symbols, but linking and tests succeeded. This local reproduction did not
+reproduce a deadlock; it does not prove that the hosted Windows jobs passed.
 
 Allow the active attempt to finish or reach its configured deadline. Diagnose
 the resulting logs before changing time budgets or product code. Keep the
