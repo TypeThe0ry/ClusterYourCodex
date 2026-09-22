@@ -54,3 +54,94 @@ Guest: Status upon boot failure: Timeout
 After each attempt, `vmrun -T ws stop ... hard` returned the host to `Total running VMs: 0`. The Windows ISO itself is readable by Windows (`Mount-DiskImage` exposes `CCCOMA_X64FRE_ZH-CN_DV9` and `<mounted-iso-root>\efi\boot\bootx64.efi`), and its hash remains the Microsoft-published value above. These observations identify an optical-media boot failure but do not establish its root cause; they are not evidence of a successful Windows guest boot. The Windows 11 clean-VM installer/lifecycle gate therefore remains open.
 
 Host-specific paths in this record are redacted placeholders, not literal commands or unmodified CLI output. Media hashes, exit codes, and boot errors are retained unchanged.
+
+## Disposable-path retry — 2026-09-22
+
+A disposable copy was created on the D drive with native single-backslash VMX
+paths for both the VMDK and ISO. The attempt again used VMware CLI only:
+
+- `vmrun -T ws start ... nogui` returned exit code `0`.
+- `vmrun -T ws list` reported the VM as running.
+- `vmware.log` recorded `Guest: Status upon boot failure: No Media`, then
+  `EFI VMware Virtual SATA CDROM Drive (1.0)` and `Status upon boot failure:
+  Time out`.
+- `vmrun -T ws stop ... hard` returned the host to zero running VMs.
+
+This confirms a reproducible EFI optical-media boot failure even after the
+path correction. No Windows guest boot or installer lifecycle result is
+claimed; Issue #2 remains open.
+
+## No-prompt EFI experiment — 2026-09-22
+
+A subsequent CLI-only experiment replaced the EFI El Torito boot image in the
+disposable ISO copy with Microsoft's `efisys_noprompt.bin` from the original
+media. Before writing, the embedded image at LBA 555 was SHA-256 compared with
+the original `efisys.bin`; the image lengths matched. The original downloaded
+ISO was not modified. The disposable ISO is modified test media and must not be
+represented as matching the original Microsoft whole-ISO hash.
+
+The new boot log progressed beyond the former CD-ROM timeout:
+
+```text
+2026-09-22T15:51:07.508Z Guest: Firmware has transitioned to runtime.
+2026-09-22T15:51:09.055Z Guest: PVSCSI: driver StorPort v1.3.15.0 starts.
+2026-09-22T15:51:09.056Z Guest: Driver=pvscsii, Version=1.3.15.0
+```
+
+This supports an unattended optical-boot prompt timeout as the previous
+blocker, rather than proving unreadable media. It proves progress into Windows
+boot code, not completion of Setup. CLI `captureScreen` failed because guest
+login is required. The disposable VM was stopped and `vmrun list` confirmed
+zero running VMs. Next work is unattended Setup and guest-side installer
+lifecycle evidence; Issue #2 remains open.
+
+## Setup screen diagnosis — 2026-09-23 (Asia/Singapore)
+
+The installed Workstation also provides `vmcli.exe`. Unlike the attempted
+`vmrun captureScreen`, its `MKS captureScreenshot <filename>` command succeeded
+without guest credentials or VMware Tools. This supplies a CLI-only diagnostic
+path before the guest OS is installed:
+
+```powershell
+& $vmcli $vmx MKS captureScreenshot $diagnosticPng
+```
+
+The captured Windows 11 Setup screen is the **Product key** page, with the
+built-in **I don't have a product key** option visible. This is direct evidence
+that Setup has booted and is awaiting input; the earlier small VMDK size alone
+did not establish a firmware or hardware-requirement failure. A separate private
+answer ISO had already been attached, but unattended installation has not been
+proven: determine whether Setup consumed the answer file and how to suppress
+this prompt through supported installation settings. Do not publish the answer
+file, guest credentials, or screenshots containing them.
+
+VMware logs also reported `SecureBootModeDisabled`; successful vTPM provisioning
+has not been established. These remain separate checks, not a proven explanation
+for the currently observed product-key prompt. No hardware-check bypass or
+Windows activation workaround was applied. No ClusterYourCodex installer has
+run inside this guest yet, so Issue #2 remains open.
+
+### Confirmed next blocker: TPM 2.0
+
+CLI keyboard delivery was verified using `MKS sendKeyEvent 0x2b0007 0`
+(Tab) and `0x280007 0` (Enter). The HID encoding uses the keyboard usage
+in the upper word and usage page 7 in the lower word. `sendKeySequence`
+accepts literal text; `{TAB}` is not a verified special-key syntax.
+
+After selecting the built-in **I don't have a product key** option, Setup
+explicitly displayed **This PC must support TPM 2.0**. This establishes an
+actual hardware-requirement blocker, rather than an inference from disk size.
+
+A powered-off disposable-VM experiment added `vtpm.present = "TRUE"`.
+Power-on failed with these VMware log messages:
+
+```text
+msg.vtpm.poweron.notEncrypted: The virtual machine must be encrypted.
+msg.vtpm.initfail: Virtual TPM initialization failed.
+```
+
+The experimental setting was removed, and `vmrun list` confirmed zero running
+VMs. `vmcli VM Create` with `windows11-64` also produced a separate probe VM
+without TPM/encryption entries; selecting a guest type alone does not provision
+the required device. Next work requires a supported command-line provisioning
+path for encrypted vTPM state. No Windows hardware checks were bypassed.

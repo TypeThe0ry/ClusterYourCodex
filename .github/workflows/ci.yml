@@ -109,7 +109,12 @@ jobs:
       - name: Check the locked Windows desktop host at MSRV
         if: matrix.graph == 'desktop'
         timeout-minutes: 15
-        run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+        shell: pwsh
+        run: >-
+          ./scripts/Invoke-BoundedWindowsProcess.ps1
+          -FilePath (Get-Command cargo.exe -CommandType Application).Source
+          -ArgumentList 'check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml'
+          -TimeoutSeconds 840 -WorkingDirectory $PWD -EvidenceRoot $env:RUNNER_TEMP
 
   rust:
     name: Rust (${{ matrix.os }})
@@ -122,7 +127,11 @@ jobs:
     # Windows cold-cache workspace tests compile substantially more slowly
     # than Linux/macOS. Keep the matrix bounded without cutting off the
     # Windows test process while it is still making progress.
-    timeout-minutes: 55
+    # Windows ACL-backed worker tests are intentionally serialized and can
+    # spend over 15 minutes in PowerShell security helpers on a cold hosted
+    # runner. Keep the outer bound finite while leaving room for every package
+    # to reach its own bounded-process diagnostic.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
@@ -133,7 +142,15 @@ jobs:
       # state, so run native tests on one test thread for deterministic CI.
       - name: Test Rust workspace
         timeout-minutes: 45
+        if: matrix.os != 'windows-latest'
         run: cargo test --workspace --locked -- --test-threads=1
+      - name: Test Rust workspace (bounded Windows process)
+        timeout-minutes: 50
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: >-
+          ./scripts/Test-WindowsWorkspacePackages.ps1
+          -PackageTimeoutSeconds 1800 -WorkingDirectory $PWD -EvidenceRoot $env:RUNNER_TEMP
 
   native-worker-kits:
     name: Native Worker Kit (${{ matrix.label }})

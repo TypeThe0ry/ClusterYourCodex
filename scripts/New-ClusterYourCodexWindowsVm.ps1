@@ -73,8 +73,8 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $diskPath -PathType Lea
     Fail "VMware virtual disk creation failed (exit $LASTEXITCODE)."
 }
 
-# VMware Workstation's VMX parser expects native Windows paths. Do not JSON-style
-# escape backslashes here; doubled separators make the guest disk/ISO unresolved.
+# Write native Windows paths; VMX is not JSON. Path normalization alone does not
+# prove optical boot, Secure Boot, or vTPM readiness.
 $isoEscaped = $IsoPath
 $diskEscaped = $diskPath
 $vmx = @"
@@ -97,9 +97,10 @@ sata0:1.present = "TRUE"
 sata0:1.deviceType = "cdrom-image"
 sata0:1.fileName = "$isoEscaped"
 sata0:1.startConnected = "TRUE"
-# Workstation-managed software vTPM provisioning. Workstation creates the
-# required protected TPM state when the VM is first opened; do not hand-edit
-# encryption keys or put a password in this script or its metadata.
+# This is a provisioning request, not proof that a vTPM exists. Workstation
+# 26.0.1 CLI-only testing did not create a usable TPM from this setting alone.
+# Provision encrypted vTPM state through VMware before Windows 11 acceptance.
+# Never put encryption passwords or protected state in this script or metadata.
 managedVM.autoAddVTPM = "software"
 ethernet0.present = "TRUE"
 ethernet0.connectionType = "nat"
@@ -117,8 +118,11 @@ $metadata = [ordered]@{
     isoSha256 = (Get-FileHash -LiteralPath $iso.FullName -Algorithm SHA256).Hash
     disk = $diskPath
     vmrun = $vmrun
-    tpmProvisioning = 'vmware-managed-software'
+    tpmProvisioning = 'requested-not-verified'
+    secureBoot = 'requested-not-verified'
+    windows11Readiness = 'unverified'
     state = 'created-not-started'
 }
 $metadata | ConvertTo-Json | ForEach-Object { Write-Utf8NoBom -Path $metadataPath -Content $_ }
-Write-Output ("Created VM configuration: {0}`nISO SHA-256: {1}`nStart after review: vmrun -T ws start `"{0}`" gui" -f $vmxPath, $metadata.isoSha256)
+Write-Warning 'VM configuration created, not Windows 11 installation readiness. Verify encrypted vTPM provisioning and Secure Boot before acceptance; autoAddVTPM alone is insufficient on tested Workstation 26.0.1.'
+Write-Output ("Created VM configuration: {0}`nISO SHA-256: {1}`nDiagnostic boot after provisioning review: & `"{2}`" -T ws start `"{0}`" nogui" -f $vmxPath, $metadata.isoSha256, $vmrun)
