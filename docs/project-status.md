@@ -8,9 +8,9 @@
   the long Desktop/Windows host/Codex bridge job.
 - PR #108 (Vitest 5) and PR #112 (React/Vite runtime) are separate dependency
   updates. #108 is closed and cannot be reopened through the current GitHub
-  API; its independent disposition is recorded in the PR comments. #112 is
-  rebased on the post-#113 `main` and remains open while its dependency checks
-  complete.
+  API; its independent change was recovered as PR #115. #112 merged as
+  `df63576` after all required checks passed; #115 remains open while its
+  dependency checks complete.
 - Open Issues #2 and #3 remain intentionally open. Their required evidence is
   respectively a clean Windows 11 install/repair/rollback/uninstall run and a
   native macOS LaunchAgent plus managed controller/worker round trip; hosted

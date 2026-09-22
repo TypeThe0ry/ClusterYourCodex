@@ -44,8 +44,8 @@ raises the Windows-hosted Git Bash worker-kit lifecycle fixture budget from
 120 seconds to 300 seconds while retaining a bounded watchdog. The local
 `Test-WorkerKits.ps1` run passed, and both the pre-merge and latest-main CI
 matrices passed all required jobs, including the Desktop/Windows host/Codex
-bridge round trip. PR #108 was closed as superseded by the newer #112 runtime
-dependency update; #112 is still being validated against this `main`.
+bridge round trip. PR #112 (React/Vite runtime dependencies) is merged as
+`df63576`; the recovered independent Vitest 5 update is tracked in PR #115.
 
 The stable `v0.0.1` tag and assets remain unchanged. PR #108 (Vitest 5)
 and #112 (React/Vite runtime) are separate dependency updates and remain
