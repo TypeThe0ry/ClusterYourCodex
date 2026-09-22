@@ -1013,6 +1013,9 @@ jobs:
           powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
           -File .\packaging\windows\Test-WindowsPackaging.ps1
       - name: Validate managed worker kits
+        # Keep the release gate aligned with CI: the Windows-hosted Git Bash
+        # lifecycle fixtures are bounded individually but run sequentially.
+        timeout-minutes: 40
         shell: powershell
         run: >-
           powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass

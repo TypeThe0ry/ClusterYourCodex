@@ -300,7 +300,11 @@ jobs:
           powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
           -File .\packaging\windows\Test-WindowsPackaging.ps1
       - name: Validate managed worker kits
-        timeout-minutes: 15
+        # Test-WorkerKits.ps1 runs bounded Linux and macOS lifecycle fixtures
+        # sequentially. Each fixture can legitimately consume 300 seconds on
+        # a cold Windows-hosted Git Bash runner; leave headroom for both plus
+        # setup/teardown instead of letting the job timeout mid-fixture.
+        timeout-minutes: 40
         shell: powershell
         run: >-
           powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
