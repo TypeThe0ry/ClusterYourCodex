@@ -31,7 +31,7 @@ The green cards above are backed by repeatable checks, not a decorative claim:
 
 - **Native plugin:** the integrity contract, bundled runtime, MCP protocol probe, and 48-test MCP suite pass on the Windows controller host. See the [cache verification record](docs/native-plugin-cache-verification-20260919.md).
 - **Hosted CI:** the current candidate exercises Rust on Windows/Linux/macOS, native Linux/macOS Worker Kits, dependency/security checks, and the Windows controller/bridge path. See [GitHub Actions](https://github.com/TypeThe0ry/ClusterYourCodex/actions) for the run history.
-- **Acceptance in progress:** a Microsoft-hash-matched Windows 11 ISO and a D-drive VMware VM are running, but the clean-VM install/repair/rollback lifecycle is not marked complete until the guest workflow is visibly finished. The live macOS managed-runtime gate remains tracked in [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3).
+- **Acceptance in progress:** the original Windows 11 ISO matches Microsoft's published hash. A disposable D-drive VMware VM reached Windows boot code using a modified, no-prompt test ISO; Setup and the clean-VM install/repair/rollback lifecycle remain unverified. The VM was stopped after testing. The macOS managed-runtime gate remains tracked in [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3).
 
 This distinction keeps the README useful: a passing package test proves the package contract, while a clean-VM or live-worker claim requires the corresponding runtime evidence.
 
@@ -39,7 +39,7 @@ This distinction keeps the README useful: a passing package test proves the pack
 
 #### Current repository audit — 2026-09-22
 
-The current `main` is `e3f1589` (PR #116). The completed candidate CI run
+The audited implementation baseline is `e3f1589` (PR #116). Its completed candidate CI run
 [`35716663556`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35716663556)
 passed every required job: Windows/Linux/macOS Rust, MSRV, native Linux and
 macOS Worker Kits, the Windows install lifecycle, managed worker-kit lifecycle,
@@ -58,8 +58,8 @@ and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) remain open
 because hosted CI is not a substitute for a clean Windows 11 VM lifecycle or
 a live macOS LaunchAgent and managed controller/worker round trip.
 
-Older candidate snapshots below are retained as an evidence ledger; they are
-not claims about the current head.
+The table below summarizes that tested baseline and the separately recorded
+VM experiment; it is not a live status feed for later commits.
 
 | Test layer | Current result | What was observed |
 | --- | --- | --- |
@@ -67,7 +67,7 @@ not claims about the current head.
 | Native Worker Kits | PASS | Linux x64 plus macOS x64/arm64 package checks completed |
 | Security and dependency gates | PASS | CodeQL, RustSec, Cargo deny, and pnpm audit completed |
 | Windows controller/bridge job | PASS | The current candidate run completed the Windows controller/worker live round trip |
-| D-drive VMware acceptance | BOOTSTRAP ONLY | ISO hash and VM power-on are recorded in [`docs/vmware-acceptance-20260920.md`](docs/vmware-acceptance-20260920.md). Subsequent inspection found an EFI CD-ROM boot timeout and `No operating system was found`; guest installation has not been verified |
+| D-drive VMware acceptance | BOOTSTRAP ONLY | The no-prompt test ISO reached Windows boot code after earlier EFI CD-ROM timeouts; Setup and the application lifecycle remain unverified. See the [CLI experiment record](docs/vmware-acceptance-20260920.md) |
 
 The diagrams summarize the evidence categories; they are not application screenshots or an automatically refreshed test dashboard. Runtime acceptance remains open until the corresponding evidence is recorded.
 

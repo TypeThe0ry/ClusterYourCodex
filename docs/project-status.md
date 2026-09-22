@@ -2,8 +2,9 @@
 
 ## Current GitHub audit — 2026-09-22 (updated after PR #116)
 
-- `origin/main` is `e3f1589`, the merge of PR #116.
-- PRs #112, #114, #115, and #116 are merged; there are no open pull requests.
+- The audited implementation baseline is `e3f1589`, the merge of PR #116.
+- PRs #112, #114, #115, and #116 are merged. This dated record does not
+  describe the live pull-request queue.
 - CI run [`35716663556`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35716663556)
   passed all required platform, worker-kit, Windows lifecycle, and live
   controller/worker round-trip jobs. CodeQL and dependency-security checks
@@ -18,8 +19,9 @@
   `e4fbaef04b764268fa038311d85573b18b549f9f`.
 - The 2026-09-22 disposable D-drive VMware retry is recorded in
   [`docs/vmware-acceptance-20260920.md`](vmware-acceptance-20260920.md):
-  `vmrun` control worked, but EFI still reported `No Media`/`Time out`, so no
-  clean Windows guest lifecycle claim is made.
+  correcting VMX paths alone still produced an EFI timeout. A subsequent
+  no-prompt EFI test ISO reached Windows boot code; Setup and the clean
+  Windows guest lifecycle remain unverified. The test VM is stopped.
 - The macOS installer remains fail-closed when native containment is
   unavailable (`MACOS_WORKER_CONTAINMENT_READY=0`); no native macOS host is
   reachable for LaunchAgent or live managed-run evidence.
