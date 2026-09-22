@@ -1,5 +1,19 @@
 # ClusterYourCodex project status
 
+## Current GitHub audit — 2026-09-22
+
+- PR #113 (`3b64e1a`) is merged. The Windows-hosted Git Bash lifecycle fixture
+  now allows a bounded 300-second setup budget; local `Test-WorkerKits.ps1`
+  and both CI matrices (before and after rebasing on `main`) passed, including
+  the long Desktop/Windows host/Codex bridge job.
+- PR #108 is closed as superseded by PR #112. PR #112 is rebased on the
+  post-#113 `main` and remains open while its dependency checks complete.
+- Open Issues #2 and #3 remain intentionally open. Their required evidence is
+  respectively a clean Windows 11 install/repair/rollback/uninstall run and a
+  native macOS LaunchAgent plus managed controller/worker round trip; hosted
+  package/build jobs are not equivalent evidence.
+- The published `v0.0.1` tag and release assets are unchanged.
+
 ## Current GitHub audit — 2026-09-18
 
 The repository state on `origin/main` is authoritative for this audit. PR #89
