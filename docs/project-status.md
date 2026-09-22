@@ -16,6 +16,13 @@
   hosted CI is not being used as a substitute.
 - The published `v0.0.1` tag remains unchanged at
   `e4fbaef04b764268fa038311d85573b18b549f9f`.
+- The 2026-09-22 disposable D-drive VMware retry is recorded in
+  [`docs/vmware-acceptance-20260920.md`](vmware-acceptance-20260920.md):
+  `vmrun` control worked, but EFI still reported `No Media`/`Time out`, so no
+  clean Windows guest lifecycle claim is made.
+- The macOS installer remains fail-closed when native containment is
+  unavailable (`MACOS_WORKER_CONTAINMENT_READY=0`); no native macOS host is
+  reachable for LaunchAgent or live managed-run evidence.
 
 The historical audit entries below are retained as an evidence ledger.
 

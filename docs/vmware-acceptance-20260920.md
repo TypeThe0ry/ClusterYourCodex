@@ -54,3 +54,19 @@ Guest: Status upon boot failure: Timeout
 After each attempt, `vmrun -T ws stop ... hard` returned the host to `Total running VMs: 0`. The Windows ISO itself is readable by Windows (`Mount-DiskImage` exposes `CCCOMA_X64FRE_ZH-CN_DV9` and `<mounted-iso-root>\efi\boot\bootx64.efi`), and its hash remains the Microsoft-published value above. These observations identify an optical-media boot failure but do not establish its root cause; they are not evidence of a successful Windows guest boot. The Windows 11 clean-VM installer/lifecycle gate therefore remains open.
 
 Host-specific paths in this record are redacted placeholders, not literal commands or unmodified CLI output. Media hashes, exit codes, and boot errors are retained unchanged.
+
+## Disposable-path retry — 2026-09-22
+
+A disposable copy was created on the D drive with native single-backslash VMX
+paths for both the VMDK and ISO. The attempt again used VMware CLI only:
+
+- `vmrun -T ws start ... nogui` returned exit code `0`.
+- `vmrun -T ws list` reported the VM as running.
+- `vmware.log` recorded `Guest: Status upon boot failure: No Media`, then
+  `EFI VMware Virtual SATA CDROM Drive (1.0)` and `Status upon boot failure:
+  Time out`.
+- `vmrun -T ws stop ... hard` returned the host to zero running VMs.
+
+This confirms a reproducible EFI optical-media boot failure even after the
+path correction. No Windows guest boot or installer lifecycle result is
+claimed; Issue #2 remains open.
