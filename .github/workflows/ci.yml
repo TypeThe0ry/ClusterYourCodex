@@ -109,7 +109,12 @@ jobs:
       - name: Check the locked Windows desktop host at MSRV
         if: matrix.graph == 'desktop'
         timeout-minutes: 15
-        run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+        shell: pwsh
+        run: >-
+          ./scripts/Invoke-BoundedWindowsProcess.ps1
+          -FilePath (Get-Command cargo.exe -CommandType Application).Source
+          -ArgumentList 'check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml'
+          -TimeoutSeconds 840 -WorkingDirectory $PWD -EvidenceRoot $env:RUNNER_TEMP
 
   rust:
     name: Rust (${{ matrix.os }})
@@ -133,7 +138,12 @@ jobs:
       # state, so run native tests on one test thread for deterministic CI.
       - name: Test Rust workspace
         timeout-minutes: 45
-        run: cargo test --workspace --locked -- --test-threads=1
+        shell: pwsh
+        run: >-
+          ./scripts/Invoke-BoundedWindowsProcess.ps1
+          -FilePath (Get-Command cargo.exe -CommandType Application).Source
+          -ArgumentList 'test --workspace --locked -- --test-threads=1'
+          -TimeoutSeconds 2400 -WorkingDirectory $PWD -EvidenceRoot $env:RUNNER_TEMP
 
   native-worker-kits:
     name: Native Worker Kit (${{ matrix.label }})
