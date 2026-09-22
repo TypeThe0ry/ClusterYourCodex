@@ -56,11 +56,11 @@ worker-test/package budget after reproducing the serialized ACL/PowerShell
 helper overhead; the regression test passed locally before the merge.
 
 **Follow-up:** [PR #120](https://github.com/TypeThe0ry/ClusterYourCodex/pull/120)
-tracks the desktop native-check time budget. Its Windows checks are still
-unverified; manually cancelled attempts are not timeout failures. See the
-[CI observation record](docs/ci-observation-20260923.md) for the corrected
-timeline and the active third attempt. The passing baseline above does not
-establish that this newer candidate passed.
+merged as `946bbb75` after [CI attempt 3](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35792946149)
+passed all ten jobs, including Windows workspace tests and the desktop
+installation/Worker Kit/live round-trip checks. CodeQL and dependency-security
+checks also passed. Earlier manually cancelled attempts were not proven timeout
+failures; see the [CI observation record](docs/ci-observation-20260923.md).
 
 The stable `v0.0.1` tag and assets remain unchanged at
 `e4fbaef04b764268fa038311d85573b18b549f9f`. Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
