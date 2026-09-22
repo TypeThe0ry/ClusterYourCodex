@@ -30,6 +30,20 @@ successful checks. Its Windows jobs are 106973085337 (desktop), 106973085516
 (desktop MSRV), and 106973085752 (workspace). At observation they were running;
 no success or failure conclusion is claimed here.
 
+### Final result of attempt 3
+
+The attempt subsequently completed with conclusion `success`. All ten CI jobs
+passed, including Windows workspace tests and the Desktop/Windows host/Codex
+bridge job (35 minutes 38 seconds). That desktop job completed installation
+lifecycle, managed Worker Kits, and the live controller/worker round trip.
+PR #120 automatically squash-merged as
+`946bbb75faa7d4ee40dfd846e66672af708f992a` after required checks passed.
+
+The native integration step took 8 minutes 56 seconds, below even the former
+900-second internal limit. This successful run supports the tested behavior;
+it does not prove that raising the timeout fixed a deadlock or was necessary
+for this run. The local reproduction below is separate evidence.
+
 A local `cargo test --locked -p cyc-provision -- --test-threads=1` against the
 same code completed with exit code 0: 45 unit tests and 27 state-machine tests
 passed, with no failures or ignored tests. The cold test-profile build took

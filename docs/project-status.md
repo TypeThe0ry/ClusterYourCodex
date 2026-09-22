@@ -2,10 +2,11 @@
 
 ## Follow-up audit — 2026-09-23 (PR #120)
 
-PR #119 merged the previous audit into `main` at `a111c066`. PR #120 remains
-open for the desktop native-check budget change at `028709ea`.
-Its CI run `35792946149` is on attempt 3. Windows checks remain unverified;
-the earlier attempts were manually cancelled, not proven to have timed out.
+PR #119 merged the previous audit into `main` at `a111c066`. PR #120 then
+merged at `946bbb75` after CI run `35792946149`, attempt 3, completed
+successfully. This includes the Windows workspace, desktop host, installation
+lifecycle, managed Worker Kits, and live controller/worker round trip.
+The earlier attempts were manually cancelled, not proven to have timed out.
 See the [observation correction](ci-observation-20260923.md) for timestamps,
 completed package tests, and the distinction between compile activity and
 test completion. CodeQL and dependency-security checks passed on this PR.
