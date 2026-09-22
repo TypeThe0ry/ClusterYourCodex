@@ -1,5 +1,19 @@
 # ClusterYourCodex project status
 
+## Follow-up audit — 2026-09-23 (PR #120)
+
+PR #119 merged the previous audit into `main` at `a111c066`. PR #120 remains
+open for the desktop native-check budget change at `028709ea`.
+Its CI run `35792946149` is on attempt 3. Windows checks remain unverified;
+the earlier attempts were manually cancelled, not proven to have timed out.
+See the [observation correction](ci-observation-20260923.md) for timestamps,
+completed package tests, and the distinction between compile activity and
+test completion. CodeQL and dependency-security checks passed on this PR.
+
+Issues #2 and #3 still require their respective clean Windows 11 lifecycle
+and live macOS managed-runtime evidence. These requirements are unchanged.
+The entries below describe dated checkpoints, not the live PR queue.
+
 ## Current GitHub audit — 2026-09-23 (updated after PR #118)
 
 - The audited implementation baseline is `3249646`, the merge of PR #118.

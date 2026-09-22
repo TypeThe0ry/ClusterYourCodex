@@ -51,9 +51,16 @@ The post-merge `main` checks (`35783783045` CI and `35783783039` CodeQL) were
 still running at the time of this audit. This README does not treat an in-progress
 run as a pass.
 
-The current pull-request queue is empty. PR #118 raised the bounded Windows
+At that audit checkpoint the pull-request queue was empty. PR #118 raised the bounded Windows
 worker-test/package budget after reproducing the serialized ACL/PowerShell
 helper overhead; the regression test passed locally before the merge.
+
+**Follow-up:** [PR #120](https://github.com/TypeThe0ry/ClusterYourCodex/pull/120)
+tracks the desktop native-check time budget. Its Windows checks are still
+unverified; manually cancelled attempts are not timeout failures. See the
+[CI observation record](docs/ci-observation-20260923.md) for the corrected
+timeline and the active third attempt. The passing baseline above does not
+establish that this newer candidate passed.
 
 The stable `v0.0.1` tag and assets remain unchanged at
 `e4fbaef04b764268fa038311d85573b18b549f9f`. Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
