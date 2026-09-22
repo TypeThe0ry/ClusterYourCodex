@@ -170,3 +170,17 @@ lifecycle finished. The VM remains a compatibility test environment with a
 documented TPM exception; it does not establish Windows 11 hardware compliance.
 No activation mechanism was changed. The original downloaded ISO, host OS,
 published release, and other VM disks were not modified by this experiment.
+
+### First boot and network configuration
+
+Windows completed its installation phases and reached region/keyboard OOBE.
+The unspecified default network adapter produced no usable network on that
+screen. Changing it to `e1000e` alone failed VM power-on with
+`msg.pci.noslotavail: No PCIe slot available for Ethernet0`. Adding a PCI bridge
+and a `pcieRootPort` bridge with eight functions, and clearing the old Ethernet
+PCI slot assignment, restored successful power-on. OOBE then advanced beyond
+the network-driver page to checking updates. The VM helper now emits this
+adapter/bridge combination as well as the SATA disk attachment.
+
+This is guest installation/OOBE evidence, not a completed desktop login,
+application installation, or live ClusterYourCodex job result.
