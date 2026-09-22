@@ -94,3 +94,29 @@ boot code, not completion of Setup. CLI `captureScreen` failed because guest
 login is required. The disposable VM was stopped and `vmrun list` confirmed
 zero running VMs. Next work is unattended Setup and guest-side installer
 lifecycle evidence; Issue #2 remains open.
+
+## Setup screen diagnosis — 2026-09-23 (Asia/Singapore)
+
+The installed Workstation also provides `vmcli.exe`. Unlike the attempted
+`vmrun captureScreen`, its `MKS captureScreenshot <filename>` command succeeded
+without guest credentials or VMware Tools. This supplies a CLI-only diagnostic
+path before the guest OS is installed:
+
+```powershell
+& $vmcli $vmx MKS captureScreenshot $diagnosticPng
+```
+
+The captured Windows 11 Setup screen is the **Product key** page, with the
+built-in **I don't have a product key** option visible. This is direct evidence
+that Setup has booted and is awaiting input; the earlier small VMDK size alone
+did not establish a firmware or hardware-requirement failure. A separate private
+answer ISO had already been attached, but unattended installation has not been
+proven: determine whether Setup consumed the answer file and how to suppress
+this prompt through supported installation settings. Do not publish the answer
+file, guest credentials, or screenshots containing them.
+
+VMware logs also reported `SecureBootModeDisabled`; successful vTPM provisioning
+has not been established. These remain separate checks, not a proven explanation
+for the currently observed product-key prompt. No hardware-check bypass or
+Windows activation workaround was applied. No ClusterYourCodex installer has
+run inside this guest yet, so Issue #2 remains open.
