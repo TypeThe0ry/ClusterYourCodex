@@ -1,5 +1,22 @@
 # ClusterYourCodex project status
 
+## Current GitHub audit — 2026-09-22
+
+- PR #113 (`3b64e1a`) is merged. The Windows-hosted Git Bash lifecycle fixture
+  now allows a bounded 300-second setup budget; local `Test-WorkerKits.ps1`
+  and both CI matrices (before and after rebasing on `main`) passed, including
+  the long Desktop/Windows host/Codex bridge job.
+- PR #108 (Vitest 5) and PR #112 (React/Vite runtime) are separate dependency
+  updates. #108 is closed and cannot be reopened through the current GitHub
+  API; its independent change was recovered as PR #115. #112 merged as
+  `df63576` after all required checks passed; #115 remains open while its
+  dependency checks complete.
+- Open Issues #2 and #3 remain intentionally open. Their required evidence is
+  respectively a clean Windows 11 install/repair/rollback/uninstall run and a
+  native macOS LaunchAgent plus managed controller/worker round trip; hosted
+  package/build jobs are not equivalent evidence.
+- The published `v0.0.1` tag and release assets are unchanged.
+
 ## Current GitHub audit — 2026-09-18
 
 The repository state on `origin/main` is authoritative for this audit. PR #89

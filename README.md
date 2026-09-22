@@ -37,6 +37,23 @@ This distinction keeps the README useful: a passing package test proves the pack
 
 ### Recorded candidate test results
 
+#### Current repository audit — 2026-09-22
+
+The current `main` contains merge commit `3b64e1a` from PR #113. Its fix
+raises the Windows-hosted Git Bash worker-kit lifecycle fixture budget from
+120 seconds to 300 seconds while retaining a bounded watchdog. The local
+`Test-WorkerKits.ps1` run passed, and both the pre-merge and latest-main CI
+matrices passed all required jobs, including the Desktop/Windows host/Codex
+bridge round trip. PR #112 (React/Vite runtime dependencies) is merged as
+`df63576`; the recovered independent Vitest 5 update is tracked in PR #115.
+
+The stable `v0.0.1` tag and assets remain unchanged. PR #108 (Vitest 5)
+and #112 (React/Vite runtime) are separate dependency updates and remain
+independently tracked. Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
+and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) remain open:
+hosted CI does not replace clean Windows 11 VM lifecycle evidence or a native
+macOS LaunchAgent and managed controller/worker round trip.
+
 The following snapshot refers to commit `c5123d5` and [CI run 35482026938](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35482026938), not every later candidate. That run was superseded and cancelled after a documentation update. Consult the [PR checks](https://github.com/TypeThe0ry/ClusterYourCodex/pull/99/checks) for the current head.
 
 | Test layer | Current result | What was observed |
