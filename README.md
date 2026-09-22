@@ -47,7 +47,9 @@ matrices passed all required jobs, including the Desktop/Windows host/Codex
 bridge round trip. PR #108 was closed as superseded by the newer #112 runtime
 dependency update; #112 is still being validated against this `main`.
 
-The stable `v0.0.1` tag and assets remain unchanged. Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
+The stable `v0.0.1` tag and assets remain unchanged. PR #108 (Vitest 5)
+and #112 (React/Vite runtime) are separate dependency updates and remain
+independently tracked. Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
 and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) remain open:
 hosted CI does not replace clean Windows 11 VM lifecycle evidence or a native
 macOS LaunchAgent and managed controller/worker round trip.

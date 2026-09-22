@@ -6,8 +6,11 @@
   now allows a bounded 300-second setup budget; local `Test-WorkerKits.ps1`
   and both CI matrices (before and after rebasing on `main`) passed, including
   the long Desktop/Windows host/Codex bridge job.
-- PR #108 is closed as superseded by PR #112. PR #112 is rebased on the
-  post-#113 `main` and remains open while its dependency checks complete.
+- PR #108 (Vitest 5) and PR #112 (React/Vite runtime) are separate dependency
+  updates. #108 is closed and cannot be reopened through the current GitHub
+  API; its independent disposition is recorded in the PR comments. #112 is
+  rebased on the post-#113 `main` and remains open while its dependency checks
+  complete.
 - Open Issues #2 and #3 remain intentionally open. Their required evidence is
   respectively a clean Windows 11 install/repair/rollback/uninstall run and a
   native macOS LaunchAgent plus managed controller/worker round trip; hosted
