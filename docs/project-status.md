@@ -12,6 +12,21 @@ test completion. CodeQL and dependency-security checks passed on this PR.
 
 Issues #2 and #3 still require their respective clean Windows 11 lifecycle
 and live macOS managed-runtime evidence. These requirements are unchanged.
+The Windows VM reached Setup, which explicitly requested TPM 2.0; the
+remaining provisioning blocker is a usable encrypted vTPM through the
+CLI-only workflow, not the earlier optical-boot timeout. See the
+[VMware evidence](vmware-acceptance-20260920.md).
+
+Issue #3 also has an implementation gap, not only missing hardware access:
+`crates/cyc-worker/src/process.rs` tracks macOS jobs by their original Unix
+process group. The descendant tracker and the double-fork/new-session
+regression tests are Linux-only. An empty original process group therefore
+does not prove that detached descendants exited. Keep
+`MACOS_WORKER_CONTAINMENT_READY=0` until native cleanup covers normal exit,
+timeout, cancellation, and restart, with process-identity checks preventing
+signals to reused PIDs, followed by real LaunchAgent and controller round-trip
+validation. Hosted macOS package checks do not establish those properties.
+
 The entries below describe dated checkpoints, not the live PR queue.
 
 ## Current GitHub audit — 2026-09-23 (updated after PR #118)
