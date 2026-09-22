@@ -70,3 +70,27 @@ paths for both the VMDK and ISO. The attempt again used VMware CLI only:
 This confirms a reproducible EFI optical-media boot failure even after the
 path correction. No Windows guest boot or installer lifecycle result is
 claimed; Issue #2 remains open.
+
+## No-prompt EFI experiment — 2026-09-22
+
+A subsequent CLI-only experiment replaced the EFI El Torito boot image in the
+disposable ISO copy with Microsoft's `efisys_noprompt.bin` from the original
+media. Before writing, the embedded image at LBA 555 was SHA-256 compared with
+the original `efisys.bin`; the image lengths matched. The original downloaded
+ISO was not modified. The disposable ISO is modified test media and must not be
+represented as matching the original Microsoft whole-ISO hash.
+
+The new boot log progressed beyond the former CD-ROM timeout:
+
+```text
+2026-09-22T15:51:07.508Z Guest: Firmware has transitioned to runtime.
+2026-09-22T15:51:09.055Z Guest: PVSCSI: driver StorPort v1.3.15.0 starts.
+2026-09-22T15:51:09.056Z Guest: Driver=pvscsii, Version=1.3.15.0
+```
+
+This supports an unattended optical-boot prompt timeout as the previous
+blocker, rather than proving unreadable media. It proves progress into Windows
+boot code, not completion of Setup. CLI `captureScreen` failed because guest
+login is required. The disposable VM was stopped and `vmrun list` confirmed
+zero running VMs. Next work is unattended Setup and guest-side installer
+lifecycle evidence; Issue #2 remains open.
