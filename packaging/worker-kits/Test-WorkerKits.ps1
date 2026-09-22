@@ -2450,7 +2450,12 @@ test -s "$data/config.json"
 "$good/install-worker.sh" uninstall --bundle-root "$good" --purge-data >/dev/null
 test ! -e "$data"
 '@.TrimStart(), $utf8NoBom)
-        Invoke-CycWorkerKitBashSmoke -ScriptPath $smoke -ArgumentPath $temporary -Label 'linux-worker-lifecycle' -Phases @('repair', 'binding', 'uninstall')
+        # Windows-hosted Git Bash spends several minutes in the pre-marker
+        # contract setup (repeated OpenSSL/signature and installer probes).
+        # Keep the watchdog bounded, but give that setup enough time on cold
+        # hosted runners instead of treating normal crypto startup latency as
+        # a lifecycle hang.
+        Invoke-CycWorkerKitBashSmoke -ScriptPath $smoke -ArgumentPath $temporary -Label 'linux-worker-lifecycle' -TimeoutSeconds 300 -Phases @('repair', 'binding', 'uninstall')
 
         $macosGoodKit = Join-Path $temporary 'macos-smoke-good'
         $macosUpgradeKit = Join-Path $temporary 'macos-smoke-upgrade'
@@ -3078,7 +3083,7 @@ test ! -e "$default_program/cyc-worker"
 test ! -e "$default_data"
 test ! -e "$default_logs"
 '@.TrimStart(), $utf8NoBom)
-        Invoke-CycWorkerKitBashSmoke -ScriptPath $macosSmoke -ArgumentPath $temporary -Label 'macos-worker-lifecycle' -Phases @('repair', 'binding', 'uninstall')
+        Invoke-CycWorkerKitBashSmoke -ScriptPath $macosSmoke -ArgumentPath $temporary -Label 'macos-worker-lifecycle' -TimeoutSeconds 300 -Phases @('repair', 'binding', 'uninstall')
     }
 
     foreach ($content in @(
