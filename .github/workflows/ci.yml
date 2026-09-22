@@ -141,14 +141,12 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: cargo test --workspace --locked -- --test-threads=1
       - name: Test Rust workspace (bounded Windows process)
-        timeout-minutes: 45
+        timeout-minutes: 50
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: >-
-          ./scripts/Invoke-BoundedWindowsProcess.ps1
-          -FilePath (Get-Command cargo.exe -CommandType Application).Source
-          -ArgumentList 'test --workspace --locked -- --test-threads=1'
-          -TimeoutSeconds 2400 -WorkingDirectory $PWD -EvidenceRoot $env:RUNNER_TEMP
+          ./scripts/Test-WindowsWorkspacePackages.ps1
+          -PackageTimeoutSeconds 900 -WorkingDirectory $PWD -EvidenceRoot $env:RUNNER_TEMP
 
   native-worker-kits:
     name: Native Worker Kit (${{ matrix.label }})
