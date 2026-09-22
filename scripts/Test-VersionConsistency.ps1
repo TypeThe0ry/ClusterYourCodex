@@ -256,12 +256,21 @@ function Assert-CycReleaseWorkflowIdentity {
             $workflowContract.Text,
             '(?ms)^  msrv:\s*\r?\n(?<body>.*?)(?=^  [0-9A-Za-z_-]+:\s*\r?$|\z)'
         )
+        # CI runs the Windows desktop check through the bounded process wrapper
+        # so a stalled Cargo child emits a heartbeat and is reaped. Preserve the
+        # exact Cargo command as an argument assertion while allowing that
+        # observability layer; the release workflow remains direct.
+        $desktopMsrvGate = if ($workflowContract.Name -eq 'CI') {
+            $msrvJob.Groups['body'].Value -match '(?ms)Invoke-BoundedWindowsProcess\.ps1.*?-ArgumentList\s+[''\"]check\s+--locked\s+--manifest-path\s+apps/desktop/src-tauri/Cargo\.toml[''\"]'
+        } else {
+            $msrvJob.Groups['body'].Value -match '(?m)^\s*run:\s*cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo\.toml\s*$'
+        }
         if (-not $msrvJob.Success -or
             $msrvJob.Groups['body'].Value -notmatch '(?m)^\s*RUSTUP_TOOLCHAIN:\s*1\.88\.0\s*$' -or
             $msrvJob.Groups['body'].Value -notmatch 'dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b\s+#\s+1\.88\.0' -or
             $msrvJob.Groups['body'].Value -notmatch '(?m)^\s*run:\s*\.\/scripts\/Test-RustMsrv\.ps1\s*$' -or
             $msrvJob.Groups['body'].Value -notmatch '(?m)^\s*run:\s*cargo check --workspace --locked\s*$' -or
-            $msrvJob.Groups['body'].Value -notmatch '(?m)^\s*run:\s*cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo\.toml\s*$') {
+            -not $desktopMsrvGate) {
             throw "$($workflowContract.Name) workflow is missing the exact Rust 1.88.0 workspace/desktop MSRV gates."
         }
     }
