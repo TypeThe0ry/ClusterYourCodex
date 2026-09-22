@@ -127,7 +127,11 @@ jobs:
     # Windows cold-cache workspace tests compile substantially more slowly
     # than Linux/macOS. Keep the matrix bounded without cutting off the
     # Windows test process while it is still making progress.
-    timeout-minutes: 55
+    # Windows ACL-backed worker tests are intentionally serialized and can
+    # spend over 15 minutes in PowerShell security helpers on a cold hosted
+    # runner. Keep the outer bound finite while leaving room for every package
+    # to reach its own bounded-process diagnostic.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
@@ -146,7 +150,7 @@ jobs:
         shell: pwsh
         run: >-
           ./scripts/Test-WindowsWorkspacePackages.ps1
-          -PackageTimeoutSeconds 900 -WorkingDirectory $PWD -EvidenceRoot $env:RUNNER_TEMP
+          -PackageTimeoutSeconds 1800 -WorkingDirectory $PWD -EvidenceRoot $env:RUNNER_TEMP
 
   native-worker-kits:
     name: Native Worker Kit (${{ matrix.label }})
