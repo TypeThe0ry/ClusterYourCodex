@@ -52,9 +52,9 @@ This distinction keeps the README useful: a passing package test proves the pack
 
 #### Current repository audit — 2026-09-23
 
-The authoritative source is `origin/main` at merge commit `f7f1732`
-([PR #125](https://github.com/TypeThe0ry/ClusterYourCodex/pull/125)). PR #125
-records the final post-merge audit after PR #122 fixed Windows staging
+The authoritative source is `origin/main` at merge commit `ebd02e3`
+([PR #126](https://github.com/TypeThe0ry/ClusterYourCodex/pull/126)). PR #126
+records the final post-merge audit correction after PR #122 fixed Windows staging
 failures caused by long temporary paths. Its completed
 candidate checks passed the Windows Setup acceptance run
 [`35805960001`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35805960001)
