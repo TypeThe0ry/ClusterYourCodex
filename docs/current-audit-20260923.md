@@ -79,6 +79,11 @@ that evidence is captured.
 ### Issue #3 — Heterogeneous Linux and macOS worker packages
 
 Linux x64 and macOS x64/arm64 packages build and pass their hosted probes.
+The current candidate also adds a macOS process-table containment backend that
+tracks `(pid, lstart)` identities, discovers descendants across new process
+groups, and re-checks identity before signaling. This is source-level progress,
+not native acceptance: the implementation still needs to compile and run on a
+real macOS host before the installer gate can be enabled.
 Issue #3 still requires a real macOS host running the LaunchAgent and a live
 managed Controller/Worker round trip. macOS descendant/new-session cleanup and
 process-identity checks also need native runtime evidence; package compilation
