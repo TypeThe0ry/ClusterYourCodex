@@ -31,7 +31,7 @@ The green cards above are backed by repeatable checks, not a decorative claim:
 
 - **Native plugin:** the integrity contract, bundled runtime, MCP protocol probe, and 48-test MCP suite pass on the Windows controller host. See the [cache verification record](docs/native-plugin-cache-verification-20260919.md).
 - **Hosted CI:** the current candidate exercises Rust on Windows/Linux/macOS, native Linux/macOS Worker Kits, dependency/security checks, and the Windows controller/bridge path. See [GitHub Actions](https://github.com/TypeThe0ry/ClusterYourCodex/actions) for the run history.
-- **Acceptance in progress:** the original Windows 11 ISO matches Microsoft's published hash. A disposable D-drive VMware VM reached Windows boot code using a modified, no-prompt test ISO; Setup and the clean-VM install/repair/rollback lifecycle remain unverified. The VM was stopped after testing. The macOS managed-runtime gate remains tracked in [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3).
+- **Acceptance in progress:** the original Windows 11 ISO matches Microsoft's published hash. A disposable VMware VM began installing Windows after a guest-only TPM-check exception and a SATA disk-controller correction, using modified no-prompt test media. This is a compatibility test environment, not proof of Windows 11 hardware compliance; OS completion and the clean-VM application lifecycle remain unverified. See the [VMware evidence](docs/vmware-acceptance-20260920.md). macOS still needs detached-descendant cleanup implementation and native managed-runtime validation before [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) can close.
 
 This distinction keeps the README useful: a passing package test proves the package contract, while a clean-VM or live-worker claim requires the corresponding runtime evidence.
 
@@ -51,9 +51,16 @@ The post-merge `main` checks (`35783783045` CI and `35783783039` CodeQL) were
 still running at the time of this audit. This README does not treat an in-progress
 run as a pass.
 
-The current pull-request queue is empty. PR #118 raised the bounded Windows
+At that audit checkpoint the pull-request queue was empty. PR #118 raised the bounded Windows
 worker-test/package budget after reproducing the serialized ACL/PowerShell
 helper overhead; the regression test passed locally before the merge.
+
+**Follow-up:** [PR #120](https://github.com/TypeThe0ry/ClusterYourCodex/pull/120)
+merged as `946bbb75` after [CI attempt 3](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35792946149)
+passed all ten jobs, including Windows workspace tests and the desktop
+installation/Worker Kit/live round-trip checks. CodeQL and dependency-security
+checks also passed. Earlier manually cancelled attempts were not proven timeout
+failures; see the [CI observation record](docs/ci-observation-20260923.md).
 
 The stable `v0.0.1` tag and assets remain unchanged at
 `e4fbaef04b764268fa038311d85573b18b549f9f`. Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)

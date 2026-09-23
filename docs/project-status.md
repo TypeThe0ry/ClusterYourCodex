@@ -1,5 +1,39 @@
 # ClusterYourCodex project status
 
+## Follow-up audit — 2026-09-23 (PR #120)
+
+PR #119 merged the previous audit into `main` at `a111c066`. PR #120 then
+merged at `946bbb75` after CI run `35792946149`, attempt 3, completed
+successfully. This includes the Windows workspace, desktop host, installation
+lifecycle, managed Worker Kits, and live controller/worker round trip.
+The earlier attempts were manually cancelled, not proven to have timed out.
+See the [observation correction](ci-observation-20260923.md) for timestamps,
+completed package tests, and the distinction between compile activity and
+test completion. CodeQL and dependency-security checks passed on this PR.
+
+Issues #2 and #3 still require their respective clean Windows 11 lifecycle
+and live macOS managed-runtime evidence. These requirements are unchanged.
+The Windows VM reached Setup, which explicitly requested TPM 2.0; the
+supported-hardware provisioning blocker is a usable encrypted vTPM through
+the CLI-only workflow, not the earlier optical-boot timeout. A subsequent
+disposable compatibility run applied a guest-only TPM-check exception and
+changed the disk attachment from legacy LSI Logic SCSI to SATA. Windows
+installation then began; neither completed OS installation nor the product
+lifecycle is claimed yet. See the
+[VMware evidence](vmware-acceptance-20260920.md).
+
+Issue #3 also has an implementation gap, not only missing hardware access:
+`crates/cyc-worker/src/process.rs` tracks macOS jobs by their original Unix
+process group. The descendant tracker and the double-fork/new-session
+regression tests are Linux-only. An empty original process group therefore
+does not prove that detached descendants exited. Keep
+`MACOS_WORKER_CONTAINMENT_READY=0` until native cleanup covers normal exit,
+timeout, cancellation, and restart, with process-identity checks preventing
+signals to reused PIDs, followed by real LaunchAgent and controller round-trip
+validation. Hosted macOS package checks do not establish those properties.
+
+The entries below describe dated checkpoints, not the live PR queue.
+
 ## Current GitHub audit — 2026-09-23 (updated after PR #118)
 
 - The audited implementation baseline is `3249646`, the merge of PR #118.
