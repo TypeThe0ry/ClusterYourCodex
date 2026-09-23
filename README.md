@@ -53,9 +53,9 @@ This distinction keeps the README useful: a passing package test proves the pack
 #### Current repository audit — 2026-09-23
 
 The authoritative source is the live `origin/main` ref; resolve its current
-commit with the audit commands below. PR #127 records the final audit
-self-reference correction after PR #122 fixed Windows staging
-failures caused by long temporary paths. Its completed
+commit with the audit commands below. The audit record tracks the merged
+documentation corrections after PR #122 fixed Windows staging failures caused
+by long temporary paths. Its completed
 candidate checks passed the Windows Setup acceptance run
 [`35805960001`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35805960001)
 and the platform/security checks in
