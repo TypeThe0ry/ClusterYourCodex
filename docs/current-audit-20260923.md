@@ -13,6 +13,7 @@ kept in the repository so the README does not rely on an implicit chat state.
 - PR #126: merged at `2026-09-23T05:21:04Z`
 - PR #127: merged at `2026-09-23T06:09:35Z`
 - PR #128: merged at `2026-09-23T06:58:06Z`
+- PR #129: merged at `2026-09-23T07:49:24Z`
 - Open pull requests: none
 - Published stable tag `v0.0.1`: `e4fbaef04b764268fa038311d85573b18b549f9f`
 - `git rev-parse v0.0.1` and `git ls-remote origin refs/tags/v0.0.1` agree.
@@ -50,10 +51,19 @@ kept in the repository so the README does not rely on an implicit chat state.
 - Audit self-reference correction PR #128 uses the same full matrix; its
   checks are linked from the pull request and the live ref is intentionally
   resolved by command rather than copied into this document.
+- The post-merge CI run for PR #129's merge commit completed successfully as
+  run [`35833742598`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35833742598).
 - CodeQL and dependency-security runs for PR #122 completed successfully.
 - The clean Windows VM diagnostic record documents Setup exit `0`, Controller
   health `200`, desktop first launch, and the installed native MCP eight-tool
   probe in [windows-vm-install-20260923.md](windows-vm-install-20260923.md).
+- A follow-up CLI-only VMware probe confirmed that the controller has
+  `vmrun.exe`, the D-drive retry VM is registered, VMware Tools can be queried,
+  and the installed guest payload reports `cyc`, `cyc-controller`, and
+  `cyc-worker` version `0.0.1`. After restarting that disposable VM to isolate
+  the round-trip probe, the console entered Windows Automatic Repair and Tools
+  stopped responding; no lifecycle or live-job pass is claimed from this
+  observation.
 
 ## Open acceptance boundaries
 
