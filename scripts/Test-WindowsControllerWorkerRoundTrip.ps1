@@ -1047,10 +1047,13 @@ function Invoke-LiveRoundTrip {
     Assert-DirectOwnedFile -Path $script:State.Enrollment -Label 'enrollment bundle' | Out-Null
     $script:State.StagedCredential = Join-Path $script:State.WorkerRoot ("worker.$($script:State.PairingId).credential")
 
-    $paired = Invoke-CapturedCommand -Label 'worker-pair' -FilePath $script:State.WorkerBin `
+    $pairedOutput = @(Invoke-CapturedCommand -Label 'worker-pair' -FilePath $script:State.WorkerBin `
         -ArgumentList @('pair', '--enrollment-file', $script:State.Enrollment, '--config', $script:State.WorkerConfig, '--workspace-root', $script:State.WorkspaceRoot) `
         -StdoutPath (Join-Path $script:State.EvidenceRoot 'worker-pair.stdout.log') -StderrPath (Join-Path $script:State.LogRoot 'worker-pair.stderr.log') `
-        -Timeout 60 -WorkingDirectory $script:State.RepositoryRoot
+        -Timeout 60 -WorkingDirectory $script:State.RepositoryRoot)
+    $paired = @($pairedOutput | Where-Object { $null -ne $_.PSObject.Properties['ExitCode'] } | Select-Object -Last 1)
+    if ($paired.Count -ne 1) { Fail-RoundTrip 'worker pair probe returned no structured exit result' }
+    $paired = $paired[0]
     if ($paired.ExitCode -ne 0) { Fail-RoundTrip 'worker pair failed' }
     Wait-PairReady
     $workerStatus = Invoke-CycJson -Label 'worker-status-paired' -Arguments @('pair', 'status', $script:State.PairingId) -Authenticated
