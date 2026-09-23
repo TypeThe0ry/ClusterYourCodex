@@ -931,7 +931,7 @@ fn capture_containment_seed() -> Result<ContainmentSeed> {
                 .into_values()
                 .map(|process| process.identity)
                 .collect();
-            return Ok(ContainmentSeed { baseline_processes });
+            Ok(ContainmentSeed { baseline_processes })
         }
         #[cfg(not(target_os = "macos"))]
         {
