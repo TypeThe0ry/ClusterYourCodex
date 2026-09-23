@@ -904,6 +904,8 @@ struct ContainmentSeed {
     baseline_children: std::collections::HashSet<ProcessIdentity>,
     #[cfg(target_os = "linux")]
     not_before_start_time: u64,
+    #[cfg(target_os = "macos")]
+    baseline_processes: std::collections::HashSet<MacProcessIdentity>,
 }
 
 fn capture_containment_seed() -> Result<ContainmentSeed> {
@@ -923,7 +925,18 @@ fn capture_containment_seed() -> Result<ContainmentSeed> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        Ok(ContainmentSeed {})
+        #[cfg(target_os = "macos")]
+        {
+            let baseline_processes = mac_process_snapshot()?
+                .into_values()
+                .map(|process| process.identity)
+                .collect();
+            return Ok(ContainmentSeed { baseline_processes });
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(ContainmentSeed {})
+        }
     }
 }
 
@@ -1170,11 +1183,176 @@ impl LinuxDescendants {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct MacProcessIdentity {
+    pid: i32,
+    start_time: String,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug)]
+struct MacProcess {
+    identity: MacProcessIdentity,
+    parent_pid: i32,
+    state: String,
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_process_line(line: &str) -> Option<MacProcess> {
+    // `lstart` is five whitespace-separated fields on macOS:
+    // weekday, month, day, time, year. Keeping the complete value makes a
+    // reused PID distinguishable even when the process table changes quickly.
+    let mut fields = line.split_whitespace();
+    let pid = fields.next()?.parse::<i32>().ok()?;
+    let parent_pid = fields.next()?.parse::<i32>().ok()?;
+    let mut start_fields = Vec::with_capacity(5);
+    for _ in 0..5 {
+        start_fields.push(fields.next()?);
+    }
+    let state = fields.next()?.to_owned();
+    Some(MacProcess {
+        identity: MacProcessIdentity {
+            pid,
+            start_time: start_fields.join(" "),
+        },
+        parent_pid,
+        state,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn mac_process_is_terminated(process: &MacProcess) -> bool {
+    matches!(process.state.chars().next(), Some('Z' | 'X'))
+}
+
+#[cfg(target_os = "macos")]
+fn mac_process_snapshot() -> Result<std::collections::HashMap<i32, MacProcess>> {
+    let output = Command::new("/bin/ps")
+        .args(["-axo", "pid=,ppid=,lstart=,state="])
+        .output()
+        .context("enumerate macOS processes")?;
+    if !output.status.success() {
+        bail!(
+            "macOS process enumeration failed with status {}",
+            output.status
+        );
+    }
+    let stdout = String::from_utf8(output.stdout).context("decode macOS process table")?;
+    Ok(stdout
+        .lines()
+        .filter_map(parse_macos_process_line)
+        .map(|process| (process.identity.pid, process))
+        .collect())
+}
+
+#[cfg(target_os = "macos")]
+struct MacosDescendants {
+    baseline_processes: std::collections::HashSet<MacProcessIdentity>,
+    tracked: std::collections::HashSet<MacProcessIdentity>,
+}
+
+#[cfg(target_os = "macos")]
+impl MacosDescendants {
+    fn new(root_pid: i32, seed: ContainmentSeed) -> Result<Self> {
+        let snapshot = mac_process_snapshot()?;
+        let root = snapshot
+            .get(&root_pid)
+            .map(|process| process.identity.clone())
+            .context("macOS child disappeared before containment attach")?;
+        let mut tracked = std::collections::HashSet::new();
+        tracked.insert(root.clone());
+        let mut descendants = Self {
+            baseline_processes: seed.baseline_processes,
+            tracked,
+        };
+        descendants.refresh_from_snapshot(&snapshot);
+        Ok(descendants)
+    }
+
+    fn refresh(&mut self) -> Result<()> {
+        let snapshot = mac_process_snapshot()?;
+        self.refresh_from_snapshot(&snapshot);
+        Ok(())
+    }
+
+    fn refresh_from_snapshot(&mut self, snapshot: &std::collections::HashMap<i32, MacProcess>) {
+        self.tracked.retain(|identity| {
+            snapshot.get(&identity.pid).is_some_and(|process| {
+                process.identity == *identity && !mac_process_is_terminated(process)
+            })
+        });
+
+        let tracked_pids = self
+            .tracked
+            .iter()
+            .map(|identity| identity.pid)
+            .collect::<std::collections::HashSet<_>>();
+        for process in snapshot.values() {
+            if self.baseline_processes.contains(&process.identity)
+                || mac_process_is_terminated(process)
+            {
+                continue;
+            }
+            let mut parent_pid = process.parent_pid;
+            let mut visited = std::collections::HashSet::new();
+            while parent_pid > 0 && visited.insert(parent_pid) {
+                if tracked_pids.contains(&parent_pid) {
+                    self.tracked.insert(process.identity.clone());
+                    break;
+                }
+                let Some(parent) = snapshot.get(&parent_pid) else {
+                    break;
+                };
+                parent_pid = parent.parent_pid;
+            }
+        }
+    }
+
+    fn is_empty(&mut self) -> Result<bool> {
+        self.refresh()?;
+        Ok(self.tracked.is_empty())
+    }
+
+    fn signal_all(&mut self, signal: i32) -> Result<()> {
+        self.refresh()?;
+        let snapshot = mac_process_snapshot()?;
+        for identity in self.tracked.iter() {
+            let Some(current) = snapshot.get(&identity.pid) else {
+                continue;
+            };
+            if current.identity != *identity || mac_process_is_terminated(current) {
+                continue;
+            }
+            let result = unsafe { libc::kill(identity.pid, signal) };
+            if result == -1 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error)
+                        .with_context(|| format!("signal contained macOS PID {}", identity.pid));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn best_effort_kill(&mut self) {
+        for _ in 0..3 {
+            if self.signal_all(libc::SIGKILL).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
 struct ProcessTree {
     #[cfg(unix)]
     process_group: i32,
     #[cfg(target_os = "linux")]
     descendants: LinuxDescendants,
+    #[cfg(target_os = "macos")]
+    descendants: MacosDescendants,
     #[cfg(windows)]
     job: windows_sys::Win32::Foundation::HANDLE,
     #[cfg(unix)]
@@ -1190,11 +1368,15 @@ impl ProcessTree {
             let process_group = i32::try_from(child.id()).context("child PID exceeds i32")?;
             #[cfg(target_os = "linux")]
             let descendants = LinuxDescendants::new(process_group, seed)?;
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "macos")]
+            let descendants = MacosDescendants::new(process_group, seed)?;
+            #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
             let _ = seed;
             Ok(Self {
                 process_group,
                 #[cfg(target_os = "linux")]
+                descendants,
+                #[cfg(target_os = "macos")]
                 descendants,
                 armed: true,
             })
@@ -1249,6 +1431,8 @@ impl ProcessTree {
         {
             #[cfg(target_os = "linux")]
             self.descendants.signal_all(libc::SIGTERM)?;
+            #[cfg(target_os = "macos")]
+            self.descendants.signal_all(libc::SIGTERM)?;
             let result = unsafe { libc::kill(-self.process_group, libc::SIGTERM) };
             if result == -1 {
                 let error = io::Error::last_os_error();
@@ -1272,6 +1456,8 @@ impl ProcessTree {
     fn observe(&mut self) -> Result<()> {
         #[cfg(target_os = "linux")]
         self.descendants.refresh()?;
+        #[cfg(target_os = "macos")]
+        self.descendants.refresh()?;
         Ok(())
     }
 
@@ -1284,6 +1470,9 @@ impl ProcessTree {
             }
             #[cfg(target_os = "macos")]
             {
+                if !self.descendants.is_empty()? {
+                    return Ok(false);
+                }
                 let required =
                     unsafe { libc::proc_listpgrppids(self.process_group, std::ptr::null_mut(), 0) };
                 if required < 0 {
@@ -1291,20 +1480,7 @@ impl ProcessTree {
                         .context("enumerate macOS process group");
                 }
                 if required > 0 {
-                    let mut pids = vec![0 as libc::pid_t; required as usize];
-                    let written = unsafe {
-                        libc::proc_listpgrppids(
-                            self.process_group,
-                            pids.as_mut_ptr().cast(),
-                            (pids.len() * std::mem::size_of::<libc::pid_t>()) as i32,
-                        )
-                    };
-                    if written < 0 {
-                        return Err(io::Error::last_os_error()).context("read macOS process group");
-                    }
-                    if written > 0 {
-                        return Ok(false);
-                    }
+                    return Ok(false);
                 }
                 let result = unsafe { libc::kill(-self.process_group, 0) };
                 if result == 0 {
@@ -1364,6 +1540,8 @@ impl ProcessTree {
         {
             #[cfg(target_os = "linux")]
             self.descendants.signal_all(libc::SIGKILL)?;
+            #[cfg(target_os = "macos")]
+            self.descendants.signal_all(libc::SIGKILL)?;
             let result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
             if result == -1 {
                 let error = io::Error::last_os_error();
@@ -1404,6 +1582,8 @@ impl Drop for ProcessTree {
                 libc::kill(-self.process_group, libc::SIGKILL);
             }
             #[cfg(target_os = "linux")]
+            self.descendants.best_effort_kill();
+            #[cfg(target_os = "macos")]
             self.descendants.best_effort_kill();
         }
         #[cfg(windows)]
@@ -1535,6 +1715,16 @@ mod tests {
         assert!(!process_disappeared(&io::Error::from_raw_os_error(
             libc::EACCES
         )));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_process_line_preserves_pid_identity() {
+        let process = parse_macos_process_line(" 123  45 Mon Sep 23 10:11:12 2026 S+").unwrap();
+        assert_eq!(process.identity.pid, 123);
+        assert_eq!(process.parent_pid, 45);
+        assert_eq!(process.identity.start_time, "Mon Sep 23 10:11:12 2026");
+        assert_eq!(process.state, "S+");
     }
 
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
