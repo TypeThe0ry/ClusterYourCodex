@@ -12,6 +12,7 @@ kept in the repository so the README does not rely on an implicit chat state.
 - PR #125: merged at `2026-09-23T04:30:28Z`
 - PR #126: merged at `2026-09-23T05:21:04Z`
 - PR #127: merged at `2026-09-23T06:09:35Z`
+- PR #128: merged at `2026-09-23T06:58:06Z`
 - Open pull requests: none
 - Published stable tag `v0.0.1`: `e4fbaef04b764268fa038311d85573b18b549f9f`
 - `git rev-parse v0.0.1` and `git ls-remote origin refs/tags/v0.0.1` agree.
@@ -46,7 +47,7 @@ kept in the repository so the README does not rely on an implicit chat state.
   [`35818882361`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35818882361)
   completed successfully with the full Windows, Linux, macOS, Worker Kit,
   CodeQL, MSRV, RustSec, Cargo deny, and pnpm audit matrix.
-- Audit self-reference correction PR #127 uses the same full matrix; its
+- Audit self-reference correction PR #128 uses the same full matrix; its
   checks are linked from the pull request and the live ref is intentionally
   resolved by command rather than copied into this document.
 - CodeQL and dependency-security runs for PR #122 completed successfully.
