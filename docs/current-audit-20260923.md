@@ -6,6 +6,8 @@ kept in the repository so the README does not rely on an implicit chat state.
 ## Repository and release invariants
 
 - `origin/main`: verify with `git fetch origin --prune; git rev-parse origin/main`
+- Current `origin/main` after the macOS containment merge:
+  `83de510bca30cf6116a20ced105b86ec3e2e9ba5`
 - PR #122: merged at `2026-09-23T02:03:29Z`
 - PR #123: merged at `2026-09-23T03:02:06Z`
 - PR #124: merged at `2026-09-23T03:43:42Z`
@@ -14,6 +16,8 @@ kept in the repository so the README does not rely on an implicit chat state.
 - PR #127: merged at `2026-09-23T06:09:35Z`
 - PR #128: merged at `2026-09-23T06:58:06Z`
 - PR #129: merged at `2026-09-23T07:49:24Z`
+- PR #130: merged at `2026-09-23T11:19:05Z`
+- PR #131: merged at `2026-09-23T14:41:56Z`
 - Open pull requests: none
 - Published stable tag `v0.0.1`: `e4fbaef04b764268fa038311d85573b18b549f9f`
 - `git rev-parse v0.0.1` and `git ls-remote origin refs/tags/v0.0.1` agree.
@@ -53,6 +57,14 @@ kept in the repository so the README does not rely on an implicit chat state.
   resolved by command rather than copied into this document.
 - The post-merge CI run for PR #129's merge commit completed successfully as
   run [`35833742598`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35833742598).
+- PR #131's candidate CI run
+  [`35870549904`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35870549904)
+  completed successfully before merge. It covered the full Windows, Linux, and
+  macOS Rust matrix, including the macOS process-containment regressions, the
+  Windows bounded-process suite, the Windows controller/worker live round trip,
+  native Linux/macOS Worker Kits, MSRV, CodeQL, RustSec, Cargo deny, pnpm audit,
+  and product-version identity checks. The merge commit is
+  `83de510bca30cf6116a20ced105b86ec3e2e9ba5`.
 - CodeQL and dependency-security runs for PR #122 completed successfully.
 - The clean Windows VM diagnostic record documents Setup exit `0`, Controller
   health `200`, desktop first launch, and the installed native MCP eight-tool
@@ -79,15 +91,17 @@ that evidence is captured.
 ### Issue #3 — Heterogeneous Linux and macOS worker packages
 
 Linux x64 and macOS x64/arm64 packages build and pass their hosted probes.
-The current candidate also adds a macOS process-table containment backend that
-tracks `(pid, lstart)` identities, discovers descendants across new process
-groups, and re-checks identity before signaling. This is source-level progress,
-not native acceptance: the implementation still needs to compile and run on a
-real macOS host before the installer gate can be enabled.
+PR #131 is now merged. Its macOS process-table containment backend tracks
+`(pid, lstart)` identities, discovers descendants across new process groups,
+and re-checks identity before signaling. The merged candidate compiled and ran
+the full macOS Rust suite in CI, including detached-descendant and timeout
+cleanup regressions. That is stronger than a package-only check, but it is not
+customer-host acceptance.
 Issue #3 still requires a real macOS host running the LaunchAgent and a live
 managed Controller/Worker round trip. macOS descendant/new-session cleanup and
 process-identity checks also need native runtime evidence; package compilation
-alone is insufficient.
+alone, or a hosted runner, is insufficient. Keep
+`MACOS_WORKER_CONTAINMENT_READY=0` until those native gates are captured.
 
 ## Reproduction commands
 

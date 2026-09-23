@@ -44,7 +44,7 @@ The green cards above are backed by repeatable checks, not a decorative claim:
 
 - **Native plugin:** the integrity contract, bundled runtime, MCP protocol probe, and 48-test MCP suite pass on the Windows controller host. See the [cache verification record](docs/native-plugin-cache-verification-20260919.md).
 - **Hosted CI:** the current candidate exercises Rust on Windows/Linux/macOS, native Linux/macOS Worker Kits, dependency/security checks, and the Windows controller/bridge path. See [GitHub Actions](https://github.com/TypeThe0ry/ClusterYourCodex/actions) for the run history.
-- **Acceptance in progress:** the Windows 11 VM now boots to the desktop. A diagnostic installer passed installation, controller/database health, desktop rendering, and the installed plugin's eight-tool MCP protocol probe. Current-source lifecycle and live-job acceptance remain open. This VM uses a guest-only TPM-check exception and modified no-prompt media, so it does not prove Windows 11 hardware compliance. See the [VM install evidence](docs/windows-vm-install-20260923.md). The current candidate adds macOS detached-descendant identity tracking; native managed-runtime validation is still required before [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) can close.
+- **Acceptance in progress:** the Windows 11 VM now boots to the desktop. A diagnostic installer passed installation, controller/database health, desktop rendering, and the installed plugin's eight-tool MCP protocol probe. Current-source lifecycle and live-job acceptance remain open. This VM uses a guest-only TPM-check exception and modified no-prompt media, so it does not prove Windows 11 hardware compliance. See the [VM install evidence](docs/windows-vm-install-20260923.md). PR #131 now carries the macOS detached-descendant identity backend and its full hosted macOS regression suite is green; native managed-runtime validation is still required before [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) can close.
 
 This distinction keeps the README useful: a passing package test proves the package contract, while a clean-VM or live-worker claim requires the corresponding runtime evidence.
 
@@ -60,8 +60,12 @@ candidate checks passed the Windows Setup acceptance run
 [`35805960001`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35805960001)
 and the platform/security checks in
 [`35805960000`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35805960000).
-The post-merge `main` CI run is tracked separately; an in-progress check is not
-counted as a completed pass.
+The later PR #131 candidate run
+[`35870549904`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35870549904)
+also completed successfully and was merged as
+`83de510bca30cf6116a20ced105b86ec3e2e9ba5`. It includes the macOS process
+containment regressions and the Windows controller/worker live round trip. An
+in-progress check is not counted as a completed pass.
 
 There are currently no open pull requests. Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
 and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) remain open
@@ -90,7 +94,7 @@ The diagrams summarize the evidence categories; they are not application screens
 | Native Codex plugin | Ready | Registration, bundled runtime integrity, and MCP 8-tool smoke pass on Windows |
 | Windows controller/worker | Preview-ready | Hosted CI controller/worker round-trip is green; clean-VM GA evidence remains open |
 | Linux worker kit | Preview-ready | Native Linux kit build and contract verification pass |
-| macOS worker kits | Package-ready | Intel and Apple Silicon kits build and verify; live managed execution remains gated |
+| macOS worker kits | Package-ready | Intel and Apple Silicon kits build and verify; PR #131's containment tests pass in hosted CI, while live managed execution on a customer Mac remains gated |
 | Stable release | `v0.0.1` unchanged | New work stays prerelease until the real GA gates in Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) are evidenced |
 
 ### Choose the right channel
