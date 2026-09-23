@@ -1476,9 +1476,6 @@ impl ProcessTree {
             }
             #[cfg(target_os = "macos")]
             {
-                if !self.descendants.is_empty()? {
-                    return Ok(false);
-                }
                 let required =
                     unsafe { libc::proc_listpgrppids(self.process_group, std::ptr::null_mut(), 0) };
                 if required < 0 {
@@ -1486,20 +1483,33 @@ impl ProcessTree {
                         .context("enumerate macOS process group");
                 }
                 if required > 0 {
-                    return Ok(false);
+                    let mut pids = vec![0 as libc::pid_t; required as usize];
+                    let written = unsafe {
+                        libc::proc_listpgrppids(
+                            self.process_group,
+                            pids.as_mut_ptr().cast(),
+                            (pids.len() * std::mem::size_of::<libc::pid_t>()) as i32,
+                        )
+                    };
+                    if written < 0 {
+                        return Err(io::Error::last_os_error()).context("read macOS process group");
+                    }
+                    if written > 0 {
+                        return Ok(false);
+                    }
                 }
                 let result = unsafe { libc::kill(-self.process_group, 0) };
                 if result == 0 {
                     return Ok(false);
                 }
                 let error = io::Error::last_os_error();
-                if error.raw_os_error() == Some(libc::ESRCH) {
-                    return Ok(true);
-                }
                 if error.raw_os_error() == Some(libc::EPERM) {
                     return Ok(false);
                 }
-                Err(error).context("probe macOS process group")
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error).context("probe macOS process group");
+                }
+                self.descendants.is_empty()
             }
             #[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
             {
