@@ -92,6 +92,15 @@ jobs:
             -PackageRoot $package `
             -OutputPath (Join-Path $env:RUNNER_TEMP 'ClusterYourCodex-Setup.exe') `
             -MakeNsisPath $nsis
+      - name: Retain the exact installer for clean-VM verification
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-setup-candidate
+          path: |
+            ${{ runner.temp }}/ClusterYourCodex-Setup.exe
+            ${{ runner.temp }}/ClusterYourCodex-Setup.exe.sha256
+          if-no-files-found: error
+          retention-days: 7
       - name: Run disposable packaged lifecycle
         timeout-minutes: 30
         env:
