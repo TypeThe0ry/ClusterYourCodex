@@ -46,7 +46,30 @@ runs in the Windows installer test step in CI. The broader local packaging
 script was blocked before execution by antivirus (`ScriptContainedMaliciousContent`);
 it is not reported as passed, and protection was not disabled.
 
-This verifies the payload-copy fix, not a complete rebuilt Setup install,
-repair, upgrade, rollback, uninstall, or live job. Issue #2 remains open until
-those applicable lifecycle checks finish. Published `v0.0.1` bytes and tag are
-unchanged; a corrected installer requires a new candidate artifact.
+## Diagnostic Setup and controller startup
+
+An unpublished diagnostic Setup was repacked from the verified `v0.0.1`
+archive with only the bootstrap staging-path fix and corresponding package
+hash metadata updated. The original release manifest was excluded rather than
+reuse an attestation for changed bytes. This is not a current-source release
+candidate, and the published release was not replaced.
+
+```text
+SHA-256 FFEF281CE84BB060EA5AE0427BD193D4D5A6EADD9221360A608E48E8128F9196
+Started  2026-09-23T00:14:44Z
+Finished 2026-09-23T00:21:21Z
+Exit     0
+```
+
+The desktop, controller, worker, CLI, bundled Node runtime and Windows worker
+kit were installed. A fresh guest observation at `2026-09-23T00:25:52Z`
+confirmed the controller scheduled task and process were running. An
+authenticated request to `/v1/health` returned HTTP 200, `status: ok`,
+`apiVersion: cyc.dev/v1`, `controllerVersion: 0.0.1`, and `database: ok`.
+The token was read inside the guest and was not included in commands or reports.
+
+This verifies diagnostic Setup installation and controller/database startup,
+not desktop interaction, native Codex plugin use, a live worker job, or the
+complete repair/upgrade/rollback/uninstall lifecycle. Issue #2 remains open
+until the applicable checks finish against a current-source candidate.
+Published `v0.0.1` bytes and tag are unchanged.
