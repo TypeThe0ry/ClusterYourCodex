@@ -52,7 +52,7 @@ This distinction keeps the README useful: a passing package test proves the pack
 
 #### Current repository audit — 2026-09-23
 
-The authoritative source is `origin/main` at merge commit `19b60fef`
+The authoritative source is `origin/main` at merge commit `40b8e41`
 ([PR #122](https://github.com/TypeThe0ry/ClusterYourCodex/pull/122)). PR #122
 fixes Windows staging failures caused by long temporary paths. Its completed
 candidate checks passed the Windows Setup acceptance run
