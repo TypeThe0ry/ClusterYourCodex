@@ -5,9 +5,10 @@ kept in the repository so the README does not rely on an implicit chat state.
 
 ## Repository and release invariants
 
-- `origin/main`: `269cce923b15d2cdf0290c61658c70ead260262e`
+- `origin/main`: `40b8e41b37d1c7f94033a7573901dfaa58bce191`
 - PR #122: merged at `2026-09-23T02:03:29Z`
 - PR #123: merged at `2026-09-23T03:02:06Z`
+- PR #124: merged at `2026-09-23T03:43:42Z`
 - Open pull requests: none
 - Published stable tag `v0.0.1`: `e4fbaef04b764268fa038311d85573b18b549f9f`
 - `git rev-parse v0.0.1` and `git ls-remote origin refs/tags/v0.0.1` agree.
@@ -28,6 +29,10 @@ kept in the repository so the README does not rely on an implicit chat state.
   completed successfully with the same platform matrix, including the
   37-minute Windows Rust test and the 42-minute Windows controller/worker
   live round trip.
+- Documentation audit PR #124 CI run
+  [`35812813465`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35812813465)
+  completed successfully, including the final Windows Rust bounded-process test
+  and Windows controller/worker live round trip.
 - CodeQL and dependency-security runs for PR #122 completed successfully.
 - The clean Windows VM diagnostic record documents Setup exit `0`, Controller
   health `200`, desktop first launch, and the installed native MCP eight-tool
