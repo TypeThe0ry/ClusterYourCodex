@@ -3,8 +3,17 @@
 $testRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $probePath = Join-Path $testRoot 'Test-WindowsControllerWorkerRoundTrip.ps1'
 $probeSource = [IO.File]::ReadAllText($probePath)
+$probeAst = [System.Management.Automation.Language.Parser]::ParseInput($probeSource, [ref]$null, [ref]$null)
+$provenanceFunction = $probeAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-OptionalSourceCommit' }, $true)
+. ([scriptblock]::Create($provenanceFunction.Extent.Text))
 
 Describe 'Windows controller/worker live round-trip probe contract' {
+    It 'preserves result generation when Git is not installed' {
+        Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'git' }
+        $commit = Get-OptionalSourceCommit -Path $TestDrive
+        ($null -eq $commit) | Should Be $true
+    }
+
     It 'is parseable by the host PowerShell parser' {
         $tokens = $null
         $errors = $null

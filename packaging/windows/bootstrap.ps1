@@ -4060,7 +4060,9 @@ function Install-PlannedFiles {
         $parent = Split-Path -Parent $file.targetPath
         Assert-CycCreationPathNoReparse -Path $parent
         [void](New-Item -ItemType Directory -Path $parent -Force)
-        $temporary = $file.targetPath + '.cyc-install-' + [Guid]::NewGuid().ToString('N')
+        # Keep staging in the same directory without extending a potentially
+        # long payload filename beyond Windows PowerShell 5.1's path limit.
+        $temporary = Join-Path $parent ('.cyc-install-' + [Guid]::NewGuid().ToString('N'))
         try {
             Copy-Item -LiteralPath $file.sourcePath -Destination $temporary -Force
             $copiedHash = (Get-CycFileHash -LiteralPath $temporary -Algorithm SHA256).Hash.ToLowerInvariant()

@@ -847,13 +847,26 @@ function Write-Manifest {
     Write-Utf8NoBom -Path (Join-Path $script:State.JobRoot 'manifest.json') -Content ($manifest | ConvertTo-Json -Depth 8)
 }
 
+function Get-OptionalSourceCommit {
+    param([string]$Path)
+    # Packaged-binary acceptance also runs from source archives on machines
+    # without Git. Missing provenance must not suppress the diagnostic result.
+    try {
+        $gitCommand = Get-Command git -CommandType Application -ErrorAction SilentlyContinue
+        if ($null -eq $gitCommand) { return $null }
+        $commit = & $gitCommand.Source -C $Path rev-parse HEAD 2>$null
+        if ($LASTEXITCODE -eq 0 -and [string]$commit -match '^[0-9a-f]{40,64}$') { return [string]$commit }
+    } catch {}
+    return $null
+}
+
 function Write-Result {
     param([Parameter(Mandatory)][string]$Status)
     $result = [ordered]@{
         schema = 'cyc.dev/windows-controller-worker-roundtrip-result/v1'
         status = $Status
         failure = $script:State.Failure
-        sourceCommit = ((git -C $script:State.RepositoryRoot rev-parse HEAD 2>$null) | Select-Object -First 1)
+        sourceCommit = Get-OptionalSourceCommit -Path $script:State.RepositoryRoot
         hostOs = [Environment]::OSVersion.VersionString
         hostArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
         jobRoot = $script:State.JobRoot
@@ -1034,10 +1047,13 @@ function Invoke-LiveRoundTrip {
     Assert-DirectOwnedFile -Path $script:State.Enrollment -Label 'enrollment bundle' | Out-Null
     $script:State.StagedCredential = Join-Path $script:State.WorkerRoot ("worker.$($script:State.PairingId).credential")
 
-    $paired = Invoke-CapturedCommand -Label 'worker-pair' -FilePath $script:State.WorkerBin `
+    $pairedOutput = @(Invoke-CapturedCommand -Label 'worker-pair' -FilePath $script:State.WorkerBin `
         -ArgumentList @('pair', '--enrollment-file', $script:State.Enrollment, '--config', $script:State.WorkerConfig, '--workspace-root', $script:State.WorkspaceRoot) `
         -StdoutPath (Join-Path $script:State.EvidenceRoot 'worker-pair.stdout.log') -StderrPath (Join-Path $script:State.LogRoot 'worker-pair.stderr.log') `
-        -Timeout 60 -WorkingDirectory $script:State.RepositoryRoot
+        -Timeout 60 -WorkingDirectory $script:State.RepositoryRoot)
+    $paired = @($pairedOutput | Where-Object { $null -ne $_.PSObject.Properties['ExitCode'] } | Select-Object -Last 1)
+    if ($paired.Count -ne 1) { Fail-RoundTrip 'worker pair probe returned no structured exit result' }
+    $paired = $paired[0]
     if ($paired.ExitCode -ne 0) { Fail-RoundTrip 'worker pair failed' }
     Wait-PairReady
     $workerStatus = Invoke-CycJson -Label 'worker-status-paired' -Arguments @('pair', 'status', $script:State.PairingId) -Authenticated

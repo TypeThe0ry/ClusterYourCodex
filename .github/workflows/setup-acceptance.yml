@@ -63,8 +63,21 @@ jobs:
       - name: Compile Setup from current source
         run: |
           $ErrorActionPreference = 'Stop'
-          choco install nsis --yes --no-progress
-          if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed' }
+          $nsisCandidates = @(
+            (Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'),
+            (Join-Path $env:ProgramFiles 'NSIS\makensis.exe'),
+            (Join-Path $env:ChocolateyInstall 'lib\nsis\tools\makensis.exe'),
+            (Join-Path $env:ChocolateyInstall 'lib\nsis.install\tools\makensis.exe')
+          )
+          $makeNsis = $null
+          foreach ($attempt in 1..3) {
+            $existing = @(Get-Command makensis.exe -CommandType Application -All -ErrorAction SilentlyContinue)
+            $makeNsis = if ($existing.Count -gt 0) { [string]$existing[0].Source } else { $nsisCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1 }
+            if ($makeNsis) { break }
+            choco install nsis --yes --no-progress
+            if ($LASTEXITCODE -ne 0 -and $attempt -lt 3) { Start-Sleep -Seconds (10 * $attempt) }
+          }
+          if (-not $makeNsis) { throw 'makensis.exe was not found after three NSIS installation attempts.' }
           $plugin = Join-Path $env:RUNNER_TEMP 'setup-native-plugin'
           $nodeCommand = @(Get-Command node.exe -CommandType Application -All -ErrorAction Stop | Select-Object -First 1)
           if ($nodeCommand.Count -ne 1) { throw 'node.exe was not resolved to exactly one executable' }
@@ -72,16 +85,6 @@ jobs:
           $nodeLicense = Join-Path (Split-Path $node -Parent) 'LICENSE'
           if (-not (Test-Path -LiteralPath $nodeLicense -PathType Leaf)) { $nodeLicense = Join-Path $PWD 'packaging/windows/LICENSE.node.txt' }
           ./scripts/Prepare-NativeCodexPlugin.ps1 -OutputRoot $plugin -NodeLicense $nodeLicense
-          $nsisCommand = @(Get-Command makensis.exe -CommandType Application -All -ErrorAction SilentlyContinue | Select-Object -First 1)
-          $nsis = if ($nsisCommand.Count -eq 1) {
-            [string]$nsisCommand[0].Source
-          } else {
-            $installedNsis = Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'
-            if (-not (Test-Path -LiteralPath $installedNsis -PathType Leaf)) {
-              throw 'makensis.exe was not found after NSIS installation.'
-            }
-            $installedNsis
-          }
           $package = Join-Path $env:RUNNER_TEMP 'setup-package'
           ./packaging/windows/New-PreviewPayload.ps1 `
             -McpDeployRoot (Join-Path $plugin 'plugins/cluster-your-codex/mcp') `
@@ -91,7 +94,16 @@ jobs:
           ./packaging/windows/New-SetupExecutable.ps1 `
             -PackageRoot $package `
             -OutputPath (Join-Path $env:RUNNER_TEMP 'ClusterYourCodex-Setup.exe') `
-            -MakeNsisPath $nsis
+            -MakeNsisPath $makeNsis
+      - name: Retain the exact installer for clean-VM verification
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-setup-candidate
+          path: |
+            ${{ runner.temp }}/ClusterYourCodex-Setup.exe
+            ${{ runner.temp }}/ClusterYourCodex-Setup.exe.sha256
+          if-no-files-found: error
+          retention-days: 7
       - name: Run disposable packaged lifecycle
         timeout-minutes: 30
         env:
