@@ -44,7 +44,7 @@ The green cards above are backed by repeatable checks, not a decorative claim:
 
 - **Native plugin:** the integrity contract, bundled runtime, MCP protocol probe, and 48-test MCP suite pass on the Windows controller host. See the [cache verification record](docs/native-plugin-cache-verification-20260919.md).
 - **Hosted CI:** the current candidate exercises Rust on Windows/Linux/macOS, native Linux/macOS Worker Kits, dependency/security checks, and the Windows controller/bridge path. See [GitHub Actions](https://github.com/TypeThe0ry/ClusterYourCodex/actions) for the run history.
-- **Acceptance in progress:** the original Windows 11 ISO matches Microsoft's published hash. A disposable VMware VM began installing Windows after a guest-only TPM-check exception and a SATA disk-controller correction, using modified no-prompt test media. This is a compatibility test environment, not proof of Windows 11 hardware compliance; OS completion and the clean-VM application lifecycle remain unverified. See the [VMware evidence](docs/vmware-acceptance-20260920.md). macOS still needs detached-descendant cleanup implementation and native managed-runtime validation before [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) can close.
+- **Acceptance in progress:** the Windows 11 VM now boots to the desktop. A diagnostic installer passed installation, controller/database health, desktop rendering, and the installed plugin's eight-tool MCP protocol probe. Current-source lifecycle and live-job acceptance remain open. This VM uses a guest-only TPM-check exception and modified no-prompt media, so it does not prove Windows 11 hardware compliance. See the [VM install evidence](docs/windows-vm-install-20260923.md). macOS still needs detached-descendant cleanup implementation and native managed-runtime validation before [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) can close.
 
 This distinction keeps the README useful: a passing package test proves the package contract, while a clean-VM or live-worker claim requires the corresponding runtime evidence.
 
@@ -90,7 +90,7 @@ VM experiment; it is not a live status feed for later commits.
 | Native Worker Kits | PASS | Linux x64 plus macOS x64/arm64 package checks completed |
 | Security and dependency gates | PASS | CodeQL, RustSec, Cargo deny, and pnpm audit completed |
 | Windows controller/bridge job | PASS | The current candidate run completed the Windows controller/worker live round trip |
-| D-drive VMware acceptance | BOOTSTRAP ONLY | The no-prompt test ISO reached Windows boot code after earlier EFI CD-ROM timeouts; Setup and the application lifecycle remain unverified. See the [CLI experiment record](docs/vmware-acceptance-20260920.md) |
+| D-drive VMware acceptance | PARTIAL | Diagnostic Setup exit 0, controller/database healthy, desktop rendered, installed MCP eight-tool probe passed; current-source lifecycle and live-job acceptance remain open. See the [VM install record](docs/windows-vm-install-20260923.md) |
 
 The diagrams summarize the evidence categories; they are not application screenshots or an automatically refreshed test dashboard. Runtime acceptance remains open until the corresponding evidence is recorded.
 

@@ -76,6 +76,14 @@ of the Add Computer and Codex integration flows.
 
 ![Diagnostic desktop first launch](assets/windows-vm-first-launch.png)
 
+At `2026-09-23T00:32:00Z`, the installed plugin passed
+`Test-NativeCodexPlugin.ps1` (six required payload files and bundled runtime).
+The installed Node executable then ran `Test-McpDeployment.mjs` against the
+installed MCP directory and exited 0. Initialization negotiated protocol
+`2025-06-18`, and `tools/list` returned all eight expected tools. The probe
+uses self-test mode: this verifies the installed stdio server and payload,
+not registration in a Codex client or an actual fleet job.
+
 This verifies diagnostic Setup installation and controller/database startup,
 not desktop interaction, native Codex plugin use, a live worker job, or the
 complete repair/upgrade/rollback/uninstall lifecycle. Issue #2 remains open
