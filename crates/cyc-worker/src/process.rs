@@ -1431,8 +1431,6 @@ impl ProcessTree {
         {
             #[cfg(target_os = "linux")]
             self.descendants.signal_all(libc::SIGTERM)?;
-            #[cfg(target_os = "macos")]
-            self.descendants.signal_all(libc::SIGTERM)?;
             let result = unsafe { libc::kill(-self.process_group, libc::SIGTERM) };
             if result == -1 {
                 let error = io::Error::last_os_error();
@@ -1440,6 +1438,8 @@ impl ProcessTree {
                     return Err(error).context("send SIGTERM to process group");
                 }
             }
+            #[cfg(target_os = "macos")]
+            self.descendants.signal_all(libc::SIGTERM)?;
         }
         #[cfg(windows)]
         {
@@ -1540,8 +1540,6 @@ impl ProcessTree {
         {
             #[cfg(target_os = "linux")]
             self.descendants.signal_all(libc::SIGKILL)?;
-            #[cfg(target_os = "macos")]
-            self.descendants.signal_all(libc::SIGKILL)?;
             let result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
             if result == -1 {
                 let error = io::Error::last_os_error();
@@ -1549,6 +1547,8 @@ impl ProcessTree {
                     return Err(error).context("send SIGKILL to process group");
                 }
             }
+            #[cfg(target_os = "macos")]
+            self.descendants.signal_all(libc::SIGKILL)?;
         }
         #[cfg(windows)]
         {
