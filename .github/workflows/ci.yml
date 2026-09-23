@@ -73,7 +73,8 @@ jobs:
           Import-Module Pester -RequiredVersion 3.4.0 -Force
           Invoke-Pester -Script @(
             '.\packaging\windows\Test-LifecyclePortPreflight.Tests.ps1',
-            '.\packaging\windows\Test-LifecycleDiagnostics.Tests.ps1'
+            '.\packaging\windows\Test-LifecycleDiagnostics.Tests.ps1',
+            '.\packaging\windows\Test-InstallPlannedFiles.Tests.ps1'
           ) -EnableExit
 
   msrv:
