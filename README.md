@@ -52,44 +52,34 @@ This distinction keeps the README useful: a passing package test proves the pack
 
 #### Current repository audit — 2026-09-23
 
-The audited implementation baseline is `3249646`
-([PR #118](https://github.com/TypeThe0ry/ClusterYourCodex/pull/118)). Its completed
-candidate CI run [`35778999899`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35778999899)
-passed every required job: Windows/Linux/macOS Rust, MSRV, native Linux and
-macOS Worker Kits, the Windows install lifecycle, managed worker-kit lifecycle,
-and the Windows controller/worker live round trip. CodeQL and dependency
-security checks also passed.
+The authoritative source is `origin/main` at merge commit `19b60fef`
+([PR #122](https://github.com/TypeThe0ry/ClusterYourCodex/pull/122)). PR #122
+fixes Windows staging failures caused by long temporary paths. Its completed
+candidate checks passed the Windows Setup acceptance run
+[`35805960001`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35805960001)
+and the platform/security checks in
+[`35805960000`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35805960000).
+The post-merge `main` CI run is tracked separately; an in-progress check is not
+counted as a completed pass.
 
-The post-merge `main` checks (`35783783045` CI and `35783783039` CodeQL) were
-still running at the time of this audit. This README does not treat an in-progress
-run as a pass.
-
-At that audit checkpoint the pull-request queue was empty. PR #118 raised the bounded Windows
-worker-test/package budget after reproducing the serialized ACL/PowerShell
-helper overhead; the regression test passed locally before the merge.
-
-**Follow-up:** [PR #120](https://github.com/TypeThe0ry/ClusterYourCodex/pull/120)
-merged as `946bbb75` after [CI attempt 3](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35792946149)
-passed all ten jobs, including Windows workspace tests and the desktop
-installation/Worker Kit/live round-trip checks. CodeQL and dependency-security
-checks also passed. Earlier manually cancelled attempts were not proven timeout
-failures; see the [CI observation record](docs/ci-observation-20260923.md).
+There are currently no open pull requests. Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
+and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) remain open
+because their final runtime gates are still specific and independently
+unproven: a current-source clean Windows 11 lifecycle for #2, and a native
+macOS LaunchAgent plus managed controller/worker round trip for #3. Hosted CI
+and package probes are recorded as evidence, but are not substituted for those
+runtime gates. See the [live audit record](docs/current-audit-20260923.md).
 
 The stable `v0.0.1` tag and assets remain unchanged at
-`e4fbaef04b764268fa038311d85573b18b549f9f`. Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
-and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) remain open
-because hosted CI is not a substitute for a clean Windows 11 VM lifecycle or
-a live macOS LaunchAgent and managed controller/worker round trip.
-
-The table below summarizes that tested baseline and the separately recorded
-VM experiment; it is not a live status feed for later commits.
+`e4fbaef04b764268fa038311d85573b18b549f9f`. The table below summarizes the
+current evidence and is not an automatically refreshed dashboard.
 
 | Test layer | Current result | What was observed |
 | --- | --- | --- |
 | Rust controller/workspace | PASS | Windows, Ubuntu, and macOS jobs completed successfully |
 | Native Worker Kits | PASS | Linux x64 plus macOS x64/arm64 package checks completed |
 | Security and dependency gates | PASS | CodeQL, RustSec, Cargo deny, and pnpm audit completed |
-| Windows controller/bridge job | PASS | The current candidate run completed the Windows controller/worker live round trip |
+| Windows controller/bridge job | PASS | Candidate CI completed the Windows controller/worker live round trip |
 | D-drive VMware acceptance | PARTIAL | Diagnostic Setup exit 0, controller/database healthy, desktop rendered, installed MCP eight-tool probe passed; current-source lifecycle and live-job acceptance remain open. See the [VM install record](docs/windows-vm-install-20260923.md) |
 
 The diagrams summarize the evidence categories; they are not application screenshots or an automatically refreshed test dashboard. Runtime acceptance remains open until the corresponding evidence is recorded.
@@ -107,7 +97,7 @@ The diagrams summarize the evidence categories; they are not application screens
 | You need | Use | What it means |
 | --- | --- | --- |
 | A published baseline | [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1) | Immutable stable assets; no native-plugin recovery fixes |
-| A published preview | [v0.1.0-preview.102](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.102) | Latest published preview as of 2026-09-19; predates the native-plugin repair below |
+| A published preview | [v0.1.0-preview.102](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.102) | Latest published preview; it predates the fixes currently on `main` |
 | Source development | `main` or a feature branch | Run the checks below before packaging; do not call a preview stable |
 
 For installation fixes and their verification, see the
