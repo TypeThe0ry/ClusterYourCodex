@@ -23,6 +23,19 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 
 ## Status at a glance
 
+### Clean Windows VM: first application launch
+
+![ClusterYourCodex running in a clean Windows VM, with the first-run Windows firewall prompt](docs/assets/windows-vm-first-launch.png)
+
+On 2026-09-23, a local diagnostic installer containing the `v0.0.1` binaries
+and a bootstrap path-length fix installed successfully in the clean VM
+(exit 0). The desktop rendered its Chinese empty-fleet home screen, and the
+controller health endpoint returned HTTP 200 with a healthy database. The
+screenshot includes the first-run Windows firewall prompt; it does not prove
+remote worker connectivity. This diagnostic package is not the published
+installer or a current-source release candidate. See the
+[installation evidence and remaining checks](docs/windows-vm-install-20260923.md).
+
 ![Validation status](docs/assets/validation-status.svg)
 
 ### What the test effect means

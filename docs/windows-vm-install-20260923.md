@@ -68,6 +68,14 @@ authenticated request to `/v1/health` returned HTTP 200, `status: ok`,
 `apiVersion: cyc.dev/v1`, `controllerVersion: 0.0.1`, and `database: ok`.
 The token was read inside the guest and was not included in commands or reports.
 
+Launching the installed desktop through the guest Run dialog rendered the
+Chinese home screen with zero computers. The captured first-launch screen
+includes Windows' controller firewall prompt, which remained unresolved at
+this observation. This proves rendering, not remote connectivity or completion
+of the Add Computer and Codex integration flows.
+
+![Diagnostic desktop first launch](assets/windows-vm-first-launch.png)
+
 This verifies diagnostic Setup installation and controller/database startup,
 not desktop interaction, native Codex plugin use, a live worker job, or the
 complete repair/upgrade/rollback/uninstall lifecycle. Issue #2 remains open
