@@ -1316,6 +1316,10 @@ impl MacosDescendants {
 
     fn signal_all(&mut self, signal: i32) -> Result<()> {
         self.refresh()?;
+        self.signal_tracked(signal)
+    }
+
+    fn signal_tracked(&self, signal: i32) -> Result<()> {
         let snapshot = mac_process_snapshot()?;
         for identity in self.tracked.iter() {
             let Some(current) = snapshot.get(&identity.pid) else {
@@ -1431,6 +1435,8 @@ impl ProcessTree {
         {
             #[cfg(target_os = "linux")]
             self.descendants.signal_all(libc::SIGTERM)?;
+            #[cfg(target_os = "macos")]
+            self.descendants.refresh()?;
             let result = unsafe { libc::kill(-self.process_group, libc::SIGTERM) };
             if result == -1 {
                 let error = io::Error::last_os_error();
@@ -1439,7 +1445,7 @@ impl ProcessTree {
                 }
             }
             #[cfg(target_os = "macos")]
-            self.descendants.signal_all(libc::SIGTERM)?;
+            self.descendants.signal_tracked(libc::SIGTERM)?;
         }
         #[cfg(windows)]
         {
@@ -1540,6 +1546,8 @@ impl ProcessTree {
         {
             #[cfg(target_os = "linux")]
             self.descendants.signal_all(libc::SIGKILL)?;
+            #[cfg(target_os = "macos")]
+            self.descendants.refresh()?;
             let result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
             if result == -1 {
                 let error = io::Error::last_os_error();
@@ -1548,7 +1556,7 @@ impl ProcessTree {
                 }
             }
             #[cfg(target_os = "macos")]
-            self.descendants.signal_all(libc::SIGKILL)?;
+            self.descendants.signal_tracked(libc::SIGKILL)?;
         }
         #[cfg(windows)]
         {
