@@ -67,3 +67,27 @@ the complete clean-guest lifecycle (`Install -> Repair -> Upgrade -> Rollback
 -> Uninstall`) or a live ClusterYourCodex worker job. Those gates still need a
 guest credential/bootstrap channel and must be recorded separately when they
 are completed.
+
+## Blank-disk installation attempt
+
+After the cloned-guest probe, a separate blank 80 GiB VMDK was created with
+`scripts/New-ClusterYourCodexWindowsVm.ps1`. The verified Windows ISO and the
+existing private `answer.iso` (containing `Autounattend.xml`) were attached and
+the VM was started through `vmrun -T ws start ... nogui`.
+
+The attempt was stopped after VMware reported the same optical-media failure on
+both the generated SATA CD-ROM and an IDE CD-ROM configuration:
+
+```text
+DISKUTIL: ide1:0 : capacity=0 logical sector size=2048
+Guest: Status upon boot failure: No Media
+No operating system was found
+```
+
+The ISO is independently readable by Windows (`UDF`, 8,471,603,200 bytes) and
+its SHA-256 matches the Microsoft-published value above. Therefore this
+attempt is recorded as a VMware optical-media/CLI environment failure, not as
+a completed Windows installation. The blank-disk VM was powered off and left
+in its disposable D-drive directory for repeatable diagnosis; no existing VM
+or stable release artifact was modified.
+
