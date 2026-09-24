@@ -76,6 +76,13 @@ kept in the repository so the README does not rely on an implicit chat state.
   the round-trip probe, the console entered Windows Automatic Repair and Tools
   stopped responding; no lifecycle or live-job pass is claimed from this
   observation.
+- A new disposable D-drive clone was created and started entirely through
+  VMware CLI on 2026-09-24. The verified Windows 11 25H2 English x64 ISO was
+  attached, `vmrun` returned exit code `0`, and `checkToolsState` reported
+  `installed`. The details are in
+  [vmware-cli-install-20260924.md](vmware-cli-install-20260924.md). This is
+  boot/tooling evidence only; it does not close the clean-guest lifecycle or
+  live-worker acceptance gate.
 
 ## Open acceptance boundaries
 
