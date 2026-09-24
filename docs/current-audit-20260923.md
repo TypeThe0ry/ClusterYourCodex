@@ -1,13 +1,13 @@
 # Current GitHub Audit — 2026-09-23
 
-This record is based on the live repository state queried on 2026-09-23. It is
+This record is based on the live repository state queried on 2026-09-24. It is
 kept in the repository so the README does not rely on an implicit chat state.
 
 ## Repository and release invariants
 
 - `origin/main`: verify with `git fetch origin --prune; git rev-parse origin/main`
-- Current `origin/main` after the macOS containment merge:
-  `83de510bca30cf6116a20ced105b86ec3e2e9ba5`
+- Current `origin/main` after the VMware CLI evidence merges:
+  `23065e0ae39bad14f378f8464f1a3a14c4172f04`
 - PR #122: merged at `2026-09-23T02:03:29Z`
 - PR #123: merged at `2026-09-23T03:02:06Z`
 - PR #124: merged at `2026-09-23T03:43:42Z`
@@ -18,6 +18,8 @@ kept in the repository so the README does not rely on an implicit chat state.
 - PR #129: merged at `2026-09-23T07:49:24Z`
 - PR #130: merged at `2026-09-23T11:19:05Z`
 - PR #131: merged at `2026-09-23T14:41:56Z`
+- PR #133: merged at `2026-09-24T06:30:51Z`
+- PR #135: merged at `2026-09-24T09:22:13Z`
 - Open pull requests: none
 - Published stable tag `v0.0.1`: `e4fbaef04b764268fa038311d85573b18b549f9f`
 - `git rev-parse v0.0.1` and `git ls-remote origin refs/tags/v0.0.1` agree.
@@ -83,6 +85,10 @@ kept in the repository so the README does not rely on an implicit chat state.
   [vmware-cli-install-20260924.md](vmware-cli-install-20260924.md). This is
   boot/tooling evidence only; it does not close the clean-guest lifecycle or
   live-worker acceptance gate.
+- PR #135 additionally records the blank-disk installation attempt. VMware
+  reported `capacity=0` and `No Media` for both generated SATA and IDE
+  CD-ROM configurations, so no clean Windows installation is claimed from
+  that attempt.
 
 ## Open acceptance boundaries
 
