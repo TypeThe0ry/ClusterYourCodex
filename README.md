@@ -63,9 +63,11 @@ and the platform/security checks in
 The later PR #131 candidate run
 [`35870549904`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35870549904)
 also completed successfully and was merged as
-`83de510bca30cf6116a20ced105b86ec3e2e9ba5`. It includes the macOS process
-containment regressions and the Windows controller/worker live round trip. An
-in-progress check is not counted as a completed pass.
+`83de510bca30cf6116a20ced105b86ec3e2e9ba5`. PR #133 then recorded a
+CLI-created VMware guest, and PR #135 recorded the separate blank-disk media
+boundary; both documentation PRs passed the full candidate matrix. The current
+`origin/main` is `23065e0ae39bad14f378f8464f1a3a14c4172f04`. An in-progress
+check is not counted as a completed pass.
 
 There are currently no open pull requests. Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
 and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) remain open
@@ -85,7 +87,7 @@ current evidence and is not an automatically refreshed dashboard.
 | Native Worker Kits | PASS | Linux x64 plus macOS x64/arm64 package checks completed |
 | Security and dependency gates | PASS | CodeQL, RustSec, Cargo deny, and pnpm audit completed |
 | Windows controller/bridge job | PASS | Candidate CI completed the Windows controller/worker live round trip |
-| D-drive VMware acceptance | PARTIAL | Diagnostic Setup exit 0, controller/database healthy, desktop rendered, installed MCP eight-tool probe passed; current-source lifecycle and live-job acceptance remain open. See the [VM install record](docs/windows-vm-install-20260923.md) |
+| D-drive VMware acceptance | PARTIAL | A cloned Windows 11 guest boots and accepts CLI guest commands; the independent blank-disk attempt is blocked by VMware reporting `capacity=0`/`No Media` for the attached ISO. Current-source lifecycle and live-job acceptance remain open. See the [VMware CLI record](docs/vmware-cli-install-20260924.md) |
 
 The diagrams summarize the evidence categories; they are not application screenshots or an automatically refreshed test dashboard. Runtime acceptance remains open until the corresponding evidence is recorded.
 
