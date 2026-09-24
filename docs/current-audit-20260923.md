@@ -6,8 +6,8 @@ kept in the repository so the README does not rely on an implicit chat state.
 ## Repository and release invariants
 
 - `origin/main`: verify with `git fetch origin --prune; git rev-parse origin/main`
-- Current `origin/main` after the VMware CLI evidence merges:
-  `23065e0ae39bad14f378f8464f1a3a14c4172f04`
+- Current `origin/main` after the final audit-baseline merge:
+  `3964c1b0b25a064cd268675c7b0ad2cb35cbe9aa`
 - PR #122: merged at `2026-09-23T02:03:29Z`
 - PR #123: merged at `2026-09-23T03:02:06Z`
 - PR #124: merged at `2026-09-23T03:43:42Z`
@@ -20,6 +20,7 @@ kept in the repository so the README does not rely on an implicit chat state.
 - PR #131: merged at `2026-09-23T14:41:56Z`
 - PR #133: merged at `2026-09-24T06:30:51Z`
 - PR #135: merged at `2026-09-24T09:22:13Z`
+- PR #136: merged at `2026-09-24T10:11:31Z`
 - Open pull requests: none
 - Published stable tag `v0.0.1`: `e4fbaef04b764268fa038311d85573b18b549f9f`
 - `git rev-parse v0.0.1` and `git ls-remote origin refs/tags/v0.0.1` agree.
