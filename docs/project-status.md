@@ -228,7 +228,9 @@ This tests the installed native MCP bridge and real remote execution; the probe
 used self-test mode and does not assert a Codex runtime attestation receipt.
 
 PR #80 merged the standalone native plugin deployment workflow. PR #81 bounds
-Windows ACL/SID helpers to 30 seconds and fails closed on timeout. Local helper
+Windows ACL/SID helpers to 120 seconds and fails closed on timeout. The longer
+finite bound covers cold hosted-runner PowerShell startup and ACL inspection
+without allowing an unbounded worker stall. Local helper
 regressions (2/2), existing security tests (9/9), worker Clippy, and formatting
 passed. The live recovery above used the existing worker binary; deployment of
 the timeout fix and the remaining full CI checks are separate acceptance steps.

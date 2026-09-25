@@ -7,6 +7,9 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
+#[cfg(windows)]
+const WINDOWS_ACL_HELPER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// A deliberately non-debuggable, non-serializable credential value.
 pub struct SecretString(String);
 
@@ -572,6 +575,10 @@ fn run_windows_acl_for_owner(path: &Path, action: &str, sid: &str) -> Result<()>
         bail!("invalid Windows credential ACL action");
     }
 
+    // PowerShell ACL inspection is substantially slower on cold hosted
+    // Windows runners than on an interactive host. Keep the operation
+    // bounded, but leave enough room for startup plus one ACL round-trip;
+    // callers still fail closed when the finite bound is exceeded.
     let operation = bounded_security_output(
         Command::new("powershell.exe")
             .args([
@@ -586,7 +593,7 @@ fn run_windows_acl_for_owner(path: &Path, action: &str, sid: &str) -> Result<()>
             .env("CYC_WORKER_ACL_PATH", path)
             .env("CYC_WORKER_ACL_SID", sid)
             .env("CYC_WORKER_ACL_ACTION", action),
-        std::time::Duration::from_secs(30),
+        WINDOWS_ACL_HELPER_TIMEOUT,
     )
     .context("launch Windows credential ACL operation")?;
     if !operation.status.success() {
