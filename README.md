@@ -65,9 +65,10 @@ The later PR #131 candidate run
 also completed successfully and was merged as
 `83de510bca30cf6116a20ced105b86ec3e2e9ba5`. PR #133 then recorded a
 CLI-created VMware guest, and PR #135 recorded the separate blank-disk media
-boundary; both documentation PRs passed the full candidate matrix. The current
-`origin/main` is `3964c1b0b25a064cd268675c7b0ad2cb35cbe9aa`. An in-progress
-check is not counted as a completed pass.
+boundary; both documentation PRs passed the full candidate matrix. Resolve the
+live `origin/main` ref with the audit command below instead of relying on a
+copied commit hash; PR #137's merge commit is recorded in the audit document.
+An in-progress check is not counted as a completed pass.
 
 There are currently no open pull requests. Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
 and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) remain open
