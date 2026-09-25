@@ -97,6 +97,16 @@ kept in the repository so the README does not rely on an implicit chat state.
   [`36092595363`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/36092595363)
   passed the full Windows, Linux, macOS, MSRV, Worker Kit, security, and live
   controller/worker checks.
+- PR #138 removed the stale copied `origin/main` hash from this audit and made
+  the current branch reference resolve live with `git fetch origin --prune` and
+  `git rev-parse origin/main`. Its candidate matrix passed and it merged at
+  `aceb2a7b849fefbd014738b868b288dd8dbf4495`.
+- The 2026-09-25 VMware follow-up rebuilt the verified Windows ISO as a
+  CDFS/ISO9660 + BIOS/UEFI image and reproduced `capacity=0`/`No Media` on the
+  same blank guest. This strengthens the existing diagnosis as a VMware
+  Workstation 26.0.1 virtual CD-ROM failure; it still does not prove the clean
+  Windows lifecycle gate. Full details are in
+  [vmware-cli-install-20260924.md](vmware-cli-install-20260924.md).
 
 ## Open acceptance boundaries
 
