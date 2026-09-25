@@ -91,3 +91,27 @@ a completed Windows installation. The blank-disk VM was powered off and left
 in its disposable D-drive directory for repeatable diagnosis; no existing VM
 or stable release artifact was modified.
 
+## Optical-media isolation follow-up — 2026-09-25
+
+To distinguish an ISO filesystem problem from a VMware virtual-drive problem,
+the verified ISO contents were copied to a disposable D-drive staging directory
+and rebuilt inside a Linux container with an ISO9660/Joliet image and both BIOS
+and UEFI El Torito boot entries. The rebuilt image was independently mounted by
+Windows as `CDFS` and measured `8,467,810,304` bytes. It was then attached to
+the same blank VM's single IDE CD-ROM after removing the extra CD-ROM and
+`autodetect`/`clientDevice` entries. VMware still reported:
+
+```text
+DISKUTIL: ide1:0 : capacity=0 logical sector size=2048
+Guest: Status upon boot failure: No Media
+```
+
+The same `capacity=0` result was also reproduced with VMware's own
+`windows.iso`, and the rebuilt CDFS image produced the same result when moved
+from IDE to SATA. This rules out the source ISO's UDF layout, the duplicate
+CD-ROM configuration, and the controller choice as causes. The remaining
+diagnosis is a host-specific VMware Workstation 26.0.1 virtual CD-ROM path
+failure. The rebuilt ISO and the disposable minimal VM remain under
+`D:\ClusterYourCodex-validation`; neither is a product release artifact. No
+clean-VM installation or lifecycle pass is claimed from this experiment.
+
