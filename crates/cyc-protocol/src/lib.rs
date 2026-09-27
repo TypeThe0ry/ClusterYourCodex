@@ -17,6 +17,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod cleanup;
+pub mod discovery;
 pub mod node_state;
 pub mod onboarding;
 pub mod placement_binding;
@@ -27,6 +28,9 @@ pub use cleanup::{
     CleanupFailureCodeV1, CleanupFailureV1, CleanupReceiptV1, CleanupReservationReleaseReasonV1,
     CleanupStatusPhaseV1, CleanupStatusV1, JobRootCleanupOutcomeV1, TerminalCompletionAckV1,
     CLEANUP_API_VERSION, COMPLETION_ACKNOWLEDGED_AT_HEADER, COMPLETION_SHA256_HEADER,
+};
+pub use discovery::{
+    DiscoveryAnnouncementV1, DISCOVERY_API_VERSION, DISCOVERY_PORT, DISCOVERY_QUERY_V1,
 };
 
 pub use node_state::{

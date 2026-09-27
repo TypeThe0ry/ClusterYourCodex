@@ -225,6 +225,14 @@ suite. A failed cache check should be repaired, not bypassed.
 4. In **Add Computer**, enter the worker host and user, verify the host-key fingerprint, then run install, pair, start, and probe.
 5. Open **Advanced verification** and run **Full Run Check**. Then ask Codex to run a real build or test.
 
+To find controllers already running on the same private LAN, run
+`cyc discover --pretty`. It sends a credential-free UDP probe and returns only
+metadata candidates; it never pairs automatically or transmits an SSH
+password. Verify the SSH host key, then use the normal Add Computer flow for
+install, pairing, and the first probe. The protocol and current validation
+boundaries are recorded in
+[`docs/cross-platform-validation-20260927.md`](docs/cross-platform-validation-20260927.md).
+
 ## How it works
 
 ```text
@@ -270,6 +278,7 @@ Run the browser renderer with `pnpm dev`; it is not the installed native app. Fo
 - [Release process](docs/release-process.md)
 - [Changelog](CHANGELOG.md)
 - [Project status](docs/project-status.md)
+- [Cross-platform validation and LAN discovery](docs/cross-platform-validation-20260927.md)
 
 Open acceptance work is tracked in [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
 and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). Hosted CI and

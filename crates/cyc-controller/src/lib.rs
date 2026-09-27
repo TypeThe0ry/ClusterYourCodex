@@ -1,5 +1,6 @@
 pub mod api;
 pub mod auth;
+pub mod discovery;
 pub mod store;
 pub mod worker_api;
 
