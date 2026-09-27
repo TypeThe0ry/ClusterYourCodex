@@ -76,8 +76,14 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("failed to bind {}", args.bind))?;
     tracing::info!(address = %args.bind, "ClusterYourCodex controller listening");
+    let beacon_url = worker.as_ref().map(|worker| worker.public_url.clone());
+    let beacon = tokio::spawn(async move {
+        if let Err(error) = cyc_controller::discovery::run_beacon(beacon_url).await {
+            tracing::warn!(%error, "CYC LAN discovery beacon unavailable; continuing without LAN announcements");
+        }
+    });
     let mut state = AppState::new(store, token, args.bind.port());
-    if let Some(worker) = worker {
+    let result = if let Some(worker) = worker {
         state = state.with_worker_endpoint(worker.public_url.clone(), worker.certificate_pem);
         tracing::info!(address = %worker.bind, "managed-worker TLS listener enabled");
         let client_state = state.clone();
@@ -92,7 +98,10 @@ async fn main() -> Result<()> {
         }
     } else {
         cyc_controller::serve(listener, state).await
-    }
+    };
+    beacon.abort();
+    let _ = beacon.await;
+    result
 }
 
 struct WorkerOptions {

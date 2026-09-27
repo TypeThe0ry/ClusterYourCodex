@@ -1,13 +1,13 @@
 use std::path::{Path, PathBuf};
-use std::{fs, io};
+use std::{collections::BTreeMap, fs, io, net::SocketAddr};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use cyc_protocol::onboarding::{CreatePairingRequestV1, EnrollmentBundleV1, PairingStatusV1};
 use cyc_protocol::{
-    JobSpec, SnapshotMetadataV1, MAX_SNAPSHOT_ARCHIVE_BYTES, MAX_SNAPSHOT_ENTRIES,
-    MAX_SNAPSHOT_EXPANDED_BYTES, MAX_SNAPSHOT_FILE_BYTES, SNAPSHOT_ARCHIVE_FORMAT,
-    SNAPSHOT_MEDIA_TYPE,
+    DiscoveryAnnouncementV1, JobSpec, SnapshotMetadataV1, DISCOVERY_PORT, DISCOVERY_QUERY_V1,
+    MAX_SNAPSHOT_ARCHIVE_BYTES, MAX_SNAPSHOT_ENTRIES, MAX_SNAPSHOT_EXPANDED_BYTES,
+    MAX_SNAPSHOT_FILE_BYTES, SNAPSHOT_ARCHIVE_FORMAT, SNAPSHOT_MEDIA_TYPE,
 };
 use reqwest::{Client, Method};
 use serde_json::Value;
@@ -510,6 +510,17 @@ struct Cli {
 enum Commands {
     /// Check controller and database health.
     Health,
+    /// Find CYC controllers announcing on the local LAN; this never pairs or
+    /// transmits credentials.
+    Discover {
+        /// How long to wait for announcements after sending the probe.
+        #[arg(long, default_value_t = 1500)]
+        timeout_ms: u64,
+        /// Optional unicast address to probe (repeat for multiple addresses).
+        /// When omitted, the IPv4 LAN broadcast is used.
+        #[arg(long = "address")]
+        addresses: Vec<String>,
+    },
     /// List registered worker nodes and their current capabilities.
     Nodes,
     /// List jobs, or fetch a single job by id.
@@ -653,6 +664,7 @@ async fn main() -> Result<()> {
     let token = if matches!(
         &cli.command,
         Commands::Health
+            | Commands::Discover { .. }
             | Commands::Snapshot {
                 command: SnapshotCommands::Pack { .. }
             }
@@ -680,6 +692,10 @@ async fn main() -> Result<()> {
             )
             .await?
         }
+        Commands::Discover {
+            timeout_ms,
+            addresses,
+        } => discover(*timeout_ms, addresses).await?,
         Commands::Jobs { id: Some(id) } => {
             request_json(
                 &client,
@@ -929,6 +945,69 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string(&response)?);
     }
     Ok(())
+}
+
+async fn discover(timeout_ms: u64, addresses: &[String]) -> Result<Value> {
+    if !(100..=30_000).contains(&timeout_ms) {
+        bail!("--timeout-ms must be between 100 and 30000");
+    }
+    let socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0))
+        .await
+        .context("bind local UDP discovery socket")?;
+    socket
+        .set_broadcast(true)
+        .context("enable IPv4 discovery broadcast")?;
+    let targets = if addresses.is_empty() {
+        vec![SocketAddr::from(([255, 255, 255, 255], DISCOVERY_PORT))]
+    } else {
+        addresses
+            .iter()
+            .map(|address| {
+                address
+                    .parse::<SocketAddr>()
+                    .or_else(|_| format!("{address}:{DISCOVERY_PORT}").parse::<SocketAddr>())
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("--address must be an IP address with an optional port")?
+    };
+    for target in targets {
+        socket
+            .send_to(DISCOVERY_QUERY_V1, target)
+            .await
+            .with_context(|| format!("send LAN discovery probe to {target}"))?;
+    }
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+    let mut buffer = [0_u8; 4096];
+    let mut candidates = BTreeMap::new();
+    loop {
+        let received = tokio::time::timeout_at(deadline, socket.recv_from(&mut buffer)).await;
+        let Ok(Ok((length, peer))) = received else {
+            break;
+        };
+        let Ok(announcement) = serde_json::from_slice::<DiscoveryAnnouncementV1>(&buffer[..length])
+        else {
+            continue;
+        };
+        if !announcement.validate() {
+            continue;
+        }
+        candidates.insert(
+            peer.to_string(),
+            serde_json::json!({
+                "address": peer.ip().to_string(),
+                "port": peer.port(),
+                "announcement": announcement,
+                "nextAction": "verify the host key, then run the normal explicit SSH install and pairing flow"
+            }),
+        );
+    }
+    Ok(serde_json::json!({
+        "apiVersion": cyc_protocol::DISCOVERY_API_VERSION,
+        "broadcast": addresses.is_empty(),
+        "candidates": candidates.into_values().collect::<Vec<_>>(),
+        "pairingRequired": true,
+        "credentialsTransmitted": false
+    }))
 }
 
 fn normalize_base_url(raw: &str) -> Result<String> {
