@@ -32,6 +32,16 @@ operator to verify the SSH host-key fingerprint and runs the existing install �
 pair → start → probe workflow. This keeps convenience separate from trust: a
 random LAN device cannot enroll by merely answering a UDP packet.
 
+The current probe is an IPv4 broadcast on the local layer-2 segment. It does
+not enumerate routed subnets or claim cross-router discovery. On Windows, the
+managed-worker installer currently owns the narrow Private-profile TCP worker
+rule; the UDP `47830` discovery rule is not yet part of that same transactional
+install/repair/rollback lifecycle. A strict inbound firewall can therefore
+make an otherwise healthy controller invisible to automatic discovery. In that
+case, use the manual host field or the explicit `--address` probe until the
+UDP rule is added to the installer lifecycle. This limitation is tracked in
+Issue #2 and is intentionally not hidden behind a green loopback test.
+
 ## Verification commands
 
 ```powershell
