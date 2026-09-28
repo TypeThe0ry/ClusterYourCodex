@@ -88,7 +88,7 @@ current evidence and is not an automatically refreshed dashboard.
 | Native Worker Kits | PASS | Linux x64 plus macOS x64/arm64 package checks completed |
 | Security and dependency gates | PASS | CodeQL, RustSec, Cargo deny, and pnpm audit completed |
 | Windows controller/bridge job | PASS | Candidate CI completed the Windows controller/worker live round trip |
-| D-drive VMware acceptance | PARTIAL | A cloned Windows 11 guest boots and accepts CLI guest commands; the independent blank-disk attempt is blocked by VMware reporting `capacity=0`/`No Media` for the attached ISO. Current-source lifecycle and live-job acceptance remain open. See the [VMware CLI record](docs/vmware-cli-install-20260924.md) |
+| D-drive VMware acceptance | PARTIAL, with live fixture pass | The current-source Windows 11 guest completed the self-contained controller/worker fixture with pairing, queued → running → succeeded execution, artifact/cleanup, process cleanup, and secret scan all green. The independent blank-disk install attempt is still blocked by VMware reporting `capacity=0`/`No Media` for the attached ISO, so signed Setup lifecycle, upgrade/rollback, and packaged tray acceptance remain open. See the [VMware CLI record](docs/vmware-cli-install-20260924.md) and [cross-platform validation](docs/cross-platform-validation-20260927.md). |
 
 The diagrams summarize the evidence categories; they are not application screenshots or an automatically refreshed test dashboard. Runtime acceptance remains open until the corresponding evidence is recorded.
 
