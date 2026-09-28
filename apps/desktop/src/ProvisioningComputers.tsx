@@ -15,6 +15,7 @@ import {
   type StartComputerInput,
   type SshAuthenticationMethod,
 } from "./api/provisioning";
+import { discoveryClient, type LanDiscoveryCandidate } from "./api/discovery";
 import { useI18n, type TranslationKey, type TranslationValues } from "./i18n";
 
 const stepLabels: Record<ProvisioningStep, string> = {
@@ -420,6 +421,11 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
   const [error, setError] = useState<ProvisioningClientError>();
   const [hostKeyConfirmed, setHostKeyConfirmed] = useState(false);
   const [actionSecret, setActionSecret] = useState("");
+  const [lanCandidates, setLanCandidates] = useState<LanDiscoveryCandidate[]>([]);
+  const [lanScanning, setLanScanning] = useState(false);
+  const [lanScanned, setLanScanned] = useState(false);
+  const [lanError, setLanError] = useState(false);
+  const lanScanSequence = useRef(0);
   const [autoTick, setAutoTick] = useState(0);
   const listSequence = useRef(0);
   const lastAppliedList = useRef(0);
@@ -563,11 +569,13 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
   }, [applyResult, autoTick, computers, operation, refresh]);
 
   useEffect(() => () => {
+    lanScanSequence.current += 1;
     for (const timer of autoTimers.current.values()) window.clearTimeout(timer);
     autoTimers.current.clear();
   }, []);
 
   const resetAndCloseWizard = useCallback(() => {
+    lanScanSequence.current += 1;
     const reset = resetProvisioningModal();
     setShowWizard(false);
     setForm(reset.form);
@@ -575,10 +583,44 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
     setIntendedNodeId(reset.intendedNodeId);
     setActionSecret(reset.actionSecret);
     setHostKeyConfirmed(reset.hostKeyConfirmed);
+    setLanCandidates([]);
+    setLanScanning(false);
+    setLanScanned(false);
+    setLanError(false);
+  }, []);
+
+  const scanLan = useCallback(async () => {
+    const sequence = ++lanScanSequence.current;
+    setLanScanning(true);
+    setLanError(false);
+    setLanScanned(false);
+    setLanCandidates([]);
+    try {
+      const result = await discoveryClient.scan();
+      if (sequence !== lanScanSequence.current) return;
+      setLanCandidates(result.candidates);
+      setLanScanned(true);
+    } catch {
+      if (sequence === lanScanSequence.current) setLanError(true);
+    } finally {
+      if (sequence === lanScanSequence.current) setLanScanning(false);
+    }
+  }, []);
+
+  const chooseLanCandidate = useCallback((candidate: LanDiscoveryCandidate) => {
+    setForm((current) => ({
+      ...current,
+      host: candidate.address,
+      password: "",
+      passphrase: "",
+      displayName: current.displayName || `${candidate.address} · CYC`,
+    }));
   }, []);
 
   const start = useCallback(async (event: FormEvent) => {
     event.preventDefault();
+    lanScanSequence.current += 1;
+    setLanScanning(false);
     if (!canSubmitProvisioningForm(form)) {
       setError(new ProvisioningClientError("invalid_request"));
       return;
@@ -808,6 +850,29 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
                 </details>
               </div>
             ) : null}
+            <section className="lan-discovery" aria-live="polite">
+              <div className="lan-discovery-header">
+                <div>
+                  <strong>{t("provision.lanDiscoveryTitle")}</strong>
+                  <p>{t("provision.lanDiscoveryDescription")}</p>
+                </div>
+                <button className="button button-secondary" disabled={Boolean(operation) || lanScanning} onClick={() => void scanLan()} type="button">
+                  {lanScanning ? t("provision.lanDiscoveryScanning") : t("provision.lanDiscoveryScan")}
+                </button>
+              </div>
+              {lanCandidates.length > 0 ? (
+                <div className="lan-discovery-candidates">
+                  {lanCandidates.map((candidate) => (
+                    <button className="lan-discovery-candidate" disabled={Boolean(operation) || lanScanning} key={`${candidate.address}:${candidate.port}`} onClick={() => chooseLanCandidate(candidate)} type="button">
+                      <span><strong>{candidate.address}</strong><small>{candidate.announcement.version} · {t("provision.lanDiscoveryController")}</small></span>
+                      <span>{t("provision.lanDiscoveryUse")}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {lanScanned && lanCandidates.length === 0 && !lanScanning ? <small>{t("provision.lanDiscoveryNone")}</small> : null}
+              {lanError ? <small role="alert">{t("provision.lanDiscoveryError")}</small> : null}
+            </section>
             <div className="form-grid">
               <label className="wide">{t("provision.host")}<input autoFocus maxLength={1024} onChange={(event) => setForm({ ...form, host: event.target.value })} required value={form.host} /></label>
               <label className="wide">{t("provision.user")}<input maxLength={256} onChange={(event) => setForm({ ...form, username: event.target.value })} required value={form.username} /></label>

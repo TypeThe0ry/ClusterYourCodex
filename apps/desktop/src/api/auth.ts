@@ -38,6 +38,8 @@ export interface ClusterYourCodexDesktopBridge {
   fullRunCheck: () => Promise<unknown>;
   /** Poll the latest native Full Run snapshot without waiting for the operation lock. */
   fullRunCheckStatus: () => Promise<unknown>;
+  /** Scan the local network for credential-free CYC controller announcements. */
+  discoveryScan: (timeoutMs?: number) => Promise<unknown>;
   /** Create one durable SSH provisioning record (password, agent, or private key). */
   provisioningStart: (request: unknown) => Promise<unknown>;
   /** Recover every durable provisioning record after a desktop restart. */
