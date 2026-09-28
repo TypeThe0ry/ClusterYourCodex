@@ -222,15 +222,15 @@ suite. A failed cache check should be repaired, not bypassed.
    ```
 
 3. Run Setup. It installs per-user files under `%LOCALAPPDATA%\Programs\ClusterYourCodex`, registers the Codex plugin, and opens the desktop.
-4. In **Add Computer**, enter the worker host and user, verify the host-key fingerprint, then run install, pair, start, and probe.
+4. In **Add Computer**, choose **Scan local network** to find running CYC controllers, or enter the worker host manually. Selecting a candidate only pre-fills the SSH host; verify the host-key fingerprint, then run install, pair, start, and probe.
 5. Open **Advanced verification** and run **Full Run Check**. Then ask Codex to run a real build or test.
 
-To find controllers already running on the same private LAN, run
-`cyc discover --pretty`. It sends a credential-free UDP probe and returns only
-metadata candidates; it never pairs automatically or transmits an SSH
-password. Verify the SSH host key, then use the normal Add Computer flow for
-install, pairing, and the first probe. The protocol and current validation
-boundaries are recorded in
+To find controllers already running on the same private LAN, use **Scan local
+network** in Add Computer or run `cyc discover --pretty`. Both paths send a
+credential-free UDP probe and return only metadata candidates; neither pairs
+automatically or transmits an SSH password. Verify the SSH host key, then use
+the normal Add Computer flow for install, pairing, and the first probe. The
+protocol and current validation boundaries are recorded in
 [`docs/cross-platform-validation-20260927.md`](docs/cross-platform-validation-20260927.md).
 
 ## How it works

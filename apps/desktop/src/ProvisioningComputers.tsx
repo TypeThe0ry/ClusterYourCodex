@@ -15,6 +15,7 @@ import {
   type StartComputerInput,
   type SshAuthenticationMethod,
 } from "./api/provisioning";
+import { discoveryClient, DiscoveryClientError, type LanDiscoveryCandidate } from "./api/discovery";
 import { useI18n, type TranslationKey, type TranslationValues } from "./i18n";
 
 const stepLabels: Record<ProvisioningStep, string> = {
@@ -420,6 +421,8 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
   const [error, setError] = useState<ProvisioningClientError>();
   const [hostKeyConfirmed, setHostKeyConfirmed] = useState(false);
   const [actionSecret, setActionSecret] = useState("");
+  const [lanCandidates, setLanCandidates] = useState<LanDiscoveryCandidate[]>([]);
+  const [lanScanning, setLanScanning] = useState(false);
   const [autoTick, setAutoTick] = useState(0);
   const listSequence = useRef(0);
   const lastAppliedList = useRef(0);
@@ -575,6 +578,41 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
     setIntendedNodeId(reset.intendedNodeId);
     setActionSecret(reset.actionSecret);
     setHostKeyConfirmed(reset.hostKeyConfirmed);
+    setLanCandidates([]);
+    setLanScanning(false);
+  }, []);
+
+  const scanLan = useCallback(async () => {
+    setLanScanning(true);
+    setError(undefined);
+    try {
+      const result = await discoveryClient.scan();
+      setLanCandidates(result.candidates);
+      if (result.candidates.length === 1) {
+        const candidate = result.candidates[0];
+        setForm((current) => ({
+          ...current,
+          host: candidate.address,
+          displayName: current.displayName || `${candidate.address} · CYC`,
+        }));
+      }
+    } catch (caught) {
+      if (caught instanceof DiscoveryClientError) {
+        setError(new ProvisioningClientError(caught.code));
+      } else {
+        setError(new ProvisioningClientError("operation_unavailable"));
+      }
+    } finally {
+      setLanScanning(false);
+    }
+  }, []);
+
+  const chooseLanCandidate = useCallback((candidate: LanDiscoveryCandidate) => {
+    setForm((current) => ({
+      ...current,
+      host: candidate.address,
+      displayName: current.displayName || `${candidate.address} · CYC`,
+    }));
   }, []);
 
   const start = useCallback(async (event: FormEvent) => {
@@ -808,6 +846,28 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
                 </details>
               </div>
             ) : null}
+            <section className="lan-discovery" aria-live="polite">
+              <div className="lan-discovery-header">
+                <div>
+                  <strong>{t("provision.lanDiscoveryTitle")}</strong>
+                  <p>{t("provision.lanDiscoveryDescription")}</p>
+                </div>
+                <button className="button button-secondary" disabled={Boolean(operation) || lanScanning} onClick={() => void scanLan()} type="button">
+                  {lanScanning ? t("provision.lanDiscoveryScanning") : t("provision.lanDiscoveryScan")}
+                </button>
+              </div>
+              {lanCandidates.length > 0 ? (
+                <div className="lan-discovery-candidates">
+                  {lanCandidates.map((candidate) => (
+                    <button className="lan-discovery-candidate" key={`${candidate.address}:${candidate.port}`} onClick={() => chooseLanCandidate(candidate)} type="button">
+                      <span><strong>{candidate.address}</strong><small>{candidate.announcement.version} · {t("provision.lanDiscoveryController")}</small></span>
+                      <span>{t("provision.lanDiscoveryUse")}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {lanCandidates.length === 0 && !lanScanning ? <small>{t("provision.lanDiscoveryNone")}</small> : null}
+            </section>
             <div className="form-grid">
               <label className="wide">{t("provision.host")}<input autoFocus maxLength={1024} onChange={(event) => setForm({ ...form, host: event.target.value })} required value={form.host} /></label>
               <label className="wide">{t("provision.user")}<input maxLength={256} onChange={(event) => setForm({ ...form, username: event.target.value })} required value={form.username} /></label>

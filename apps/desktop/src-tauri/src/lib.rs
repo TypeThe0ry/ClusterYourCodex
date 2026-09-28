@@ -14,9 +14,11 @@ use zeroize::Zeroizing;
 
 mod full_run;
 mod integration;
+mod lan_discovery;
 mod provisioning;
 
 use full_run::{FullRunCheckManager, FullRunCheckResult, PublicFullRunCheckError};
+use lan_discovery::LanDiscoveryResult;
 
 use integration::{
     IntegrationActionResult, IntegrationManager, IntegrationSelfTestResult, IntegrationStatus,
@@ -244,6 +246,13 @@ const BRIDGE_INITIALIZATION_SCRIPT: &str = r#"
         return Promise.reject(new Error("native bridge unavailable"));
       }
       return invoke("full_run_check_status");
+    },
+    discoveryScan(timeoutMs) {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("discovery_scan", { timeoutMs });
     },
     provisioningStart(request) {
       const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
@@ -590,6 +599,15 @@ async fn full_run_check(
 }
 
 #[tauri::command]
+async fn discovery_scan(timeout_ms: Option<u64>) -> Result<LanDiscoveryResult, String> {
+    let timeout_ms = timeout_ms.unwrap_or(1_500);
+    tauri::async_runtime::spawn_blocking(move || lan_discovery::scan(timeout_ms))
+        .await
+        .map_err(|_| "discovery operation unavailable".to_owned())?
+        .map_err(str::to_owned)
+}
+
+#[tauri::command]
 fn full_run_check_status(manager: State<'_, ManagedFullRunCheck>) -> Option<FullRunCheckResult> {
     manager.progress()
 }
@@ -927,6 +945,7 @@ pub fn run() -> Result<(), tauri::Error> {
             integration_self_test,
             full_run_check,
             full_run_check_status,
+            discovery_scan,
             provisioning_start,
             provisioning_list,
             provisioning_get,
@@ -1150,6 +1169,8 @@ mod tests {
         assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("full_run_check"));
         assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("fullRunCheckStatus"));
         assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("full_run_check_status"));
+        assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("discoveryScan"));
+        assert!(BRIDGE_INITIALIZATION_SCRIPT.contains("discovery_scan"));
         for (method, command) in [
             ("provisioningStart", "provisioning_start"),
             ("provisioningList", "provisioning_list"),
