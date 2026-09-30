@@ -119,6 +119,37 @@ Describe 'Windows payload staging paths' {
         $privateStateError | Should Be $null
     }
 
+    It 'creates a protected transaction child beneath an inheritance-enabled parent' {
+        . $bootstrapPath
+        $transactionsRoot = Join-Path $TestDrive 'inherited-parent\transactions'
+        $transactionRoot = Join-Path $transactionsRoot ([Guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($transactionsRoot)
+        & icacls.exe $transactionsRoot /inheritance:e /grant '*S-1-1-0:(OI)(CI)(RX)' *> $null
+        $LASTEXITCODE | Should Be 0
+        $parentAcl = Get-FileSystemAclPortable -Item (Get-Item -LiteralPath $transactionsRoot -Force)
+        $parentAcl.AreAccessRulesProtected | Should Be $false
+        $parentRules = @($parentAcl.GetAccessRules(
+            $true, $true, [System.Security.Principal.SecurityIdentifier]
+        ) | Where-Object {
+            $_.IdentityReference.Value -eq 'S-1-1-0' -and
+            -not $_.IsInherited -and
+            $_.InheritanceFlags -eq [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+        })
+        $parentRules.Count | Should Be 1
+
+        New-CycPrivateDirectory -Path $transactionRoot
+
+        $childAcl = Get-FileSystemAclPortable -Item (Get-Item -LiteralPath $transactionRoot -Force)
+        $childAcl.AreAccessRulesProtected | Should Be $true
+        $childRules = @($childAcl.GetAccessRules(
+            $true, $true, [System.Security.Principal.SecurityIdentifier]
+        ))
+        @($childRules | Where-Object { $_.IsInherited }).Count | Should Be 0
+        @($childRules | Where-Object { $_.IdentityReference.Value -eq 'S-1-1-0' }).Count | Should Be 0
+        Assert-PrivatePathAcl -Path $transactionRoot
+        Assert-CycPrivateStateTree -Root $transactionRoot
+    }
+
     It 'keeps an atomically-created backup protected when the copy is interrupted' {
         . $bootstrapPath
         $transactionRoot = Join-Path $TestDrive 'atomic-copy-interruption'
