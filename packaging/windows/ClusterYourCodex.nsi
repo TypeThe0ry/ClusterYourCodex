@@ -48,6 +48,7 @@ Var CycMappingOwned
 Var CycSentinelName
 Var CycSentinelToken
 Var CycSentinelReady
+Var CycPowerShellPath
 Var CycPrimaryExit
 Var CycCleanupExit
 
@@ -201,6 +202,18 @@ cyc_cleanup_sentinel_deleted:
 cyc_cleanup_done:
 FunctionEnd
 
+Function CycResolvePowerShellPath
+  ; NSIS is a 32-bit process. Prefer the native 64-bit Windows PowerShell
+  ; through Sysnative so lifecycle process inspection sees x64 controller and
+  ; worker paths; retain the System32 fallback for a 32-bit Windows guest.
+  IfFileExists "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" 0 cyc_use_system_powershell
+  StrCpy $CycPowerShellPath "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+  Goto cyc_powershell_path_ready
+cyc_use_system_powershell:
+  StrCpy $CycPowerShellPath "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
+cyc_powershell_path_ready:
+FunctionEnd
+
 Function .onGUIEnd
   ; Best-effort backstop for GUI cancellation and transient cleanup failures.
   Call CycCleanupShortStaging
@@ -235,13 +248,14 @@ cyc_package_extraction_failed:
 
 cyc_package_extraction_complete:
   DetailPrint "Validating package and freezing one private-LAN listener plan; only the firewall step will request UAC..."
+  Call CycResolvePowerShellPath
   ; ExecWait inherits the NSIS coordinator's console creation flags.  On
   ; Windows 11 ARM64 x64 emulation that can briefly materialize a visible
   ; Windows PowerShell console even when -WindowStyle Hidden is present.
   ; nsExec creates the child with CREATE_NO_WINDOW and still gives us the
   ; native exit code, so silent Setup has one hidden process boundary.
   ClearErrors
-  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$CycMappedDrive\p\Invoke-ClusterYourCodexLifecycle.ps1" -Action Install -BundleRoot "$CycMappedDrive\p\payload" -PackageRoot "$CycMappedDrive\p" -PackageManifest "$CycMappedDrive\p\preview-manifest.json" -PackageExecutable "$EXEPATH" ${CYC_SIGNATURE_ARGUMENT} -NoLaunch'
+  nsExec::ExecToStack '"$CycPowerShellPath" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$CycMappedDrive\p\Invoke-ClusterYourCodexLifecycle.ps1" -Action Install -BundleRoot "$CycMappedDrive\p\payload" -PackageRoot "$CycMappedDrive\p" -PackageManifest "$CycMappedDrive\p\preview-manifest.json" -PackageExecutable "$EXEPATH" ${CYC_SIGNATURE_ARGUMENT} -NoLaunch'
   Pop $0
   Pop $1
   StrCmp $0 "error" cyc_lifecycle_launch_failed
