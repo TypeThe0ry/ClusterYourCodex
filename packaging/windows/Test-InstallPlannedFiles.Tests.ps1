@@ -85,4 +85,37 @@ Describe 'Windows payload staging paths' {
         Remove-FileRollbackSnapshot -Snapshot $rollback
         (Test-Path -LiteralPath $rollback.root) | Should Be $false
     }
+
+    It 'leaves an interrupted rollback snapshot as a fully protected private tree' {
+        . $bootstrapPath
+        $installRoot = Join-Path $TestDrive 'interrupted-rollback-install'
+        $dataRoot = Join-Path $TestDrive 'interrupted-rollback-data'
+        $goodTarget = Join-Path $installRoot 'a-good.bin'
+        $badTarget = Join-Path $installRoot 'z-not-a-file'
+        [void][IO.Directory]::CreateDirectory($installRoot)
+        [IO.File]::WriteAllText($goodTarget, 'snapshot before interruption')
+        [void][IO.Directory]::CreateDirectory($badTarget)
+        $plan = [pscustomobject]@{
+            installRoot = $installRoot
+            dataRoot = $dataRoot
+            manifestPath = (Join-Path $dataRoot 'install-manifest.json')
+            files = @(
+                [pscustomobject]@{relativePath = 'a-good.bin'}
+                [pscustomobject]@{relativePath = 'z-not-a-file'}
+            )
+        }
+
+        $failure = $null
+        try { [void](New-FileRollbackSnapshot -Plan $plan -OldManifest $null) } catch {
+            $failure = $_
+        }
+        $failure | Should Not Be $null
+        $transactionRoot = @(Get-ChildItem -LiteralPath (Join-Path $dataRoot '.installer\transactions') -Directory -Force)
+        $transactionRoot.Count | Should Be 1
+        $privateStateError = $null
+        try { Assert-CycPrivateStateTree -Root $transactionRoot[0].FullName } catch {
+            $privateStateError = $_
+        }
+        $privateStateError | Should Be $null
+    }
 }

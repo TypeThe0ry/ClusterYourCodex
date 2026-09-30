@@ -949,7 +949,12 @@ try {
     Assert-True ($source -match 'function Assert-CycExistingPrivateDirectory') 'lifecycle recovery has a verify-only private-root preflight'
     Assert-True ($source -match 'function Assert-CycPrivateStateTree') 'transaction journals are validated as a complete private state tree'
     Assert-True ($source -match 'Recover-CycAgentsTransactions[\s\S]+Assert-CycPrivateStateTree') 'journal recovery validates private state before enumerating records'
-    Assert-True ($source -match 'New-FileRollbackSnapshot[\s\S]+Set-PrivateDirectoryAcl -Path \$transactionRoot') 'new rollback snapshots publish an exact private ACL before recovery can consume them'
+    $rollbackSnapshotSource = [regex]::Match($source, 'function New-FileRollbackSnapshot[\s\S]+?function Restore-FileRollbackSnapshot')
+    Assert-True ($rollbackSnapshotSource.Success -and
+        $rollbackSnapshotSource.Value -match 'New-Item -ItemType Directory -Path \$transactionRoot[\s\S]+Set-PrivateDirectoryAcl -Path \$transactionRoot' -and
+        $rollbackSnapshotSource.Value -match 'New-Item -ItemType Directory -Path \$backupDirectory[\s\S]+Set-PrivateDirectoryAcl -Path \$backupDirectory' -and
+        $rollbackSnapshotSource.Value -match 'Copy-CycProtectedFile -Source \$target -Destination \$backup' -and
+        $rollbackSnapshotSource.Value -match 'Copy-CycProtectedFile -Source \$Plan\.manifestPath -Destination \$manifestBackup') 'rollback snapshots publish protected roots and leaves before copying bytes'
     $codexOnlyTransactionRootSource = [regex]::Match($source, 'function New-CycCodexOnlyTransactionRoot[\s\S]+?function Remove-CycCodexOnlyTransactionRoot')
     Assert-True ($codexOnlyTransactionRootSource.Success -and
         $codexOnlyTransactionRootSource.Value -match 'Assert-CycPrivateStateTree -Root \$transactionsRoot' -and
