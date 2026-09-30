@@ -3513,6 +3513,219 @@ function Set-PrivateDirectoryAcl {
     }
 }
 
+function Get-CycFileSystemAclExtensionsType {
+    $typeName = 'System.IO.FileSystemAclExtensions, System.IO.FileSystem.AccessControl'
+    $aclType = [System.Type]::GetType($typeName, $false)
+    if ($null -eq $aclType) {
+        try { Add-Type -AssemblyName System.IO.FileSystem.AccessControl } catch { }
+        $aclType = [System.Type]::GetType($typeName, $false)
+    }
+    if ($null -eq $aclType) {
+        foreach ($assembly in [AppDomain]::CurrentDomain.GetAssemblies()) {
+            try {
+                $candidate = $assembly.GetType('System.IO.FileSystemAclExtensions', $false)
+                if ($null -ne $candidate) {
+                    $aclType = $candidate
+                    break
+                }
+            } catch { }
+        }
+    }
+    if ($null -eq $aclType) {
+        throw 'Secure private-state creation API is unavailable.'
+    }
+    return $aclType
+}
+
+function Invoke-CycSecureDirectoryCreate {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][System.Security.AccessControl.DirectorySecurity]$Security
+    )
+    $directorySecurityType = [System.Security.AccessControl.DirectorySecurity]
+    $legacy = [System.IO.Directory].GetMethod(
+        'CreateDirectory',
+        [System.Type[]]@([string], $directorySecurityType)
+    )
+    if ($null -ne $legacy) {
+        [void]$legacy.Invoke($null, @($Path, $Security))
+        return
+    }
+    $flags = [System.Reflection.BindingFlags]::Public -bor
+        [System.Reflection.BindingFlags]::Static
+    $aclType = Get-CycFileSystemAclExtensionsType
+    $method = $aclType.GetMethod(
+        'Create',
+        $flags,
+        $null,
+        [System.Type[]]@([System.IO.DirectoryInfo], $directorySecurityType),
+        $null
+    )
+    if ($null -eq $method) {
+        throw 'Secure private-state directory creation API is unavailable.'
+    }
+    [void]$method.Invoke(
+        $null,
+        @([System.IO.DirectoryInfo]::new($Path), $Security)
+    )
+}
+
+function New-CycPrivateDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    Assert-CycCreationPathNoReparse -Path $Path
+    $security = New-PrivateFileSystemAcl -Directory $true
+    Invoke-CycSecureDirectoryCreate -Path $Path -Security $security
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or (Test-ReparsePoint $item)) {
+        throw "Private transaction path must be a normal directory: $Path"
+    }
+    Assert-PrivatePathAcl -Path $Path
+}
+
+function New-CycSecureFileStream {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][System.Security.AccessControl.FileSecurity]$Security
+    )
+    $fileSecurityType = [System.Security.AccessControl.FileSecurity]
+    $legacy = [System.IO.FileStream].GetConstructor(
+        [System.Type[]]@(
+            [string],
+            [System.IO.FileMode],
+            [System.Security.AccessControl.FileSystemRights],
+            [System.IO.FileShare],
+            [int],
+            [System.IO.FileOptions],
+            $fileSecurityType
+        )
+    )
+    if ($null -ne $legacy) {
+        return [System.IO.FileStream]$legacy.Invoke(@(
+            $Path,
+            [System.IO.FileMode]::CreateNew,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            [System.IO.FileShare]::None,
+            65536,
+            [System.IO.FileOptions]::WriteThrough,
+            $Security
+        ))
+    }
+    $flags = [System.Reflection.BindingFlags]::Public -bor
+        [System.Reflection.BindingFlags]::Static
+    $aclType = Get-CycFileSystemAclExtensionsType
+    $method = $aclType.GetMethod(
+        'Create',
+        $flags,
+        $null,
+        [System.Type[]]@(
+            [System.IO.FileInfo],
+            [System.IO.FileMode],
+            [System.Security.AccessControl.FileSystemRights],
+            [System.IO.FileShare],
+            [int],
+            [System.IO.FileOptions],
+            $fileSecurityType
+        ),
+        $null
+    )
+    if ($null -eq $method) {
+        throw 'Secure private-state file creation API is unavailable.'
+    }
+    return [System.IO.FileStream]$method.Invoke(
+        $null,
+        @(
+            [System.IO.FileInfo]::new($Path),
+            [System.IO.FileMode]::CreateNew,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            [System.IO.FileShare]::None,
+            65536,
+            [System.IO.FileOptions]::WriteThrough,
+            $Security
+        )
+    )
+}
+
+function Copy-CycProtectedFile {
+    <#
+    Copy one rollback input into a destination that is already covered by the
+    private-state ACL contract.  Copy-Item creates a new destination using
+    the parent inheritance state and only lets the caller normalize it after
+    the copy completes.  If the process is terminated during that window,
+    recovery correctly rejects the entire transaction tree.  Publish an empty
+    protected file first, then stream the bytes into that same file so every
+    partially-written backup remains a valid private-state leaf.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [scriptblock]$AfterCreate
+    )
+    Assert-CycCreationPathNoReparse -Path $Source
+    $sourceItem = Get-Item -LiteralPath $Source -Force -ErrorAction Stop
+    if ($sourceItem.PSIsContainer -or (Test-ReparsePoint $sourceItem)) {
+        throw "Rollback source must be a regular file: $Source"
+    }
+    $destinationParent = Split-Path -Parent $Destination
+    Assert-CycCreationPathNoReparse -Path $destinationParent
+    $existingDestination = $null
+    try {
+        $existingDestination = Get-Item -LiteralPath $Destination -Force -ErrorAction Stop
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        # The flat rollback name is generated by the caller and must be new.
+    }
+    if ($null -ne $existingDestination) {
+        throw "Rollback destination already exists: $Destination"
+    }
+
+    # FileStream's FileSecurity overload publishes the exact DACL as part of
+    # CreateFile. This closes the final create-to-SetAccessControl interval:
+    # a kill immediately after creation still leaves a valid private leaf.
+    $fileSecurity = New-PrivateFileSystemAcl -Directory $false
+    $createStream = $null
+    try {
+        $createStream = New-CycSecureFileStream -Path $Destination -Security $fileSecurity
+        $createStream.Flush($true)
+    } finally {
+        if ($null -ne $createStream) { $createStream.Dispose() }
+    }
+    $destinationItem = Get-Item -LiteralPath $Destination -Force -ErrorAction Stop
+    if ($destinationItem.PSIsContainer -or (Test-ReparsePoint $destinationItem)) {
+        throw "Rollback destination must be a regular file: $Destination"
+    }
+    Assert-PrivatePathAcl -Path $Destination
+    if ($null -ne $AfterCreate) { & $AfterCreate }
+
+    $sourceStream = $null
+    $destinationStream = $null
+    [byte[]]$buffer = New-Object byte[] 65536
+    try {
+        $sourceStream = [System.IO.FileStream]::new(
+            $Source,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read,
+            65536,
+            [System.IO.FileOptions]::SequentialScan
+        )
+        $destinationStream = [System.IO.FileStream]::new(
+            $Destination,
+            [System.IO.FileMode]::Create,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None,
+            65536,
+            [System.IO.FileOptions]::WriteThrough
+        )
+        while (($read = $sourceStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $destinationStream.Write($buffer, 0, $read)
+        }
+        $destinationStream.Flush($true)
+    } finally {
+        if ($null -ne $destinationStream) { $destinationStream.Dispose() }
+        if ($null -ne $sourceStream) { $sourceStream.Dispose() }
+    }
+    Assert-PrivatePathAcl -Path $Destination
+}
+
 function Invoke-CycIdentityCommand {
     param(
         [Parameter(Mandatory = $true)][string]$Executable,
@@ -4901,7 +5114,11 @@ function New-FileRollbackSnapshot {
     $null = @(Get-CycRegularDirectories -Root $Plan.installRoot)
     Set-PrivateDirectoryAcl -Path $transactionsRoot
     Assert-CycCreationPathNoReparse -Path $transactionRoot
-    [void](New-Item -ItemType Directory -Path $transactionRoot -Force)
+    New-CycPrivateDirectory -Path $transactionRoot
+    # Publish the transaction root before any rollback bytes are copied.  A
+    # termination during the first copy must leave a tree recovery can verify,
+    # not an inherited ACL tree that is indistinguishable from foreign state.
+    Set-PrivateDirectoryAcl -Path $transactionRoot
     $relativePaths = @($Plan.files.relativePath)
     if ($OldManifest) { $relativePaths += @($OldManifest.files | ForEach-Object { [string]$_.relativePath }) }
     $relativePaths = @($relativePaths | Sort-Object -Unique)
@@ -4912,7 +5129,7 @@ function New-FileRollbackSnapshot {
     # record; the backup only needs a collision-proof private name.
     $backupDirectory = Join-Path $transactionRoot 'files'
     Assert-CycCreationPathNoReparse -Path $backupDirectory
-    [void](New-Item -ItemType Directory -Path $backupDirectory -Force -ErrorAction Stop)
+    New-CycPrivateDirectory -Path $backupDirectory
     $records = @()
     foreach ($relative in $relativePaths) {
         $target = Assert-ChildPath -Root $Plan.installRoot -Candidate (Join-Path $Plan.installRoot $relative)
@@ -4933,7 +5150,7 @@ function New-FileRollbackSnapshot {
             throw "Owned file path is not a regular file: $target"
         }
         if ($existed) {
-            Copy-Item -LiteralPath $target -Destination $backup -Force -ErrorAction Stop
+            Copy-CycProtectedFile -Source $target -Destination $backup
         }
         $records += [PSCustomObject]@{
             targetPath = $target
@@ -4974,7 +5191,7 @@ function New-FileRollbackSnapshot {
             $manifestBackupItem.PSIsContainer -or (Test-ReparsePoint $manifestBackupItem))) {
             throw "Rollback manifest backup must be a regular file: $manifestBackup"
         }
-        Copy-Item -LiteralPath $Plan.manifestPath -Destination $manifestBackup -Force
+        Copy-CycProtectedFile -Source $Plan.manifestPath -Destination $manifestBackup
     }
     # Snapshot roots and every copied descendant are durable private state. A
     # later recovery pass must verify them before reading a journal, so
