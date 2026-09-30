@@ -465,10 +465,6 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
   }, [refresh]);
 
   useEffect(() => {
-    if (addRequest > 0) setShowWizard(true);
-  }, [addRequest]);
-
-  useEffect(() => {
     if (!hasActiveWork(computers)) return undefined;
     const interval = window.setInterval(() => void refresh(true), 3_000);
     return () => window.clearInterval(interval);
@@ -607,6 +603,15 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
     }
   }, []);
 
+  const openWizard = useCallback(() => {
+    setShowWizard(true);
+    void scanLan();
+  }, [scanLan]);
+
+  useEffect(() => {
+    if (addRequest > 0) openWizard();
+  }, [addRequest, openWizard]);
+
   const chooseLanCandidate = useCallback((candidate: LanDiscoveryCandidate) => {
     setForm((current) => ({
       ...current,
@@ -721,7 +726,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
         <h3>{t("nav.computers")}</h3>
         <div className="provisioning-header-actions">
           <button className="button button-secondary" disabled={loading || Boolean(operation)} onClick={() => void refresh()}>{loading ? t("common.loading") : t("common.refresh")}</button>
-          <button className="button button-primary" disabled={Boolean(operation)} onClick={() => setShowWizard(true)}>＋ {t("computers.add")}</button>
+          <button className="button button-primary" disabled={Boolean(operation)} onClick={openWizard}>＋ {t("computers.add")}</button>
         </div>
       </header>
 

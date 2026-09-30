@@ -118,4 +118,31 @@ Describe 'Windows payload staging paths' {
         }
         $privateStateError | Should Be $null
     }
+
+    It 'keeps an atomically-created backup protected when the copy is interrupted' {
+        . $bootstrapPath
+        $transactionRoot = Join-Path $TestDrive 'atomic-copy-interruption'
+        $backupDirectory = Join-Path $transactionRoot 'files'
+        $source = Join-Path $TestDrive 'atomic-copy-source.txt'
+        $destination = Join-Path $backupDirectory 'backup.bak'
+        New-CycPrivateDirectory -Path $transactionRoot
+        New-CycPrivateDirectory -Path $backupDirectory
+        [IO.File]::WriteAllText($source, 'copy source')
+
+        $failure = $null
+        try {
+            Copy-CycProtectedFile `
+                -Source $source `
+                -Destination $destination `
+                -AfterCreate { throw 'CYC_TEST_INTERRUPTED_AFTER_SECURE_CREATE' }
+        } catch {
+            $failure = $_
+        }
+        $failure.Exception.Message | Should Be 'CYC_TEST_INTERRUPTED_AFTER_SECURE_CREATE'
+        $privateStateError = $null
+        try { Assert-CycPrivateStateTree -Root $transactionRoot } catch {
+            $privateStateError = $_
+        }
+        $privateStateError | Should Be $null
+    }
 }
