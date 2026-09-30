@@ -4905,10 +4905,18 @@ function New-FileRollbackSnapshot {
     $relativePaths = @($Plan.files.relativePath)
     if ($OldManifest) { $relativePaths += @($OldManifest.files | ForEach-Object { [string]$_.relativePath }) }
     $relativePaths = @($relativePaths | Sort-Object -Unique)
+    # Keep rollback payload names flat and short.  Mirroring the installed
+    # relative path beneath the transaction root makes an otherwise valid
+    # target exceed the Win32 MAX_PATH boundary (and leaves rollback unable
+    # to create its temporary sibling).  The target path remains in the
+    # record; the backup only needs a collision-proof private name.
+    $backupDirectory = Join-Path $transactionRoot 'files'
+    Assert-CycCreationPathNoReparse -Path $backupDirectory
+    [void](New-Item -ItemType Directory -Path $backupDirectory -Force -ErrorAction Stop)
     $records = @()
     foreach ($relative in $relativePaths) {
         $target = Assert-ChildPath -Root $Plan.installRoot -Candidate (Join-Path $Plan.installRoot $relative)
-        $backup = Assert-ChildPath -Root $transactionRoot -Candidate (Join-Path $transactionRoot (Join-Path 'files' $relative))
+        $backup = Assert-ChildPath -Root $transactionRoot -Candidate (Join-Path $backupDirectory ([Guid]::NewGuid().ToString('N') + '.bak'))
         Assert-CycCreationPathNoReparse -Path $target
         $targetItem = $null
         try {
@@ -4925,13 +4933,12 @@ function New-FileRollbackSnapshot {
             throw "Owned file path is not a regular file: $target"
         }
         if ($existed) {
-            Assert-CycCreationPathNoReparse -Path (Split-Path -Parent $backup)
-            [void](New-Item -ItemType Directory -Path (Split-Path -Parent $backup) -Force)
-            Copy-Item -LiteralPath $target -Destination $backup -Force
+            Copy-Item -LiteralPath $target -Destination $backup -Force -ErrorAction Stop
         }
         $records += [PSCustomObject]@{
             targetPath = $target
             backupPath = $backup
+            relativePath = $relative
             existed = [bool]$existed
         }
     }
@@ -4991,11 +4998,14 @@ function Restore-FileRollbackSnapshot {
     foreach ($record in $Snapshot.files) {
         if ($record.existed) {
             Assert-CycCreationPathNoReparse -Path (Split-Path -Parent $record.targetPath)
-            [void](New-Item -ItemType Directory -Path (Split-Path -Parent $record.targetPath) -Force)
-            $temporary = $record.targetPath + '.cyc-rollback-' + [Guid]::NewGuid().ToString('N')
-            Copy-Item -LiteralPath $record.backupPath -Destination $temporary -Force
+            [void](New-Item -ItemType Directory -Path (Split-Path -Parent $record.targetPath) -Force -ErrorAction Stop)
+            # The temporary replacement must be a sibling, not a suffix on
+            # the full target path.  A suffix can push a long but valid target
+            # over MAX_PATH before the atomic Move-Item is attempted.
+            $temporary = Join-Path (Split-Path -Parent $record.targetPath) ('.cyc-rollback-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+            Copy-Item -LiteralPath $record.backupPath -Destination $temporary -Force -ErrorAction Stop
             [void](Get-CycAtomicTargetItem -Path $record.targetPath -Description 'rollback target')
-            Move-Item -LiteralPath $temporary -Destination $record.targetPath -Force
+            Move-Item -LiteralPath $temporary -Destination $record.targetPath -Force -ErrorAction Stop
         } else {
             $targetItem = Get-CycAtomicTargetItem -Path $record.targetPath -Description 'rollback target'
             if ($null -eq $targetItem) { continue }
