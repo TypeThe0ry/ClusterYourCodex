@@ -115,9 +115,10 @@ kept in the repository so the README does not rely on an implicit chat state.
   scheduled task `ClusterYourCodex Controller` was present and the controller
   listened on `127.0.0.1:47831` and `192.168.6.131:47832`. The retained probe is
   `D:\\ClusterYourCodex-validation\\vmware-windows-roundtrip-20260930\\cyc-vm-probe.json`.
-  This is current-source guest/runtime evidence only; the VM is an already
-  provisioned fixture, so it does not close the clean-guest lifecycle or prove
-  a fresh live worker job.
+  This is provisioned-guest/runtime evidence only; the probe does not assert
+  that the installed fixture binaries match the current source revision. The
+  VM is already provisioned, so it does not close the clean-guest lifecycle or
+  prove a fresh live worker job.
 
 ## Open acceptance boundaries
 
