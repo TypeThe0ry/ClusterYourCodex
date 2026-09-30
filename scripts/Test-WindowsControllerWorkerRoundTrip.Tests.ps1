@@ -28,8 +28,9 @@ Describe 'Windows controller/worker live round-trip probe contract' {
     It 'has an explicit Windows and RFC1918 fail-closed boundary' {
         $probeSource | Should Match 'Test-IsWindowsHost'
         $probeSource | Should Match 'Test-PrivateIpv4'
+        $probeSource | Should Match 'Test-LocalTcpSelfConnect'
         $probeSource | Should Match 'requires a Windows host'
-        $probeSource | Should Match 'no assigned RFC1918 IPv4 address'
+        $probeSource | Should Match 'local TCP self-connect probe'
         $probeSource | Should Match 'worker-public-url'
         $probeSource | Should Match 'Protect-PrivateDirectory'
         $probeSource | Should Match 'privateJobRootAcl'
