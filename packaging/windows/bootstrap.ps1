@@ -4719,23 +4719,69 @@ function Invoke-CycOwnedTaskEnd {
     param([Parameter(Mandatory = $true)][string]$Name)
     $schtasks = Join-Path $env:SystemRoot 'System32\schtasks.exe'
     if (-not (Test-Path -LiteralPath $schtasks -PathType Leaf)) { return }
+    $schedulerProcess = $null
     try {
         # /End is a scheduler-requested termination. It prevents the task's
         # RestartCount policy from treating our cleanup as an action failure;
         # killing the process first can otherwise launch a replacement while
         # the lifecycle is checking its ports.
-        $result = Start-Process `
+        $taskIdentifier = ('\' + $Name).Replace('"', '')
+        $arguments = '/End /TN "{0}"' -f $taskIdentifier
+        $schedulerProcess = Start-Process `
             -FilePath $schtasks `
-            -ArgumentList @('/End', '/TN', $Name) `
+            -ArgumentList $arguments `
             -WindowStyle Hidden `
-            -Wait `
             -PassThru `
             -ErrorAction Stop
-        [void]$result
+        if (-not $schedulerProcess.WaitForExit(30000)) {
+            try { $schedulerProcess.Kill() } catch [System.InvalidOperationException] { }
+            try { [void]$schedulerProcess.WaitForExit(30000) } catch { }
+            throw "schtasks /End timed out for owned task '$Name'."
+        }
     } catch {
         # Stop-CycRuntime still performs exact executable-path termination and
         # the bounded listener preflight. A scheduler race is handled there;
         # this helper must not hide access-denied on the owned process itself.
+    } finally {
+        if ($null -ne $schedulerProcess) { $schedulerProcess.Dispose() }
+    }
+}
+
+function Get-CycOwnedRuntimeProcesses {
+    param([Parameter(Mandatory = $true)][string[]]$OwnedExecutables)
+    $matches = New-Object System.Collections.Generic.List[object]
+    $ownedPaths = @($OwnedExecutables | ForEach-Object { Resolve-NormalizedPath ([string]$_) })
+    try {
+        # Win32_Process exposes the full executable path even when this
+        # coordinator is hosted by 32-bit Windows PowerShell under WOW64.
+        # Get-Process.Path is blank for many 64-bit targets in that host.
+        foreach ($process in @(Get-CimInstance -ClassName Win32_Process -OperationTimeoutSec 15 -ErrorAction Stop)) {
+            $pathProperty = $process.PSObject.Properties['ExecutablePath']
+            if ($null -eq $pathProperty -or [string]::IsNullOrWhiteSpace([string]$pathProperty.Value)) { continue }
+            $observedPath = $null
+            try { $observedPath = Resolve-NormalizedPath ([string]$pathProperty.Value) } catch { continue }
+            if ($ownedPaths -contains $observedPath) {
+                [void]$matches.Add([PSCustomObject]@{ Id = [int]$process.ProcessId; Path = $observedPath })
+            }
+        }
+        return $matches.ToArray()
+    } catch {
+        # A 32-bit host cannot safely use Get-Process.Path for x64 targets;
+        # without CIM's ExecutablePath, fail closed instead of assuming that a
+        # hidden owned controller/worker has stopped.
+        if (-not [Environment]::Is64BitProcess) {
+            throw "Unable to enumerate owned runtime executable paths from 32-bit PowerShell."
+        }
+        # Preserve a usable direct-invocation fallback when CIM is unavailable;
+        # it remains exact-path only and never falls back to process names.
+        foreach ($process in @(Get-Process -Name @('ClusterYourCodex', 'cyc-controller', 'cyc-worker') -ErrorAction SilentlyContinue)) {
+            $processPath = $null
+            try { $processPath = $process.Path } catch { $processPath = $null }
+            if ($processPath -and ($ownedPaths -contains (Resolve-NormalizedPath $processPath))) {
+                [void]$matches.Add([PSCustomObject]@{ Id = [int]$process.Id; Path = (Resolve-NormalizedPath $processPath) })
+            }
+        }
+        return $matches.ToArray()
     }
 }
 
@@ -4773,14 +4819,7 @@ function Stop-CycRuntime {
             Stop-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction SilentlyContinue
             Invoke-CycOwnedTaskEnd -Name $name
         }
-        $ownedProcesses = @(
-            Get-Process -Name @('ClusterYourCodex', 'cyc-controller', 'cyc-worker') -ErrorAction SilentlyContinue |
-                Where-Object {
-                    $processPath = $null
-                    try { $processPath = $_.Path } catch { $processPath = $null }
-                    $processPath -and ($ownedExecutables -contains (Resolve-NormalizedPath $processPath))
-                }
-        )
+        $ownedProcesses = @(Get-CycOwnedRuntimeProcesses -OwnedExecutables $ownedExecutables)
         if ($ownedProcesses.Count -eq 0) { return }
         foreach ($process in $ownedProcesses) {
             try {
@@ -4798,14 +4837,7 @@ function Stop-CycRuntime {
         Start-Sleep -Milliseconds 250
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
 
-    $remaining = @(
-        Get-Process -Name @('ClusterYourCodex', 'cyc-controller', 'cyc-worker') -ErrorAction SilentlyContinue |
-            Where-Object {
-                $processPath = $null
-                try { $processPath = $_.Path } catch { $processPath = $null }
-                $processPath -and ($ownedExecutables -contains (Resolve-NormalizedPath $processPath))
-            }
-    )
+    $remaining = @(Get-CycOwnedRuntimeProcesses -OwnedExecutables $ownedExecutables)
     if ($remaining.Count -gt 0) {
         $pids = @($remaining | ForEach-Object { [int]$_.Id } | Sort-Object -Unique)
         throw "Owned ClusterYourCodex runtime did not stop within 20 seconds (PID $($pids -join ','))."

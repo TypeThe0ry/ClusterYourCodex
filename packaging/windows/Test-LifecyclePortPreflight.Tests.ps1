@@ -99,11 +99,20 @@ Describe 'Owned runtime teardown' {
         Mock Stop-ScheduledTask { }
         Mock Invoke-CycOwnedTaskEnd { }
         Mock Resolve-NormalizedPath { param([string]$Path) return $Path }
+        Mock Get-CimInstance {
+            param([string]$ClassName)
+            $script:runtimeEnumeration++
+            if ($script:runtimeEnumeration -le 2) {
+                return [PSCustomObject]@{
+                    ProcessId = 4242
+                    ExecutablePath = 'C:\Cyc\cyc-controller.exe'
+                }
+            }
+            return @()
+        }
         Mock Get-Process {
             param([string[]]$Name, [int]$Id)
             if ($PSBoundParameters.ContainsKey('Id')) { return $null }
-            $script:runtimeEnumeration++
-            if ($script:runtimeEnumeration -le 2) { return $script:runtimeProcess }
             return @()
         }
         Mock Stop-Process { }
