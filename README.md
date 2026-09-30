@@ -51,7 +51,23 @@ This distinction keeps the README useful: a passing package test proves the pack
 
 ### Recorded candidate test results
 
-#### Current repository audit — 2026-09-23
+#### Current repository audit — 2026-09-30
+
+The fresh v2 lifecycle-request fix is merged on `main` as
+`34c4f25a499e05b988c21fac473e13c4a00d4909` (PR #153). Its candidate runs
+completed the Windows Setup packaged lifecycle, Windows controller/bridge and
+bounded Rust jobs, Linux/macOS Rust and Worker Kits, MSRV, CodeQL, RustSec,
+Cargo deny, pnpm audit, and product-version checks. The detailed record is in
+the [2026-09-30 audit](docs/current-audit-20260930.md).
+
+The D-drive VMware guest is useful for CLI runtime checks, but the guest is
+already provisioned: its previous install manifest predates this candidate.
+An attempted `/S` repair therefore exercised an old-install long-path backup
+boundary and is not a clean Install → Repair → Upgrade → Rollback → Uninstall
+pass. Keep Issue #2 open until a genuinely clean Windows 11 guest completes
+that matrix and a live worker job.
+
+#### Historical repository audit — 2026-09-23
 
 The authoritative source is the live `origin/main` ref; resolve its current
 commit with the audit commands below. The audit record tracks the merged
@@ -77,7 +93,8 @@ because their final runtime gates are still specific and independently
 unproven: a current-source clean Windows 11 lifecycle for #2, and a native
 macOS LaunchAgent plus managed controller/worker round trip for #3. Hosted CI
 and package probes are recorded as evidence, but are not substituted for those
-runtime gates. See the [live audit record](docs/current-audit-20260923.md).
+runtime gates. See the [current live audit record](docs/current-audit-20260930.md)
+and the historical [2026-09-23 audit](docs/current-audit-20260923.md).
 
 The stable `v0.0.1` tag and assets remain unchanged at
 `e4fbaef04b764268fa038311d85573b18b549f9f`. The table below summarizes the
