@@ -689,7 +689,7 @@ function Get-CycFirewallOriginalSnapshot {
             }
         }
         Assert-CycFirewallSnapshotShape -Snapshot $workerSnapshot
-        Assert-CycFirewallSnapshotShape -Snapshot $discoverySnapshot
+        Assert-CycFirewallSnapshotShape -Snapshot $discoverySnapshot -Discovery
         return [ordered]@{
             worker = $workerSnapshot
             discovery = $discoverySnapshot
@@ -909,9 +909,8 @@ function Assert-CycFirewallStateShape {
     $schemaIsV2 = [string]$State.schemaVersion -ceq $script:CycFirewallStateSchemaV2
     if ($schemaIsV2) {
         Assert-CycFirewallExactProperties -Object $State.original -Label 'Firewall rollback snapshot' -Expected @('discovery', 'worker')
-        foreach ($snapshot in @($State.original.worker, $State.original.discovery)) {
-            Assert-CycFirewallSnapshotShape -Snapshot $snapshot
-        }
+        Assert-CycFirewallSnapshotShape -Snapshot $State.original.worker
+        Assert-CycFirewallSnapshotShape -Snapshot $State.original.discovery -Discovery
     } else {
         Assert-CycFirewallSnapshotShape -Snapshot $State.original
     }
@@ -919,7 +918,10 @@ function Assert-CycFirewallStateShape {
 }
 
 function Assert-CycFirewallSnapshotShape {
-    param([Parameter(Mandatory = $true)]$Snapshot)
+    param(
+        [Parameter(Mandatory = $true)]$Snapshot,
+        [switch]$Discovery
+    )
     if (-not ($Snapshot.existed -is [bool])) {
         throw 'Firewall rollback snapshot existence marker must be Boolean.'
     }
@@ -930,6 +932,9 @@ function Assert-CycFirewallSnapshotShape {
                 $Snapshot.port -is [int32] -or $Snapshot.port -is [int64]) -or
             [long]$Snapshot.port -lt 1 -or [long]$Snapshot.port -gt 65535) {
             throw 'Firewall rollback snapshot metadata is invalid.'
+        }
+        if ($Discovery -and [long]$Snapshot.port -ne [long]$script:CycFirewallDiscoveryPort) {
+            throw 'LAN discovery rollback snapshot port is invalid.'
         }
     } else {
         Assert-CycFirewallExactProperties -Object $Snapshot -Label 'Firewall rollback snapshot' -Expected @('existed')
