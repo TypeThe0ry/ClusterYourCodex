@@ -107,6 +107,17 @@ kept in the repository so the README does not rely on an implicit chat state.
   Workstation 26.0.1 virtual CD-ROM failure; it still does not prove the clean
   Windows lifecycle gate. Full details are in
   [vmware-cli-install-20260924.md](vmware-cli-install-20260924.md).
+- On 2026-09-30 the D-drive retry guest was started and inspected entirely
+  through `vmrun` (no VMware GUI automation). `checkToolsState` returned
+  `installed`, `getGuestIPAddress -wait` returned `192.168.6.131`, and the
+  guest probe reported Windows 11 Pro build `26200` with
+  `cyc-controller.exe` running from the per-user install location. The
+  scheduled task `ClusterYourCodex Controller` was present and the controller
+  listened on `127.0.0.1:47831` and `192.168.6.131:47832`. The retained probe is
+  `D:\\ClusterYourCodex-validation\\vmware-windows-roundtrip-20260930\\cyc-vm-probe.json`.
+  This is current-source guest/runtime evidence only; the VM is an already
+  provisioned fixture, so it does not close the clean-guest lifecycle or prove
+  a fresh live worker job.
 
 ## Open acceptance boundaries
 
