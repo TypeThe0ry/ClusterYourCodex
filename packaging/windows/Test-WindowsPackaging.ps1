@@ -904,6 +904,9 @@ try {
     Assert-True ($source -match 'Assert-SafePurgeTarget') 'recursive purge is guarded'
     Assert-True ($source -match 'Stop-CycRuntime') 'owned runtime is stopped before replacement'
     Assert-True ($source -match 'Get-Process -Id \$process\.Id -ErrorAction SilentlyContinue') 'runtime stop tolerates a process exiting between snapshot and stop'
+    Assert-True ($source -match 'function Invoke-CycOwnedTaskEnd[\s\S]+System32[\\/]schtasks\.exe[\s\S]+/End[\s\S]+RestartCount') 'runtime stop asks Task Scheduler to end owned tasks before killing their action process'
+    Assert-True ($source -match 'ownedTaskNames[\s\S]+Re-enumerate and stop only exact install-root-owned processes[\s\S]+AddSeconds\(20\)') 'runtime stop closes the bounded Scheduled Task restart race before probing ports'
+    Assert-True ($source -match 'Owned ClusterYourCodex runtime did not stop within 20 seconds') 'runtime stop fails closed when an owned process remains stuck'
     Assert-True ($source -match 'Restore-FileRollbackSnapshot') 'failed replacement has file rollback'
     Assert-True ($source -match 'Restore-CycTaskSnapshots') 'failed replacement has task rollback'
     $installCoreSource = [regex]::Match($source, 'function Invoke-InstallOrRepairCore[\s\S]+?function Invoke-InstallOrRepair')

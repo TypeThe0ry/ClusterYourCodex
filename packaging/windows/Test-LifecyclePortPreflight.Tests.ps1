@@ -1,5 +1,6 @@
 #requires -Version 5.1
 . (Join-Path $PSScriptRoot 'Invoke-ClusterYourCodexLifecycle.ps1')
+$bootstrapPath = Join-Path $PSScriptRoot 'bootstrap.ps1'
 
 Describe 'Controller storage preflight' {
     It 'accepts a new data root without creating it' {
@@ -80,5 +81,39 @@ Describe 'Fresh install port preflight' {
         Assert-CycFreshInstallPortsAvailable -Plan $plan -ExistingManifest $null
         Assert-MockCalled Get-NetTCPConnection -Times 1 -Exactly -Scope It
         Assert-MockCalled Get-NetTCPConnection -Times 0 -Exactly -Scope It -ParameterFilter { $LocalPort -eq 47832 }
+    }
+}
+
+Describe 'Owned runtime teardown' {
+    It 're-enumerates a controller that is restarted by its owned task' {
+        . $bootstrapPath
+        $script:runtimeEnumeration = 0
+        $script:runtimeProcess = [PSCustomObject]@{
+            Id = 4242
+            Path = 'C:\Cyc\cyc-controller.exe'
+        }
+
+        Mock Assert-CycLiveTaskOwnership {
+            [PSCustomObject]@{ name = $Name }
+        }
+        Mock Stop-ScheduledTask { }
+        Mock Invoke-CycOwnedTaskEnd { }
+        Mock Resolve-NormalizedPath { param([string]$Path) return $Path }
+        Mock Get-Process {
+            param([string[]]$Name, [int]$Id)
+            if ($PSBoundParameters.ContainsKey('Id')) { return $null }
+            $script:runtimeEnumeration++
+            if ($script:runtimeEnumeration -le 2) { return $script:runtimeProcess }
+            return @()
+        }
+        Mock Stop-Process { }
+        Mock Wait-Process { }
+        Mock Start-Sleep { }
+
+        Stop-CycRuntime -InstallRoot 'C:\Cyc' -ExpectedSid 'S-1-5-21-1-2-3-1001'
+
+        $script:runtimeEnumeration | Should Be 3
+        Assert-MockCalled Stop-Process -Times 2 -Exactly -Scope It
+        Assert-MockCalled Stop-ScheduledTask -Times 8 -Exactly -Scope It
     }
 }
