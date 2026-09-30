@@ -838,6 +838,13 @@ are versioned independently from the product.
 
 ## Unreleased
 
+### Added
+
+- Preview payload manifests now carry the exact 40-character Git source commit
+  when the builder receives `-SourceCommit`; tagged release and setup-acceptance
+  workflows bind that field to the workflow's verified source SHA. This keeps
+  external VM evidence distinguishable from an older provisioned fixture.
+
 ### Security
 
 - Raised the transitive `fast-uri` override from `3.1.6` to `3.1.7` and

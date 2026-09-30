@@ -90,6 +90,7 @@ jobs:
             -McpDeployRoot (Join-Path $plugin 'plugins/cluster-your-codex/mcp') `
             -NodeExecutable $node `
             -NodeLicense $nodeLicense `
+            -SourceCommit $env:GITHUB_SHA `
             -OutputRoot $package
           ./packaging/windows/New-SetupExecutable.ps1 `
             -PackageRoot $package `

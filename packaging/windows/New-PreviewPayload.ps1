@@ -9,6 +9,7 @@ param(
     [Parameter(Mandatory = $true)][string]$NodeLicense,
     [string]$WorkerKitsRoot,
     [string]$SourceTag = [string]$env:CYC_SOURCE_TAG,
+    [ValidatePattern('^[0-9a-fA-F]{40}$')][string]$SourceCommit = [string]$env:CYC_SOURCE_COMMIT,
     [Parameter(Mandatory = $true)][string]$OutputRoot
 )
 
@@ -362,6 +363,7 @@ $releaseIdentity = (& (Join-Path $repo 'scripts\Test-VersionConsistency.ps1') @v
 $productVersion = [string]$releaseIdentity.productVersion
 $releaseChannel = [string]$releaseIdentity.releaseChannel
 $sourceTagValue = if ($null -eq $releaseIdentity.sourceTag) { $null } else { [string]$releaseIdentity.sourceTag }
+$sourceCommitValue = if ([string]::IsNullOrWhiteSpace($SourceCommit)) { $null } else { $SourceCommit.Trim().ToLowerInvariant() }
 $rootTarget = Resolve-FullPath $RootCargoTarget
 $desktopTarget = Resolve-FullPath $DesktopCargoTarget
 $mcpDeploy = Resolve-FullPath $McpDeployRoot
@@ -503,6 +505,7 @@ $manifest = [ordered]@{
     productVersion = $productVersion
     releaseChannel = $releaseChannel
     sourceTag = $sourceTagValue
+    sourceCommit = $sourceCommitValue
     createdAtUtc = [DateTime]::UtcNow.ToString('o')
     architecture = 'x86_64-pc-windows-msvc'
     nodeVersion = $nodeVersion.Trim()

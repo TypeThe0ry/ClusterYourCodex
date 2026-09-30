@@ -664,6 +664,9 @@ try {
     $expectedReleaseChannel = if ([string]$previewManifest.productVersion -match '-') { 'prerelease' } else { 'stable' }
     Assert-FreshTest ([string]$previewManifest.releaseChannel -ceq $expectedReleaseChannel) 'package manifest release channel matches its product version'
     Assert-FreshTest ($null -eq $previewManifest.sourceTag -or [string]$previewManifest.sourceTag -ceq "v$($previewManifest.productVersion)") 'preview manifest source tag is absent or exactly vPRODUCT_VERSION'
+    if ($null -ne $previewManifest.sourceCommit) {
+        Assert-FreshTest ([string]$previewManifest.sourceCommit -match '^[0-9a-f]{40}$') 'preview manifest source commit is a full lowercase Git SHA when supplied'
+    }
 
     # The child can commit a task/manifest and then fail before returning.
     # Mark cleanup ownership before crossing that process boundary.
