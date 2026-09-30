@@ -74,6 +74,7 @@ jobs:
           Invoke-Pester -Script @(
             '.\packaging\windows\Test-LifecyclePortPreflight.Tests.ps1',
             '.\packaging\windows\Test-LifecycleDiagnostics.Tests.ps1',
+            '.\packaging\windows\Test-LifecycleRequestBinding.Tests.ps1',
             '.\packaging\windows\Test-InstallPlannedFiles.Tests.ps1',
             '.\packaging\windows\Test-DiscoveryFirewall.Tests.ps1'
           ) -EnableExit

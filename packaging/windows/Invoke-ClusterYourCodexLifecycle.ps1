@@ -970,13 +970,39 @@ function Test-CycFirewallRequestJournalBinding {
         $expectedAction = if ([string]$Journal.action -ceq 'Uninstall') { 'Remove' } else { 'Apply' }
         $expectedRule = 'ClusterYourCodex.ManagedWorker.' + ([string]$Journal.initiatorSid).Replace('-', '_')
         $expectedDiscoveryRule = 'ClusterYourCodex.ManagedDiscovery.' + ([string]$Journal.initiatorSid).Replace('-', '_')
+        # New requests are intentionally kept as an OrderedDictionary until
+        # they are atomically written.  PSObject.Properties does not expose
+        # dictionary keys, so read v2 discovery fields through the IDictionary
+        # interface when validating the fresh in-memory request.  Requests
+        # recovered from JSON remain PSCustomObjects and use their properties.
+        $requestIsDictionary = $Request -is [System.Collections.IDictionary]
+        $hasDiscoveryRuleName = if ($requestIsDictionary) {
+            $Request.Contains('discoveryRuleName')
+        } else {
+            $null -ne $Request.PSObject.Properties['discoveryRuleName']
+        }
+        $hasDiscoveryPort = if ($requestIsDictionary) {
+            $Request.Contains('discoveryPort')
+        } else {
+            $null -ne $Request.PSObject.Properties['discoveryPort']
+        }
+        $requestDiscoveryRuleName = if ($requestIsDictionary) {
+            [string]$Request['discoveryRuleName']
+        } else {
+            [string]$Request.discoveryRuleName
+        }
+        $requestDiscoveryPort = if ($requestIsDictionary) {
+            $Request['discoveryPort']
+        } else {
+            $Request.discoveryPort
+        }
         $discoveryBindingValid = if ($requestSchema -ceq $script:CycFirewallRequestSchemaV2) {
-            ($null -ne $Request.PSObject.Properties['discoveryRuleName']) -and
-            ($null -ne $Request.PSObject.Properties['discoveryPort']) -and
-            ($Request.discoveryPort -is [byte] -or $Request.discoveryPort -is [int16] -or
-                $Request.discoveryPort -is [int32] -or $Request.discoveryPort -is [int64]) -and
-            [string]$Request.discoveryRuleName -ceq $expectedDiscoveryRule -and
-            [int]$Request.discoveryPort -eq $script:CycFirewallDiscoveryPort
+            $hasDiscoveryRuleName -and
+            $hasDiscoveryPort -and
+            ($requestDiscoveryPort -is [byte] -or $requestDiscoveryPort -is [int16] -or
+                $requestDiscoveryPort -is [int32] -or $requestDiscoveryPort -is [int64]) -and
+            $requestDiscoveryRuleName -ceq $expectedDiscoveryRule -and
+            [int]$requestDiscoveryPort -eq $script:CycFirewallDiscoveryPort
         } else { $true }
         return (
             $requestSchema -in @($script:CycFirewallRequestSchema, $script:CycFirewallRequestSchemaV2) -and
