@@ -887,7 +887,7 @@ function Test-CycPendingFirewallManifestBinding {
         $controllerRecords = @($Manifest.files | Where-Object {
             [string]$_.relativePath -ceq 'cyc-controller.exe'
         })
-        $requestIsV2 = [string]$Request.schemaVersion -ceq $script:CycFirewallRequestSchemaV2
+        $requestIsV2 = [string]$Receipt.schemaVersion -ceq $script:CycFirewallReceiptSchemaV2
         $expectedDiscoveryRule = 'ClusterYourCodex.ManagedDiscovery.' + ([string]$Journal.initiatorSid).Replace('-', '_')
         $manifestDiscoveryBindingValid = if ($requestIsV2) {
             ($null -ne $firewall.PSObject.Properties['discoveryName']) -and
@@ -932,6 +932,7 @@ function Test-CycPendingFirewallManifestBinding {
                 [System.StringComparison]::OrdinalIgnoreCase
             ) -and
             [int]$firewall.port -eq [int]$Receipt.port -and
+            $manifestDiscoveryBindingValid -and
             $controllerRecords.Count -eq 1 -and
             [string]$controllerRecords[0].sha256 -ceq [string]$Receipt.programSha256
         )
@@ -1061,6 +1062,15 @@ function Test-CycPendingFirewallManifestRequestBinding {
         $controllerRecords = @($Manifest.files | Where-Object {
             [string]$_.relativePath -ceq 'cyc-controller.exe'
         })
+        $expectedDiscoveryRule = 'ClusterYourCodex.ManagedDiscovery.' + ([string]$Journal.initiatorSid).Replace('-', '_')
+        $manifestDiscoveryBindingValid = if ([string]$Request.schemaVersion -ceq $script:CycFirewallRequestSchemaV2) {
+            ($null -ne $firewall.PSObject.Properties['discoveryName']) -and
+            ($null -ne $firewall.PSObject.Properties['discoveryPort']) -and
+            [string]$firewall.discoveryName -ceq $expectedDiscoveryRule -and
+            ($firewall.discoveryPort -is [byte] -or $firewall.discoveryPort -is [int16] -or
+                $firewall.discoveryPort -is [int32] -or $firewall.discoveryPort -is [int64]) -and
+            [int]$firewall.discoveryPort -eq $script:CycFirewallDiscoveryPort
+        } else { $true }
         return (
             [string]$Manifest.schemaVersion -ceq 'cyc.dev/windows-install-manifest/v1' -and
             [string]::Equals(

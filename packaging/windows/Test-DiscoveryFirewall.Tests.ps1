@@ -246,6 +246,17 @@ Describe 'Windows LAN discovery firewall contract' {
         @($script:MockRemoveFirewallCalls).Count | Should Be 2
     }
 
+    It 'accepts a legacy worker rule on the previous port so repair can migrate it' {
+        $request = New-DiscoveryFirewallFixtureRequest -Version v1
+        Add-MockDiscoveryFirewallRule -Name $request.ruleName -Protocol TCP -Port 47831
+        $owned = Get-CycOwnedFirewallRule -Request $request
+        $owned.port.LocalPort | Should Be '47831'
+        $snapshot = Get-CycFirewallOriginalSnapshot -Request $request
+        $snapshot.port | Should Be 47831
+        Set-CycExactFirewallDesiredState -Request $request
+        $script:MockFirewallRules[$request.ruleName].LocalPort | Should Be '47832'
+    }
+
     It 'restores the complete v2 snapshot after a partial discovery-rule failure' {
         $request = New-DiscoveryFirewallFixtureRequest
         $snapshot = [PSCustomObject][ordered]@{

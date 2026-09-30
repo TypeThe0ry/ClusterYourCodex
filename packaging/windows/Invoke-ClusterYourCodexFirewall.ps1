@@ -639,7 +639,8 @@ function Get-CycOwnedFirewallRule {
         [string]$rule.EdgeTraversalPolicy -notmatch '^(0|Block)$' -or
         [string]$port.Protocol -notmatch $protocolPattern -or
         [string]$port.LocalPort -notmatch '^\d{1,5}$' -or
-        [int]$port.LocalPort -ne $portNumber -or
+        [int]$port.LocalPort -lt 1 -or [int]$port.LocalPort -gt 65535 -or
+        ($Discovery -and [int]$port.LocalPort -ne $portNumber) -or
         [string]$port.RemotePort -notmatch '^(Any|0-65535)$' -or
         @($address.LocalAddress).Count -ne 1 -or
         @($address.LocalAddress) -cnotcontains 'Any' -or
