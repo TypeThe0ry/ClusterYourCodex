@@ -1358,7 +1358,11 @@ function Assert-SetupSilentFirewall {
         Assert-SetupSilent ([string]$rule.Action -ceq 'Allow') "$Label allows traffic"
         Assert-SetupSilent ([string]$rule.Profile -match '^(2|Private)$') "$Label is Private-profile only"
         Assert-SetupSilent ([string]$rule.EdgeTraversalPolicy -match '^(0|Block)$') "$Label blocks edge traversal"
-        Assert-SetupSilent ([string]$port.Protocol -match (if ($ExpectedProtocol -ceq 'UDP') { '^(17|UDP)$' } else { '^(6|TCP)$' })) "$Label is $ExpectedProtocol"
+        $expectedProtocolPattern = '^(6|TCP)$'
+        if ($ExpectedProtocol -ceq 'UDP') {
+            $expectedProtocolPattern = '^(17|UDP)$'
+        }
+        Assert-SetupSilent ([string]$port.Protocol -match $expectedProtocolPattern) "$Label is $ExpectedProtocol"
         Assert-SetupSilent ([int]$port.LocalPort -eq $ExpectedPort) "$Label exposes only port $ExpectedPort"
         Assert-SetupSilent (@($address.LocalAddress) -contains 'Any') "$Label binds all local addresses"
         Assert-SetupSilent (@($address.RemoteAddress) -contains 'LocalSubnet') "$Label is LocalSubnet only"
