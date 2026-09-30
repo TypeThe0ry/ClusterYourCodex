@@ -17,7 +17,8 @@ Product data:  %LOCALAPPDATA%\ClusterYourCodex
 It installs the desktop host, local controller, CLI, optional local worker,
 private Node runtime, Codex marketplace/plugin, signed Worker Kits, per-user
 Scheduled Tasks, uninstall registration, and—when a managed LAN listener is
-enabled—one product-owned firewall rule. Unrelated global `AGENTS.md` bytes are
+enabled—two product-owned firewall rules: the worker TCP listener and the fixed
+UDP LAN-discovery listener on port `47830`. Unrelated global `AGENTS.md` bytes are
 preserved outside the uniquely marked ClusterYourCodex block.
 
 ## Requirements

@@ -2843,6 +2843,36 @@ exit /b !ERRORLEVEL!
     Assert-ThrowsLike -Pattern 'metadata' -Message 'helper rejects an out-of-range TCP port' -Action {
         [void](Assert-CycFirewallRequestShape -Request $badPort)
     }
+
+    # v1 remains an exact worker-only compatibility format. v2 adds only the
+    # deterministic LAN-discovery rule identity and fixed UDP port; the helper
+    # still validates the original request fields and rejects widened scope.
+    $v2Request = Convert-CycPackagingJson ($validRequest | ConvertTo-Json -Depth 6)
+    $v2Request.schemaVersion = 'cyc.dev/windows-firewall-request/v2'
+    $v2Request | Add-Member -NotePropertyName discoveryRuleName -NotePropertyValue ('ClusterYourCodex.ManagedDiscovery.' + ([string]$binding.sid).Replace('-', '_'))
+    $v2Request | Add-Member -NotePropertyName discoveryPort -NotePropertyValue 47830
+    [void](Assert-CycFirewallRequestShape -Request $v2Request)
+    Assert-True ((Get-CycFirewallRequestSchemaVersion -Request $v2Request) -ceq 'v2') 'v2 request binds the LAN-discovery transaction schema'
+    $v2Receipt = New-CycFirewallReceipt -Request $v2Request -RequestHash ('d' * 64) -Result verified
+    [void](Assert-CycFirewallReceiptBinding -Receipt $v2Receipt -Request $v2Request -RequestHash ('d' * 64))
+    Assert-True ([string]$v2Receipt.schemaVersion -ceq 'cyc.dev/windows-firewall-receipt/v2') 'v2 receipt uses the discovery-aware receipt schema'
+    Assert-True ([string]$v2Receipt.discoveryRuleName -ceq [string]$v2Request.discoveryRuleName -and [int]$v2Receipt.discoveryPort -eq 47830) 'v2 receipt binds the deterministic discovery rule and fixed port'
+    $v2BadName = Convert-CycPackagingJson ($v2Request | ConvertTo-Json -Depth 6)
+    $v2BadName.discoveryRuleName = 'ClusterYourCodex.ManagedDiscovery.Arbitrary'
+    Assert-ThrowsLike -Pattern 'discovery|fixed rule identity|scope' -Message 'v2 rejects a non-deterministic discovery rule name' -Action {
+        [void](Assert-CycFirewallRequestShape -Request $v2BadName)
+    }
+    $v2BadPort = Convert-CycPackagingJson ($v2Request | ConvertTo-Json -Depth 6)
+    $v2BadPort.discoveryPort = 47831
+    Assert-ThrowsLike -Pattern 'discovery|metadata|fixed rule identity|scope' -Message 'v2 rejects a non-fixed discovery port' -Action {
+        [void](Assert-CycFirewallRequestShape -Request $v2BadPort)
+    }
+    $v1Extra = Convert-CycPackagingJson ($validRequest | ConvertTo-Json -Depth 6)
+    $v1Extra | Add-Member -NotePropertyName discoveryRuleName -NotePropertyValue ([string]$v2Request.discoveryRuleName)
+    $v1Extra | Add-Member -NotePropertyName discoveryPort -NotePropertyValue 47830
+    Assert-ThrowsLike -Pattern 'unsupported|missing|field' -Message 'legacy v1 rejects v2-only discovery fields instead of silently widening scope' -Action {
+        [void](Assert-CycFirewallRequestShape -Request $v1Extra)
+    }
     $validRequest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $requestPath -Encoding UTF8
     $requestObject = Convert-CycPackagingJson (Get-Content -LiteralPath $requestPath -Raw)
     $requestHash = (Get-FileHash -LiteralPath $requestPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -2865,6 +2895,25 @@ exit /b !ERRORLEVEL!
     [void](Assert-CycFirewallReplayBinding -State $state -TransactionId $transactionId -RequestSha256 $requestHash)
     Assert-ThrowsLike -Pattern 'replay' -Message 'transaction replay with a different request is rejected' -Action {
         [void](Assert-CycFirewallReplayBinding -State $state -TransactionId $transactionId -RequestSha256 ('e' * 64))
+    }
+    $v2State = [PSCustomObject][ordered]@{
+        schemaVersion = 'cyc.dev/windows-firewall-state/v2'
+        transactionId = [string]$v2Request.transactionId
+        requestSha256 = ('d' * 64)
+        phase = 'prepared'
+        original = [PSCustomObject][ordered]@{
+            worker = [PSCustomObject][ordered]@{ existed = $false }
+            discovery = [PSCustomObject][ordered]@{ existed = $false }
+        }
+        helperProcessId = [int]$PID
+        preparedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        appliedAtUtc = $null
+    }
+    [void](Assert-CycFirewallStateShape -State $v2State)
+    [void](Assert-CycFirewallReplayBinding -State $v2State -TransactionId $v2Request.transactionId -RequestSha256 ('d' * 64))
+    $v2State.original.discovery = [PSCustomObject][ordered]@{ existed = $true; enabled = 'True'; port = 47831 }
+    Assert-ThrowsLike -Pattern 'metadata|port|discovery|snapshot' -Message 'v2 rejects an invalid discovery rollback snapshot' -Action {
+        [void](Assert-CycFirewallStateShape -State $v2State)
     }
     Assert-True ((Get-CycFirewallBoundRecoveryAction -State $null -Action Rollback -JournalPhase prepared) -eq 'RollbackWithoutState') 'recovery can close a prepared transaction that never created helper state'
     $state | Add-Member -NotePropertyName phase -NotePropertyValue 'prepared'

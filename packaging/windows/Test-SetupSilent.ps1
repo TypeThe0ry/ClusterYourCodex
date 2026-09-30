@@ -29,6 +29,7 @@ $script:InstallManifestSchema = 'cyc.dev/windows-install-manifest/v1'
 $script:PreviewManifestSchema = 'cyc.dev/windows-preview/v1'
 $script:LifecycleJournalSchema = 'cyc.dev/windows-external-lifecycle/v1'
 $script:FirewallReceiptSchema = 'cyc.dev/windows-firewall-receipt/v1'
+$script:FirewallReceiptSchemaV2 = 'cyc.dev/windows-firewall-receipt/v2'
 $script:CoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:ManagedWorkerNetworkPlanSchema = 'cyc.dev/windows-managed-worker-network/v1'
 $script:ManagedWorkerIdentityVersion = 'managed-worker-v2'
@@ -471,12 +472,14 @@ function Assert-SetupSilentFirewallReceipt {
     )
     $receiptFile = Resolve-SetupSilentPath $ReceiptPath
     $receipt = Read-SetupSilentJson -Path $receiptFile -MaximumBytes $script:MaximumFirewallReceiptBytes
+    $expectedDiscoveryRuleName = 'ClusterYourCodex.ManagedDiscovery.' + $ExpectedSid.Replace('-', '_')
     Assert-SetupSilentExactProperties -Object $receipt -Label 'durable firewall receipt' -Expected @(
         'action', 'failureCode', 'initiatorLocalAppData', 'initiatorProfile',
         'initiatorSid', 'port', 'program', 'programSha256', 'requestSha256',
-        'result', 'ruleName', 'schemaVersion', 'transactionId', 'verifiedAtUtc'
+        'result', 'ruleName', 'schemaVersion', 'transactionId', 'verifiedAtUtc',
+        'discoveryRuleName', 'discoveryPort'
     )
-    Assert-SetupSilent ([string]$receipt.schemaVersion -ceq $script:FirewallReceiptSchema) 'durable firewall receipt schema is current'
+    Assert-SetupSilent ([string]$receipt.schemaVersion -ceq $script:FirewallReceiptSchemaV2) 'durable firewall receipt schema is current'
     Assert-SetupSilent ([string]$receipt.transactionId -cmatch '^[0-9a-f]{32}$') 'durable firewall receipt has a canonical transaction id'
     Assert-SetupSilent ([string]$receipt.transactionId -ceq $ExpectedTransactionId) 'durable firewall receipt transaction matches the lifecycle'
     Assert-SetupSilent ([System.IO.Path]::GetFileName($receiptFile) -ceq ($ExpectedTransactionId + '.json')) 'durable firewall receipt filename matches the transaction'
@@ -489,6 +492,8 @@ function Assert-SetupSilentFirewallReceipt {
     Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$receipt.initiatorProfile) -Right $ExpectedProfile) 'durable firewall receipt binds the initiating profile'
     Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$receipt.initiatorLocalAppData) -Right $ExpectedLocalAppData) 'durable firewall receipt binds LOCALAPPDATA'
     Assert-SetupSilent ([string]$receipt.ruleName -ceq $ExpectedRuleName) 'durable firewall receipt binds the owned rule name'
+    Assert-SetupSilent ([string]$receipt.discoveryRuleName -ceq $expectedDiscoveryRuleName) 'durable firewall receipt binds the owned discovery rule name'
+    Assert-SetupSilent ([int]$receipt.discoveryPort -eq 47830) 'durable firewall receipt binds the LAN discovery port'
     Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$receipt.program) -Right (Join-Path $InstallRoot 'cyc-controller.exe')) 'durable firewall receipt binds the installed controller path'
     Assert-SetupSilent ([string]$receipt.programSha256 -cmatch '^[0-9a-f]{64}$') 'durable firewall receipt has a canonical controller digest'
     Assert-SetupSilent ([string]$receipt.programSha256 -ceq $ExpectedProgramSha256) 'durable firewall receipt binds the installed controller digest'
@@ -579,6 +584,9 @@ function Assert-SetupSilentAppliedLifecycleEvidence {
     Assert-SetupSilent ([string]$firewall.requestSha256 -cmatch '^[0-9a-f]{64}$') "$ExpectedAction manifest records a request digest"
     Assert-SetupSilent ([string]$firewall.receiptSha256 -cmatch '^[0-9a-f]{64}$') "$ExpectedAction manifest records a receipt digest"
     Assert-SetupSilent ([string]$firewall.name -ceq $ExpectedRuleName) "$ExpectedAction manifest records the owned firewall rule"
+    $expectedDiscoveryRuleName = 'ClusterYourCodex.ManagedDiscovery.' + $ExpectedSid.Replace('-', '_')
+    Assert-SetupSilent ([string]$firewall.discoveryName -ceq $expectedDiscoveryRuleName) "$ExpectedAction manifest records the owned LAN discovery rule"
+    Assert-SetupSilent ([int]$firewall.discoveryPort -eq 47830) "$ExpectedAction manifest records the fixed LAN discovery port"
 
     $controllerRecord = Get-SetupSilentManifestFile -Manifest $Manifest -RelativePath 'cyc-controller.exe'
     $receiptPath = Join-Path (Join-Path $DataRoot '.installer\firewall-receipts') (([string]$firewall.transactionId) + '.json')
@@ -1322,24 +1330,59 @@ function Assert-SetupSilentFirewall {
     Assert-SetupSilent ([bool]$firewall.enabled) 'managed-worker firewall is enabled'
     Assert-SetupSilent ([string]$firewall.state -ceq 'applied') 'managed-worker firewall receipt is committed'
     Assert-SetupSilent ([string]$firewall.receiptSha256 -match '^[0-9a-f]{64}$') 'managed-worker firewall receipt has a SHA-256 digest'
-    $rules = @(Get-NetFirewallRule -Name ([string]$firewall.name) -ErrorAction SilentlyContinue)
-    Assert-SetupSilent ($rules.Count -eq 1) 'owned managed-worker firewall rule exists exactly once'
-    $rule = $rules[0]
-    $port = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
-    $address = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
-    $application = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
-    Assert-SetupSilent ([string]$rule.Group -ceq $script:FirewallGroup) 'firewall group is owned by ClusterYourCodex'
-    Assert-SetupSilent ([string]$rule.DisplayName -ceq 'ClusterYourCodex Managed Worker') 'firewall display name is current'
-    Assert-SetupSilent ([string]$rule.Description -ceq $script:FirewallDescription) 'firewall description proves ownership'
-    Assert-SetupSilent ([string]$rule.Enabled -ceq 'True') 'firewall rule is enabled'
-    Assert-SetupSilent ([string]$rule.Direction -ceq 'Inbound') 'firewall rule is inbound'
-    Assert-SetupSilent ([string]$rule.Action -ceq 'Allow') 'firewall rule allows traffic'
-    Assert-SetupSilent ([string]$rule.Profile -match '^(2|Private)$') 'firewall rule is Private-profile only'
-    Assert-SetupSilent ([string]$port.Protocol -match '^(6|TCP)$') 'firewall rule is TCP'
-    Assert-SetupSilent ([string]$port.LocalPort -ceq '47832') 'firewall rule exposes only port 47832'
-    Assert-SetupSilent (@($address.RemoteAddress) -contains 'LocalSubnet') 'firewall rule is LocalSubnet only'
-    Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$application.Program) -Right ([string]$firewall.program)) 'firewall rule is bound to the installed controller'
-    return $rule
+    $expectedDiscoveryName = 'ClusterYourCodex.ManagedDiscovery.' + ([string]$Manifest.initiator.sid).Replace('-', '_')
+    Assert-SetupSilent ([string]$firewall.discoveryName -ceq $expectedDiscoveryName) 'manifest records the deterministic LAN discovery rule name'
+    Assert-SetupSilent ([int]$firewall.discoveryPort -eq 47830) 'manifest records the fixed LAN discovery port'
+
+    function Assert-SetupSilentFirewallRule {
+        param(
+            [Parameter(Mandatory = $true)][string]$RuleName,
+            [Parameter(Mandatory = $true)][string]$ExpectedDisplayName,
+            [Parameter(Mandatory = $true)][string]$ExpectedDescription,
+            [Parameter(Mandatory = $true)][string]$ExpectedProtocol,
+            [Parameter(Mandatory = $true)][int]$ExpectedPort,
+            [Parameter(Mandatory = $true)][string]$ExpectedProgram,
+            [Parameter(Mandatory = $true)][string]$Label
+        )
+        $rules = @(Get-NetFirewallRule -Name $RuleName -ErrorAction SilentlyContinue)
+        Assert-SetupSilent ($rules.Count -eq 1) "$Label exists exactly once"
+        $rule = $rules[0]
+        $port = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
+        $address = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
+        $application = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
+        Assert-SetupSilent ([string]$rule.Group -ceq $script:FirewallGroup) "$Label group is owned by ClusterYourCodex"
+        Assert-SetupSilent ([string]$rule.DisplayName -ceq $ExpectedDisplayName) "$Label display name is current"
+        Assert-SetupSilent ([string]$rule.Description -ceq $ExpectedDescription) "$Label description proves ownership"
+        Assert-SetupSilent ([string]$rule.Enabled -ceq 'True') "$Label is enabled"
+        Assert-SetupSilent ([string]$rule.Direction -ceq 'Inbound') "$Label is inbound"
+        Assert-SetupSilent ([string]$rule.Action -ceq 'Allow') "$Label allows traffic"
+        Assert-SetupSilent ([string]$rule.Profile -match '^(2|Private)$') "$Label is Private-profile only"
+        Assert-SetupSilent ([string]$rule.EdgeTraversalPolicy -match '^(0|Block)$') "$Label blocks edge traversal"
+        Assert-SetupSilent ([string]$port.Protocol -match (if ($ExpectedProtocol -ceq 'UDP') { '^(17|UDP)$' } else { '^(6|TCP)$' })) "$Label is $ExpectedProtocol"
+        Assert-SetupSilent ([int]$port.LocalPort -eq $ExpectedPort) "$Label exposes only port $ExpectedPort"
+        Assert-SetupSilent (@($address.LocalAddress) -contains 'Any') "$Label binds all local addresses"
+        Assert-SetupSilent (@($address.RemoteAddress) -contains 'LocalSubnet') "$Label is LocalSubnet only"
+        Assert-SetupSilent (Test-SetupSilentPathEqual -Left ([string]$application.Program) -Right $ExpectedProgram) "$Label is bound to the installed controller"
+        return $rule
+    }
+
+    $workerRule = Assert-SetupSilentFirewallRule `
+        -RuleName ([string]$firewall.name) `
+        -ExpectedDisplayName 'ClusterYourCodex Managed Worker' `
+        -ExpectedDescription $script:FirewallDescription `
+        -ExpectedProtocol 'TCP' `
+        -ExpectedPort 47832 `
+        -ExpectedProgram ([string]$firewall.program) `
+        -Label 'owned managed-worker firewall rule'
+    $discoveryRule = Assert-SetupSilentFirewallRule `
+        -RuleName ([string]$firewall.discoveryName) `
+        -ExpectedDisplayName 'ClusterYourCodex LAN Discovery' `
+        -ExpectedDescription 'ClusterYourCodex owned LAN discovery listener' `
+        -ExpectedProtocol 'UDP' `
+        -ExpectedPort 47830 `
+        -ExpectedProgram ([string]$firewall.program) `
+        -Label 'owned LAN discovery firewall rule'
+    return @($workerRule, $discoveryRule)
 }
 
 function Assert-SetupSilentUninstallRegistration {
@@ -1453,17 +1496,28 @@ function Remove-SetupSilentOwnedFirewall {
         [Parameter(Mandatory = $true)][string]$ExpectedProgram,
         [Parameter(Mandatory = $true)][string]$ExpectedRuleName
     )
-    $rules = @(Get-NetFirewallRule -Name $ExpectedRuleName -ErrorAction SilentlyContinue)
-    foreach ($rule in $rules) {
-        $port = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
-        $application = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
-        if ([string]$rule.Group -cne $script:FirewallGroup -or
-            [string]$rule.Description -cne $script:FirewallDescription -or
-            [string]$port.LocalPort -cne '47832' -or
-            -not (Test-SetupSilentPathEqual -Left ([string]$application.Program) -Right $ExpectedProgram)) {
-            throw "refusing to remove a firewall rule not owned by the disposable install: $ExpectedRuleName"
+    $expectedDiscoveryRuleName = $ExpectedRuleName -replace '^ClusterYourCodex\.ManagedWorker\.', 'ClusterYourCodex.ManagedDiscovery.'
+    foreach ($spec in @(
+        [PSCustomObject]@{ name = $ExpectedRuleName; description = $script:FirewallDescription; protocol = 'TCP'; port = '47832' },
+        [PSCustomObject]@{ name = $expectedDiscoveryRuleName; description = 'ClusterYourCodex owned LAN discovery listener'; protocol = 'UDP'; port = '47830' }
+    )) {
+        $rules = @(Get-NetFirewallRule -Name ([string]$spec.name) -ErrorAction SilentlyContinue)
+        foreach ($rule in $rules) {
+            $port = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
+            $address = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
+            $application = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
+            $protocolPattern = if ([string]$spec.protocol -ceq 'UDP') { '^(17|UDP)$' } else { '^(6|TCP)$' }
+            if ([string]$rule.Group -cne $script:FirewallGroup -or
+                [string]$rule.Description -cne [string]$spec.description -or
+                [string]$rule.EdgeTraversalPolicy -notmatch '^(0|Block)$' -or
+                [string]$port.Protocol -notmatch $protocolPattern -or
+                [string]$port.LocalPort -cne [string]$spec.port -or
+                @($address.RemoteAddress) -cnotcontains 'LocalSubnet' -or
+                -not (Test-SetupSilentPathEqual -Left ([string]$application.Program) -Right $ExpectedProgram)) {
+                throw "refusing to remove a firewall rule not owned by the disposable install: $($spec.name)"
+            }
+            Remove-NetFirewallRule -Name ([string]$rule.Name) -ErrorAction Stop
         }
-        Remove-NetFirewallRule -Name ([string]$rule.Name) -ErrorAction Stop
     }
 }
 

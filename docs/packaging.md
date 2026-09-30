@@ -53,18 +53,23 @@ that identity even when UAC credentials belong to a different administrator.
 Only `Invoke-ClusterYourCodexFirewall.ps1` is elevated, exactly once per fresh
 lifecycle attempt.
 
-The helper accepts a single manifest-hashed request and no command channel. It
-derives the rule name from the initiating SID and permits only one inbound,
-Allow, enabled, Private-profile, TCP, `LocalSubnet` rule for the exact
-`cyc-controller.exe` path and bounded port. It rejects a changed SID/profile,
-helper/request tamper, replay mismatch, rule-name collision, program mismatch,
-or malformed scope. It durably snapshots the prior owned rule, applies and
-verifies the desired state, and stays alive while the unelevated core runs. A
-core failure/cancellation/timeout signals rollback; success signals a final
-program-hash and rule verification. The manifest records the firewall as
-`pending` until a transaction-bound helper receipt is committed. Response-loss
-replay and commit are idempotent; ambiguous state stays retryable rather than
-being reported as installed.
+The helper accepts a single manifest-hashed request and no command channel. New
+requests use `cyc.dev/windows-firewall-request/v2`: it derives both rule names
+from the initiating SID and permits exactly two product-owned inbound rules for
+the exact `cyc-controller.exe` path—an Allow, enabled, Private-profile TCP
+`LocalSubnet` worker rule on the selected bounded port, plus an Allow, enabled,
+Private-profile UDP `LocalSubnet` LAN-discovery rule on fixed port `47830`.
+The TCP and UDP rules remain separate (the protocol is never widened to Any).
+It rejects a changed SID/profile, helper/request tamper, replay mismatch,
+rule-name collision, program mismatch, or malformed scope. It durably snapshots
+both prior owned rules, applies and verifies the pair, and stays alive while the
+unelevated core runs. A core failure/cancellation/timeout signals rollback;
+success signals a final program-hash and dual-rule verification. The manifest
+records the firewall as `pending` until a transaction-bound v2 helper receipt is
+committed. Response-loss replay and commit are idempotent; ambiguous state
+stays retryable rather than being reported as installed. In-flight v1
+worker-only requests, journals, receipts, and manifests remain readable for
+recovery and are never silently upgraded.
 
 `packaging/windows/bootstrap.ps1` is the per-user core. It rejects a managed
 listener lifecycle that was not marked `-DeferFirewall`, and install/repair/

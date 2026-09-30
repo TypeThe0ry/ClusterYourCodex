@@ -22,6 +22,8 @@ kept in the repository so the README does not rely on an implicit chat state.
 - PR #135: merged at `2026-09-24T09:22:13Z`
 - PR #136: merged at `2026-09-24T10:11:31Z`
 - PR #137: merged at `2026-09-25T04:41:38Z`
+- PR #150: merged at `2026-09-30T02:50:37Z` (`62c83f7ea0bbc9d6337eb978bd4229f6e22210fa`)
+- PR #151: merged at `2026-09-30T03:50:52Z` (`7b987fb203317fff5f2598e43e8f528e72892979`)
 - Open pull requests: none
 - Published stable tag `v0.0.1`: `e4fbaef04b764268fa038311d85573b18b549f9f`
 - `git rev-parse v0.0.1` and `git ls-remote origin refs/tags/v0.0.1` agree.
@@ -119,13 +121,28 @@ kept in the repository so the README does not rely on an implicit chat state.
   that the installed fixture binaries match the current source revision. The
   VM is already provisioned, so it does not close the clean-guest lifecycle or
   prove a fresh live worker job.
+- On 2026-09-30 the same D-drive VM was restarted and inspected entirely with
+  `vmrun` (no VMware GUI automation). The current-source controller payload
+  `C:\\Windows\\Temp\\cyc-controller-current.exe` listened on TCP `47931`/
+  `47932` and UDP `47830`; its credential-free UDP response matched
+  `cyc.dev/discovery/v1` and advertised `https://192.168.6.131:47932`. The
+  guest initially used the Public profile, so the host-to-guest probe correctly
+  timed out before any rule was added. A disposable exact-scope UDP rule for
+  that current binary was then created on the VM, the profile was set to
+  Private, and the host probe returned the expected controller metadata. The
+  rule and process were removed, the profile was restored, and the VM was
+  powered off. Retained evidence is under
+  `D:\\ClusterYourCodex-validation\\vmware-windows-roundtrip-20260930\\`.
+  This proves the current-source discovery protocol and the VMware network path;
+  it does not substitute for the packaged clean-VM install lifecycle.
 
 ## Open acceptance boundaries
 
 ### Issue #2 — Windows one-click installer and desktop host
 
 The product and hosted acceptance jobs cover the desktop host, native proxy,
-scheduled tasks, ACL checks, bundled MCP runtime, and packaged repair path.
+scheduled tasks, ACL checks, bundled MCP runtime, packaged repair path, and the
+candidate's transactional worker-TCP plus LAN-discovery-UDP firewall contract.
 The retained D-drive VM record is still diagnostic: it does not prove the
 current-source `Install -> Repair -> Upgrade -> Rollback -> Uninstall` matrix
 plus a live worker job in a clean Windows 11 guest. Keep the issue open until
