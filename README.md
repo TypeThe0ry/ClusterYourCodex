@@ -51,21 +51,23 @@ This distinction keeps the README useful: a passing package test proves the pack
 
 ### Recorded candidate test results
 
-#### Current repository audit — 2026-09-30
+#### Current repository audit — 2026-10-01
 
-The fresh v2 lifecycle-request fix is merged on `main` as
-`34c4f25a499e05b988c21fac473e13c4a00d4909` (PR #153). Its candidate runs
-completed the Windows Setup packaged lifecycle, Windows controller/bridge and
-bounded Rust jobs, Linux/macOS Rust and Worker Kits, MSRV, CodeQL, RustSec,
-Cargo deny, pnpm audit, and product-version checks. The detailed record is in
-the [2026-09-30 audit](docs/current-audit-20260930.md).
+The current `main` is `8d9fd499bd3312a81dda986985fd2cace09efac0`, with PR #157's
+transactional LAN discovery firewall path and PR #158's native PowerShell
+runtime-ownership repair merged. The candidate CI matrix and Windows Setup
+acceptance both passed (runs [36749204624](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/36749204624)
+and [36749204684](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/36749204684)).
+The detailed record is in the [2026-09-30 audit](docs/current-audit-20260930.md)
+and the [runtime repair note](docs/windows-runtime-repair-20261001.md).
 
-The D-drive VMware guest is useful for CLI runtime checks, but the guest is
-already provisioned: its previous install manifest predates this candidate.
-An attempted `/S` repair therefore exercised an old-install long-path backup
-boundary and is not a clean Install → Repair → Upgrade → Rollback → Uninstall
-pass. Keep Issue #2 open until a genuinely clean Windows 11 guest completes
-that matrix and a live worker job.
+The D-drive VMware guest is provisioned rather than clean. The current Setup
+candidate exited `0`, reached a successful lifecycle diagnostic, returned
+controller health HTTP 200/database `ok`, and answered a credential-free LAN
+discovery probe. Its installed-package worker round-trip harness stopped before
+the worker job proof, so hosted CI remains the authoritative live round-trip
+evidence. Keep Issue #2 open until a genuinely clean Windows 11 guest completes
+Install → Repair → Upgrade → Rollback → Uninstall and a live worker job.
 
 #### Historical repository audit — 2026-09-23
 
@@ -106,7 +108,7 @@ current evidence and is not an automatically refreshed dashboard.
 | Native Worker Kits | PASS | Linux x64 plus macOS x64/arm64 package checks completed |
 | Security and dependency gates | PASS | CodeQL, RustSec, Cargo deny, and pnpm audit completed |
 | Windows controller/bridge job | PASS | Candidate CI completed the Windows controller/worker live round trip |
-| D-drive VMware acceptance | PARTIAL, with live fixture pass | The current-source Windows 11 guest completed the self-contained controller/worker fixture with pairing, queued → running → succeeded execution, artifact/cleanup, process cleanup, and secret scan all green. The independent blank-disk install attempt is still blocked by VMware reporting `capacity=0`/`No Media` for the attached ISO, so signed Setup lifecycle, upgrade/rollback, and packaged tray acceptance remain open. See the [VMware CLI record](docs/vmware-cli-install-20260924.md) and [cross-platform validation](docs/cross-platform-validation-20260927.md). |
+| D-drive VMware acceptance | PARTIAL | Current Setup install/repair diagnostics and health pass on the provisioned guest; LAN discovery returns a controller candidate without credentials. A complete clean-VM lifecycle and installed-package worker job are not yet proven. See the [runtime repair note](docs/windows-runtime-repair-20261001.md) and [cross-platform validation](docs/cross-platform-validation-20260927.md). |
 
 The diagrams summarize the evidence categories; they are not application screenshots or an automatically refreshed test dashboard. Runtime acceptance remains open until the corresponding evidence is recorded.
 
