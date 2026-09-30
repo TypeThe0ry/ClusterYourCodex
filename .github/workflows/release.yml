@@ -1168,6 +1168,7 @@ jobs:
             -NodeExecutable $node `
             -NodeLicense $nodeLicense `
             -WorkerKitsRoot $workerKits `
+            -SourceCommit $env:CYC_SOURCE_COMMIT `
             -OutputRoot $preview
           if ($LASTEXITCODE -ne 0) { throw 'failed to stage Windows preview payload' }
 

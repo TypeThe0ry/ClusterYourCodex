@@ -1560,6 +1560,9 @@ Assert-SetupSilent ([string]$previewManifest.productVersion -match '^[0-9]+\.[0-
 $expectedReleaseChannel = if ([string]$previewManifest.productVersion -match '-') { 'prerelease' } else { 'stable' }
 Assert-SetupSilent ([string]$previewManifest.releaseChannel -ceq $expectedReleaseChannel) 'package manifest release channel matches its product version'
 Assert-SetupSilent ($null -eq $previewManifest.sourceTag -or [string]$previewManifest.sourceTag -ceq "v$($previewManifest.productVersion)") 'preview manifest source tag is absent or exactly vPRODUCT_VERSION'
+if ($null -ne $previewManifest.sourceCommit) {
+    Assert-SetupSilent ([string]$previewManifest.sourceCommit -match '^[0-9a-f]{40}$') 'preview manifest source commit is a full lowercase Git SHA when supplied'
+}
 $expectedPackageManifestSha256 = (Get-CycFileHash -LiteralPath $packageManifest -Algorithm SHA256).Hash.ToLowerInvariant()
 
 $taskBefore = @(Get-SetupSilentTaskSnapshot)

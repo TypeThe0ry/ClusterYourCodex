@@ -2484,6 +2484,7 @@ exit 4
         -NodeLicense $nodeLicense `
         -WorkerKitsRoot $workerKits `
         -SourceTag "v$productVersion" `
+        -SourceCommit ('a' * 40) `
         -OutputRoot $preview | Out-Null
     Assert-True (Test-Path -LiteralPath (Join-Path $preview 'bootstrap.ps1') -PathType Leaf) 'preview contains bootstrap'
     Assert-True (Test-Path -LiteralPath (Join-Path $preview 'Install-ClusterYourCodex.cmd') -PathType Leaf) 'preview contains double-click installer'
@@ -2510,6 +2511,7 @@ exit 4
     $expectedReleaseChannel = if ($productVersion.Contains('-')) { 'prerelease' } else { 'stable' }
     Assert-True ([string]$previewManifest.releaseChannel -ceq $expectedReleaseChannel) 'package manifest records the version-derived release channel'
     Assert-True ([string]$previewManifest.sourceTag -ceq "v$productVersion") 'package manifest binds the exact source tag'
+    Assert-True ([string]$previewManifest.sourceCommit -ceq ('a' * 40)) 'package manifest binds the exact source commit when supplied'
     Assert-True (@($previewManifest.workerKits).Count -eq $allWorkerKitTargets.Count) 'preview manifest binds all worker kits'
     foreach ($workerKit in @($previewManifest.workerKits)) {
         Assert-True ([string]$workerKit.version -ceq $productVersion) "preview rejects worker-kit product-version drift for $($workerKit.target)"
