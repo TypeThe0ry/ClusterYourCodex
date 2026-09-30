@@ -907,7 +907,7 @@ try {
     Assert-True ($source -match 'function Invoke-CycOwnedTaskEnd[\s\S]+System32[\\/]schtasks\.exe[\s\S]+/End[\s\S]+RestartCount') 'runtime stop asks Task Scheduler to end owned tasks before killing their action process'
     Assert-True (($source -match 'taskIdentifier = ') -and ($source -match '/End /TN "\{0\}"') -and ($source -match 'WaitForExit\(30000\)')) 'runtime task end quotes task names and uses a bounded scheduler wait'
     Assert-True ($source -match 'function Get-CycOwnedRuntimeProcesses[\s\S]+Get-CimInstance -ClassName Win32_Process -OperationTimeoutSec 15[\s\S]+ExecutablePath') 'runtime ownership uses CIM executable paths when hosted by 32-bit PowerShell'
-    Assert-True ($source -match 'ownedTaskNames[\s\S]+Re-enumerate and stop only exact install-root-owned processes[\s\S]+AddSeconds\(20\)') 'runtime stop closes the bounded Scheduled Task restart race before probing ports'
+    Assert-True ($source -match 'function Stop-CycRuntime[\s\S]+ownedTaskNames[\s\S]+AddSeconds\(20\)[\s\S]+do \{[\s\S]+Invoke-CycOwnedTaskEnd[\s\S]+Get-CycOwnedRuntimeProcesses[\s\S]+\} while') 'runtime stop closes the bounded Scheduled Task restart race before probing ports'
     Assert-True ($source -match 'Owned ClusterYourCodex runtime did not stop within 20 seconds') 'runtime stop fails closed when an owned process remains stuck'
     Assert-True ($source -match 'Restore-FileRollbackSnapshot') 'failed replacement has file rollback'
     Assert-True ($source -match 'Restore-CycTaskSnapshots') 'failed replacement has task rollback'
