@@ -1,21 +1,29 @@
 # Current GitHub Audit — 2026-09-30
 
-This is the post-merge audit for the live `origin/main` state. It records the
-evidence that is safe to claim now and keeps the remaining runtime gates
+This is the post-merge audit record for the 2026-09-30 evidence set. It records
+the evidence that is safe to claim now and keeps the remaining runtime gates
 explicit instead of treating hosted CI as a substitute for a clean physical or
-virtual machine.
+virtual machine. The exact live `origin/main` ref is intentionally resolved by
+the reproduction commands below so this document does not become stale every
+time a documentation PR is merged.
 
 ## Repository and release invariants
 
-- `origin/main`: `10243cfd26b8b3faee6a793d5ad9405fd725ab84`
+- Audit baseline before PR #160: `10243cfd26b8b3faee6a793d5ad9405fd725ab84`
 - PR #157: merged before the runtime repair and added transactional LAN
   discovery firewall ownership.
 - PR #158: merged at `2026-09-30T17:57:26Z` as
   `8d9fd499bd3312a81dda986985fd2cace09efac0`; it repaired native PowerShell
   runtime ownership checks, scheduler-stop quoting, and the x86-to-native
   PowerShell lifecycle boundary.
-- PR #159: merged at `2026-09-30T19:18:33Z` as the final audit-documentation
-  merge commit recorded above.
+- PR #159: merged at `2026-09-30T19:18:33Z` as
+  `10243cfd26b8b3faee6a793d5ad9405fd725ab84`.
+- PR #160: merged at `2026-09-30T20:07:54Z` as
+  `6ddb6c3a8f4d31763d4df89eaee91a1e1d6e25d1`; it corrected the final-main
+  reference in the audit documentation.
+- Resolve the exact current `origin/main` with the reproduction commands below;
+  this record intentionally avoids asserting its own future merge commit as the
+  live hash.
 - Open pull requests: none
 - Open issues: #2 (Windows one-click installer and desktop host) and #3
   (heterogeneous Linux and macOS worker packages)
