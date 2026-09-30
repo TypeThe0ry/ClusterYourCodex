@@ -2084,6 +2084,70 @@ function Complete-CycAgentsRemovalTransaction {
     Set-CycAgentsJournalPhase -JournalPath $Transaction.journalPath -Journal $journal -Phase committed
 }
 
+function Remove-CycLegacyFileRollbackSnapshots {
+    <#
+    Releases file-only rollback snapshots written by pre-MAX_PATH builds.
+    Those snapshots have a GUID directory with a `files` child but no journal;
+    they cannot be recovered after the owning lifecycle process exited.  A
+    lifecycle mutex is held by every caller of Recover-CycAgentsTransactions,
+    so removing this exact stale shape cannot race a live rollback.
+
+    Do not recurse through the old payload with PowerShell first: its mirrored
+    relative paths may already exceed Windows PowerShell 5.1's path limit.
+    Robocopy's empty-tree mirror removes those entries without constructing
+    the overlong child paths in the PowerShell provider.  Unknown children,
+    journals, and reparse-point roots are left fail-closed for normal recovery
+    validation instead of being guessed at or deleted.
+    #>
+    param([Parameter(Mandatory = $true)][string]$TransactionsRoot)
+    $resolvedRoot = Assert-CycExistingPrivateDirectory -Path $TransactionsRoot
+    if (-not (Test-Path -LiteralPath $resolvedRoot -PathType Container)) { return @() }
+    $removed = New-Object System.Collections.Generic.List[string]
+    foreach ($child in @(Get-ChildItem -LiteralPath $resolvedRoot -Directory -Force -ErrorAction Stop)) {
+        if ($child.Name -cnotmatch '^[0-9a-f]{32}$') { continue }
+        if (Test-ReparsePoint $child) {
+            throw "Legacy rollback transaction is a reparse point: $($child.FullName)"
+        }
+        $direct = @(Get-ChildItem -LiteralPath $child.FullName -Force -ErrorAction Stop)
+        $hasFilesDirectory = $false
+        $knownShape = $true
+        foreach ($entry in $direct) {
+            if (Test-ReparsePoint $entry) {
+                throw "Legacy rollback transaction contains a reparse point: $($entry.FullName)"
+            }
+            if ($entry.Name -ceq 'files' -and $entry.PSIsContainer) {
+                $hasFilesDirectory = $true
+                continue
+            }
+            if ($entry.Name -ceq 'install-manifest.json' -and -not $entry.PSIsContainer) { continue }
+            $knownShape = $false
+        }
+        if (-not $knownShape -or (-not $hasFilesDirectory -and $direct.Count -gt 0)) { continue }
+        $target = Assert-ChildPath -Root $resolvedRoot -Candidate $child.FullName
+        $empty = Join-Path $resolvedRoot ('.legacy-empty-' + [Guid]::NewGuid().ToString('N'))
+        Assert-CycCreationPathNoReparse -Path $empty
+        [void](New-Item -ItemType Directory -Path $empty -Force -ErrorAction Stop)
+        try {
+            $robocopy = Join-Path $env:SystemRoot 'System32\robocopy.exe'
+            if (-not (Test-Path -LiteralPath $robocopy -PathType Leaf)) {
+                throw 'Robocopy is required to clean a legacy rollback snapshot.'
+            }
+            $arguments = '"' + $empty + '" "' + $target + '" /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS'
+            $process = Start-Process -FilePath $robocopy -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
+            if ($process.ExitCode -gt 7) {
+                throw "Robocopy could not clean legacy rollback transaction (exit code $($process.ExitCode))."
+            }
+            Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
+            [void]$removed.Add($target)
+        } finally {
+            if (Test-Path -LiteralPath $empty -PathType Container) {
+                Remove-Item -LiteralPath $empty -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    return @($removed)
+}
+
 function Recover-CycAgentsTransactions {
     param(
         [Parameter(Mandatory = $true)][string]$DataRoot,
@@ -2096,6 +2160,7 @@ function Recover-CycAgentsTransactions {
     # Do not trust or enumerate a journal until the complete private state
     # hierarchy has passed the exact owner/DACL/reparse-point contract.
     [void](Assert-CycExistingPrivateDirectory -Path $installerRoot)
+    [void](Remove-CycLegacyFileRollbackSnapshots -TransactionsRoot $transactionsRoot)
     Assert-CycPrivateStateTree -Root $transactionsRoot
     $manifest = Read-InstallManifest -ManifestPath $ManifestPath
     $results = New-Object System.Collections.Generic.List[object]

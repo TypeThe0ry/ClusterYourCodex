@@ -85,4 +85,26 @@ Describe 'Windows payload staging paths' {
         Remove-FileRollbackSnapshot -Snapshot $rollback
         (Test-Path -LiteralPath $rollback.root) | Should Be $false
     }
+
+    It 'cleans a stale legacy file snapshot without touching journal transactions' {
+        . $bootstrapPath
+        $transactionsRoot = Join-Path $TestDrive 'legacy-transactions'
+        $legacyRoot = Join-Path $transactionsRoot ('a' * 32)
+        $legacyFiles = Join-Path $legacyRoot 'files'
+        $journalRoot = Join-Path $transactionsRoot ('b' * 32)
+        $journalFiles = Join-Path $journalRoot 'files'
+        [void][IO.Directory]::CreateDirectory($legacyFiles)
+        [void][IO.Directory]::CreateDirectory($journalFiles)
+        [IO.File]::WriteAllText((Join-Path $legacyFiles 'old.bin'), 'old')
+        [IO.File]::WriteAllText((Join-Path $journalRoot 'journal.json'), '{}')
+        Set-PrivateDirectoryAcl -Path $transactionsRoot
+        Set-PrivateDirectoryAcl -Path $legacyRoot
+        Set-PrivateDirectoryAcl -Path $journalRoot
+
+        $removed = @(Remove-CycLegacyFileRollbackSnapshots -TransactionsRoot $transactionsRoot)
+        $removed.Count | Should Be 1
+        (Test-Path -LiteralPath $legacyRoot) | Should Be $false
+        (Test-Path -LiteralPath $journalRoot -PathType Container) | Should Be $true
+        (Test-Path -LiteralPath (Join-Path $journalRoot 'journal.json') -PathType Leaf) | Should Be $true
+    }
 }
