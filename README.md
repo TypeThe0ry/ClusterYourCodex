@@ -53,9 +53,10 @@ This distinction keeps the README useful: a passing package test proves the pack
 
 #### Current repository audit — 2026-10-01
 
-The current `main` is `8d9fd499bd3312a81dda986985fd2cace09efac0`, with PR #157's
-transactional LAN discovery firewall path and PR #158's native PowerShell
-runtime-ownership repair merged. The candidate CI matrix and Windows Setup
+The current `main` is `10243cfd26b8b3faee6a793d5ad9405fd725ab84`, with PR #157's
+transactional LAN discovery firewall path, PR #158's native PowerShell
+runtime-ownership repair, and PR #159's final audit documentation merged. The
+candidate CI matrix and Windows Setup
 acceptance both passed (runs [36749204624](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/36749204624)
 and [36749204684](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/36749204684)).
 The detailed record is in the [2026-09-30 audit](docs/current-audit-20260930.md)

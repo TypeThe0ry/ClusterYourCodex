@@ -7,12 +7,15 @@ virtual machine.
 
 ## Repository and release invariants
 
-- `origin/main`: `8d9fd499bd3312a81dda986985fd2cace09efac0`
+- `origin/main`: `10243cfd26b8b3faee6a793d5ad9405fd725ab84`
 - PR #157: merged before the runtime repair and added transactional LAN
   discovery firewall ownership.
-- PR #158: merged at `2026-09-30T17:57:26Z` as the commit above; it repaired
-  native PowerShell runtime ownership checks, scheduler-stop quoting, and the
-  x86-to-native PowerShell lifecycle boundary.
+- PR #158: merged at `2026-09-30T17:57:26Z` as
+  `8d9fd499bd3312a81dda986985fd2cace09efac0`; it repaired native PowerShell
+  runtime ownership checks, scheduler-stop quoting, and the x86-to-native
+  PowerShell lifecycle boundary.
+- PR #159: merged at `2026-09-30T19:18:33Z` as the final audit-documentation
+  merge commit recorded above.
 - Open pull requests: none
 - Open issues: #2 (Windows one-click installer and desktop host) and #3
   (heterogeneous Linux and macOS worker packages)
