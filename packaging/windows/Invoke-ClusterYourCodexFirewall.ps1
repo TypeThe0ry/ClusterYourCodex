@@ -15,15 +15,25 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # This is intentionally the complete elevated surface. It accepts one bounded
-# request document and can only create/replace/remove one product-owned inbound
-# TCP rule. It cannot launch a caller-selected command or script.
+# request document and can only create/replace/remove the fixed product-owned
+# worker TCP rule (and, for v2, its fixed LAN-discovery UDP companion). It
+# cannot launch a caller-selected command or script.
 $script:CycFirewallRequestSchema = 'cyc.dev/windows-firewall-request/v1'
 $script:CycFirewallStateSchema = 'cyc.dev/windows-firewall-state/v1'
 $script:CycFirewallReceiptSchema = 'cyc.dev/windows-firewall-receipt/v1'
+# v1 is intentionally preserved for in-flight transactions and recovery.  v2
+# keeps the v1 fields and adds only the deterministic discovery rule name and
+# port, treating both listeners as one transaction.
+$script:CycFirewallRequestSchemaV2 = 'cyc.dev/windows-firewall-request/v2'
+$script:CycFirewallStateSchemaV2 = 'cyc.dev/windows-firewall-state/v2'
+$script:CycFirewallReceiptSchemaV2 = 'cyc.dev/windows-firewall-receipt/v2'
 $script:CycLifecycleJournalSchema = 'cyc.dev/windows-external-lifecycle/v1'
 $script:CycFirewallRuleGroup = 'ClusterYourCodex'
 $script:CycFirewallRuleDescription = 'ClusterYourCodex owned managed-worker TLS listener'
 $script:CycFirewallDisplayName = 'ClusterYourCodex Managed Worker'
+$script:CycFirewallDiscoveryDisplayName = 'ClusterYourCodex LAN Discovery'
+$script:CycFirewallDiscoveryDescription = 'ClusterYourCodex owned LAN discovery listener'
+$script:CycFirewallDiscoveryPort = 47830
 $script:CycFirewallExchangeDirectory = 'ClusterYourCodex-Firewall'
 $script:CycFirewallHelperName = 'Invoke-ClusterYourCodexFirewall.ps1'
 
@@ -254,9 +264,38 @@ function Get-CycExpectedRuleName {
     return 'ClusterYourCodex.ManagedWorker.' + $Sid.Replace('-', '_')
 }
 
+function Get-CycExpectedDiscoveryRuleName {
+    param([Parameter(Mandatory = $true)][string]$Sid)
+    return 'ClusterYourCodex.ManagedDiscovery.' + $Sid.Replace('-', '_')
+}
+
+function Get-CycFirewallRequestSchemaVersion {
+    param([Parameter(Mandatory = $true)]$Request)
+    if ([string]$Request.schemaVersion -ceq $script:CycFirewallRequestSchemaV2) { return 'v2' }
+    if ([string]$Request.schemaVersion -ceq $script:CycFirewallRequestSchema) { return 'v1' }
+    throw 'Unsupported firewall request schema.'
+}
+
+function Get-CycFirewallStateSchemaVersion {
+    param([Parameter(Mandatory = $true)][string]$RequestSchemaVersion)
+    if ($RequestSchemaVersion -cin @('v2', $script:CycFirewallRequestSchemaV2, $script:CycFirewallStateSchemaV2)) {
+        return $script:CycFirewallStateSchemaV2
+    }
+    return $script:CycFirewallStateSchema
+}
+
+function Get-CycFirewallReceiptSchemaVersion {
+    param([Parameter(Mandatory = $true)][string]$RequestSchemaVersion)
+    if ($RequestSchemaVersion -cin @('v2', $script:CycFirewallRequestSchemaV2, $script:CycFirewallReceiptSchemaV2)) {
+        return $script:CycFirewallReceiptSchemaV2
+    }
+    return $script:CycFirewallReceiptSchema
+}
+
 function Assert-CycFirewallRequestShape {
     param([Parameter(Mandatory = $true)]$Request)
-    Assert-CycFirewallExactProperties -Object $Request -Label 'Firewall request' -Expected @(
+    $schemaVersion = [string]$Request.schemaVersion
+    $expectedProperties = @(
         'action', 'createdAtUtc', 'deadlineUtc', 'displayName', 'exchangeRoot',
         'group', 'helperAuthenticodeRequired', 'initiatorLocalAppData',
         'initiatorProfile', 'initiatorSid', 'installRoot', 'packageExecutable',
@@ -264,7 +303,11 @@ function Assert-CycFirewallRequestShape {
         'remoteAddress', 'requestNonce', 'ruleDescription', 'ruleName',
         'schemaVersion', 'transactionId'
     )
-    if ([string]$Request.schemaVersion -cne $script:CycFirewallRequestSchema -or
+    if ($schemaVersion -ceq $script:CycFirewallRequestSchemaV2) {
+        $expectedProperties += @('discoveryRuleName', 'discoveryPort')
+    }
+    Assert-CycFirewallExactProperties -Object $Request -Label 'Firewall request' -Expected $expectedProperties
+    if ($schemaVersion -cnotin @($script:CycFirewallRequestSchema, $script:CycFirewallRequestSchemaV2) -or
         [string]$Request.action -cnotin @('Apply', 'Remove') -or
         [string]$Request.initiatorSid -cnotmatch '^S-1-5-(?:\d+-){1,14}\d+$' -or
         [string]$Request.transactionId -cnotmatch '^[0-9a-f]{32}$' -or
@@ -286,12 +329,23 @@ function Assert-CycFirewallRequestShape {
     foreach ($field in @('group', 'ruleDescription', 'displayName', 'remoteAddress', 'ruleName')) {
         Assert-CycFirewallPlainValue -Value ([string]$Request.$field) -Label $field -MaximumLength 256
     }
+    if ($schemaVersion -ceq $script:CycFirewallRequestSchemaV2) {
+        Assert-CycFirewallPlainValue -Value ([string]$Request.discoveryRuleName) -Label 'discoveryRuleName' -MaximumLength 256
+    }
     if ([string]$Request.group -cne $script:CycFirewallRuleGroup -or
         [string]$Request.ruleDescription -cne $script:CycFirewallRuleDescription -or
         [string]$Request.displayName -cne $script:CycFirewallDisplayName -or
         [string]$Request.remoteAddress -cne 'LocalSubnet' -or
         [string]$Request.ruleName -cne (Get-CycExpectedRuleName -Sid ([string]$Request.initiatorSid))) {
         throw 'Firewall request attempts to change the fixed rule identity or scope.'
+    }
+    if ($schemaVersion -ceq $script:CycFirewallRequestSchemaV2) {
+        if ([string]$Request.discoveryRuleName -cne (Get-CycExpectedDiscoveryRuleName -Sid ([string]$Request.initiatorSid)) -or
+            -not ($Request.discoveryPort -is [byte] -or $Request.discoveryPort -is [int16] -or
+                $Request.discoveryPort -is [int32] -or $Request.discoveryPort -is [int64]) -or
+            [long]$Request.discoveryPort -ne [long]$script:CycFirewallDiscoveryPort) {
+            throw 'Firewall request discovery rule identity or port is invalid.'
+        }
     }
     $created = [DateTimeOffset]::MinValue
     $deadline = [DateTimeOffset]::MinValue
@@ -557,13 +611,22 @@ function Assert-CycFirewallAuthenticode {
 }
 
 function Get-CycOwnedFirewallRule {
-    param([Parameter(Mandatory = $true)]$Request)
-    $rules = @(Get-NetFirewallRule -Name ([string]$Request.ruleName) -ErrorAction SilentlyContinue)
+    param(
+        [Parameter(Mandatory = $true)]$Request,
+        [switch]$Discovery
+    )
+    $name = if ($Discovery) { Get-CycExpectedDiscoveryRuleName -Sid ([string]$Request.initiatorSid) } else { [string]$Request.ruleName }
+    $displayName = if ($Discovery) { $script:CycFirewallDiscoveryDisplayName } else { $script:CycFirewallDisplayName }
+    $description = if ($Discovery) { $script:CycFirewallDiscoveryDescription } else { $script:CycFirewallRuleDescription }
+    $protocol = if ($Discovery) { 'UDP' } else { 'TCP' }
+    $protocolPattern = if ($Discovery) { '^(17|UDP)$' } else { '^(6|TCP)$' }
+    $portNumber = if ($Discovery) { [int]$script:CycFirewallDiscoveryPort } else { [int]$Request.port }
+    $rules = @(Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue)
     if ($rules.Count -gt 1) { throw 'Duplicate firewall rule name collision.' }
     if ($rules.Count -eq 0) { return $null }
     $rule = $rules[0]
     if ([string]$rule.Group -cne $script:CycFirewallRuleGroup -or
-        [string]$rule.Description -cne $script:CycFirewallRuleDescription) {
+        [string]$rule.Description -cne $description) {
         throw 'Firewall rule-name collision is not product-owned.'
     }
     $port = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
@@ -572,11 +635,11 @@ function Get-CycOwnedFirewallRule {
     if ([string]$rule.Direction -notmatch '^(1|Inbound)$' -or
         [string]$rule.Action -notmatch '^(2|Allow)$' -or
         [string]$rule.Profile -notmatch '^(2|Private)$' -or
-        [string]$rule.DisplayName -cne $script:CycFirewallDisplayName -or
+        [string]$rule.DisplayName -cne $displayName -or
         [string]$rule.EdgeTraversalPolicy -notmatch '^(0|Block)$' -or
-        [string]$port.Protocol -notmatch '^(6|TCP)$' -or
+        [string]$port.Protocol -notmatch $protocolPattern -or
         [string]$port.LocalPort -notmatch '^\d{1,5}$' -or
-        [int]$port.LocalPort -lt 1 -or [int]$port.LocalPort -gt 65535 -or
+        [int]$port.LocalPort -ne $portNumber -or
         [string]$port.RemotePort -notmatch '^(Any|0-65535)$' -or
         @($address.LocalAddress).Count -ne 1 -or
         @($address.LocalAddress) -cnotcontains 'Any' -or
@@ -594,28 +657,56 @@ function Get-CycOwnedFirewallRule {
         port = $port
         address = $address
         application = $application
+        name = $name
+        protocol = $protocol
+        expectedPort = $portNumber
+        discovery = [bool]$Discovery
     }
 }
 
 function Get-CycFirewallOriginalSnapshot {
     param([Parameter(Mandatory = $true)]$Request)
     $owned = Get-CycOwnedFirewallRule -Request $Request
-    if (-not $owned) {
-        return [ordered]@{ existed = $false }
+    $workerSnapshot = if (-not $owned) {
+        [ordered]@{ existed = $false }
+    } else {
+        [ordered]@{
+            existed = $true
+            enabled = [string]$owned.rule.Enabled
+            port = [int]$owned.port.LocalPort
+        }
     }
-    return [ordered]@{
-        existed = $true
-        enabled = [string]$owned.rule.Enabled
-        port = [int]$owned.port.LocalPort
+    if ((Get-CycFirewallRequestSchemaVersion -Request $Request) -ceq 'v2') {
+        $discovery = Get-CycOwnedFirewallRule -Request $Request -Discovery
+        $discoverySnapshot = if (-not $discovery) {
+            [ordered]@{ existed = $false }
+        } else {
+            [ordered]@{
+                existed = $true
+                enabled = [string]$discovery.rule.Enabled
+                port = [int]$discovery.port.LocalPort
+            }
+        }
+        Assert-CycFirewallSnapshotShape -Snapshot $workerSnapshot
+        Assert-CycFirewallSnapshotShape -Snapshot $discoverySnapshot
+        return [ordered]@{
+            worker = $workerSnapshot
+            discovery = $discoverySnapshot
+        }
     }
+    Assert-CycFirewallSnapshotShape -Snapshot $workerSnapshot
+    return $workerSnapshot
 }
 
 function Set-CycExactFirewallDesiredState {
     param([Parameter(Mandatory = $true)]$Request)
-    $owned = Get-CycOwnedFirewallRule -Request $Request
-    if ($owned) {
-        Remove-NetFirewallRule -Name ([string]$Request.ruleName) -ErrorAction Stop
-    }
+    $schemaVersion = Get-CycFirewallRequestSchemaVersion -Request $Request
+    # Read and validate every target before the first mutation. This rejects
+    # collisions on either fixed rule without leaving the other rule changed.
+    $ownedWorker = Get-CycOwnedFirewallRule -Request $Request
+    $ownedDiscovery = if ($schemaVersion -ceq 'v2') { Get-CycOwnedFirewallRule -Request $Request -Discovery } else { $null }
+    if ($ownedWorker) { Remove-NetFirewallRule -Name ([string]$Request.ruleName) -ErrorAction Stop }
+    if ($ownedDiscovery) { Remove-NetFirewallRule -Name (Get-CycExpectedDiscoveryRuleName -Sid ([string]$Request.initiatorSid)) -ErrorAction Stop }
     if ([string]$Request.action -ceq 'Remove') { return }
     New-NetFirewallRule `
         -Name ([string]$Request.ruleName) `
@@ -631,11 +722,23 @@ function Set-CycExactFirewallDesiredState {
         -RemoteAddress LocalSubnet `
         -Program ([string]$Request.program) `
         -EdgeTraversalPolicy Block | Out-Null
-    $created = Get-CycOwnedFirewallRule -Request $Request
-    if (-not $created -or [string]$created.rule.Enabled -ne 'True' -or
-        [int]$created.port.LocalPort -ne [int]$Request.port) {
-        throw 'Product-owned firewall rule failed apply verification.'
+    if ($schemaVersion -ceq 'v2') {
+        New-NetFirewallRule `
+            -Name (Get-CycExpectedDiscoveryRuleName -Sid ([string]$Request.initiatorSid)) `
+            -DisplayName $script:CycFirewallDiscoveryDisplayName `
+            -Group $script:CycFirewallRuleGroup `
+            -Description $script:CycFirewallDiscoveryDescription `
+            -Direction Inbound `
+            -Action Allow `
+            -Enabled True `
+            -Profile Private `
+            -Protocol UDP `
+            -LocalPort ([int]$script:CycFirewallDiscoveryPort) `
+            -RemoteAddress LocalSubnet `
+            -Program ([string]$Request.program) `
+            -EdgeTraversalPolicy Block | Out-Null
     }
+    [void](Test-CycFirewallDesiredState -Request $Request)
 }
 
 function Restore-CycExactFirewallSnapshot {
@@ -643,27 +746,59 @@ function Restore-CycExactFirewallSnapshot {
         [Parameter(Mandatory = $true)]$Request,
         [Parameter(Mandatory = $true)]$Snapshot
     )
-    Assert-CycFirewallExactProperties -Object $Snapshot -Label 'Firewall rollback snapshot' -Expected @(
-        if ([bool]$Snapshot.existed) { 'enabled'; 'existed'; 'port' } else { 'existed' }
+    $schemaVersion = Get-CycFirewallRequestSchemaVersion -Request $Request
+    if ($schemaVersion -ceq 'v2') {
+        Assert-CycFirewallExactProperties -Object $Snapshot -Label 'Firewall rollback snapshot' -Expected @('discovery', 'worker')
+        $errors = [System.Collections.Generic.List[string]]::new()
+        foreach ($kind in @('worker', 'discovery')) {
+            try {
+                Restore-CycExactFirewallSnapshotSingle -Request $Request -Snapshot $Snapshot.$kind -Discovery:($kind -eq 'discovery')
+            } catch { [void]$errors.Add($kind + ': ' + $_.Exception.Message) }
+        }
+        if ($errors.Count -gt 0) { throw ('Combined firewall rollback failed closed: ' + [string]::Join('; ', $errors)) }
+        return
+    }
+    Restore-CycExactFirewallSnapshotSingle -Request $Request -Snapshot $Snapshot
+}
+
+function Restore-CycExactFirewallSnapshotSingle {
+    param(
+        [Parameter(Mandatory = $true)]$Request,
+        [Parameter(Mandatory = $true)]$Snapshot,
+        [switch]$Discovery
     )
-    $owned = Get-CycOwnedFirewallRule -Request $Request
-    if ($owned) { Remove-NetFirewallRule -Name ([string]$Request.ruleName) -ErrorAction Stop }
+    $expectedProperties = if ([bool]$Snapshot.existed) { @('enabled', 'existed', 'port') } else { @('existed') }
+    Assert-CycFirewallExactProperties -Object $Snapshot -Label 'Firewall rollback snapshot' -Expected $expectedProperties
+    if (-not ($Snapshot.existed -is [bool])) { throw 'Firewall rollback snapshot existence marker must be Boolean.' }
+    if ([bool]$Snapshot.existed -and
+        ([string]$Snapshot.enabled -cnotin @('True', 'False') -or
+        -not ($Snapshot.port -is [byte] -or $Snapshot.port -is [int16] -or
+            $Snapshot.port -is [int32] -or $Snapshot.port -is [int64]) -or
+        [long]$Snapshot.port -lt 1 -or [long]$Snapshot.port -gt 65535)) {
+        throw 'Firewall rollback snapshot metadata is invalid.'
+    }
+    $owned = Get-CycOwnedFirewallRule -Request $Request -Discovery:$Discovery
+    if ($owned) { Remove-NetFirewallRule -Name ([string]$owned.name) -ErrorAction Stop }
     if (-not [bool]$Snapshot.existed) { return }
+    $name = if ($Discovery) { Get-CycExpectedDiscoveryRuleName -Sid ([string]$Request.initiatorSid) } else { [string]$Request.ruleName }
+    $displayName = if ($Discovery) { $script:CycFirewallDiscoveryDisplayName } else { $script:CycFirewallDisplayName }
+    $description = if ($Discovery) { $script:CycFirewallDiscoveryDescription } else { $script:CycFirewallRuleDescription }
+    $protocol = if ($Discovery) { 'UDP' } else { 'TCP' }
     New-NetFirewallRule `
-        -Name ([string]$Request.ruleName) `
-        -DisplayName $script:CycFirewallDisplayName `
+        -Name $name `
+        -DisplayName $displayName `
         -Group $script:CycFirewallRuleGroup `
-        -Description $script:CycFirewallRuleDescription `
+        -Description $description `
         -Direction Inbound `
         -Action Allow `
         -Enabled ([string]$Snapshot.enabled) `
         -Profile Private `
-        -Protocol TCP `
+        -Protocol $protocol `
         -LocalPort ([int]$Snapshot.port) `
         -RemoteAddress LocalSubnet `
         -Program ([string]$Request.program) `
         -EdgeTraversalPolicy Block | Out-Null
-    $restored = Get-CycOwnedFirewallRule -Request $Request
+    $restored = Get-CycOwnedFirewallRule -Request $Request -Discovery:$Discovery
     if (-not $restored -or
         [string]$restored.rule.Enabled -cne [string]$Snapshot.enabled -or
         [int]$restored.port.LocalPort -ne [int]$Snapshot.port) {
@@ -676,14 +811,21 @@ function Test-CycFirewallDesiredState {
         [Parameter(Mandatory = $true)]$Request,
         [switch]$Final
     )
+    $schemaVersion = Get-CycFirewallRequestSchemaVersion -Request $Request
     $owned = Get-CycOwnedFirewallRule -Request $Request
+    $ownedDiscovery = if ($schemaVersion -ceq 'v2') { Get-CycOwnedFirewallRule -Request $Request -Discovery } else { $null }
     if ([string]$Request.action -ceq 'Remove') {
-        if ($owned) { throw 'Firewall rule remains after verified removal.' }
+        if ($owned -or $ownedDiscovery) { throw 'Firewall rule remains after verified removal.' }
         return $true
     }
     if (-not $owned -or [string]$owned.rule.Enabled -ne 'True' -or
         [int]$owned.port.LocalPort -ne [int]$Request.port) {
         throw 'Firewall rule is absent or disabled after apply.'
+    }
+    if ($schemaVersion -ceq 'v2' -and (-not $ownedDiscovery -or
+        [string]$ownedDiscovery.rule.Enabled -ne 'True' -or
+        [int]$ownedDiscovery.port.LocalPort -ne [int]$script:CycFirewallDiscoveryPort)) {
+        throw 'LAN discovery firewall rule is absent or disabled after apply.'
     }
     if ($Final) {
         if (-not (Test-Path -LiteralPath ([string]$Request.program) -PathType Leaf) -or
@@ -710,9 +852,14 @@ function Assert-CycFirewallReplayBinding {
     param(
         [Parameter(Mandatory = $true)]$State,
         [Parameter(Mandatory = $true)][string]$TransactionId,
-        [Parameter(Mandatory = $true)][string]$RequestSha256
+        [Parameter(Mandatory = $true)][string]$RequestSha256,
+        [string]$ExpectedSchemaVersion
     )
-    if ([string]$State.schemaVersion -cne $script:CycFirewallStateSchema -or
+    $allowedSchemas = @($script:CycFirewallStateSchema, $script:CycFirewallStateSchemaV2)
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSchemaVersion)) {
+        $allowedSchemas = @(Get-CycFirewallStateSchemaVersion -RequestSchemaVersion $ExpectedSchemaVersion)
+    }
+    if ([string]$State.schemaVersion -cnotin $allowedSchemas -or
         [string]$State.transactionId -cne $TransactionId -or
         [string]$State.requestSha256 -cne $RequestSha256) {
         throw 'Firewall transaction state replay does not match the approved request.'
@@ -755,21 +902,37 @@ function Assert-CycFirewallStateShape {
             throw 'Firewall state apply timestamp is invalid.'
         }
     }
-    if (-not ($State.original.existed -is [bool])) {
+    if ([string]$State.schemaVersion -cnotin @($script:CycFirewallStateSchema, $script:CycFirewallStateSchemaV2)) {
+        throw 'Firewall state schema is unsupported.'
+    }
+    $schemaIsV2 = [string]$State.schemaVersion -ceq $script:CycFirewallStateSchemaV2
+    if ($schemaIsV2) {
+        Assert-CycFirewallExactProperties -Object $State.original -Label 'Firewall rollback snapshot' -Expected @('discovery', 'worker')
+        foreach ($snapshot in @($State.original.worker, $State.original.discovery)) {
+            Assert-CycFirewallSnapshotShape -Snapshot $snapshot
+        }
+    } else {
+        Assert-CycFirewallSnapshotShape -Snapshot $State.original
+    }
+    return $State
+}
+
+function Assert-CycFirewallSnapshotShape {
+    param([Parameter(Mandatory = $true)]$Snapshot)
+    if (-not ($Snapshot.existed -is [bool])) {
         throw 'Firewall rollback snapshot existence marker must be Boolean.'
     }
-    if ([bool]$State.original.existed) {
-        Assert-CycFirewallExactProperties -Object $State.original -Label 'Firewall rollback snapshot' -Expected @('enabled', 'existed', 'port')
-        if ([string]$State.original.enabled -cnotin @('True', 'False') -or
-            -not ($State.original.port -is [byte] -or $State.original.port -is [int16] -or
-                $State.original.port -is [int32] -or $State.original.port -is [int64]) -or
-            [long]$State.original.port -lt 1 -or [long]$State.original.port -gt 65535) {
+    if ([bool]$Snapshot.existed) {
+        Assert-CycFirewallExactProperties -Object $Snapshot -Label 'Firewall rollback snapshot' -Expected @('enabled', 'existed', 'port')
+        if ([string]$Snapshot.enabled -cnotin @('True', 'False') -or
+            -not ($Snapshot.port -is [byte] -or $Snapshot.port -is [int16] -or
+                $Snapshot.port -is [int32] -or $Snapshot.port -is [int64]) -or
+            [long]$Snapshot.port -lt 1 -or [long]$Snapshot.port -gt 65535) {
             throw 'Firewall rollback snapshot metadata is invalid.'
         }
     } else {
-        Assert-CycFirewallExactProperties -Object $State.original -Label 'Firewall rollback snapshot' -Expected @('existed')
+        Assert-CycFirewallExactProperties -Object $Snapshot -Label 'Firewall rollback snapshot' -Expected @('existed')
     }
-    return $State
 }
 
 function Get-CycFirewallBoundRecoveryAction {
@@ -834,8 +997,9 @@ function New-CycFirewallReceipt {
         [Parameter(Mandatory = $true)][ValidateSet('verified', 'rolledBack', 'rollbackFailed')][string]$Result,
         [string]$FailureCode
     )
-    return [ordered]@{
-        schemaVersion = $script:CycFirewallReceiptSchema
+    $requestSchemaVersion = Get-CycFirewallRequestSchemaVersion -Request $Request
+    $receipt = [ordered]@{
+        schemaVersion = Get-CycFirewallReceiptSchemaVersion -RequestSchemaVersion $requestSchemaVersion
         transactionId = [string]$Request.transactionId
         requestSha256 = $RequestHash
         action = [string]$Request.action
@@ -850,6 +1014,11 @@ function New-CycFirewallReceipt {
         port = [int]$Request.port
         verifiedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
     }
+    if ($requestSchemaVersion -ceq 'v2') {
+        $receipt.discoveryRuleName = Get-CycExpectedDiscoveryRuleName -Sid ([string]$Request.initiatorSid)
+        $receipt.discoveryPort = [int]$script:CycFirewallDiscoveryPort
+    }
+    return $receipt
 }
 
 function Assert-CycFirewallReceiptBinding {
@@ -858,11 +1027,14 @@ function Assert-CycFirewallReceiptBinding {
         [Parameter(Mandatory = $true)]$Request,
         [Parameter(Mandatory = $true)][string]$RequestHash
     )
-    Assert-CycFirewallExactProperties -Object $Receipt -Label 'Firewall receipt' -Expected @(
+    $requestSchemaVersion = Get-CycFirewallRequestSchemaVersion -Request $Request
+    $expectedProperties = @(
         'action', 'failureCode', 'initiatorLocalAppData', 'initiatorProfile',
         'initiatorSid', 'port', 'program', 'programSha256', 'requestSha256',
         'result', 'ruleName', 'schemaVersion', 'transactionId', 'verifiedAtUtc'
     )
+    if ($requestSchemaVersion -ceq 'v2') { $expectedProperties += @('discoveryRuleName', 'discoveryPort') }
+    Assert-CycFirewallExactProperties -Object $Receipt -Label 'Firewall receipt' -Expected $expectedProperties
     $verifiedAt = [DateTimeOffset]::MinValue
     $timestampStyle = [System.Globalization.DateTimeStyles]::RoundtripKind
     $timestampValid = (
@@ -890,7 +1062,13 @@ function Assert-CycFirewallReceiptBinding {
         }
         default { $false }
     }
-    if ([string]$Receipt.schemaVersion -cne $script:CycFirewallReceiptSchema -or
+    $discoveryPortValid = $true
+    if ($requestSchemaVersion -ceq 'v2') {
+        $discoveryPortValid = ($Receipt.discoveryPort -is [byte] -or $Receipt.discoveryPort -is [int16] -or
+            $Receipt.discoveryPort -is [int32] -or $Receipt.discoveryPort -is [int64]) -and
+            [long]$Receipt.discoveryPort -eq [long]$script:CycFirewallDiscoveryPort
+    }
+    if ([string]$Receipt.schemaVersion -cne (Get-CycFirewallReceiptSchemaVersion -RequestSchemaVersion $requestSchemaVersion) -or
         [string]$Receipt.transactionId -cne [string]$Request.transactionId -or
         [string]$Receipt.requestSha256 -cne $RequestHash -or
         [string]$Receipt.action -cne [string]$Request.action -or
@@ -914,6 +1092,9 @@ function Assert-CycFirewallReceiptBinding {
         [string]$Receipt.programSha256 -cne [string]$Request.programSha256 -or
         [int]$Receipt.port -ne [int]$Request.port -or
         [string]$Receipt.result -cnotin @('verified', 'rolledBack', 'rollbackFailed') -or
+        ($requestSchemaVersion -ceq 'v2' -and
+            ([string]$Receipt.discoveryRuleName -cne (Get-CycExpectedDiscoveryRuleName -Sid ([string]$Request.initiatorSid)) -or
+             -not $discoveryPortValid)) -or
         -not $failureBindingValid -or -not $timestampValid) {
         throw 'Firewall receipt is not bound to the exact approved request.'
     }
@@ -956,6 +1137,7 @@ function Invoke-CycFirewallElevatedTransaction {
         -MaximumBytes 32768 `
         -Label 'Firewall request'
     $request = $requestCapture.value
+    $requestSchemaVersion = Get-CycFirewallRequestSchemaVersion -Request $request
     [void](Assert-CycFirewallRequestBinding `
         -Request $request `
         -RequestFile $requestCapture.path `
@@ -1023,7 +1205,8 @@ function Invoke-CycFirewallElevatedTransaction {
             [void](Assert-CycFirewallReplayBinding `
                 -State $state `
                 -TransactionId ([string]$request.transactionId) `
-                -RequestSha256 $RequestHash)
+                -RequestSha256 $RequestHash `
+                -ExpectedSchemaVersion $requestSchemaVersion)
             $snapshot = $state.original
             $applied = [string]$state.phase -cin @('applying', 'applied')
             $terminalStateCommitted = [string]$state.phase -cin @('verified', 'rolledBack', 'rollbackFailed')
@@ -1036,7 +1219,7 @@ function Invoke-CycFirewallElevatedTransaction {
             }
             $snapshot = Get-CycFirewallOriginalSnapshot -Request $request
             $state = [ordered]@{
-                schemaVersion = $script:CycFirewallStateSchema
+                schemaVersion = Get-CycFirewallStateSchemaVersion -RequestSchemaVersion $requestSchemaVersion
                 transactionId = [string]$request.transactionId
                 requestSha256 = $RequestHash
                 phase = 'prepared'

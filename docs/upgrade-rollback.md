@@ -85,4 +85,5 @@ user profile:
 
 Back up needed logs/artifacts first. After uninstall, verify product-owned
 tasks, firewall rule, Apps registration, process, install root, plugin entry,
-and managed `AGENTS.md` block are absent; do not remove unrelated user files.
+and both product-owned firewall rules (worker TCP plus LAN-discovery UDP) are
+absent; do not remove unrelated user files.

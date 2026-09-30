@@ -22,12 +22,15 @@ $ErrorActionPreference = 'Stop'
 
 $script:CycLifecycleJournalSchema = 'cyc.dev/windows-external-lifecycle/v1'
 $script:CycFirewallRequestSchema = 'cyc.dev/windows-firewall-request/v1'
+$script:CycFirewallRequestSchemaV2 = 'cyc.dev/windows-firewall-request/v2'
 $script:CycFirewallReceiptSchema = 'cyc.dev/windows-firewall-receipt/v1'
+$script:CycFirewallReceiptSchemaV2 = 'cyc.dev/windows-firewall-receipt/v2'
 $script:CycCoreCommitSchema = 'cyc.dev/windows-core-commit/v1'
 $script:CycFirewallRuleGroup = 'ClusterYourCodex'
 $script:CycFirewallRuleDescription = 'ClusterYourCodex owned managed-worker TLS listener'
 $script:CycFirewallDisplayName = 'ClusterYourCodex Managed Worker'
 $script:CycFirewallLifecycleName = 'external-elevated-helper'
+$script:CycFirewallDiscoveryPort = 47830
 $script:CycFirewallExchangeDirectory = 'ClusterYourCodex-Firewall'
 $script:CycBootstrapName = 'bootstrap.ps1'
 $script:CycFirewallHelperName = 'Invoke-ClusterYourCodexFirewall.ps1'
@@ -672,14 +675,23 @@ function Test-CycFirewallReceiptJournalBinding {
     )
     if (-not $Receipt) { return $false }
     try {
-        Assert-CycLifecycleExactProperties -Object $Receipt -Label 'Firewall receipt' -Expected @(
+        $receiptSchema = [string]$Receipt.schemaVersion
+        if ($receiptSchema -notin @($script:CycFirewallReceiptSchema, $script:CycFirewallReceiptSchemaV2)) {
+            return $false
+        }
+        [string[]]$receiptFields = @(
             'action', 'failureCode', 'initiatorLocalAppData', 'initiatorProfile',
             'initiatorSid', 'port', 'program', 'programSha256', 'requestSha256',
             'result', 'ruleName', 'schemaVersion', 'transactionId', 'verifiedAtUtc'
         )
+        if ($receiptSchema -ceq $script:CycFirewallReceiptSchemaV2) {
+            $receiptFields += @('discoveryRuleName', 'discoveryPort')
+        }
+        Assert-CycLifecycleExactProperties -Object $Receipt -Label 'Firewall receipt' -Expected $receiptFields
         $expectedAction = if ([string]$Journal.action -ceq 'Uninstall') { 'Remove' } else { 'Apply' }
         $expectedProgram = Resolve-CycLifecyclePath (Join-Path ([string]$Journal.installRoot) 'cyc-controller.exe')
         $expectedRule = 'ClusterYourCodex.ManagedWorker.' + ([string]$Journal.initiatorSid).Replace('-', '_')
+        $expectedDiscoveryRule = 'ClusterYourCodex.ManagedDiscovery.' + ([string]$Journal.initiatorSid).Replace('-', '_')
         $verifiedAt = [DateTimeOffset]::MinValue
         $timestampStyle = [System.Globalization.DateTimeStyles]::RoundtripKind
         $timestampValid = (
@@ -707,8 +719,17 @@ function Test-CycFirewallReceiptJournalBinding {
             }
             default { $false }
         }
+        $discoveryBindingValid = if ($receiptSchema -ceq $script:CycFirewallReceiptSchemaV2) {
+            $hasName = $null -ne $Receipt.PSObject.Properties['discoveryRuleName']
+            $hasPort = $null -ne $Receipt.PSObject.Properties['discoveryPort']
+            $hasName -and $hasPort -and
+                ($Receipt.discoveryPort -is [byte] -or $Receipt.discoveryPort -is [int16] -or
+                    $Receipt.discoveryPort -is [int32] -or $Receipt.discoveryPort -is [int64]) -and
+                [string]$Receipt.discoveryRuleName -ceq $expectedDiscoveryRule -and
+                [int]$Receipt.discoveryPort -eq $script:CycFirewallDiscoveryPort
+        } else { $true }
         return (
-            [string]$Receipt.schemaVersion -ceq $script:CycFirewallReceiptSchema -and
+            $receiptSchema -in @($script:CycFirewallReceiptSchema, $script:CycFirewallReceiptSchemaV2) -and
             [string]$Receipt.transactionId -ceq [string]$Journal.transactionId -and
             [string]$Receipt.requestSha256 -ceq [string]$Journal.requestSha256 -and
             [string]$Receipt.action -ceq $expectedAction -and
@@ -733,7 +754,8 @@ function Test-CycFirewallReceiptJournalBinding {
             ) -and
             [string]$Receipt.programSha256 -cmatch '^[0-9a-f]{64}$' -and
             [int]$Receipt.port -ge 1 -and [int]$Receipt.port -le 65535 -and
-            [string]$Receipt.ruleName -ceq $expectedRule
+            [string]$Receipt.ruleName -ceq $expectedRule -and
+            $discoveryBindingValid
         )
     } catch {
         return $false
@@ -791,6 +813,14 @@ function Test-CycAppliedFirewallManifestBinding {
         $controllerRecords = @($Manifest.files | Where-Object {
             [string]$_.relativePath -ceq 'cyc-controller.exe'
         })
+        $receiptIsV2 = [string]$Receipt.schemaVersion -ceq $script:CycFirewallReceiptSchemaV2
+        $expectedDiscoveryRule = 'ClusterYourCodex.ManagedDiscovery.' + ([string]$Journal.initiatorSid).Replace('-', '_')
+        $manifestDiscoveryBindingValid = if ($receiptIsV2) {
+            ($null -ne $firewall.PSObject.Properties['discoveryName']) -and
+            ($null -ne $firewall.PSObject.Properties['discoveryPort']) -and
+            [string]$firewall.discoveryName -ceq $expectedDiscoveryRule -and
+            [int]$firewall.discoveryPort -eq $script:CycFirewallDiscoveryPort
+        } else { $true }
         return (
             $ReceiptSha256 -cmatch '^[0-9a-f]{64}$' -and
             [string]$Manifest.schemaVersion -ceq 'cyc.dev/windows-install-manifest/v1' -and
@@ -830,6 +860,7 @@ function Test-CycAppliedFirewallManifestBinding {
                 [System.StringComparison]::OrdinalIgnoreCase
             ) -and
             [int]$firewall.port -eq [int]$Receipt.port -and
+            $manifestDiscoveryBindingValid -and
             $controllerRecords.Count -eq 1 -and
             [string]$controllerRecords[0].sha256 -ceq [string]$Receipt.programSha256
         )
@@ -856,6 +887,14 @@ function Test-CycPendingFirewallManifestBinding {
         $controllerRecords = @($Manifest.files | Where-Object {
             [string]$_.relativePath -ceq 'cyc-controller.exe'
         })
+        $requestIsV2 = [string]$Request.schemaVersion -ceq $script:CycFirewallRequestSchemaV2
+        $expectedDiscoveryRule = 'ClusterYourCodex.ManagedDiscovery.' + ([string]$Journal.initiatorSid).Replace('-', '_')
+        $manifestDiscoveryBindingValid = if ($requestIsV2) {
+            ($null -ne $firewall.PSObject.Properties['discoveryName']) -and
+            ($null -ne $firewall.PSObject.Properties['discoveryPort']) -and
+            [string]$firewall.discoveryName -ceq $expectedDiscoveryRule -and
+            [int]$firewall.discoveryPort -eq $script:CycFirewallDiscoveryPort
+        } else { $true }
         return (
             [string]$Manifest.schemaVersion -ceq 'cyc.dev/windows-install-manifest/v1' -and
             [string]::Equals(
@@ -908,7 +947,11 @@ function Test-CycFirewallRequestJournalBinding {
     )
     try {
         if (-not $Request) { return $false }
-        Assert-CycLifecycleExactProperties -Object $Request -Label 'Recovered firewall request' -Expected @(
+        $requestSchema = [string]$Request.schemaVersion
+        if ($requestSchema -notin @($script:CycFirewallRequestSchema, $script:CycFirewallRequestSchemaV2)) {
+            return $false
+        }
+        [string[]]$requestFields = @(
             'action', 'createdAtUtc', 'deadlineUtc', 'displayName', 'exchangeRoot',
             'group', 'helperAuthenticodeRequired', 'initiatorLocalAppData',
             'initiatorProfile', 'initiatorSid', 'installRoot', 'packageExecutable',
@@ -916,13 +959,26 @@ function Test-CycFirewallRequestJournalBinding {
             'remoteAddress', 'requestNonce', 'ruleDescription', 'ruleName',
             'schemaVersion', 'transactionId'
         )
+        if ($requestSchema -ceq $script:CycFirewallRequestSchemaV2) {
+            $requestFields += @('discoveryRuleName', 'discoveryPort')
+        }
+        Assert-CycLifecycleExactProperties -Object $Request -Label 'Recovered firewall request' -Expected $requestFields
         $createdAt = [DateTimeOffset]::MinValue
         $deadlineAt = [DateTimeOffset]::MinValue
         $timestampStyle = [System.Globalization.DateTimeStyles]::RoundtripKind
         $expectedAction = if ([string]$Journal.action -ceq 'Uninstall') { 'Remove' } else { 'Apply' }
         $expectedRule = 'ClusterYourCodex.ManagedWorker.' + ([string]$Journal.initiatorSid).Replace('-', '_')
+        $expectedDiscoveryRule = 'ClusterYourCodex.ManagedDiscovery.' + ([string]$Journal.initiatorSid).Replace('-', '_')
+        $discoveryBindingValid = if ($requestSchema -ceq $script:CycFirewallRequestSchemaV2) {
+            ($null -ne $Request.PSObject.Properties['discoveryRuleName']) -and
+            ($null -ne $Request.PSObject.Properties['discoveryPort']) -and
+            ($Request.discoveryPort -is [byte] -or $Request.discoveryPort -is [int16] -or
+                $Request.discoveryPort -is [int32] -or $Request.discoveryPort -is [int64]) -and
+            [string]$Request.discoveryRuleName -ceq $expectedDiscoveryRule -and
+            [int]$Request.discoveryPort -eq $script:CycFirewallDiscoveryPort
+        } else { $true }
         return (
-            [string]$Request.schemaVersion -ceq $script:CycFirewallRequestSchema -and
+            $requestSchema -in @($script:CycFirewallRequestSchema, $script:CycFirewallRequestSchemaV2) -and
             [string]$Request.transactionId -ceq [string]$Journal.transactionId -and
             [string]$Request.requestNonce -cmatch '^[0-9a-f]{64}$' -and
             [string]$Request.action -ceq $expectedAction -and
@@ -976,7 +1032,8 @@ function Test-CycFirewallRequestJournalBinding {
                 [ref]$deadlineAt
             ) -and
             $deadlineAt -gt $createdAt -and
-            ($deadlineAt - $createdAt).TotalMinutes -le 35
+            ($deadlineAt - $createdAt).TotalMinutes -le 35 -and
+            $discoveryBindingValid
         )
     } catch {
         return $false
@@ -1041,6 +1098,7 @@ function Test-CycPendingFirewallManifestRequestBinding {
                 [System.StringComparison]::OrdinalIgnoreCase
             ) -and
             [int]$firewall.port -eq [int]$Request.port -and
+            $manifestDiscoveryBindingValid -and
             $controllerRecords.Count -eq 1 -and
             [string]$controllerRecords[0].sha256 -ceq [string]$Request.programSha256
         )
@@ -1393,11 +1451,19 @@ function Assert-CycFirewallReceipt {
         [Parameter(Mandatory = $true)]$Request,
         [Parameter(Mandatory = $true)][string]$RequestHash
     )
-    Assert-CycLifecycleExactProperties -Object $Receipt -Label 'Firewall receipt' -Expected @(
+    $receiptSchema = [string]$Receipt.schemaVersion
+    if ($receiptSchema -notin @($script:CycFirewallReceiptSchema, $script:CycFirewallReceiptSchemaV2)) {
+        throw 'Firewall receipt uses an unsupported schema.'
+    }
+    [string[]]$receiptFields = @(
         'action', 'failureCode', 'initiatorLocalAppData', 'initiatorProfile',
         'initiatorSid', 'port', 'program', 'programSha256', 'requestSha256',
         'result', 'ruleName', 'schemaVersion', 'transactionId', 'verifiedAtUtc'
     )
+    if ($receiptSchema -ceq $script:CycFirewallReceiptSchemaV2) {
+        $receiptFields += @('discoveryRuleName', 'discoveryPort')
+    }
+    Assert-CycLifecycleExactProperties -Object $Receipt -Label 'Firewall receipt' -Expected $receiptFields
     $verifiedAt = [DateTimeOffset]::MinValue
     $timestampStyle = [System.Globalization.DateTimeStyles]::RoundtripKind
     $timestampValid = (
@@ -1425,7 +1491,17 @@ function Assert-CycFirewallReceipt {
         }
         default { $false }
     }
-    if ([string]$Receipt.schemaVersion -cne $script:CycFirewallReceiptSchema -or
+    $expectedDiscoveryRule = 'ClusterYourCodex.ManagedDiscovery.' + ([string]$Request.initiatorSid).Replace('-', '_')
+    $discoveryBindingValid = if ([string]$Request.schemaVersion -ceq $script:CycFirewallRequestSchemaV2) {
+        $receiptSchema -ceq $script:CycFirewallReceiptSchemaV2 -and
+            ($Receipt.discoveryPort -is [byte] -or $Receipt.discoveryPort -is [int16] -or
+                $Receipt.discoveryPort -is [int32] -or $Receipt.discoveryPort -is [int64]) -and
+            [string]$Receipt.discoveryRuleName -ceq $expectedDiscoveryRule -and
+            [int]$Receipt.discoveryPort -eq $script:CycFirewallDiscoveryPort
+    } else {
+        $receiptSchema -ceq $script:CycFirewallReceiptSchema
+    }
+    if (-not $discoveryBindingValid -or
         [string]$Receipt.transactionId -cne [string]$Request.transactionId -or
         [string]$Receipt.requestSha256 -cne $RequestHash -or
         [string]$Receipt.action -cne [string]$Request.action -or
@@ -1942,8 +2018,12 @@ function New-CycFirewallRequest {
     $packageExecutableValue = if ([string]::IsNullOrWhiteSpace($PackageExecutable)) {
         Resolve-CycLifecyclePath $PSCommandPath
     } else { Resolve-CycLifecyclePath $PackageExecutable }
+    $discoveryRuleName = 'ClusterYourCodex.ManagedDiscovery.' + $Binding.sid.Replace('-', '_')
     return [ordered]@{
-        schemaVersion = $script:CycFirewallRequestSchema
+        # New transactions are v2: one elevated helper request owns both the
+        # managed-worker TCP rule and the LAN-discovery UDP rule. Existing v1
+        # journals/requests remain accepted by the recovery validators above.
+        schemaVersion = $script:CycFirewallRequestSchemaV2
         transactionId = $TransactionId
         requestNonce = ([Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N'))
         action = $FirewallAction
@@ -1961,6 +2041,8 @@ function New-CycFirewallRequest {
         group = $script:CycFirewallRuleGroup
         ruleDescription = $script:CycFirewallRuleDescription
         remoteAddress = 'LocalSubnet'
+        discoveryRuleName = $discoveryRuleName
+        discoveryPort = $script:CycFirewallDiscoveryPort
         exchangeRoot = $Exchange.root
         packageManifestSha256 = $PackageDigest
         packageExecutable = $packageExecutableValue

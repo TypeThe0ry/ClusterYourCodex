@@ -80,11 +80,15 @@ the exact SAN set. The SAN set is the canonical union of `127.0.0.1`, `::1`,
 controller hostname, public host, and all selected private addresses.
 
 The managed listener binds only the selected private address. It never binds a
-wildcard, loopback, link-local, or public address. The firewall remains one
-program-and-port-bound inbound TCP rule restricted to `Private` and
-`LocalSubnet`. Readiness connects to the bind host but authenticates the public
-host. Controller startup repeats the private-bind, public-IP equality, and
-exact-port checks as defense in depth.
+wildcard, loopback, link-local, or public address. The firewall transaction
+keeps the worker rule as a program-and-port-bound inbound TCP rule restricted
+to `Private` and `LocalSubnet`, and adds a separate program-bound inbound UDP
+rule on fixed discovery port `47830` for the same profile and subnet. The
+protocols are deliberately not merged into a permissive Any rule. Readiness
+connects to the bind host but authenticates the public host. Controller startup
+repeats the private-bind, public-IP equality, and exact-port checks as defense
+in depth; LAN discovery continues to be a same-L2 broadcast capability rather
+than a routable worker API.
 
 PlanOnly, firewall coordination, and the per-user core propagate the exact
 typed plan; they do not independently rediscover an interface. Once installed,

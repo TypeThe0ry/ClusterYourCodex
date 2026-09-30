@@ -112,6 +112,8 @@ $script:WorkerTaskName = 'ClusterYourCodex Worker'
 $script:FirewallRuleGroup = 'ClusterYourCodex'
 $script:FirewallRuleDescription = 'ClusterYourCodex owned managed-worker TLS listener'
 $script:FirewallReceiptSchema = 'cyc.dev/windows-firewall-receipt/v1'
+$script:FirewallReceiptSchemaV2 = 'cyc.dev/windows-firewall-receipt/v2'
+$script:FirewallDiscoveryPort = 47830
 $script:FirewallLifecycleName = 'external-elevated-helper'
 $script:ManagedWorkerNetworkPlanSchema = 'cyc.dev/windows-managed-worker-network/v1'
 $script:ManagedWorkerIdentityVersion = 'managed-worker-v2'
@@ -3204,6 +3206,10 @@ function Get-InstallPlan {
             firewall = [PSCustomObject]@{
                 enabled = $firewallDesired
                 name = Get-CycFirewallRuleName
+                discoveryName = if ($firewallDesired) {
+                    Get-CycFirewallDiscoveryRuleName -Sid ([string]$initiator.sid)
+                } else { $null }
+                discoveryPort = if ($firewallDesired) { $script:FirewallDiscoveryPort } else { $null }
                 displayName = 'ClusterYourCodex Managed Worker'
                 group = $script:FirewallRuleGroup
                 description = $script:FirewallRuleDescription
@@ -3777,6 +3783,14 @@ function Test-IsAdministrator {
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
     return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Get-CycFirewallDiscoveryRuleName {
+    param([Parameter(Mandatory = $true)][string]$Sid)
+    if ($Sid -notmatch '^S-1-5-(?:\d+-){1,14}\d+$') {
+        throw 'Cannot derive a discovery firewall rule name from an invalid SID.'
+    }
+    return 'ClusterYourCodex.ManagedDiscovery.' + $Sid.Replace('-', '_')
 }
 
 function Get-OwnedCycFirewallRule {
@@ -5836,6 +5850,12 @@ function Write-InstallManifest {
             firewall = [ordered]@{
                 enabled = $Plan.managedWorker.firewall.enabled
                 name = $Plan.managedWorker.firewall.name
+                discoveryName = Get-CycObjectProperty `
+                    -Object $Plan.managedWorker.firewall `
+                    -Name 'discoveryName'
+                discoveryPort = Get-CycObjectProperty `
+                    -Object $Plan.managedWorker.firewall `
+                    -Name 'discoveryPort'
                 group = $Plan.managedWorker.firewall.group
                 description = $Plan.managedWorker.firewall.description
                 lifecycle = $Plan.managedWorker.firewall.lifecycle
@@ -6457,11 +6477,18 @@ function Invoke-CycCodexOnlyIntegration {
 function Assert-CycFirewallReceiptProperties {
     param([Parameter(Mandatory = $true)]$Receipt)
     [string[]]$actual = @($Receipt.PSObject.Properties.Name)
+    $schemaVersion = [string](Get-CycObjectProperty -Object $Receipt -Name 'schemaVersion')
+    if ($schemaVersion -notin @($script:FirewallReceiptSchema, $script:FirewallReceiptSchemaV2)) {
+        throw 'Firewall receipt uses an unsupported schema.'
+    }
     [string[]]$expected = @(
         'action', 'failureCode', 'initiatorLocalAppData', 'initiatorProfile',
         'initiatorSid', 'port', 'program', 'programSha256', 'requestSha256',
         'result', 'ruleName', 'schemaVersion', 'transactionId', 'verifiedAtUtc'
     )
+    if ($schemaVersion -ceq $script:FirewallReceiptSchemaV2) {
+        $expected += @('discoveryRuleName', 'discoveryPort')
+    }
     [Array]::Sort($actual, [System.StringComparer]::Ordinal)
     [Array]::Sort($expected, [System.StringComparer]::Ordinal)
     if ([string]::Join(',', $actual) -cne [string]::Join(',', $expected)) {
@@ -6513,7 +6540,21 @@ function Invoke-CycCommitFirewallReceipt {
     Assert-CycFirewallReceiptProperties -Receipt $receipt
     $controllerRecord = @($manifest.files | Where-Object { [string]$_.relativePath -ceq 'cyc-controller.exe' })
     if ($controllerRecord.Count -ne 1) { throw 'Installed manifest has no unique controller binary.' }
-    if ([string]$receipt.schemaVersion -cne $script:FirewallReceiptSchema -or
+    $receiptIsV2 = [string]$receipt.schemaVersion -ceq $script:FirewallReceiptSchemaV2
+    $expectedDiscoveryName = if ($receiptIsV2) {
+        Get-CycFirewallDiscoveryRuleName -Sid ([string]$CurrentBinding.sid)
+    } else { $null }
+    $discoveryBindingValid = if ($receiptIsV2) {
+        ($null -ne $firewall.PSObject.Properties['discoveryName']) -and
+            ($null -ne $firewall.PSObject.Properties['discoveryPort']) -and
+            [string]$receipt.discoveryRuleName -ceq $expectedDiscoveryName -and
+            ($receipt.discoveryPort -is [byte] -or $receipt.discoveryPort -is [int16] -or
+                $receipt.discoveryPort -is [int32] -or $receipt.discoveryPort -is [int64]) -and
+            [int]$receipt.discoveryPort -eq $script:FirewallDiscoveryPort -and
+            [string]$firewall.discoveryName -ceq $expectedDiscoveryName -and
+            [int]$firewall.discoveryPort -eq $script:FirewallDiscoveryPort
+    } else { $true }
+    if ((-not $receiptIsV2 -and [string]$receipt.schemaVersion -cne $script:FirewallReceiptSchema) -or
         [string]$receipt.result -cne 'verified' -or
         [string]$receipt.action -cne 'Apply' -or
         [string]$receipt.transactionId -cne $TransactionId -or
@@ -6524,7 +6565,8 @@ function Invoke-CycCommitFirewallReceipt {
         [string]$receipt.ruleName -cne [string]$firewall.name -or
         [int]$receipt.port -ne [int]$firewall.port -or
         -not [string]::Equals((Resolve-NormalizedPath ([string]$receipt.program)), (Resolve-NormalizedPath ([string]$firewall.program)), [System.StringComparison]::OrdinalIgnoreCase) -or
-        [string]$receipt.programSha256 -cne [string]$controllerRecord[0].sha256) {
+        [string]$receipt.programSha256 -cne [string]$controllerRecord[0].sha256 -or
+        -not $discoveryBindingValid) {
         throw 'Firewall receipt is not bound to the exact installed plan.'
     }
     $receiptHash = (Get-CycFileHash -LiteralPath $receiptFile -Algorithm SHA256).Hash.ToLowerInvariant()

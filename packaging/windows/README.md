@@ -149,8 +149,9 @@ The ZIP and `ClusterYourCodex-Setup.exe` contain the same self-contained Windows
 developer preview. Installation discovers one active private-LAN interface,
 persists a versioned immutable network plan, creates or verifies the matching
 non-rotating controller TLS identity, starts the loopback API plus one explicit
-RFC1918/ULA managed-worker listener, adds one product-owned inbound TCP rule
-restricted to the Private profile and `LocalSubnet`, installs the
+RFC1918/ULA managed-worker listener, adds two product-owned inbound rules
+(the worker TCP listener and fixed UDP LAN-discovery port `47830`) restricted
+to the Private profile and `LocalSubnet`, installs the
 GUI/CLI/Worker Kits/Codex integration, and registers a per-user uninstaller in
 Windows Apps & Features. The listener never binds `0.0.0.0`, `::`, loopback,
 link-local, or a public IP. The controller independently rejects those binds,
@@ -178,14 +179,16 @@ the immutable plan and versioned identity bytes. Uninstall preserves
 controller/worker data unless `-PurgeData` is explicitly supplied.
 
 The coordinator durably records `prepared -> firewallApplied -> coreApplied ->
-complete`. The helper snapshots only the exact product rule, applies and
-verifies it, then remains elevated until the unelevated core signals finalize
-or rollback. Core failure, cancellation, or timeout restores the verified prior
-rule. Its final receipt binds the transaction, request digest, initiating
-SID/profile, program hash, port, and rule identity. The core manifest stays
-`pending` until that receipt is committed. Matching response-loss replay is
-idempotent; changed SID/profile, request/helper hash, rule collision, or receipt
-fails closed.
+complete`. New v2 helper requests snapshot both exact product rules, apply and
+verify the worker TCP rule plus the fixed UDP discovery rule, then remain
+elevated until the unelevated core signals finalize or rollback. Core failure,
+cancellation, or timeout restores the verified prior pair. The v2 receipt binds
+the transaction, request digest, initiating SID/profile, program hash, both
+ports, and both rule identities. The core manifest stays `pending` until that
+receipt is committed. Matching response-loss replay is idempotent; changed
+SID/profile, request/helper hash, rule collision, or receipt fails closed.
+Legacy v1 worker-only requests and receipts remain accepted for recovery of
+transactions created before the dual-rule protocol.
 
 `New-SetupExecutable.ps1` revalidates every staged length and SHA-256 before
 embedding the package, emits a checksum sidecar, and reports the Authenticode
@@ -252,7 +255,7 @@ bounded logs for troubleshooting.
 The release workflow also runs the real NSIS `Setup.exe /S` path on its
 disposable `windows-latest` runner. That complementary test exercises the
 default per-user install roots, controller Scheduled Task, managed-worker
-listener, firewall rule, Apps & Features registration, Repair, and the
+listener, both firewall rules, Apps & Features registration, Repair, and the
 installed uninstaller. It verifies that silent mode launches no GUI and that
 tasks, firewall state, ports, registration, and per-user paths return to their
 clean pre-test state. Both the explicit switch and disposable-runner sentinel
