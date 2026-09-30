@@ -4860,7 +4860,7 @@ exit 91
     Assert-True ($nsis -match 'Invoke-ClusterYourCodexLifecycle\.ps1[\s\S]+-PackageManifest ') 'Setup.exe invokes the coordinator and manifest validation gate'
     Assert-True ($nsis -match 'Function CycResolvePowerShellPath[\s\S]+Sysnative[\\/]WindowsPowerShell[\\/]v1\.0[\\/]powershell\.exe[\s\S]+CycPowerShellPath') 'Setup.exe prefers native 64-bit Windows PowerShell through Sysnative for x64 process ownership checks'
     Assert-True ($nsis -match 'Call CycResolvePowerShellPath[\s\S]+nsExec::ExecToStack[\s\S]+\$CycPowerShellPath') 'Setup.exe launches the lifecycle coordinator through the resolved native PowerShell path'
-    Assert-True ($nsis -match 'nsExec::ExecToStack[\s\S]+powershell\.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden[\s\S]+Pop \$0[\s\S]+Pop \$1') 'silent Setup uses the hidden nsExec process boundary for the non-elevated lifecycle PowerShell console'
+    Assert-True ($nsis -match 'nsExec::ExecToStack[\s\S]+\$CycPowerShellPath" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden[\s\S]+Pop \$0[\s\S]+Pop \$1') 'silent Setup uses the hidden nsExec process boundary for the non-elevated lifecycle PowerShell console'
     Assert-True ($nsis -notmatch '(?m)^\s*ExecWait\s+') 'silent Setup does not use the NSIS ExecWait console path'
     Assert-True ($nsis -match 'StrCmp \$0 "error" cyc_lifecycle_launch_failed') 'silent Setup distinguishes nsExec launch failure from a lifecycle exit code'
     Assert-True ($lifecycleSource -match 'Start-Process[\s\S]+-Verb RunAs -WindowStyle Hidden -PassThru') 'firewall-only elevation hides its PowerShell console after UAC consent'
