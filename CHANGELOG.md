@@ -836,6 +836,14 @@ are versioned independently from the product.
   bounded test counts, zero exit status, cleanup confirmation, and content/hash
   cross-binding across readiness and preview-publisher checks.
 
+## Unreleased
+
+### Security
+
+- Raised the transitive `fast-uri` override from `3.1.6` to `3.1.7` and
+  refreshed the lockfile to remove the two published high-severity URL
+  normalization advisories reported by `pnpm audit`.
+
 ## [0.1.0-preview.71] - 2026-09-03
 
 ### Fixed
