@@ -5,6 +5,13 @@ what is proven by the latest checks and keeps the remaining native-environment
 gates explicit. The exact moving `origin/main` hash is resolved by the commands
 below rather than copied into this document.
 
+PR #171 (`fix: make provisioning credential capabilities explicit`) is now
+merged to `main` as `9bd6e15ee7dcf1bb61b8baa66409384c980a5853`. Its complete
+candidate CI run was `36868203968`; Windows Desktop live round-trip and Windows
+Rust completed successfully alongside the Linux/macOS, MSRV, CodeQL, RustSec,
+Cargo deny, pnpm audit, and Worker Kit checks. The merge keeps the stable
+`v0.0.1` tag immutable.
+
 ## Repository and release invariants
 
 - PR #163 (`test: cover inherited transaction ACL creation`) merged at
