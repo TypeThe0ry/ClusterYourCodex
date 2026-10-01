@@ -56,38 +56,37 @@ This distinction keeps the README useful: a passing package test proves the pack
 The current `main` includes PR #157's transactional LAN discovery firewall
 path, PR #158's native PowerShell runtime-ownership repair, PR #159's audit
 documentation, PR #160's final-main reference correction, and PR #163's
-inherited-ACL regression coverage plus a usable worker-address probe. Resolve
-the exact live `origin/main` ref with the reproduction commands in the [current
-audit record](docs/current-audit-20261001.md) instead of copying a hash into
-this document. The candidate CI matrix and Windows Setup
-acceptance both passed (runs [36749204624](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/36749204624)
+inherited-ACL regression coverage plus a usable worker-address probe. PR #169
+then corrected the VMware acceptance record and documented the installed
+scheduled-task worker round trip. Resolve the exact live `origin/main` ref with
+the reproduction commands in the [current audit record](docs/current-audit-20261001.md)
+instead of copying a hash into this document. The candidate CI matrix and
+Windows Setup acceptance both passed (runs
+[36749204624](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/36749204624)
 and [36749204684](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/36749204684)).
-The latest PR #163 candidate matrix also passed, including the Windows
-controller/worker live round trip and packaged acceptance. The detailed record
-is in the [2026-10-01 audit](docs/current-audit-20261001.md), the
-[2026-09-30 audit](docs/current-audit-20260930.md)
-and the [runtime repair note](docs/windows-runtime-repair-20261001.md).
+The latest PR #169 candidate matrix also passed, including the Windows
+controller/worker live round trip and packaged acceptance (run
+[36844909414](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/36844909414)).
+The detailed record is in the [2026-10-01 audit](docs/current-audit-20261001.md),
+the [2026-09-30 audit](docs/current-audit-20260930.md), the [VMware installed
+round-trip record](docs/vmware-installed-task-roundtrip-20261001.md), and the
+[runtime repair note](docs/windows-runtime-repair-20261001.md).
 
-The D-drive VMware guest is provisioned rather than clean. The current Setup
-candidate exited `0`, reached a successful lifecycle diagnostic, returned
+The D-drive VMware evidence uses reset full clones of the existing Windows
+validation image, not a blank Windows installation. The first Setup attempt on
+the latest clone failed closed because another lifecycle operation still held
+the installer mutex; after that process ended, the `install2` retry and a
+post-logon Setup run exited `0`, reached a complete diagnostic, returned
 controller health HTTP 200/database `ok`, and answered a credential-free LAN
-discovery probe. Its installed-package worker round-trip harness stopped before
-the worker job proof, so hosted CI remains the authoritative live round-trip
-evidence. Keep Issue #2 open until a genuinely clean Windows 11 guest completes
-Install → Repair → Upgrade → Rollback → Uninstall and a live worker job.
-The latest [`vmrun`-only recheck](docs/vmware-cli-recheck-20261001.md) also
-confirmed that the guest can be started, inspected, and soft-stopped cleanly,
-but has no interactive logon session for the default Interactive scheduled
-task. That session limitation is recorded rather than hidden behind a green
-fixture result.
-An additional CLI-only session-channel probe confirmed that host keyboard
-injection is blocked. A credentialed guest command could enable a temporary
-RDP listener, but the host RDP attempt did not produce a stable interactive
-session; the validation boundary is documented in the [recheck record](docs/vmware-cli-recheck-20261001.md).
-The same recheck then executed the exact current Windows ACL helper in the guest:
-fresh transaction children were protected without inherited ACEs, while an
-existing weak child was rejected without mutation. This confirms the fail-closed
-ACL contract, but does not replace clean-VM lifecycle evidence.
+discovery probe. The installed scheduled-task controller/worker harness then
+passed all 15 checks (`queued → running → succeeded`), and the same-version
+Setup rerun followed the idempotent Repair-equivalent path. Uninstall removed
+the product-owned install state while preserving user data. Issue #2 remains
+open only for the version-changing Upgrade, interrupted Rollback, genuinely
+blank-guest lifecycle, and any remaining GA signing/tray requirements.
+The [`vmrun`-only recheck](docs/vmware-cli-recheck-20261001.md) records the
+separate headless-session boundary and the fail-closed ACL proof; no product
+guard was bypassed and no credentials were retained in Git.
 
 #### Historical repository audit — 2026-09-23
 
@@ -129,7 +128,7 @@ current evidence and is not an automatically refreshed dashboard.
 | Native Worker Kits | PASS | Linux x64 plus macOS x64/arm64 package checks completed |
 | Security and dependency gates | PASS | CodeQL, RustSec, Cargo deny, and pnpm audit completed |
 | Windows controller/bridge job | PASS | Candidate CI completed the Windows controller/worker live round trip |
-| D-drive VMware acceptance | PARTIAL | Current Setup install/repair diagnostics and health pass on the provisioned guest; LAN discovery returns a controller candidate without credentials. A complete clean-VM lifecycle and installed-package worker job are not yet proven. See the [runtime repair note](docs/windows-runtime-repair-20261001.md) and [cross-platform validation](docs/cross-platform-validation-20260927.md). |
+| D-drive VMware acceptance | PARTIAL | Reset full-clone Setup retry, same-version Repair-equivalent rerun, Uninstall, LAN discovery, and installed scheduled-task worker job (15/15) pass. Version-changing Upgrade, interrupted Rollback, blank-guest lifecycle, and remaining GA signing/tray gates are still open. See the [current audit](docs/current-audit-20261001.md), [installed round-trip record](docs/vmware-installed-task-roundtrip-20261001.md), and [cross-platform validation](docs/cross-platform-validation-20260927.md). |
 
 The diagrams summarize the evidence categories; they are not application screenshots or an automatically refreshed test dashboard. Runtime acceptance remains open until the corresponding evidence is recorded.
 
