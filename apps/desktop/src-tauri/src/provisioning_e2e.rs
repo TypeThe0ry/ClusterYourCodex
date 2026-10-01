@@ -496,13 +496,10 @@ fn live_ssh_provisioning() {
     let config = parse_config_bytes(&bytes)
         .unwrap_or_else(|error| panic!("live SSH config rejected: {}", error.code()));
     match run_live_ssh_provisioning(config) {
-        Ok(report) => eprintln!(
-            "live SSH provisioning passed: final_state={} paired_node_id={} steps={} removed={}",
-            report.final_state,
-            report.paired_node_id,
-            report.steps.len(),
-            report.removed
-        ),
+        // Do not log report fields here. The configuration carries secret-file
+        // taint through the live run; keeping the test silent makes it
+        // impossible for a future report field to become a log sink.
+        Ok(_report) => {}
         Err(error) => panic!("live SSH provisioning failed: {}", error.code()),
     }
 }
