@@ -85,11 +85,21 @@ and an already-existing weak child was rejected without changing its security
 descriptor. This confirms the existing fail-closed helper contract; it is not
 clean-VM lifecycle evidence.
 
-The current guest evidence therefore does not close Issue #2's clean
-Install → Repair → Upgrade → Rollback → Uninstall matrix or prove an
-installed-package worker job. Hosted CI is the authoritative live
-Windows controller/worker evidence. No credentials, tokens, or pairing
-material are stored in Git.
+The follow-up then used a separate D-drive full clone rather than the linked
+clone that retained a pre-existing weak transaction directory. The current
+candidate Setup completed cleanly in that full clone, a second Setup run
+completed the Repair path, and the installed health/listener/discovery probes
+passed. A quiet uninstall removed the install root, scheduled task, firewall
+rules, and uninstall registration while preserving the user data root. The
+sanitized procedure and exact evidence boundary are recorded in
+[`vmware-clean-full-lifecycle-20261001.md`](vmware-clean-full-lifecycle-20261001.md).
+
+This still does not close Issue #2's full
+Install → Repair → Upgrade → Rollback → Uninstall matrix: the version-changing
+Upgrade, interrupted-install Rollback, and an installed scheduled-task worker
+job remain unproven. Hosted CI remains the authoritative live Windows
+controller/worker evidence for the cross-platform runtime. No credentials,
+tokens, or pairing material are stored in Git.
 
 ## Remaining issues
 
