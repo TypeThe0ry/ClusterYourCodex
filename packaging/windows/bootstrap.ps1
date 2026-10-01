@@ -3579,6 +3579,17 @@ function New-CycPrivateDirectory {
     if (-not $item.PSIsContainer -or (Test-ReparsePoint $item)) {
         throw "Private transaction path must be a normal directory: $Path"
     }
+    # A few Windows profile/filesystem policy combinations have been observed
+    # to ignore the protected bit on Directory.CreateDirectory(path,
+    # DirectorySecurity), even though the call succeeds.  Only in that case,
+    # re-publish the exact private ACL before returning to the transaction
+    # caller.  The final readback remains fail-closed: if the platform still
+    # cannot persist the descriptor, Assert-PrivatePathAcl throws and the
+    # transaction root is never published or consumed by recovery.
+    $createdAcl = Get-FileSystemAclPortable -Item $item
+    if (-not $createdAcl.AreAccessRulesProtected) {
+        Set-PrivatePathAcl -Item $item
+    }
     Assert-PrivatePathAcl -Path $Path
 }
 
