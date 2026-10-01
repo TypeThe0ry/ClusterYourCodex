@@ -59,10 +59,15 @@ matrix is documented in
 The D-drive Windows guest was operated with VMware `vmrun` only. Controller
 health, database health, the managed-worker TCP listener, and `cyc discover`
 all passed on the provisioned guest; discovery reported
-`credentialsTransmitted=false` and `pairingRequired=true`. The guest had no
-interactive logon session during the clean-setup attempt, so the default
-Interactive scheduled task could not remain healthy. This is an environment
-boundary, not evidence to bypass the product's fail-closed task checks.
+`credentialsTransmitted=false` and `pairingRequired=true`. A second CLI-only
+inspection on 2026-10-01 started and soft-stopped the guest cleanly, but found
+no logged-on user (`quser` had no session, Winlogon had `AutoAdminLogon=0`, and
+`runProgramInGuest -interactive` was rejected). The default Interactive
+scheduled task therefore cannot be proven in this headless guest. This is an
+environment/session boundary, not evidence to bypass the product's fail-closed
+task-health or ACL checks. See
+[`vmware-cli-recheck-20261001.md`](vmware-cli-recheck-20261001.md) for the
+sanitized procedure and evidence location.
 
 The current guest evidence therefore does not close Issue #2's clean
 Install → Repair → Upgrade → Rollback → Uninstall matrix or prove an

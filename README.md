@@ -75,6 +75,11 @@ discovery probe. Its installed-package worker round-trip harness stopped before
 the worker job proof, so hosted CI remains the authoritative live round-trip
 evidence. Keep Issue #2 open until a genuinely clean Windows 11 guest completes
 Install → Repair → Upgrade → Rollback → Uninstall and a live worker job.
+The latest [`vmrun`-only recheck](docs/vmware-cli-recheck-20261001.md) also
+confirmed that the guest can be started, inspected, and soft-stopped cleanly,
+but has no interactive logon session for the default Interactive scheduled
+task. That session limitation is recorded rather than hidden behind a green
+fixture result.
 
 #### Historical repository audit — 2026-09-23
 
