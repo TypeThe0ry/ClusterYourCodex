@@ -40,6 +40,8 @@ export interface ClusterYourCodexDesktopBridge {
   fullRunCheckStatus: () => Promise<unknown>;
   /** Scan the local network for credential-free CYC controller announcements. */
   discoveryScan: (timeoutMs?: number) => Promise<unknown>;
+  /** Report whether this controller can persist password credentials in its native vault. */
+  provisioningCapabilities: () => Promise<unknown>;
   /** Create one durable SSH provisioning record (password, agent, or private key). */
   provisioningStart: (request: unknown) => Promise<unknown>;
   /** Recover every durable provisioning record after a desktop restart. */

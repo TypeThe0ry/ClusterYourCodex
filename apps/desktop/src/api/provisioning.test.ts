@@ -68,6 +68,19 @@ function startInput(): StartComputerInput {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("provisioning client secret boundary", () => {
+  it("parses the native credential-vault capability without accepting extra fields", async () => {
+    const provisioningCapabilities = vi.fn(async () => ({ persistentCredentialVault: false }));
+    vi.stubGlobal("window", { __CLUSTER_YOUR_CODEX__: { provisioningCapabilities } });
+
+    await expect(provisioningClient.capabilities()).resolves.toEqual({ persistentCredentialVault: false });
+    expect(provisioningCapabilities).toHaveBeenCalledWith();
+
+    vi.stubGlobal("window", { __CLUSTER_YOUR_CODEX__: {
+      provisioningCapabilities: vi.fn(async () => ({ persistentCredentialVault: false, unexpected: true })),
+    } });
+    await expect(provisioningClient.capabilities()).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
   it("preserves the optional Windows instance through request and returned configuration", async () => {
     const form = { ...resetProvisioningModal().form, host: "worker.example.test", username: "builder", password: PASSWORD, windowsInstanceName: "alpha-1" };
     expect(canSubmitProvisioningForm(form)).toBe(true);

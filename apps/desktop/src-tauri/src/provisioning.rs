@@ -167,6 +167,19 @@ impl ProvisioningManager {
         &self,
         mut request: StartComputerRequest,
     ) -> Result<ProvisioningOperationResult, PublicProvisioningError> {
+        // Reject an unsupported persistence request before parsing credentials
+        // or creating the idempotent record. The renderer is capability-aware,
+        // but this native boundary must remain authoritative for direct/stale
+        // callers as well.
+        if request.remember_password
+            && matches!(request.authentication_method, SshAuthenticationMethodInput::Password)
+            && !cfg!(windows)
+        {
+            return Err(PublicProvisioningError::new(
+                "credential_store_unsupported",
+                false,
+            ));
+        }
         let record_id = parse_id(&request.record_id)?;
         let intended_node_id = parse_id(&request.intended_node_id)?;
         let (ssh_authentication, secret) = request.take_authentication()?;
@@ -1720,6 +1733,10 @@ fn allowed_job_kind_name(value: AllowedJobKind) -> &'static str {
 }
 
 #[cfg(test)]
+#[path = "provisioning_e2e.rs"]
+mod provisioning_e2e;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use cyc_provision::{
@@ -1939,6 +1956,23 @@ mod tests {
 
     fn start_request() -> StartComputerRequest {
         start_request_with_identity(Uuid::new_v4(), Uuid::new_v4(), "Build worker")
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unsupported_password_persistence_is_rejected_before_record_creation() {
+        let path = temporary_database("unsupported-vault");
+        let manager = manager(&path);
+        let record_id = Uuid::new_v4();
+        let intended_node_id = Uuid::new_v4();
+        let mut request = start_request_with_identity(record_id, intended_node_id, "Session worker");
+        request.remember_password = true;
+
+        let error = manager.start(request).expect_err("unsupported vault request");
+        assert_eq!(error.code, "credential_store_unsupported");
+        assert!(!error.retryable);
+        assert!(manager.list().expect("list records").is_empty());
+        let _ = std::fs::remove_file(path);
     }
 
     fn private_key_request(path: &Path, passphrase: &str) -> StartComputerRequest {

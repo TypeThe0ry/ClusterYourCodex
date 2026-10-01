@@ -51,7 +51,14 @@ TLS, pairing, ACL, or cleanup checks.
 Sanitized records still prove Windows↔Windows, Windows↔Linux, Linux↔Linux,
 and credential-free same-L2 IPv4 discovery. Discovery returns metadata only;
 pairing remains explicit and routed-subnet enumeration is not claimed. The
-matrix is documented in
+desktop Add Computer path now queries the native credential-vault capability:
+Windows keeps the Credential Manager option, while controllers without a
+persistent native vault use an explicit session-only password path. A stale or
+direct request to persist a password on an unsupported controller is rejected
+before SSH or record creation. The reusable live SSH acceptance harness is
+documented in [`provisioning-ssh-e2e-20261001.md`](provisioning-ssh-e2e-20261001.md);
+its ignored live case is not counted until a disposable real target completes.
+The matrix is documented in
 [`cross-platform-validation-20260927.md`](cross-platform-validation-20260927.md).
 
 ## VMware CLI boundary
