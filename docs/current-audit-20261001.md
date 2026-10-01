@@ -130,6 +130,14 @@ so the manual controller process used for these probes is not counted as a new
 interactive scheduled-task round-trip. The retained files are outside Git at
 `D:\\ClusterYourCodex-validation\\vmware-ga-rerun-20261001\\`.
 
+On 2026-10-02, the repository's opt-in Windows PowerShell 5.1 worker-kit
+fixture was run with `-RunUpgradeRollbackFixtures`. It passed the interrupted
+upgrade recovery, signed fixture N-1 → N upgrade, and downgrade rejection
+checks, followed by the complete worker-kit packaging suite. This is useful
+fail-closed regression evidence for the installer logic, but it uses mocked
+Scheduled Task state and a pinned local test key; it is not Authenticode,
+clean-VM, or live controller/worker evidence.
+
 This still does not close Issue #2's full
 Install → Repair → Upgrade → Rollback → Uninstall matrix: the version-changing
 Upgrade and interrupted-install Rollback remain unproven. Hosted CI and the
