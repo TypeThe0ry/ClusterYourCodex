@@ -254,6 +254,13 @@ const BRIDGE_INITIALIZATION_SCRIPT: &str = r#"
       }
       return invoke("discovery_scan", { timeoutMs });
     },
+    provisioningCapabilities() {
+      const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+      if (typeof invoke !== "function") {
+        return Promise.reject(new Error("native bridge unavailable"));
+      }
+      return invoke("provisioning_capabilities");
+    },
     provisioningStart(request) {
       const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
       if (typeof invoke !== "function") {
@@ -607,6 +614,22 @@ async fn discovery_scan(timeout_ms: Option<u64>) -> Result<LanDiscoveryResult, S
         .map_err(str::to_owned)
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProvisioningCapabilities {
+    persistent_credential_vault: bool,
+}
+
+/// Return platform capability metadata without opening or mutating the
+/// provisioning store. Password persistence is currently implemented only by
+/// the Windows Credential Manager backend.
+#[tauri::command]
+fn provisioning_capabilities() -> ProvisioningCapabilities {
+    ProvisioningCapabilities {
+        persistent_credential_vault: cfg!(windows),
+    }
+}
+
 #[tauri::command]
 fn full_run_check_status(manager: State<'_, ManagedFullRunCheck>) -> Option<FullRunCheckResult> {
     manager.progress()
@@ -946,6 +969,7 @@ pub fn run() -> Result<(), tauri::Error> {
             full_run_check,
             full_run_check_status,
             discovery_scan,
+            provisioning_capabilities,
             provisioning_start,
             provisioning_list,
             provisioning_get,

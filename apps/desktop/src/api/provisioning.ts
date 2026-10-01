@@ -22,6 +22,10 @@ export type ProvisioningAttention = "host_key" | "credential" | "external" | "in
 export type CredentialState = "pending" | "session_only" | "stored" | "forgotten";
 export type SshAuthenticationMethod = "password" | "agent" | "private_key";
 export type ServiceScope = "auto" | "user" | "system";
+
+export interface ProvisioningCapabilities {
+  persistentCredentialVault: boolean;
+}
 export type AllowedJobKind =
   | "build"
   | "test"
@@ -172,6 +176,7 @@ function provisioningErrorCopy(code: string): string {
     host_key_mismatch: "The approved host key does not match the key observed by SSH.",
     credential_required: "Enter the SSH authentication secret again to continue.",
     credential_store_unavailable: "Windows Credential Manager is unavailable for this session.",
+    credential_store_unsupported: "Password saving is unavailable on this controller; use session-only authentication.",
     private_key_invalid: "The private-key file is unavailable or failed native path-safety validation.",
     SSH_PRIVATE_KEY_INVALID: "The configured private-key file failed native path-safety validation.",
     SSH_PRIVATE_KEY_UNAVAILABLE: "The configured private-key file is unavailable. Restore it, then retry.",
@@ -391,6 +396,14 @@ function parseOperation(value: unknown): ProvisioningOperationResult {
   return { outcome, computer, removedId };
 }
 
+function parseCapabilities(value: unknown): ProvisioningCapabilities {
+  if (!isObject(value) || typeof value.persistentCredentialVault !== "boolean") {
+    throw new ProvisioningClientError("invalid_response");
+  }
+  if (Object.keys(value).length !== 1) throw new ProvisioningClientError("invalid_response");
+  return { persistentCredentialVault: value.persistentCredentialVault };
+}
+
 function publicError(caught: unknown): ProvisioningClientError {
   if (caught instanceof ProvisioningClientError) return caught;
   if (isObject(caught) && typeof caught.code === "string") {
@@ -489,6 +502,13 @@ export function isAutomaticProvisioningCheckpoint(computer: ProvisioningComputer
 }
 
 export const provisioningClient = {
+  async capabilities(): Promise<ProvisioningCapabilities> {
+    try {
+      return parseCapabilities(await bridge().provisioningCapabilities());
+    } catch (caught) {
+      throw publicError(caught);
+    }
+  },
   async start(input: StartComputerInput): Promise<ProvisioningOperationResult> {
     const native = {
       recordId: input.recordId,

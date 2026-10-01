@@ -133,6 +133,7 @@ const provisioningErrorKeys: Readonly<Record<string, TranslationKey>> = {
   host_key_mismatch: "error.provisionHostKeyMismatch",
   credential_required: "error.provisionCredentialRequired",
   credential_store_unavailable: "error.provisionCredentialStoreUnavailable",
+  credential_store_unsupported: "error.provisionCredentialStoreUnsupported",
   private_key_invalid: "error.provisionPrivateKeyInvalid",
   SSH_PRIVATE_KEY_INVALID: "error.provisionPrivateKeyInvalid",
   SSH_PRIVATE_KEY_UNAVAILABLE: "error.provisionPrivateKeyUnavailable",
@@ -425,6 +426,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
   const [lanScanning, setLanScanning] = useState(false);
   const [lanScanned, setLanScanned] = useState(false);
   const [lanError, setLanError] = useState(false);
+  const [persistentCredentialVault, setPersistentCredentialVault] = useState<boolean | null>(null);
   const lanScanSequence = useRef(0);
   const [autoTick, setAutoTick] = useState(0);
   const listSequence = useRef(0);
@@ -434,6 +436,20 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
   const autoInFlight = useRef(new Set<string>());
   const autoAdvance = useRef(new Map<string, { revision: number; delayMs: number; startedAt: number }>());
   const loading = loadingCount > 0 || !hasLoaded;
+
+  useEffect(() => {
+    let active = true;
+    void provisioningClient.capabilities().then((capabilities) => {
+      if (!active) return;
+      setPersistentCredentialVault(capabilities.persistentCredentialVault);
+      if (!capabilities.persistentCredentialVault) {
+        setForm((current) => ({ ...current, rememberPassword: false }));
+      }
+    }).catch(() => {
+      if (active) setPersistentCredentialVault(false);
+    });
+    return () => { active = false; };
+  }, []);
 
   const selected = useMemo(
     () => computers.find((computer) => computer.id === selectedId),
@@ -631,6 +647,9 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
       return;
     }
     const input = buildStartComputerInput(form, recordId, intendedNodeId);
+    // Persistence is an explicit capability, not an OS guess in the renderer.
+    // Unsupported controllers always use a session-only secret.
+    input.rememberPassword = input.rememberPassword && persistentCredentialVault === true;
     mutationEpoch.current += 1;
     setOperation("start");
     setError(undefined);
@@ -899,7 +918,10 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
               </> : null}
               {form.authenticationMethod === "agent" ? <small className="wide auth-method-note">{t("provision.agentNote")}</small> : null}
             </div>
-            {form.authenticationMethod === "password" ? <label className="check-row"><input checked={form.rememberPassword} onChange={(event) => setForm({ ...form, rememberPassword: event.target.checked })} type="checkbox" /> {t("provision.rememberPassword")}</label> : null}
+            {form.authenticationMethod === "password" ? <>
+              <label className="check-row"><input checked={form.rememberPassword} disabled={persistentCredentialVault !== true} onChange={(event) => setForm({ ...form, rememberPassword: event.target.checked })} type="checkbox" /> {persistentCredentialVault === true ? t("provision.rememberPassword") : t("provision.sessionOnlyPassword")}</label>
+              {persistentCredentialVault !== true ? <small className="wide auth-method-note">{t("provision.sessionOnlyPasswordDescription")}</small> : null}
+            </> : null}
 
             <details className="advanced-options">
               <summary>{t("provision.advanced")}</summary>
@@ -919,7 +941,7 @@ export function ProvisioningComputers({ addRequest = 0 }: { addRequest?: number 
               <small>{t("provision.advancedDescription")}</small>
             </details>
 
-            <footer><button className="button button-secondary" disabled={Boolean(operation)} onClick={resetAndCloseWizard} type="button">{t("common.cancel")}</button><button className="button button-primary" disabled={Boolean(operation) || !canSubmitProvisioningForm(form)} type="submit">{operation === "start" ? t("status.connecting") : t("common.continue")}</button></footer>
+            <footer><button className="button button-secondary" disabled={Boolean(operation)} onClick={resetAndCloseWizard} type="button">{t("common.cancel")}</button><button className="button button-primary" disabled={Boolean(operation) || persistentCredentialVault === null || !canSubmitProvisioningForm(form)} type="submit">{operation === "start" ? t("status.connecting") : t("common.continue")}</button></footer>
           </form>
         </div>
       ) : null}

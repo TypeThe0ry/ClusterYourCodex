@@ -155,10 +155,14 @@ For current acceptance gaps, see [project status](docs/project-status.md).
 ## What you get
 
 - **One Windows-first desktop flow:** add a computer, connect Codex, run a check.
+- **Fast LAN onboarding:** Add Computer can scan the local IPv4 segment and
+  prefill a discovered controller; host-key approval, SSH credentials, worker
+  installation, and pairing remain explicit. The live SSH onboarding harness
+  is documented in [`docs/provisioning-ssh-e2e-20261001.md`](docs/provisioning-ssh-e2e-20261001.md).
 - **Typed scheduling:** requirements are filtered against capabilities; current load and reservations decide the best eligible worker.
 - **Evidence by default:** every run records placement, native exit status, logs, cleanup state, and artifact SHA-256 values.
 - **Portable workers:** Linux and macOS Worker Kits share the same protocol; managed runtime support remains platform-gated.
-- **Credential boundaries:** passwords, keys, and bearer tokens stay behind native vault/config references and never enter JobSpec payloads or Codex calls.
+- **Credential boundaries:** passwords, keys, and bearer tokens stay behind native vault/config references and never enter JobSpec payloads or Codex calls. Windows can remember passwords in Credential Manager; controllers without a persistent native vault use an explicit session-only path instead of failing after SSH authentication.
 
 ## The shortest useful mental model
 

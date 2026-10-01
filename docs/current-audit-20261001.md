@@ -51,7 +51,14 @@ TLS, pairing, ACL, or cleanup checks.
 Sanitized records still prove Windows↔Windows, Windows↔Linux, Linux↔Linux,
 and credential-free same-L2 IPv4 discovery. Discovery returns metadata only;
 pairing remains explicit and routed-subnet enumeration is not claimed. The
-matrix is documented in
+desktop Add Computer path now queries the native credential-vault capability:
+Windows keeps the Credential Manager option, while controllers without a
+persistent native vault use an explicit session-only password path. A stale or
+direct request to persist a password on an unsupported controller is rejected
+before SSH or record creation. The reusable live SSH acceptance harness is
+documented in [`provisioning-ssh-e2e-20261001.md`](provisioning-ssh-e2e-20261001.md);
+its ignored live case is not counted until a disposable real target completes.
+The matrix is documented in
 [`cross-platform-validation-20260927.md`](cross-platform-validation-20260927.md).
 
 ## VMware CLI boundary
@@ -104,6 +111,17 @@ Setup run succeeded and the installed controller/worker harness passed all 15
 checks (`queued → running → succeeded`, exit code `0`); the evidence and
 boundary are recorded in
 [`vmware-installed-task-roundtrip-20261001.md`](vmware-installed-task-roundtrip-20261001.md).
+
+On 2026-10-01, the installed D-drive guest was started again with `vmrun` and
+queried only through VMware Tools. A fresh guest-state probe returned controller
+health HTTP 200 with `database=ok`; `cyc discover --timeout-ms 1500 --pretty`
+returned the controller candidate and explicitly reported
+`credentialsTransmitted=false` and `pairingRequired=true`. The installed native
+Codex payload integrity check and bundled MCP probe also passed (`toolCount=8`).
+The guest's controller scheduled task remained `Ready` in this headless clone,
+so the manual controller process used for these probes is not counted as a new
+interactive scheduled-task round-trip. The retained files are outside Git at
+`D:\\ClusterYourCodex-validation\\vmware-ga-rerun-20261001\\`.
 
 This still does not close Issue #2's full
 Install → Repair → Upgrade → Rollback → Uninstall matrix: the version-changing
