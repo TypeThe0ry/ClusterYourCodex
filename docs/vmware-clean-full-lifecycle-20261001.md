@@ -1,9 +1,11 @@
-# VMware clean full-clone lifecycle — 2026-10-01
+# VMware reset full-clone lifecycle — 2026-10-01
 
 This record captures the strongest Windows validation completed after the
 earlier linked-clone run exposed inherited state. VMware was controlled only
 with the command-line `vmrun` tool; no Computer Use or VMware GUI automation
-was used. The original validation VM was not modified.
+was used. The original validation VM was not modified. “Reset” describes the
+per-user install/data roots; the source image is an existing Windows 11
+validation image, not a blank Windows installation.
 
 ## Test boundary and inputs
 
@@ -28,10 +30,15 @@ key is included here.
 
 ### Install
 
-The full clone was reset to an empty per-user install/data state before the
-test. Silent Setup completed with exit code `0`. The guest lifecycle diagnostic
-reported `status=succeeded`, `lastStage=complete`, `coreSucceeded=true`, and
-`firewallVerified=true`.
+The full clone was reset so the per-user install and data roots were absent.
+The first silent Setup attempt exited with code `1`; its diagnostic recorded
+`status=failed`, `requestedAction=Install`, `lastStage=entry`, and the exact
+active-lifecycle mutex error (“Another ClusterYourCodex install, repair, or
+uninstall is still active”). After that process ended, a subsequent Setup
+retry (`install2` in the retained evidence) exited with code `0`. Its
+diagnostic recorded `status=succeeded`, `lastStage=complete`,
+`coreSucceeded=true`, `firewallVerified=true`, and `resumed=false`. The probes
+below therefore validate the successful retry, not the initial attempt.
 
 The installed product then passed all of the following command-line probes:
 
@@ -50,13 +57,15 @@ The installed product then passed all of the following command-line probes:
 - The installed bootstrap file digest matched the extracted package digest;
   the installed manifest and controller executable were present.
 
-### Repair / repeated install
+### Repeated Setup (idempotent Repair-equivalent path)
 
 Running the same Setup candidate again against the installed clone completed
 with exit code `0`. The second lifecycle diagnostic again reached `complete`
-with `coreSucceeded=true` and `firewallVerified=true`. This verifies the
-idempotent Repair path against a real installed state rather than only a
-fixture or hosted CI process.
+with `coreSucceeded=true` and `firewallVerified=true`. The raw diagnostic
+identifies the requested/result action as `Install`; the repository's
+idempotent same-version Setup path is the Repair-equivalent behavior. This
+verifies that path against a real installed state rather than only a fixture
+or hosted CI process.
 
 ### Uninstall
 
@@ -76,12 +85,14 @@ documented data-preservation boundary, not an incomplete uninstall.
 
 ## What this does not prove
 
-This run proves clean current-candidate Install, repeated Install/Repair,
-health, listener readiness, credential-free same-L2 discovery, and Uninstall
-on a Windows 11 full clone. It does not yet prove a version-changing
-`Upgrade`, an interrupted-install `Rollback`, or a worker job submitted
-through the installed scheduled-task instance. Those remain explicit Issue #2
-gates. The independent Windows↔Windows, Windows↔Linux, Linux↔Linux, and
+This run proves a successful Setup retry after an initial lifecycle-mutex
+failure, the idempotent same-version Setup path, health, listener readiness,
+credential-free same-L2 discovery, and Uninstall on a reset Windows 11 full
+clone. It does not yet prove a version-changing `Upgrade` or an
+interrupted-install `Rollback`; those remain explicit Issue #2 gates. An
+independent installed scheduled-task worker round-trip is recorded separately
+in [`vmware-installed-task-roundtrip-20261001.md`](vmware-installed-task-roundtrip-20261001.md).
+The independent Windows↔Windows, Windows↔Linux, Linux↔Linux, and
 LAN-discovery records remain in
 [`cross-platform-validation-20260927.md`](cross-platform-validation-20260927.md).
 Native macOS runtime validation remains deferred under Issue #3 by request.

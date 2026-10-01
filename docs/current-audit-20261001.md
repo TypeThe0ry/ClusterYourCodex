@@ -86,20 +86,31 @@ descriptor. This confirms the existing fail-closed helper contract; it is not
 clean-VM lifecycle evidence.
 
 The follow-up then used a separate D-drive full clone rather than the linked
-clone that retained a pre-existing weak transaction directory. The current
-candidate Setup completed cleanly in that full clone, a second Setup run
-completed the Repair path, and the installed health/listener/discovery probes
-passed. A quiet uninstall removed the install root, scheduled task, firewall
-rules, and uninstall registration while preserving the user data root. The
-sanitized procedure and exact evidence boundary are recorded in
+clone that retained a pre-existing weak transaction directory. The per-user
+install/data roots were reset; the first Setup attempt exited `1` because the
+installer diagnostic reported an active lifecycle mutex. After that process
+ended, the `install2` retry exited `0` and reached `status=succeeded`,
+`lastStage=complete`, `coreSucceeded=true`, and `firewallVerified=true`. A
+second same-version Setup run completed the idempotent Repair-equivalent path,
+and the installed health/listener/discovery probes passed. A quiet uninstall
+removed the install root, scheduled task, firewall rules, and uninstall
+registration while preserving the user data root. The sanitized procedure and
+exact evidence boundary are recorded in
 [`vmware-clean-full-lifecycle-20261001.md`](vmware-clean-full-lifecycle-20261001.md).
+
+A separate reset full clone was then booted with a temporary private autologon
+only so its Interactive scheduled task could be exercised. The post-logon
+Setup run succeeded and the installed controller/worker harness passed all 15
+checks (`queued → running → succeeded`, exit code `0`); the evidence and
+boundary are recorded in
+[`vmware-installed-task-roundtrip-20261001.md`](vmware-installed-task-roundtrip-20261001.md).
 
 This still does not close Issue #2's full
 Install → Repair → Upgrade → Rollback → Uninstall matrix: the version-changing
-Upgrade, interrupted-install Rollback, and an installed scheduled-task worker
-job remain unproven. Hosted CI remains the authoritative live Windows
-controller/worker evidence for the cross-platform runtime. No credentials,
-tokens, or pairing material are stored in Git.
+Upgrade and interrupted-install Rollback remain unproven. Hosted CI and the
+retained cross-platform records remain the authoritative live Windows,
+Windows↔Linux, and Linux↔Linux runtime evidence. No credentials, tokens, or
+pairing material are stored in Git.
 
 ## Remaining issues
 
