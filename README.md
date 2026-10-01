@@ -55,13 +55,17 @@ This distinction keeps the README useful: a passing package test proves the pack
 
 The current `main` includes PR #157's transactional LAN discovery firewall
 path, PR #158's native PowerShell runtime-ownership repair, PR #159's audit
-documentation, and PR #160's final-main reference correction. Resolve the
-exact live `origin/main` ref with the reproduction commands in the [current
-audit record](docs/current-audit-20260930.md) instead of copying a hash into
+documentation, PR #160's final-main reference correction, and PR #163's
+inherited-ACL regression coverage plus a usable worker-address probe. Resolve
+the exact live `origin/main` ref with the reproduction commands in the [current
+audit record](docs/current-audit-20261001.md) instead of copying a hash into
 this document. The candidate CI matrix and Windows Setup
 acceptance both passed (runs [36749204624](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/36749204624)
 and [36749204684](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/36749204684)).
-The detailed record is in the [2026-09-30 audit](docs/current-audit-20260930.md)
+The latest PR #163 candidate matrix also passed, including the Windows
+controller/worker live round trip and packaged acceptance. The detailed record
+is in the [2026-10-01 audit](docs/current-audit-20261001.md), the
+[2026-09-30 audit](docs/current-audit-20260930.md)
 and the [runtime repair note](docs/windows-runtime-repair-20261001.md).
 
 The D-drive VMware guest is provisioned rather than clean. The current Setup
@@ -98,7 +102,8 @@ because their final runtime gates are still specific and independently
 unproven: a current-source clean Windows 11 lifecycle for #2, and a native
 macOS LaunchAgent plus managed controller/worker round trip for #3. Hosted CI
 and package probes are recorded as evidence, but are not substituted for those
-runtime gates. See the [current live audit record](docs/current-audit-20260930.md)
+runtime gates. See the [current live audit record](docs/current-audit-20261001.md),
+the [2026-09-30 audit](docs/current-audit-20260930.md)
 and the historical [2026-09-23 audit](docs/current-audit-20260923.md).
 
 The stable `v0.0.1` tag and assets remain unchanged at
