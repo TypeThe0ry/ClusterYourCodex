@@ -150,6 +150,34 @@ Describe 'Windows payload staging paths' {
         Assert-CycPrivateStateTree -Root $transactionRoot
     }
 
+    It 'repairs a weak secure-create result before publishing the transaction child' {
+        . $bootstrapPath
+        $transactionsRoot = Join-Path $TestDrive 'weak-create-parent\transactions'
+        $transactionRoot = Join-Path $transactionsRoot ([Guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($transactionsRoot)
+        & icacls.exe $transactionsRoot /inheritance:e /grant '*S-1-1-0:(OI)(CI)(RX)' *> $null
+        $LASTEXITCODE | Should Be 0
+
+        $originalCreate = (Get-Command Invoke-CycSecureDirectoryCreate -CommandType Function).ScriptBlock
+        try {
+            # Simulate a Windows profile/filesystem policy that ignores the
+            # security descriptor supplied to Directory.CreateDirectory.
+            function Invoke-CycSecureDirectoryCreate {
+                param(
+                    [Parameter(Mandatory = $true)][string]$Path,
+                    [Parameter(Mandatory = $true)][System.Security.AccessControl.DirectorySecurity]$Security
+                )
+                [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path $Path -Force)
+            }
+            New-CycPrivateDirectory -Path $transactionRoot
+        } finally {
+            Set-Item Function:\Invoke-CycSecureDirectoryCreate -Value $originalCreate
+        }
+
+        Assert-PrivatePathAcl -Path $transactionRoot
+        Assert-CycPrivateStateTree -Root $transactionRoot
+    }
+
     It 'keeps an atomically-created backup protected when the copy is interrupted' {
         . $bootstrapPath
         $transactionRoot = Join-Path $TestDrive 'atomic-copy-interruption'
