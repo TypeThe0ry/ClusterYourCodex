@@ -320,6 +320,7 @@ Run the browser renderer with `pnpm dev`; it is not the installed native app. Fo
 - [Changelog](CHANGELOG.md)
 - [Project status](docs/project-status.md)
 - [Cross-platform validation and LAN discovery](docs/cross-platform-validation-20260927.md)
+- [Current VMware candidate install probe](docs/vmware-current-candidate-install-20261001.md)
 
 Open acceptance work is tracked in [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
 and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). Hosted CI and
