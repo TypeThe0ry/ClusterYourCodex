@@ -150,6 +150,32 @@ Describe 'Windows payload staging paths' {
         Assert-CycPrivateStateTree -Root $transactionRoot
     }
 
+    It 'rejects an existing weak transaction child without changing its security descriptor' {
+        . $bootstrapPath
+        $transactionsRoot = Join-Path $TestDrive 'existing-weak-parent\transactions'
+        $transactionRoot = Join-Path $transactionsRoot '0123456789abcdef0123456789abcdef'
+        [void][IO.Directory]::CreateDirectory($transactionsRoot)
+        & icacls.exe $transactionsRoot /inheritance:e /grant '*S-1-1-0:(OI)(CI)(RX)' *> $null
+        $LASTEXITCODE | Should Be 0
+        [void][IO.Directory]::CreateDirectory($transactionRoot)
+
+        $beforeAcl = Get-FileSystemAclPortable -Item (Get-Item -LiteralPath $transactionRoot -Force)
+        $beforeAcl.AreAccessRulesProtected | Should Be $false
+        $beforeSddl = $beforeAcl.Sddl
+        $failure = $null
+        try {
+            New-CycPrivateDirectory -Path $transactionRoot
+        } catch {
+            $failure = $_
+        }
+        $failure | Should Not Be $null
+        $failure.Exception.Message | Should Match 'ACL inheritance remains enabled'
+
+        $afterAcl = Get-FileSystemAclPortable -Item (Get-Item -LiteralPath $transactionRoot -Force)
+        $afterAcl.AreAccessRulesProtected | Should Be $false
+        $afterAcl.Sddl | Should Be $beforeSddl
+    }
+
     It 'keeps an atomically-created backup protected when the copy is interrupted' {
         . $bootstrapPath
         $transactionRoot = Join-Path $TestDrive 'atomic-copy-interruption'

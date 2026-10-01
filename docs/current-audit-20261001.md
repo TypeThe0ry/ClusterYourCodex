@@ -69,6 +69,22 @@ task-health or ACL checks. See
 [`vmware-cli-recheck-20261001.md`](vmware-cli-recheck-20261001.md) for the
 sanitized procedure and evidence location.
 
+A follow-up CLI-only session-channel probe confirmed that host keyboard
+injection is rejected by `vmrun`. An initial guest command did not change the
+RDP registry state, but a later explicitly credentialed guest PowerShell
+command enabled TermService and a `3389` listener was confirmed. The host
+`mstsc.exe` attempt still did not yield a stable interactive session, so it is
+not counted as lifecycle evidence. Temporary RDP credential material was
+deleted after the probe, and RDP was disabled before shutdown. No product task
+or ACL guard was weakened.
+
+The exact current `packaging/windows/bootstrap.ps1` was then executed in the
+same guest through VMware Tools. Its focused ACL proof passed: a fresh child
+under an inheritance-enabled parent became protected with no inherited ACEs,
+and an already-existing weak child was rejected without changing its security
+descriptor. This confirms the existing fail-closed helper contract; it is not
+clean-VM lifecycle evidence.
+
 The current guest evidence therefore does not close Issue #2's clean
 Install → Repair → Upgrade → Rollback → Uninstall matrix or prove an
 installed-package worker job. Hosted CI is the authoritative live

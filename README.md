@@ -80,6 +80,14 @@ confirmed that the guest can be started, inspected, and soft-stopped cleanly,
 but has no interactive logon session for the default Interactive scheduled
 task. That session limitation is recorded rather than hidden behind a green
 fixture result.
+An additional CLI-only session-channel probe confirmed that host keyboard
+injection is blocked. A credentialed guest command could enable a temporary
+RDP listener, but the host RDP attempt did not produce a stable interactive
+session; the validation boundary is documented in the [recheck record](docs/vmware-cli-recheck-20261001.md).
+The same recheck then executed the exact current Windows ACL helper in the guest:
+fresh transaction children were protected without inherited ACEs, while an
+existing weak child was rejected without mutation. This confirms the fail-closed
+ACL contract, but does not replace clean-VM lifecycle evidence.
 
 #### Historical repository audit — 2026-09-23
 

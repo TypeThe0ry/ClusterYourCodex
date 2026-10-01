@@ -48,6 +48,46 @@ Interactive scheduled-task lifecycle. The VM was cleanly soft-stopped
 (`cleanShutdown=TRUE`, `softPowerOff=TRUE`); this is an environment/session
 boundary, not a reason to relax the installer task-health or ACL checks.
 
+## Session-channel follow-up
+
+The follow-up tried a second command-line-only channel without using VMware
+GUI control:
+
+- `vmrun typeKeystrokesInGuest` was rejected by the host with
+  `Insufficient permissions in the host operating system`.
+- An initial guest `runProgramInGuest` attempt to enable Remote Desktop did not
+  change `fDenyTSConnections` and produced no listener. A later explicitly
+  credentialed guest PowerShell command did have the required administrative
+  token: it set `fDenyTSConnections=0`, started TermService, and a TCP `3389`
+  listener was confirmed from the host. Launching `mstsc.exe` still did not
+  produce a stable logged-on guest session, so it is not counted as product
+  lifecycle evidence.
+- A temporary host RDP credential was used only for this probe, then removed
+  immediately with Windows Credential Manager. The RDP client and VM were
+  stopped afterward; no credential or RDP material is retained in Git.
+
+The host-side keyboard channel remains unavailable, and the RDP attempt did
+not yield a stable interactive session under this image. Completing Issue #2
+still requires a VM provisioning channel that supplies a repeatable interactive
+Windows logon (or a separately approved test-image bootstrap), not a
+product-side relaxation of the per-user Interactive task contract.
+
+## Current-source ACL proof
+
+After the session-channel probe, the exact current `packaging/windows/bootstrap.ps1`
+was copied into the guest and executed through VMware Tools. The probe's source
+SHA-256 was recorded outside Git. Two focused cases passed under Windows
+PowerShell 5.1:
+
+- A fresh transaction child beneath an inheritance-enabled parent was created
+  with protected ACLs and zero inherited ACEs.
+- An already-existing weak child was rejected by `New-CycPrivateDirectory`
+  without changing its security descriptor.
+
+This directly confirms the current fail-closed helper contract. It does not
+turn the provisioned VM into a clean lifecycle acceptance run, and it does not
+justify auto-repairing an existing weak transaction tree.
+
 ## Boundary
 
 This recheck does not prove the missing Issue #2 clean-guest
