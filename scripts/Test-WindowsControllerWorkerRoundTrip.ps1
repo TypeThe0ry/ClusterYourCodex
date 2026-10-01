@@ -100,6 +100,28 @@ function Test-PrivateIpv4 {
     return $bytes[0] -eq 192 -and $bytes[1] -eq 168
 }
 
+function Test-LocalTcpSelfConnect {
+    param([Parameter(Mandatory)][string]$Address)
+    $parsed = $null
+    if (-not [Net.IPAddress]::TryParse($Address, [ref]$parsed)) { return $false }
+    $listener = $null
+    $client = $null
+    try {
+        $listener = [Net.Sockets.TcpListener]::new($parsed, 0)
+        $listener.Start()
+        $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+        $client = [Net.Sockets.TcpClient]::new()
+        $connect = $client.ConnectAsync($parsed, $port)
+        if (-not $connect.Wait(1000) -or -not $client.Connected) { return $false }
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($null -ne $client) { $client.Dispose() }
+        if ($null -ne $listener) { $listener.Stop() }
+    }
+}
+
 function Get-PrivateIpv4Address {
     $candidates = @()
     try {
@@ -111,11 +133,12 @@ function Get-PrivateIpv4Address {
         $candidates = @()
     }
     foreach ($candidate in $candidates) {
-        if (Test-PrivateIpv4 -Address ([string]$candidate)) {
+        $address = [string]$candidate
+        if ((Test-PrivateIpv4 -Address $address) -and (Test-LocalTcpSelfConnect -Address $address)) {
             return [string]$candidate
         }
     }
-    Fail-RoundTrip 'no assigned RFC1918 IPv4 address is available for the worker TLS listener'
+    Fail-RoundTrip 'no assigned RFC1918 IPv4 address passed the local TCP self-connect probe for the worker TLS listener'
 }
 
 function Get-FreeTcpPort {
