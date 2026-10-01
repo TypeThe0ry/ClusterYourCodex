@@ -150,32 +150,30 @@ Describe 'Windows payload staging paths' {
         Assert-CycPrivateStateTree -Root $transactionRoot
     }
 
-    It 'repairs a weak secure-create result before publishing the transaction child' {
+    It 'rejects an existing weak transaction child without changing its security descriptor' {
         . $bootstrapPath
-        $transactionsRoot = Join-Path $TestDrive 'weak-create-parent\transactions'
-        $transactionRoot = Join-Path $transactionsRoot ([Guid]::NewGuid().ToString('N'))
+        $transactionsRoot = Join-Path $TestDrive 'existing-weak-parent\transactions'
+        $transactionRoot = Join-Path $transactionsRoot '0123456789abcdef0123456789abcdef'
         [void][IO.Directory]::CreateDirectory($transactionsRoot)
         & icacls.exe $transactionsRoot /inheritance:e /grant '*S-1-1-0:(OI)(CI)(RX)' *> $null
         $LASTEXITCODE | Should Be 0
+        [void][IO.Directory]::CreateDirectory($transactionRoot)
 
-        $originalCreate = (Get-Command Invoke-CycSecureDirectoryCreate -CommandType Function).ScriptBlock
+        $beforeAcl = Get-FileSystemAclPortable -Item (Get-Item -LiteralPath $transactionRoot -Force)
+        $beforeAcl.AreAccessRulesProtected | Should Be $false
+        $beforeSddl = $beforeAcl.Sddl
+        $failure = $null
         try {
-            # Simulate a Windows profile/filesystem policy that ignores the
-            # security descriptor supplied to Directory.CreateDirectory.
-            function Invoke-CycSecureDirectoryCreate {
-                param(
-                    [Parameter(Mandatory = $true)][string]$Path,
-                    [Parameter(Mandatory = $true)][System.Security.AccessControl.DirectorySecurity]$Security
-                )
-                [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path $Path -Force)
-            }
             New-CycPrivateDirectory -Path $transactionRoot
-        } finally {
-            Set-Item Function:\Invoke-CycSecureDirectoryCreate -Value $originalCreate
+        } catch {
+            $failure = $_
         }
+        $failure | Should Not Be $null
+        $failure.Exception.Message | Should Match 'ACL inheritance remains enabled'
 
-        Assert-PrivatePathAcl -Path $transactionRoot
-        Assert-CycPrivateStateTree -Root $transactionRoot
+        $afterAcl = Get-FileSystemAclPortable -Item (Get-Item -LiteralPath $transactionRoot -Force)
+        $afterAcl.AreAccessRulesProtected | Should Be $false
+        $afterAcl.Sddl | Should Be $beforeSddl
     }
 
     It 'keeps an atomically-created backup protected when the copy is interrupted' {
