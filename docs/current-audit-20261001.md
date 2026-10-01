@@ -69,6 +69,13 @@ task-health or ACL checks. See
 [`vmware-cli-recheck-20261001.md`](vmware-cli-recheck-20261001.md) for the
 sanitized procedure and evidence location.
 
+A follow-up CLI-only session-channel probe also confirmed that the blocker is
+the validation channel: host keyboard injection is rejected by `vmrun`, while
+guest commands run through VMware Tools do not have an elevated token for
+system-level RDP/Winlogon changes (`fDenyTSConnections` stayed enabled and no
+3389 listener appeared). Temporary RDP credential material was deleted after
+the probe. No product task or ACL guard was weakened.
+
 The current guest evidence therefore does not close Issue #2's clean
 Install → Repair → Upgrade → Rollback → Uninstall matrix or prove an
 installed-package worker job. Hosted CI is the authoritative live

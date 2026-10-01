@@ -48,6 +48,27 @@ Interactive scheduled-task lifecycle. The VM was cleanly soft-stopped
 (`cleanShutdown=TRUE`, `softPowerOff=TRUE`); this is an environment/session
 boundary, not a reason to relax the installer task-health or ACL checks.
 
+## Session-channel follow-up
+
+The follow-up tried a second command-line-only channel without using VMware
+GUI control:
+
+- `vmrun typeKeystrokesInGuest` was rejected by the host with
+  `Insufficient permissions in the host operating system`.
+- A guest `runProgramInGuest` probe could run ordinary user commands, but the
+  token was not elevated for system changes. A request to enable Remote
+  Desktop returned without a usable listener; the guest registry value
+  `fDenyTSConnections` remained `1` and no TCP `3389` listener appeared.
+- A temporary host RDP credential was used only for this probe, then removed
+  immediately with Windows Credential Manager. The RDP client and VM were
+  stopped afterward; no credential or RDP material is retained in Git.
+
+This rules out a second CLI transport under the current non-elevated host and
+headless guest setup. Completing Issue #2 still requires a VM provisioning
+channel that supplies a real interactive/elevated Windows logon (or a
+separately approved test-image bootstrap), not a product-side relaxation of
+the per-user Interactive task contract.
+
 ## Boundary
 
 This recheck does not prove the missing Issue #2 clean-guest

@@ -80,6 +80,10 @@ confirmed that the guest can be started, inspected, and soft-stopped cleanly,
 but has no interactive logon session for the default Interactive scheduled
 task. That session limitation is recorded rather than hidden behind a green
 fixture result.
+An additional CLI-only session-channel probe confirmed that the host blocks
+VMware keyboard injection and the guest command channel is not elevated enough
+to create a fallback RDP session; the validation boundary is documented in the
+[recheck record](docs/vmware-cli-recheck-20261001.md).
 
 #### Historical repository audit — 2026-09-23
 
