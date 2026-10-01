@@ -466,9 +466,7 @@ fn run_live_ssh_provisioning(
     let cleanup_result = cleanup_revision
         .map(|revision| remove_record(&manager, &id.to_string(), revision, &password))
         .unwrap_or(Ok(()));
-    if let Err(error) = cleanup_result {
-        return Err(error);
-    }
+    cleanup_result?;
 
     let (paired_node_id, final_state, _revision) = run_result?;
     let report = LiveSshReport {
