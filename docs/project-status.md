@@ -1,18 +1,14 @@
 # ClusterYourCodex project status
 
-## Current GitHub audit — 2026-10-03 (PR #181 / preview.105)
+## Current GitHub audit — 2026-10-03 (preview.106 candidate)
 
-The current `origin/main` source is the squash merge of PR #180,
-`d9c72456cfd351e8eb729ced2ad3c8d9ef7675be`, applied on top of the PR #179
-preview-packaging fix. PR #178 carries the preview.103 versioned product
-surfaces and increases the Windows Setup acceptance child budget to 45
-minutes. The previous release attempt exposed a hosted-runner packaging
-defect: Node.js was present but its installation directory did not contain a
-copyable `LICENSE` file. Preview.104 added a fail-closed candidate selection
-that uses the runner license when it is a real file and otherwise uses the
-repository's `packaging/windows/LICENSE.node.txt`. The exact live evidence is
-recorded in
-[`docs/current-audit-20261002.md`](current-audit-20261002.md).
+The current `origin/main` source is `dcf4a6dbf7c3f1287e86da80397ac4d75f766f5c`,
+the squash merge of PR #184. PR #183 fixed the Windows profile-matrix
+Task-Scheduler deadlock by keeping disposable scheduler probes in the elevated
+parent helper, using bounded exact-process shutdown, and rejecting foreign
+same-name tasks before replacement. PR #184 synchronized all product surfaces
+to `0.1.0-preview.106`. The exact candidate and VMware evidence are recorded
+in [`docs/current-audit-20261003.md`](current-audit-20261003.md).
 
 At the PR #180 merge point there were no other open pull requests. Issues #2 and #3 remain open because
 their remaining requirements are real native-environment gates, not replaced by
@@ -25,9 +21,13 @@ recorded as passed where their stated evidence boundary is satisfied.
 
 The stable `v0.0.1` tag remains immutable at
 `e4fbaef04b764268fa038311d85573b18b549f9f`. The current public build is the
-published developer prerelease `v0.1.0-preview.105`, produced by
-release run `37023139818` after exact push CI run `37023051938` completed
-successfully. It remains a prerelease while Issues #2 and #3 retain their
+published developer prerelease `v0.1.0-preview.105`, produced by release run
+`37023139818` after exact push CI run `37023051938` completed successfully.
+The `v0.1.0-preview.106` annotated tag points at the current candidate, but
+its first release run `37067050549` correctly stopped before assets because
+the exact merge commit did not yet have successful push CI. The candidate
+remains prerelease-only; rerun the full release workflow after push CI
+succeeds. It remains a preview while Issues #2 and #3 retain their
 native-environment gates.
 
 PR #180 fixes the release-only provenance handoff exposed by the failed

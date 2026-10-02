@@ -19,13 +19,14 @@ older audit files are historical context only.
   and packaged Setup checks
   [37062423747](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/37062423747)
   passed.
-- The first preview.106 tag attempt ([workflow
+- The preview.106 tag is present, but the first release attempt ([workflow
   37067050549](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/37067050549))
   stopped before asset publication because the exact merge commit had no
   successful `main` push CI yet. This was the intended fail-closed identity
-  gate, not an installer or build failure. A meaningful audit commit is being
-  merged before the tag is retried so the exact tagged commit has its own
-  successful push CI.
+  gate, not an installer or build failure. The exact push CI for that commit is
+  still running as this record is prepared; after it succeeds, rerun the full
+  release workflow so all skipped artifact jobs execute. Until then there is
+  no preview.106 GitHub Release or downloadable asset.
 
 ## Command-line VMware and cross-platform evidence
 

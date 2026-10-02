@@ -18,7 +18,8 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 | Goal | Action |
 | --- | --- |
 | Use the published baseline | Install [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1) |
-| Use the current Codex integration fix | Install the [latest developer preview](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.106) |
+| Use the published public build | Install the [latest published preview](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.105) |
+| Track the current candidate | Inspect the [`v0.1.0-preview.106` tag](https://github.com/TypeThe0ry/ClusterYourCodex/tree/v0.1.0-preview.106); its Release assets are not published yet |
 | Recover a broken native plugin | Run the [one-command repair](#codex-plugin-integrity) below |
 | Verify a checkout | Run the [native plugin checks](#native-plugin-checks) |
 
@@ -189,7 +190,8 @@ The diagrams summarize the evidence categories; they are not application screens
 | You need | Use | What it means |
 | --- | --- | --- |
 | A published baseline | [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1) | Immutable stable assets; no native-plugin recovery fixes |
-| A published preview | [v0.1.0-preview.106](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.106) | Latest developer preview; stable GA gates remain open |
+| A published preview | [v0.1.0-preview.105](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.105) | Latest public developer preview; stable GA gates remain open |
+| A release candidate | [`v0.1.0-preview.106`](https://github.com/TypeThe0ry/ClusterYourCodex/tree/v0.1.0-preview.106) | Tagged candidate; assets wait for exact push CI and the fail-closed release workflow |
 | Source development | `main` or a feature branch | Run the checks below before packaging; do not call a preview stable |
 
 For installation fixes and their verification, see the
