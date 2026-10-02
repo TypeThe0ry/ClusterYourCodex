@@ -8,16 +8,17 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 
 ![ClusterYourCodex execution flow](docs/assets/cluster-your-codex-flow.svg)
 
-> **Repository snapshot:** `main` contains the published `v0.0.1` stable line;
-> current fixes are delivered as prerelease candidates until their acceptance
-> evidence is complete. The published `v0.0.1` tag and assets are immutable.
+> **Repository snapshot:** `main` contains the published `v0.0.1` stable line and
+> the published `v0.1.0-preview.105` developer preview. Current fixes remain
+> prerelease candidates until the native acceptance evidence in Issues #2 and #3
+> is complete. The published `v0.0.1` tag and assets are immutable.
 
 ## Start here
 
 | Goal | Action |
 | --- | --- |
 | Use the published baseline | Install [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1) |
-| Use the current Codex integration fix | Use the [source-checkout repair](#codex-plugin-integrity); the published preview predates this fix |
+| Use the current Codex integration fix | Install the [latest developer preview](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.105) |
 | Recover a broken native plugin | Run the [one-command repair](#codex-plugin-integrity) below |
 | Verify a checkout | Run the [native plugin checks](#native-plugin-checks) |
 
@@ -50,6 +51,26 @@ The green cards above are backed by repeatable checks, not a decorative claim:
 This distinction keeps the README useful: a passing package test proves the package contract, while a clean-VM or live-worker claim requires the corresponding runtime evidence.
 
 ### Recorded candidate test results
+
+#### Current published preview audit — 2026-10-03
+
+The current `main` source is `c152f701432ce07a91f292e2ac325236883b60c5`, the
+exact commit behind the published [`v0.1.0-preview.105`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.105)
+developer preview. The exact push CI run `37023051938` passed all Windows,
+Linux, macOS, MSRV, Worker Kit, security, and Windows controller/worker live
+checks. Release run `37023139818` passed the fail-closed identity gate,
+self-contained Windows packaging, sidecar/release-index validation, and
+published the prerelease with Setup, self-contained ZIP, cross-platform
+previews, SBOM, provenance, and SHA256SUMS. The local D-drive verification
+recorded matching SHA-256 values for Setup, the self-contained ZIP, and
+`release-index.json`.
+
+The optional clean Windows 11 ARM64 x64-emulation acceptance is tracked by the
+same release run and is not substituted for a genuinely clean physical/VM
+controller-plus-guest-worker acceptance. Issue #2 therefore remains open for
+the version-changing Upgrade, interrupted Rollback, blank-guest lifecycle,
+and remaining GA signing/tray requirements. Native macOS managed-runtime
+validation remains deferred under Issue #3. See the [2026-10-03 audit record](docs/current-audit-20261003.md).
 
 #### Current repository audit — 2026-10-01
 
@@ -164,7 +185,7 @@ The diagrams summarize the evidence categories; they are not application screens
 | You need | Use | What it means |
 | --- | --- | --- |
 | A published baseline | [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1) | Immutable stable assets; no native-plugin recovery fixes |
-| A published preview | [v0.1.0-preview.102](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.102) | Latest published preview; it predates the fixes currently on `main` |
+| A published preview | [v0.1.0-preview.105](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.105) | Latest developer preview; stable GA gates remain open |
 | Source development | `main` or a feature branch | Run the checks below before packaging; do not call a preview stable |
 
 For installation fixes and their verification, see the
