@@ -1,6 +1,6 @@
 # ClusterYourCodex project status
 
-## Current GitHub audit — 2026-10-02 (PR #180 / preview.105)
+## Current GitHub audit — 2026-10-03 (PR #181 / preview.105)
 
 The current `origin/main` source is the squash merge of PR #180,
 `d9c72456cfd351e8eb729ced2ad3c8d9ef7675be`, applied on top of the PR #179
@@ -24,15 +24,26 @@ Windows↔Linux, Linux↔Linux, and credential-free LAN discovery paths are
 recorded as passed where their stated evidence boundary is satisfied.
 
 The stable `v0.0.1` tag remains immutable at
-`e4fbaef04b764268fa038311d85573b18b549f9f`. The next public build is tracked
-as prerelease `v0.1.0-preview.105`; it must be produced by the tagged release
-workflow only after the exact version-bump commit has a successful push CI run.
+`e4fbaef04b764268fa038311d85573b18b549f9f`. The current public build is the
+published developer prerelease `v0.1.0-preview.105`, produced by
+release run `37023139818` after exact push CI run `37023051938` completed
+successfully. It remains a prerelease while Issues #2 and #3 retain their
+native-environment gates.
 
 PR #180 fixes the release-only provenance handoff exposed by the failed
 preview.104 run: the self-contained Windows job now receives the exact source
 commit from the identity gate instead of relying on a job-local environment
 variable. Preview.104 remains immutable and is not presented as a published
 release.
+
+The published preview.105 assets and their sidecars were downloaded to the
+D-drive validation workspace and verified locally: Setup.exe, the Windows
+self-contained ZIP, and `release-index.json` all matched their SHA-256
+sidecars. The release index binds the prerelease to source commit
+`c152f701432ce07a91f292e2ac325236883b60c5`, includes the CycloneDX SBOM and
+GitHub artifact provenance, and marks macOS managed kits as runtime-gated.
+See [`docs/current-audit-20261003.md`](current-audit-20261003.md) for the
+full release and remaining Issue #2/#3 boundary.
 
 ## Follow-up audit — 2026-09-23 (PR #120)
 
