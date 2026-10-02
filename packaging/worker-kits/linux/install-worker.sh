@@ -388,9 +388,14 @@ verify_private_file_existing() {
 systemd_quote() {
   local value="$1"
   value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
+  # systemd's path-valued settings (notably WorkingDirectory=) do not
+  # consistently strip shell-style surrounding quotes across supported
+  # versions. Encode the small set of unit-file metacharacters instead so
+  # both ExecStart= and WorkingDirectory= receive the exact same path.
+  value="${value//\"/\\x22}"
+  value="${value// /\\x20}"
   value="${value//%/%%}"
-  printf '"%s"' "$value"
+  printf '%s' "$value"
 }
 
 json_escape() {

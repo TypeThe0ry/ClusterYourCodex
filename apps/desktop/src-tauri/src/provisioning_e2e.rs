@@ -333,22 +333,44 @@ fn remove_record(
     revision: u64,
     password: &str,
 ) -> Result<(), LiveSshHarnessError> {
-    let result = manager
-        .remove(SecretActionRequest {
-            id: id.to_owned(),
-            revision,
-            password: password.to_owned(),
-            passphrase: String::new(),
-        })
-        .map_err(provisioning_error)?;
-    if result.outcome != "removed" {
-        return Err(LiveSshHarnessError::Cleanup("remove_did_not_complete"));
+    // Removal is intentionally checkpointed: the first request tears down the
+    // remote worker and persists `teardown_completed`, while the next request
+    // forgets the transient credential and deletes the durable record. Keep
+    // driving the same intent until the engine reports the terminal outcome.
+    let mut current_revision = revision;
+    for _ in 0..=MAX_DRIVE_TRANSITIONS {
+        let result = manager
+            .remove(SecretActionRequest {
+                id: id.to_owned(),
+                revision: current_revision,
+                password: password.to_owned(),
+                passphrase: String::new(),
+            })
+            .map_err(provisioning_error)?;
+        match result.outcome {
+            "removed" => {
+                return match manager.get(ComputerIdRequest { id: id.to_owned() }) {
+                    Err(error) if error.code == "not_found" => Ok(()),
+                    Ok(_) => Err(LiveSshHarnessError::Cleanup(
+                        "record_remains_after_remove",
+                    )),
+                    Err(_) => Err(LiveSshHarnessError::Cleanup(
+                        "remove_verification_failed",
+                    )),
+                };
+            }
+            "checkpoint" | "awaiting_credential" | "awaiting_external" => {
+                current_revision = result
+                    .computer
+                    .as_ref()
+                    .ok_or(LiveSshHarnessError::Protocol("remove_missing_computer"))?
+                    .revision;
+            }
+            "failed" => return Err(LiveSshHarnessError::Cleanup("remove_failed")),
+            _ => return Err(LiveSshHarnessError::Cleanup("remove_did_not_complete")),
+        }
     }
-    match manager.get(ComputerIdRequest { id: id.to_owned() }) {
-        Err(error) if error.code == "not_found" => Ok(()),
-        Ok(_) => Err(LiveSshHarnessError::Cleanup("record_remains_after_remove")),
-        Err(_) => Err(LiveSshHarnessError::Cleanup("remove_verification_failed")),
-    }
+    Err(LiveSshHarnessError::Cleanup("remove_step_limit"))
 }
 
 fn write_report(output_root: &Path, report: &LiveSshReport) -> Result<(), LiveSshHarnessError> {

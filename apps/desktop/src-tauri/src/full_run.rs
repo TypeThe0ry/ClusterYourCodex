@@ -2521,6 +2521,7 @@ fn build_job(node: &Node, snapshot: &SnapshotPayload) -> Result<JobSpec, ()> {
             r#"$ErrorActionPreference = "Stop"
 $inputText = [System.IO.File]::ReadAllText((Join-Path (Get-Location) "input.txt"))
 if ($inputText.Trim() -ne "ClusterYourCodex full run check") { throw "snapshot input mismatch" }
+[Console]::Out.WriteLine($inputText.Trim())
 [Console]::Out.WriteLine("CYC_FULL_RUN_EXECUTED")
 [Console]::Error.WriteLine("CYC_FULL_RUN_STDERR")
 [System.IO.File]::WriteAllBytes((Join-Path (Get-Location) "full-run-proof.txt"), [System.Text.Encoding]::UTF8.GetBytes("CYC_FULL_RUN_OK`n"))"#,
@@ -2528,7 +2529,9 @@ if ($inputText.Trim() -ne "ClusterYourCodex full run check") { throw "snapshot i
         OperatingSystem::Linux | OperatingSystem::Macos => JobStep::new(
             "full-run-proof",
             r#"set -euo pipefail
-test "$(cat input.txt)" = "ClusterYourCodex full run check"
+input_text="$(cat input.txt)"
+test "$input_text" = "ClusterYourCodex full run check"
+printf '%s\n' "$input_text"
 printf 'CYC_FULL_RUN_EXECUTED\n'
 printf 'CYC_FULL_RUN_STDERR\n' >&2
 printf 'CYC_FULL_RUN_OK\n' > full-run-proof.txt"#,
