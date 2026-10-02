@@ -9,7 +9,7 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 ![ClusterYourCodex execution flow](docs/assets/cluster-your-codex-flow.svg)
 
 > **Repository snapshot:** `main` contains the published `v0.0.1` stable line and
-> the published `v0.1.0-preview.105` developer preview. Current fixes remain
+> the `v0.1.0-preview.106` developer-preview candidate. Current fixes remain
 > prerelease candidates until the native acceptance evidence in Issues #2 and #3
 > is complete. The published `v0.0.1` tag and assets are immutable.
 
@@ -18,7 +18,7 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 | Goal | Action |
 | --- | --- |
 | Use the published baseline | Install [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1) |
-| Use the current Codex integration fix | Install the [latest developer preview](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.105) |
+| Use the current Codex integration fix | Install the [latest developer preview](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.106) |
 | Recover a broken native plugin | Run the [one-command repair](#codex-plugin-integrity) below |
 | Verify a checkout | Run the [native plugin checks](#native-plugin-checks) |
 
@@ -52,18 +52,22 @@ This distinction keeps the README useful: a passing package test proves the pack
 
 ### Recorded candidate test results
 
-#### Current published preview audit — 2026-10-03
+#### Current preview audit — 2026-10-03
 
-The current `main` source is `c152f701432ce07a91f292e2ac325236883b60c5`, the
-exact commit behind the published [`v0.1.0-preview.105`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.105)
-developer preview. The exact push CI run `37023051938` passed all Windows,
-Linux, macOS, MSRV, Worker Kit, security, and Windows controller/worker live
-checks. Release run `37023139818` passed the fail-closed identity gate,
-self-contained Windows packaging, sidecar/release-index validation, and
-published the prerelease with Setup, self-contained ZIP, cross-platform
-previews, SBOM, provenance, and SHA256SUMS. The local D-drive verification
-recorded matching SHA-256 values for Setup, the self-contained ZIP, and
-`release-index.json`.
+PR #183 fixed the Windows profile-matrix scheduler deadlock by keeping
+Task-Scheduler authority in the elevated parent helper; PR #184 synchronized
+all product surfaces to `0.1.0-preview.106`. The exact PR-183 CI run
+`37057151914` and the preview.106 candidate CI run `37062423830` passed the
+Windows Setup lifecycle, bounded Windows Rust, desktop bridge, Linux/macOS
+Rust, Worker Kits, security, and live Windows controller/worker checks. The
+tagged release workflow repeats the exact-commit identity gate before building
+or publishing any asset.
+
+The D-drive VMware Windows 11 guest also passed Setup, controller health
+(HTTP 200/database ok), credential-free LAN discovery, and a self-contained
+Windows controller/worker round trip with every check green. Independent
+Windows↔Linux and Linux↔Linux evidence is retained outside Git under the
+cross-platform validation directories.
 
 The optional clean Windows 11 ARM64 x64-emulation acceptance is tracked by the
 same release run and is not substituted for a genuinely clean physical/VM
@@ -185,7 +189,7 @@ The diagrams summarize the evidence categories; they are not application screens
 | You need | Use | What it means |
 | --- | --- | --- |
 | A published baseline | [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1) | Immutable stable assets; no native-plugin recovery fixes |
-| A published preview | [v0.1.0-preview.105](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.105) | Latest developer preview; stable GA gates remain open |
+| A published preview | [v0.1.0-preview.106](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.106) | Latest developer preview; stable GA gates remain open |
 | Source development | `main` or a feature branch | Run the checks below before packaging; do not call a preview stable |
 
 For installation fixes and their verification, see the

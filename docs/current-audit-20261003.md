@@ -1,59 +1,62 @@
 # Current GitHub and preview release audit — 2026-10-03
 
-This is the current release record for `TypeThe0ry/ClusterYourCodex`. It uses
-the live GitHub repository and published assets as the authority; older audit
-records remain historical context only.
+This is the current release record for `TypeThe0ry/ClusterYourCodex`. The live
+GitHub repository, CI runs, and command-line VMware evidence are authoritative;
+older audit files are historical context only.
 
-## Published source and workflow evidence
+## Current candidate and exact-commit evidence
 
-- `origin/main`: `c152f701432ce07a91f292e2ac325236883b60c5` (PR #181 squash
-  merge).
-- Exact push CI: [run 37023051938](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/37023051938),
-  successful. It covered Windows/Linux/macOS Rust, MSRV, Worker Kits, CodeQL,
-  dependency security, desktop integration, and the Windows controller/worker
-  live round trip.
-- Preview release workflow: [run 37023139818](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/37023139818),
-  successful. Its first attempt was correctly fail-closed because push CI was
-  still running; the same tagged run was rerun after exact CI completed.
-- Published release: [`v0.1.0-preview.105`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.105),
-  non-draft prerelease, published at `2026-10-02T17:26:17Z`.
+- PR #183 (`ec4ec8f49af4d31ad79d5a02c7c143c846918956`) fixed the Windows
+  profile-matrix scheduler deadlock. Disposable Task Scheduler probes now stay
+  in the elevated parent helper, shutdown remains bounded and exact-process
+  scoped, and same-name foreign tasks are rejected before `-Force` replacement.
+  Candidate run [37057151914](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/37057151914)
+  passed the Windows desktop/bridge, Setup, bounded Rust, cross-platform Rust,
+  Worker Kit, security, and live Windows controller/worker checks.
+- PR #184 (`dcf4a6dbf7c3f1287e86da80397ac4d75f766f5c`) synchronized every
+  product surface to `0.1.0-preview.106`. Its candidate checks
+  [37062423830](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/37062423830)
+  and packaged Setup checks
+  [37062423747](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/37062423747)
+  passed.
+- The first preview.106 tag attempt ([workflow
+  37067050549](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/37067050549))
+  stopped before asset publication because the exact merge commit had no
+  successful `main` push CI yet. This was the intended fail-closed identity
+  gate, not an installer or build failure. A meaningful audit commit is being
+  merged before the tag is retried so the exact tagged commit has its own
+  successful push CI.
 
-## Asset and integrity evidence
+## Command-line VMware and cross-platform evidence
 
-The release contains Windows Setup, Windows x64 portable and self-contained
-archives, Linux x64, macOS x64/arm64 previews, managed Worker Kits, a
-CycloneDX 1.6 SBOM, `release-index.json`, provenance, and `SHA256SUMS`.
+The D-drive Windows 11 VMware guest (build 26200, launched and exercised with
+`vmrun`/VIX only) started from a clean product state. Preview.105 Setup exited
+zero, the controller health endpoint returned HTTP 200 with `database: ok`,
+ports 47831/47832 listened, and LAN discovery returned
+`credentialsTransmitted: false` with explicit pairing required. The installed
+controller/worker harness then passed the complete queued → running →
+succeeded round trip, artifact/log verification, cleanup, process cleanup, and
+secret scan. Sanitized checks are retained outside Git at
+`D:\ClusterYourCodex-validation\guest-exchange\vm-roundtrip-checks-20261003.json`.
 
-The following assets were downloaded to
-`D:\ClusterYourCodex-validation\preview-105` and matched their sidecars:
+Independent evidence also covers Windows controller ↔ Linux worker and Linux
+controller ↔ Linux worker. macOS managed-runtime validation is intentionally
+deferred. These results prove usable preview paths, not every GA lifecycle gate.
 
-| Asset | SHA-256 verification |
-| --- | --- |
-| `ClusterYourCodex-Setup.exe` | PASS |
-| `ClusterYourCodex-v0.1.0-preview.105-windows-x64-self-contained-preview.zip` | PASS |
-| `release-index.json` | PASS |
+## Remaining issue boundaries
 
-The release index binds `sourceTag=v0.1.0-preview.105` to
-`sourceCommit=c152f701432ce07a91f292e2ac325236883b60c5`, marks the release as
-`developer-preview`, includes GitHub artifact provenance, and keeps macOS kits
-`runtimeGated=true`, `containmentReady=false`, and `liveReady=false`.
+Issue [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) remains open:
+hosted CI and the VMware run do not replace a genuinely blank current-source
+VM matrix of Install → Repair → N-1→N Upgrade → interrupted Rollback →
+Uninstall, a separate guest-worker acceptance, and remaining signing/tray GA
+requirements.
 
-## Issue boundaries
-
-Issue [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) remains
-open. Hosted CI and the optional clean Windows 11 ARM64 x64-emulation job are
-useful evidence, but they do not replace a current-source clean VM matrix of
-Install → Repair → N-1→N Upgrade → interrupted Rollback → Uninstall plus an
-independent guest-worker job. The D-drive VMware verification is still a
-full-clone/headless diagnostic boundary, not blank-guest GA proof.
-
-Issue [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) remains
-open and intentionally deferred per the current scope: native macOS
-LaunchAgent activation, managed controller/worker round-trip, detached
-descendant cleanup, and process-identity/PID-reuse evidence are not claimed by
-the hosted package checks.
+Issue [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) remains open:
+native macOS LaunchAgent activation, managed controller/worker round-trip,
+detached descendant cleanup, and PID-reuse process-identity evidence are not
+claimed by package-only checks.
 
 The stable [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)
 tag remains immutable at
-`e4fbaef04b764268fa038311d85573b18b549f9`. No stable tag or stable asset was
-modified while publishing preview.105.
+`e4fbaef04b764268fa038311d85573b18b549f9`. No stable tag or stable asset is
+modified by preview work.
