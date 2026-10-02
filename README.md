@@ -166,7 +166,9 @@ For current acceptance gaps, see [project status](docs/project-status.md).
 - **Fast LAN onboarding:** Add Computer can scan the local IPv4 segment and
   prefill a discovered controller; host-key approval, SSH credentials, worker
   installation, and pairing remain explicit. The live SSH onboarding harness
-  is documented in [`docs/provisioning-ssh-e2e-20261001.md`](docs/provisioning-ssh-e2e-20261001.md).
+  is documented in [`docs/provisioning-ssh-e2e-20261001.md`](docs/provisioning-ssh-e2e-20261001.md),
+  with a [脱敏配置骨架](docs/provisioning-ssh-e2e.example.json) for a
+  disposable acceptance run.
 - **Typed scheduling:** requirements are filtered against capabilities; current load and reservations decide the best eligible worker.
 - **Evidence by default:** every run records placement, native exit status, logs, cleanup state, and artifact SHA-256 values.
 - **Portable workers:** Linux and macOS Worker Kits share the same protocol; managed runtime support remains platform-gated.

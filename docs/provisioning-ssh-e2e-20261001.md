@@ -63,6 +63,46 @@ The command must be run only against a disposable worker and a controller
 whose token and worker-kit install roots are dedicated to that run. Do not put
 the private config, secret files, or generated report under Git.
 
+### Minimal private configuration
+
+Start from the repository's [脱敏配置骨架](provisioning-ssh-e2e.example.json),
+copy it outside the repository, and replace only the marked placeholders. The
+file is deliberately safe to commit: it contains no real endpoint, account,
+password, token, or host key.
+
+Keep these files and directories outside Git and dedicated to one disposable
+run:
+
+```text
+passwordFile       one-line SSH password (private file)
+controllerTokenFile one-line token for the controller at 127.0.0.1:47831
+dataRoot           fresh provisioning database root
+installRoot        exact signed Worker Kit install root
+outputRoot         fresh report root, created only with the ownership marker
+```
+
+Before starting the ignored test, verify the following in order:
+
+1. The controller health endpoint is ready and the token file belongs to that
+   controller instance.
+2. `installRoot/worker-kits/<target>/` contains the exact five-file kit for
+   the remote OS/architecture, signed by the repository's release publisher;
+   do not substitute a test fixture kit.
+3. SSH is enabled on the disposable target and the `SHA256:` fingerprint was
+   collected out of band from that target. Do not obtain the expected value
+   from the same untrusted SSH connection being approved.
+4. The remote account has the documented Windows PowerShell/CIM or Linux
+   shell/systemd prerequisites, and the target is disposable because cleanup
+   installs and removes a worker.
+5. `dataRoot`, `installRoot`, and `outputRoot` are absolute, separate paths;
+   never point them at a production controller, an existing user profile, or
+   the repository checkout.
+
+The harness reads the password and controller token only from their private
+files, requests session-only authentication, and writes a report containing
+only step outcomes, states, revisions, pairing status, and cleanup status.
+It never prints or persists those secret values.
+
 ## Current evidence boundary
 
 The harness and its configuration-guard tests are now in the repository. A

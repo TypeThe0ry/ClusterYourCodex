@@ -1,0 +1,16 @@
+{
+  "allowLiveSsh": true,
+  "disposable": true,
+  "ownershipMarker": "ClusterYourCodex live provisioning e2e output v1",
+  "host": "worker.example.invalid",
+  "port": 22,
+  "username": "REPLACE_WITH_DISPOSABLE_ACCOUNT",
+  "passwordFile": "D:\\validation\\cyc-live-ssh\\password.txt",
+  "expectedHostKeyFingerprint": "SHA256:REPLACE_WITH_OUT_OF_BAND_HOST_KEY_FINGERPRINT",
+  "controllerTokenFile": "D:\\validation\\cyc-live-ssh\\controller-token.txt",
+  "dataRoot": "D:\\validation\\cyc-live-ssh\\data",
+  "installRoot": "D:\\validation\\cyc-live-ssh\\install",
+  "outputRoot": "D:\\validation\\cyc-live-ssh\\report",
+  "maxSteps": 120,
+  "pollIntervalMs": 2000
+}
