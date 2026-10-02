@@ -96,6 +96,17 @@ controller/worker job, and quiet Uninstall. Its sanitized evidence is in the
 The record explicitly keeps blank-guest, Authenticode, N-1 → N Upgrade, and
 interrupted Rollback gates open.
 
+The same day also completed a real disposable SSH Add Computer run from the
+current controller source to a Linux x86_64 Worker Kit. Host-key approval,
+remote inventory, signed kit staging, enrollment, worker TLS heartbeat, a
+controller-to-worker job with verified logs/artifact, and multi-step removal
+all passed. The run exposed and fixed two source defects that package-only
+checks missed: the full-run log marker was not emitted by platform-specific
+scripts, and the Linux systemd unit used an invalid quoted
+`WorkingDirectory=`. See the [2026-10-02 live cross-platform audit](docs/current-audit-20261002.md).
+This strengthens the Windows → Linux boundary; it does not close the clean
+Windows VM gates in Issue #2 or the native macOS gates in Issue #3.
+
 #### Historical repository audit — 2026-09-23
 
 The authoritative source is the live `origin/main` ref; resolve its current
