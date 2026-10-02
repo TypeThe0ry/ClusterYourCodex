@@ -88,6 +88,14 @@ The [`vmrun`-only recheck](docs/vmware-cli-recheck-20261001.md) records the
 separate headless-session boundary and the fail-closed ACL proof; no product
 guard was bypassed and no credentials were retained in Git.
 
+The latest command-line-only candidate probe on 2026-10-02 repeated the
+disposable full-clone flow with a real Setup Install, same-version
+Repair-equivalent rerun, credential-free discovery, installed Windows
+controller/worker job, and quiet Uninstall. Its sanitized evidence is in the
+[`2026-10-02 VMware lifecycle record`](docs/vmware-current-candidate-lifecycle-20261002.md).
+The record explicitly keeps blank-guest, Authenticode, N-1 → N Upgrade, and
+interrupted Rollback gates open.
+
 #### Historical repository audit — 2026-09-23
 
 The authoritative source is the live `origin/main` ref; resolve its current
