@@ -1,19 +1,20 @@
 # ClusterYourCodex project status
 
-## Current GitHub audit — 2026-10-02 (PR #178 / preview.104)
+## Current GitHub audit — 2026-10-02 (PR #180 / preview.105)
 
-The current `origin/main` source is the squash merge of PR #178,
-`ea546ac5af88ce0f3370dd8b283b62475ce7c883`, which carries the preview.103
-versioned product surfaces and increases the Windows Setup acceptance child
-budget to 45 minutes. The previous release attempt exposed a hosted-runner
-packaging defect: Node.js was present but its installation directory did not
-contain a copyable `LICENSE` file. Preview.104 adds a fail-closed candidate
-selection that uses the runner license when it is a real file and otherwise
-uses the repository's `packaging/windows/LICENSE.node.txt`. The exact live
-evidence is recorded in
+The current `origin/main` source is the squash merge of PR #180,
+`d9c72456cfd351e8eb729ced2ad3c8d9ef7675be`, applied on top of the PR #179
+preview-packaging fix. PR #178 carries the preview.103 versioned product
+surfaces and increases the Windows Setup acceptance child budget to 45
+minutes. The previous release attempt exposed a hosted-runner packaging
+defect: Node.js was present but its installation directory did not contain a
+copyable `LICENSE` file. Preview.104 added a fail-closed candidate selection
+that uses the runner license when it is a real file and otherwise uses the
+repository's `packaging/windows/LICENSE.node.txt`. The exact live evidence is
+recorded in
 [`docs/current-audit-20261002.md`](current-audit-20261002.md).
 
-At the PR #178 merge point there were no other open pull requests. Issues #2 and #3 remain open because
+At the PR #180 merge point there were no other open pull requests. Issues #2 and #3 remain open because
 their remaining requirements are real native-environment gates, not replaced by
 hosted CI or package checks: Issue #2 still needs a genuinely clean Windows 11
 Install → Repair → N-1→N Upgrade → interrupted Rollback → Uninstall run plus
@@ -24,8 +25,14 @@ recorded as passed where their stated evidence boundary is satisfied.
 
 The stable `v0.0.1` tag remains immutable at
 `e4fbaef04b764268fa038311d85573b18b549f9f`. The next public build is tracked
-as prerelease `v0.1.0-preview.104`; it must be produced by the tagged release
+as prerelease `v0.1.0-preview.105`; it must be produced by the tagged release
 workflow only after the exact version-bump commit has a successful push CI run.
+
+PR #180 fixes the release-only provenance handoff exposed by the failed
+preview.104 run: the self-contained Windows job now receives the exact source
+commit from the identity gate instead of relying on a job-local environment
+variable. Preview.104 remains immutable and is not presented as a published
+release.
 
 ## Follow-up audit — 2026-09-23 (PR #120)
 
