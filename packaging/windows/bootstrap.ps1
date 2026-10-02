@@ -4713,6 +4713,14 @@ function Get-CycTaskSnapshots {
         [Parameter(Mandatory = $true)][string]$ExpectedInstallRoot,
         [string]$ExpectedSid
     )
+    if ($script:ProfileMatrixTaskGate -ne 'none') {
+        # Disposable profile children are launched through CreateProcessWithLogonW
+        # and must not query Task Scheduler directly. The elevated parent
+        # helper owns every gated task request, including SID/action/ownership
+        # checks; an empty child snapshot also keeps repair/uninstall from
+        # hanging before their first helper request.
+        return @()
+    }
     $snapshots = @()
     foreach ($name in @($script:ControllerTaskName, $script:WorkerTaskName)) {
         $snapshot = Get-CycTaskSnapshotByName -Name $name
@@ -4803,15 +4811,17 @@ function Stop-CycRuntime {
         [string]$ExpectedSid
     )
     $ownedTaskNames = New-Object System.Collections.Generic.List[string]
-    foreach ($name in @($script:WorkerTaskName, $script:ControllerTaskName)) {
-        $snapshot = Assert-CycLiveTaskOwnership `
-            -Name $name `
-            -InstallRoot $InstallRoot `
-            -ExpectedSid $ExpectedSid
-        if ($null -ne $snapshot) {
-            [void]$ownedTaskNames.Add($name)
-            Stop-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction SilentlyContinue
-            Invoke-CycOwnedTaskEnd -Name $name
+    if ($script:ProfileMatrixTaskGate -eq 'none') {
+        foreach ($name in @($script:WorkerTaskName, $script:ControllerTaskName)) {
+            $snapshot = Assert-CycLiveTaskOwnership `
+                -Name $name `
+                -InstallRoot $InstallRoot `
+                -ExpectedSid $ExpectedSid
+            if ($null -ne $snapshot) {
+                [void]$ownedTaskNames.Add($name)
+                Stop-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction SilentlyContinue
+                Invoke-CycOwnedTaskEnd -Name $name
+            }
         }
     }
     $root = Resolve-NormalizedPath $InstallRoot

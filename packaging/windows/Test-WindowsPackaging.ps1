@@ -598,6 +598,8 @@ try {
     } else { '' }
     Assert-True ($unregisterTaskFunction.Success -and
         $unregisterGatePrefix -notmatch 'Assert-CycLiveTaskOwnership') 'profile-matrix unregistration does not query Task Scheduler before the bounded parent helper'
+    Assert-True ($source -match "function Get-CycTaskSnapshots[\s\S]+?ProfileMatrixTaskGate -ne 'none'[\s\S]+?return @\(\)") 'gated lifecycle task snapshots are delegated away from the child scheduler'
+    Assert-True ($source -match "function Stop-CycRuntime[\s\S]+?ProfileMatrixTaskGate -eq 'none'[\s\S]+?Assert-CycLiveTaskOwnership") 'gated runtime stop does not query child task ownership'
 
     # Task ownership fixture: the lifecycle helpers must accept an exact
     # current-user/root binding, while rejecting a foreign SID, executable, or
