@@ -1362,6 +1362,16 @@ function Invoke-ProfileMatrixTaskHelperRequest {
         }
         if ($operation -eq 'Register') {
             $action = Assert-ProfileMatrixTaskAction -Request $request -Sid $Sid -UserName $UserName
+            $existingTask = Get-ProfileMatrixRootTaskStrict -TaskName ([string]$request.taskName)
+            if ($null -ne $existingTask) {
+                # Preserve the production fail-closed boundary before -Force:
+                # a foreign same-name task must never be overwritten merely
+                # because this request arrived through the elevated helper.
+                [void](Assert-ProfileMatrixTaskOwnership `
+                    -Task $existingTask `
+                    -Sid $Sid `
+                    -ExpectedAction $action)
+            }
             $taskAction = New-ScheduledTaskAction `
                 -Execute $action.executable `
                 -Argument $action.arguments `

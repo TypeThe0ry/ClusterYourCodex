@@ -426,6 +426,14 @@ function Get-FreshProductTasks {
         [Parameter(Mandatory = $true)][string[]]$TaskNames
     )
 
+    if ($ProfileMatrixTaskHelperMode) {
+        # The disposable profile is not a scheduler authority. The elevated
+        # profile-matrix parent records every task operation after validating
+        # the same SID/path/action boundary; querying Task Scheduler here can
+        # hang under CreateProcessWithLogonW on ARM64/x64 emulation.
+        return @()
+    }
+
     $tasks = New-Object 'System.Collections.Generic.List[object]'
     foreach ($taskName in $TaskNames) {
         # Task names are product-owned fixed names. Scope every query to the
@@ -487,6 +495,77 @@ function Normalize-FreshTaskLogonType {
         '^(?:S4U|4)$' { return 'S4U' }
         default { return $null }
     }
+}
+
+function Get-FreshTaskHelperRecords {
+    param([Parameter(Mandatory = $true)][string]$CaseRoot)
+
+    $evidencePath = Join-Path $CaseRoot 'task-helper-evidence.json'
+    if (-not (Test-Path -LiteralPath $evidencePath -PathType Leaf)) {
+        return @()
+    }
+    $value = Read-FreshUtf8Json -Path $evidencePath
+    if ($null -eq $value) {
+        return @()
+    }
+    # The parent writes a JSON array, but accept a single record as well so
+    # this assertion remains compatible with an older helper snapshot.
+    if ($value -is [System.Array]) {
+        return @($value)
+    }
+    return @($value)
+}
+
+function Assert-FreshTaskHelperRecord {
+    param(
+        [Parameter(Mandatory = $true)][string]$CaseRoot,
+        [Parameter(Mandatory = $true)][ValidateSet('Register', 'Unregister', 'Restore')][string]$Operation,
+        [Parameter(Mandatory = $true)][ValidateSet('ClusterYourCodex Controller', 'ClusterYourCodex Worker')][string]$TaskName,
+        [Parameter(Mandatory = $true)][string]$ExpectedSid,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $records = @(Get-FreshTaskHelperRecords -CaseRoot $CaseRoot)
+    $matches = @($records | Where-Object {
+        [string]$_.operation -ceq $Operation -and
+        [string]$_.taskName -ceq $TaskName -and
+        [string]$_.status -ceq 'passed'
+    })
+    Assert-FreshTest ($matches.Count -gt 0) "$Label completed through the elevated task helper"
+    $record = $matches[$matches.Count - 1]
+    Assert-FreshTest ([string]$record.sid -ceq $ExpectedSid) "$Label helper record binds the expected SID"
+    if ($Operation -ceq 'Register') {
+        Assert-FreshTest ([string]$record.observedTaskPath -ceq '\') "$Label helper record binds the root task path"
+        Assert-FreshTest ([string]$record.observedPrincipalSid -ceq $ExpectedSid) "$Label helper record binds the expected principal SID"
+        Assert-FreshTest (@($record.observedTriggerSids | Where-Object { [string]$_ -ceq $ExpectedSid }).Count -eq 1) "$Label helper record binds the expected trigger SID"
+    }
+    return $record
+}
+
+function Assert-FreshTaskHelperAction {
+    param(
+        [Parameter(Mandatory = $true)]$Record,
+        [Parameter(Mandatory = $true)][string]$ExpectedExecutable,
+        [Parameter(Mandatory = $true)][string]$ExpectedWorkingDirectory,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $action = $Record.observedAction
+    Assert-FreshTest ($null -ne $action) "$Label helper record contains an action"
+    Assert-FreshTest (
+        [string]::Equals(
+            (Resolve-FreshPath ([string]$action.executable)),
+            (Resolve-FreshPath $ExpectedExecutable),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    ) "$Label helper action is bound to the expected executable"
+    Assert-FreshTest (
+        [string]::Equals(
+            (Resolve-FreshPath ([string]$action.workingDirectory)),
+            (Resolve-FreshPath $ExpectedWorkingDirectory),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    ) "$Label helper action uses the expected working directory"
 }
 
 function ConvertTo-FreshSid {
@@ -683,33 +762,55 @@ try {
     Assert-FreshTest ([string]$installedManifest.installRoot -eq $installRoot) 'manifest binds the isolated install root'
     Assert-FreshTest ([string]$installedManifest.dataRoot -eq $dataRoot) 'manifest binds the isolated data root'
     Assert-FreshTest (-not [bool]$installedManifest.managedWorker.enabled) 'managed worker is disabled for isolated smoke'
-    $installedControllerTasks = @(Get-ScheduledTask -TaskName 'ClusterYourCodex Controller' -TaskPath '\' -ErrorAction SilentlyContinue)
-    $installedWorkerTasks = @(Get-ScheduledTask -TaskName 'ClusterYourCodex Worker' -TaskPath '\' -ErrorAction SilentlyContinue)
-    Assert-FreshTest ($installedControllerTasks.Count -eq 1) 'install registers exactly one controller task'
-    Assert-FreshTest ($installedWorkerTasks.Count -eq 0) 'disabled managed worker does not leave a worker task'
     $expectedTaskLogonType = if ($ProfileMatrixTestMode) { 'S4U' } else { 'Interactive' }
-    $observedTaskLogonType = Assert-FreshTaskPrincipal `
-        -Task $installedControllerTasks[0] `
-        -ExpectedLogonType $expectedTaskLogonType `
-        -ExpectedSid $expectedTaskSid `
-        -Label 'controller task'
-    Assert-FreshTest ([string]$installedControllerTasks[0].TaskPath -eq '\') 'controller task is registered at the expected task path'
-    $installedControllerActions = @($installedControllerTasks[0].Actions)
-    Assert-FreshTest ($installedControllerActions.Count -eq 1) 'controller task has exactly one action'
-    Assert-FreshTest (
-        [string]::Equals(
-            (Resolve-FreshPath ([string]$installedControllerActions[0].Execute)),
-            (Resolve-FreshPath (Join-Path $installRoot 'cyc-controller.exe')),
-            [System.StringComparison]::OrdinalIgnoreCase
-        )
-    ) 'controller task action is bound to the isolated installed controller'
-    Assert-FreshTest (
-        [string]::Equals(
-            (Resolve-FreshPath ([string]$installedControllerActions[0].WorkingDirectory)),
-            $installRoot,
-            [System.StringComparison]::OrdinalIgnoreCase
-        )
-    ) 'controller task action uses the isolated install root as its working directory'
+    if ($ProfileMatrixTaskHelperMode) {
+        $installedControllerRecord = Assert-FreshTaskHelperRecord `
+            -CaseRoot $caseRoot `
+            -TaskName 'ClusterYourCodex Controller' `
+            -Operation 'Register' `
+            -ExpectedSid $expectedTaskSid `
+            -Label 'install controller task'
+        $observedTaskLogonType = Normalize-FreshTaskLogonType -Value ([string]$installedControllerRecord.observedLogonType)
+        Assert-FreshTest ($observedTaskLogonType -ceq $expectedTaskLogonType) 'install controller task logon type matches the requested profile'
+        Assert-FreshTaskHelperAction `
+            -Record $installedControllerRecord `
+            -ExpectedExecutable (Join-Path $installRoot 'cyc-controller.exe') `
+            -ExpectedWorkingDirectory $installRoot `
+            -Label 'install controller task action'
+        [void](Assert-FreshTaskHelperRecord `
+            -CaseRoot $caseRoot `
+            -TaskName 'ClusterYourCodex Worker' `
+            -Operation 'Unregister' `
+            -ExpectedSid $expectedTaskSid `
+            -Label 'install disabled worker task cleanup')
+    } else {
+        $installedControllerTasks = @(Get-ScheduledTask -TaskName 'ClusterYourCodex Controller' -TaskPath '\' -ErrorAction SilentlyContinue)
+        $installedWorkerTasks = @(Get-ScheduledTask -TaskName 'ClusterYourCodex Worker' -TaskPath '\' -ErrorAction SilentlyContinue)
+        Assert-FreshTest ($installedControllerTasks.Count -eq 1) 'install registers exactly one controller task'
+        Assert-FreshTest ($installedWorkerTasks.Count -eq 0) 'disabled managed worker does not leave a worker task'
+        $observedTaskLogonType = Assert-FreshTaskPrincipal `
+            -Task $installedControllerTasks[0] `
+            -ExpectedLogonType $expectedTaskLogonType `
+            -ExpectedSid $expectedTaskSid `
+            -Label 'controller task'
+        Assert-FreshTest ([string]$installedControllerTasks[0].TaskPath -eq '\') 'controller task is registered at the expected task path'
+        $installedControllerActions = @($installedControllerTasks[0].Actions)
+        Assert-FreshTest ($installedControllerActions.Count -eq 1) 'controller task has exactly one action'
+        Assert-FreshTest (
+            [string]::Equals(
+                (Resolve-FreshPath ([string]$installedControllerActions[0].Execute)),
+                (Resolve-FreshPath (Join-Path $installRoot 'cyc-controller.exe')),
+                [System.StringComparison]::OrdinalIgnoreCase
+            )
+        ) 'controller task action is bound to the isolated installed controller'
+        Assert-FreshTest (
+            [string]::Equals(
+                (Resolve-FreshPath ([string]$installedControllerActions[0].WorkingDirectory)),
+                $installRoot,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )
+        ) 'controller task action uses the isolated install root as its working directory'
+    }
 
     & (Join-Path $installRoot 'cyc-controller.exe') '--version' *> (Join-Path $logRoot 'controller-version.log')
     Assert-FreshTest ($LASTEXITCODE -eq 0) 'installed controller --version succeeds'
@@ -734,13 +835,29 @@ try {
     [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $repairArguments -LogRoot $logRoot -Label 'repair' -TimeoutSeconds $LifecycleTimeoutSeconds)
     $repairedManifest = Read-FreshUtf8Json -Path $installedManifestPath
     Assert-FreshTest ([string]$repairedManifest.schemaVersion -eq 'cyc.dev/windows-install-manifest/v1') 'repair keeps a valid manifest'
-    $repairedControllerTasks = @(Get-ScheduledTask -TaskName 'ClusterYourCodex Controller' -TaskPath '\' -ErrorAction SilentlyContinue)
-    Assert-FreshTest ($repairedControllerTasks.Count -eq 1) 'repair keeps exactly one controller task'
-    [void](Assert-FreshTaskPrincipal `
-        -Task $repairedControllerTasks[0] `
-        -ExpectedLogonType $expectedTaskLogonType `
-        -ExpectedSid $expectedTaskSid `
-        -Label 'repaired controller task')
+    if ($ProfileMatrixTaskHelperMode) {
+        $repairedControllerRecord = Assert-FreshTaskHelperRecord `
+            -CaseRoot $caseRoot `
+            -TaskName 'ClusterYourCodex Controller' `
+            -Operation 'Register' `
+            -ExpectedSid $expectedTaskSid `
+            -Label 'repair controller task'
+        $repairedLogonType = Normalize-FreshTaskLogonType -Value ([string]$repairedControllerRecord.observedLogonType)
+        Assert-FreshTest ($repairedLogonType -ceq $expectedTaskLogonType) 'repair controller task logon type matches the requested profile'
+        Assert-FreshTaskHelperAction `
+            -Record $repairedControllerRecord `
+            -ExpectedExecutable (Join-Path $installRoot 'cyc-controller.exe') `
+            -ExpectedWorkingDirectory $installRoot `
+            -Label 'repair controller task action'
+    } else {
+        $repairedControllerTasks = @(Get-ScheduledTask -TaskName 'ClusterYourCodex Controller' -TaskPath '\' -ErrorAction SilentlyContinue)
+        Assert-FreshTest ($repairedControllerTasks.Count -eq 1) 'repair keeps exactly one controller task'
+        [void](Assert-FreshTaskPrincipal `
+            -Task $repairedControllerTasks[0] `
+            -ExpectedLogonType $expectedTaskLogonType `
+            -ExpectedSid $expectedTaskSid `
+            -Label 'repaired controller task')
+    }
     $repairedCliSha256 = (Get-CycFileHash -LiteralPath $installedCliPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-FreshTest ($repairedCliSha256 -ceq $installedCliSha256) 'repair restores the exact packaged CLI bytes'
     & $installedCliPath '--help' *> (Join-Path $logRoot 'cli-help-after-repair.log')
@@ -769,7 +886,24 @@ try {
         TaskNames = $productTaskNames
         Label = 'uninstall'
     }
-    [void](Assert-FreshLifecycleAbsent @uninstallPostcondition)
+    if ($ProfileMatrixTaskHelperMode) {
+        [void](Assert-FreshTaskHelperRecord `
+            -CaseRoot $caseRoot `
+            -TaskName 'ClusterYourCodex Worker' `
+            -Operation 'Unregister' `
+            -ExpectedSid $expectedTaskSid `
+            -Label 'uninstall worker task cleanup')
+        [void](Assert-FreshTaskHelperRecord `
+            -CaseRoot $caseRoot `
+            -TaskName 'ClusterYourCodex Controller' `
+            -Operation 'Unregister' `
+            -ExpectedSid $expectedTaskSid `
+            -Label 'uninstall controller task cleanup')
+        Assert-FreshTest (-not (Test-Path -LiteralPath $installRoot)) 'uninstall removes the isolated install root'
+        Assert-FreshTest (-not (Test-Path -LiteralPath $installedManifestPath -PathType Leaf)) 'uninstall removes the install manifest'
+    } else {
+        [void](Assert-FreshLifecycleAbsent @uninstallPostcondition)
+    }
     Assert-FreshTest (Test-Path -LiteralPath $dataRoot -PathType Container) 'uninstall preserves the isolated data root by default'
     $uninstalled = $true
 

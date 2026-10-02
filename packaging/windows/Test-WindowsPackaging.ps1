@@ -586,6 +586,20 @@ try {
         $registerTaskFunction.Value -match 'Resolve-CycScheduledTaskAccountName' -and
         $registerTaskFunction.Value -match 'ConvertTo-CycTaskSnapshotSid' -and
         $registerTaskFunction.Value -notmatch 'WindowsIdentity\]::GetCurrent\(\)\.Name') 'production task registration never trusts WindowsIdentity.Name directly'
+    $registerGatePrefix = if ($registerTaskFunction.Success) {
+        $registerTaskFunction.Value.Substring(0, $registerTaskFunction.Value.IndexOf("if (`$script:ProfileMatrixTaskGate -ne 'none')", [StringComparison]::Ordinal))
+    } else { '' }
+    Assert-True ($registerTaskFunction.Success -and
+        $registerGatePrefix -match 'Assert-CycTaskActionBinding' -and
+        $registerGatePrefix -notmatch 'Assert-CycLiveTaskOwnership') 'profile-matrix registration reaches the bounded parent helper before child scheduler queries'
+    $unregisterTaskFunction = [regex]::Match($source, 'function Unregister-CycTask[\s\S]+?function Get-CycTaskSnapshots')
+    $unregisterGatePrefix = if ($unregisterTaskFunction.Success) {
+        $unregisterTaskFunction.Value.Substring(0, $unregisterTaskFunction.Value.IndexOf("if (`$script:ProfileMatrixTaskGate -ne 'none')", [StringComparison]::Ordinal))
+    } else { '' }
+    Assert-True ($unregisterTaskFunction.Success -and
+        $unregisterGatePrefix -notmatch 'Assert-CycLiveTaskOwnership') 'profile-matrix unregistration does not query Task Scheduler before the bounded parent helper'
+    Assert-True ($source -match "function Get-CycTaskSnapshots[\s\S]+?ProfileMatrixTaskGate -ne 'none'[\s\S]+?return @\(\)") 'gated lifecycle task snapshots are delegated away from the child scheduler'
+    Assert-True ($source -match "function Stop-CycRuntime[\s\S]+?ProfileMatrixTaskGate -eq 'none'[\s\S]+?Assert-CycLiveTaskOwnership") 'gated runtime stop does not query child task ownership'
 
     # Task ownership fixture: the lifecycle helpers must accept an exact
     # current-user/root binding, while rejecting a foreign SID, executable, or

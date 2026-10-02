@@ -4626,11 +4626,17 @@ function Register-CycTask {
         throw 'Production task registration requires the Interactive principal.'
     }
     [void](Assert-CycTaskActionBinding -Name $Name -InstallRoot $ExpectedInstallRoot -Action $Action)
-    [void](Assert-CycLiveTaskOwnership -Name $Name -InstallRoot $ExpectedInstallRoot -ExpectedSid $ExpectedSid)
     if ($script:ProfileMatrixTaskGate -ne 'none') {
+        # The disposable profile cannot safely query Task Scheduler under its
+        # CreateProcessWithLogonW token on ARM64/x64-emulated Windows.  The
+        # elevated parent helper owns the bounded scheduler query and repeats
+        # the exact action/SID checks before registration.  Keep the child
+        # gate free of an unbounded scheduler call; the normal production path
+        # below retains the direct ownership preflight.
         [void](Invoke-CycProfileMatrixTaskGate -Operation Register -Name $Name -Action $Action)
         return
     }
+    [void](Assert-CycLiveTaskOwnership -Name $Name -InstallRoot $ExpectedInstallRoot -ExpectedSid $ExpectedSid)
     $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $taskSid = if ([string]::IsNullOrWhiteSpace($ExpectedSid)) {
         Get-CurrentUserSid
@@ -4682,14 +4688,20 @@ function Unregister-CycTask {
         [Parameter(Mandatory = $true)][string]$ExpectedInstallRoot,
         [string]$ExpectedSid
     )
+    if ($script:ProfileMatrixTaskGate -ne 'none') {
+        # As with registration, the parent helper is the only scheduler
+        # authority in the disposable profile path.  Querying the scheduler
+        # first from the child can hang on ARM64/x64 emulation even when the
+        # task is already absent, preventing the request from reaching the
+        # bounded helper and turning a harmless cleanup into a 15-minute
+        # child timeout.
+        [void](Invoke-CycProfileMatrixTaskGate -Operation Unregister -Name $Name)
+        return
+    }
     $snapshot = Assert-CycLiveTaskOwnership `
         -Name $Name `
         -InstallRoot $ExpectedInstallRoot `
         -ExpectedSid $ExpectedSid
-    if ($script:ProfileMatrixTaskGate -ne 'none') {
-        [void](Invoke-CycProfileMatrixTaskGate -Operation Unregister -Name $Name)
-        return
-    }
     if ($null -ne $snapshot) {
         Stop-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName $Name -TaskPath '\' -Confirm:$false
@@ -4701,6 +4713,14 @@ function Get-CycTaskSnapshots {
         [Parameter(Mandatory = $true)][string]$ExpectedInstallRoot,
         [string]$ExpectedSid
     )
+    if ($script:ProfileMatrixTaskGate -ne 'none') {
+        # Disposable profile children are launched through CreateProcessWithLogonW
+        # and must not query Task Scheduler directly. The elevated parent
+        # helper owns every gated task request, including SID/action/ownership
+        # checks; an empty child snapshot also keeps repair/uninstall from
+        # hanging before their first helper request.
+        return @()
+    }
     $snapshots = @()
     foreach ($name in @($script:ControllerTaskName, $script:WorkerTaskName)) {
         $snapshot = Get-CycTaskSnapshotByName -Name $name
@@ -4791,15 +4811,17 @@ function Stop-CycRuntime {
         [string]$ExpectedSid
     )
     $ownedTaskNames = New-Object System.Collections.Generic.List[string]
-    foreach ($name in @($script:WorkerTaskName, $script:ControllerTaskName)) {
-        $snapshot = Assert-CycLiveTaskOwnership `
-            -Name $name `
-            -InstallRoot $InstallRoot `
-            -ExpectedSid $ExpectedSid
-        if ($null -ne $snapshot) {
-            [void]$ownedTaskNames.Add($name)
-            Stop-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction SilentlyContinue
-            Invoke-CycOwnedTaskEnd -Name $name
+    if ($script:ProfileMatrixTaskGate -eq 'none') {
+        foreach ($name in @($script:WorkerTaskName, $script:ControllerTaskName)) {
+            $snapshot = Assert-CycLiveTaskOwnership `
+                -Name $name `
+                -InstallRoot $InstallRoot `
+                -ExpectedSid $ExpectedSid
+            if ($null -ne $snapshot) {
+                [void]$ownedTaskNames.Add($name)
+                Stop-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction SilentlyContinue
+                Invoke-CycOwnedTaskEnd -Name $name
+            }
         }
     }
     $root = Resolve-NormalizedPath $InstallRoot
