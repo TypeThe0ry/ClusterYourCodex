@@ -106,7 +106,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - name: Run disposable packaged lifecycle
-        timeout-minutes: 30
+        # The lifecycle test is bounded to 1500 seconds and may need additional
+        # time for controller startup, repair, teardown, and artifact collection.
+        timeout-minutes: 45
         env:
           CYC_DISPOSABLE_WINDOWS: "1"
         run: |
