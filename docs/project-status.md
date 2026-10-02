@@ -1,17 +1,19 @@
 # ClusterYourCodex project status
 
-## Current GitHub audit — 2026-10-02 (PR #177)
+## Current GitHub audit — 2026-10-02 (PR #178 / preview.104)
 
-The current `origin/main` source is the squash merge of PR #177,
-`412fed7895faf564e40a10ff91c997d294f5b3aa`. The change set fixes three
-production-path defects exposed by the disposable SSH acceptance run: the
-platform full-run scripts now emit the validated snapshot input marker, SSH
-provisioning follows its checkpointed removal state through durable deletion,
-and Linux Worker Kit systemd paths are escaped without invalid surrounding
-quotes. The exact live evidence is recorded in
+The current `origin/main` source is the squash merge of PR #178,
+`ea546ac5af88ce0f3370dd8b283b62475ce7c883`, which carries the preview.103
+versioned product surfaces and increases the Windows Setup acceptance child
+budget to 45 minutes. The previous release attempt exposed a hosted-runner
+packaging defect: Node.js was present but its installation directory did not
+contain a copyable `LICENSE` file. Preview.104 adds a fail-closed candidate
+selection that uses the runner license when it is a real file and otherwise
+uses the repository's `packaging/windows/LICENSE.node.txt`. The exact live
+evidence is recorded in
 [`docs/current-audit-20261002.md`](current-audit-20261002.md).
 
-The repository has no open pull requests. Issues #2 and #3 remain open because
+At the PR #178 merge point there were no other open pull requests. Issues #2 and #3 remain open because
 their remaining requirements are real native-environment gates, not replaced by
 hosted CI or package checks: Issue #2 still needs a genuinely clean Windows 11
 Install → Repair → N-1→N Upgrade → interrupted Rollback → Uninstall run plus
@@ -22,7 +24,7 @@ recorded as passed where their stated evidence boundary is satisfied.
 
 The stable `v0.0.1` tag remains immutable at
 `e4fbaef04b764268fa038311d85573b18b549f9f`. The next public build is tracked
-as prerelease `v0.1.0-preview.103`; it must be produced by the tagged release
+as prerelease `v0.1.0-preview.104`; it must be produced by the tagged release
 workflow only after the exact version-bump commit has a successful push CI run.
 
 ## Follow-up audit — 2026-09-23 (PR #120)

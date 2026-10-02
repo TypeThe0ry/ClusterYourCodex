@@ -772,9 +772,20 @@ jobs:
           $runtime = Join-Path $mcpDeploy 'runtime'
           New-Item -ItemType Directory -Force -Path $runtime | Out-Null
           Copy-Item -LiteralPath $nodePath -Destination (Join-Path $runtime 'node.exe') -Force
-          $nodeLicense = Join-Path (Split-Path -Parent $nodePath) 'LICENSE'
-          if (-not (Test-Path -LiteralPath $nodeLicense -PathType Leaf)) {
-            $nodeLicense = Join-Path $PWD 'packaging/windows/LICENSE.node.txt'
+          $nodeLicenseCandidates = @(
+            (Join-Path (Split-Path -Parent $nodePath) 'LICENSE'),
+            (Join-Path $PWD 'packaging/windows/LICENSE.node.txt')
+          )
+          $nodeLicense = $null
+          foreach ($candidate in $nodeLicenseCandidates) {
+            $candidateItem = Get-Item -LiteralPath $candidate -Force -ErrorAction SilentlyContinue
+            if ($null -ne $candidateItem -and -not $candidateItem.PSIsContainer) {
+              $nodeLicense = $candidateItem.FullName
+              break
+            }
+          }
+          if ([string]::IsNullOrWhiteSpace([string]$nodeLicense)) {
+            throw "Node.js license file was not found beside node.exe or in packaging/windows/LICENSE.node.txt"
           }
           Copy-Item -LiteralPath $nodeLicense -Destination (Join-Path $runtime 'LICENSE.node.txt') -Force
           ./scripts/Test-NativeCodexPlugin.ps1 -PluginRoot $plugin
