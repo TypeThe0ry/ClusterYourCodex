@@ -13,6 +13,30 @@
   repair marketplace is absent. Install and upgrade paths still fail closed on
   missing or tampered repair payloads.
 
+## [0.1.0-preview.106] - 2026-10-03
+
+### Fixed
+
+- Route every Windows profile-matrix lifecycle task probe through the elevated
+  parent helper instead of querying Task Scheduler from a disposable
+  `CreateProcessWithLogonW` child. This removes the ARM64/x64-emulation hang
+  observed during the standard profile while keeping exact-process shutdown
+  bounded.
+- Preserve the fail-closed ownership boundary before the parent helper uses
+  `Register-ScheduledTask -Force`; a foreign same-name task is still rejected
+  rather than overwritten.
+- Validate install, repair, and uninstall task results from the parent helper's
+  SID/path/action evidence, so the acceptance harness no longer reintroduces
+  the child scheduler deadlock after lifecycle operations.
+
+### Validation scope
+
+- PR #183 passed the complete repository CI, Windows Setup acceptance, bounded
+  Windows Rust tests, desktop bridge, security checks, and live Windows
+  controller/worker round-trip. Clean Windows VM and cross-platform evidence
+  remain documented separately; native macOS runtime validation stays deferred
+  under Issue #3. Stable `v0.0.1` remains unchanged.
+
 ## [0.1.0-preview.105] - 2026-10-02
 
 ### Fixed
@@ -1780,7 +1804,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.105...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.106...HEAD
+[0.1.0-preview.106]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.105...v0.1.0-preview.106
 [0.1.0-preview.105]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.104...v0.1.0-preview.105
 [0.1.0-preview.104]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.103...v0.1.0-preview.104
 [0.1.0-preview.103]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.102...v0.1.0-preview.103
