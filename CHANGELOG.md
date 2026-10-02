@@ -13,6 +13,27 @@
   repair marketplace is absent. Install and upgrade paths still fail closed on
   missing or tampered repair payloads.
 
+## [0.1.0-preview.103] - 2026-10-02
+
+### Fixed
+
+- Emit the validated snapshot input marker from the platform-specific full-run
+  scripts so the controller can verify real stdout evidence on Windows and
+  Linux workers.
+- Drive SSH provisioning removal through checkpointed remote teardown and final
+  durable deletion, instead of treating the first checkpoint as a failed
+  removal.
+- Generate Linux systemd worker units with escaped path values rather than
+  shell-style surrounding quotes that systemd rejects as non-absolute paths.
+
+### Validation scope
+
+- A disposable SSH Add Computer run completed host-key approval, inventory,
+  signed Worker Kit staging, enrollment, TLS heartbeat, controller-to-worker
+  execution, artifact verification, and multi-step removal. Windows↔Windows,
+  Windows↔Linux, and Linux↔Linux runtime evidence remains recorded separately;
+  native macOS runtime validation is intentionally deferred.
+
 All notable user-visible changes are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and product versions
 follow Semantic Versioning. Protocol schema identifiers such as `cyc.dev/v1`
@@ -1729,7 +1750,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.0.1...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.103...HEAD
+[0.1.0-preview.103]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.102...v0.1.0-preview.103
 [0.0.1]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.102...v0.0.1
 [0.1.0-preview.102]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.101...v0.1.0-preview.102
 [0.1.0-preview.101]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.100...v0.1.0-preview.101
