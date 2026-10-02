@@ -13,6 +13,22 @@
   repair marketplace is absent. Install and upgrade paths still fail closed on
   missing or tampered repair payloads.
 
+## [0.1.0-preview.104] - 2026-10-02
+
+### Fixed
+
+- Make the integration-preview staging job select a verified Node.js license
+  file instead of assuming the runner's `node.exe` directory contains one.
+  This keeps the tagged MCP preview bundle buildable on hosted Windows
+  runners while preserving the bundled runtime license in the archive.
+
+### Validation scope
+
+- The release identity gate, exact-source push CI, dependency security, and
+  CodeQL checks remain required before publishing this prerelease. Stable
+  `v0.0.1` is unchanged; clean native Windows GA and macOS runtime gates stay
+  tracked by Issues #2 and #3.
+
 ## [0.1.0-preview.103] - 2026-10-02
 
 ### Fixed
@@ -1750,7 +1766,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.103...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.104...HEAD
+[0.1.0-preview.104]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.103...v0.1.0-preview.104
 [0.1.0-preview.103]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.102...v0.1.0-preview.103
 [0.0.1]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.102...v0.0.1
 [0.1.0-preview.102]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.101...v0.1.0-preview.102
