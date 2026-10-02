@@ -138,16 +138,18 @@ fail-closed regression evidence for the installer logic, but it uses mocked
 Scheduled Task state and a pinned local test key; it is not Authenticode,
 clean-VM, or live controller/worker evidence.
 
-Also on 2026-10-02, a D-drive VMware full-clone probe used the passing Setup
-candidate from run `36811133742`. The real guest run passed reset, silent
-Install, same-version Repair-equivalent Setup, healthy controller/database,
-credential-free LAN discovery, installed Windows controller/worker round trip
-(`queued → running → succeeded`, all 14 checks true), and quiet Uninstall with
-data preservation. The VM was soft-stopped with `vmrun` and left powered off.
-The clone is an existing Windows 11 validation image rather than a blank guest;
-the candidate is not Authenticode-signed, and this run did not exercise
-version-changing Upgrade or interrupted Rollback. See the detailed
-[`2026-10-02 VMware record`](vmware-current-candidate-lifecycle-20261002.md).
+Also on 2026-10-02, a D-drive VMware full-clone probe first used the passing
+Setup candidate from run `36811133742`, then repeated the full sequence with the
+exact Setup artifact built from merged `main` commit
+`8bf2c4d676e368d9302ace1156f22bc3c867f46d` by run `36954089310`. The current-
+`main` guest run passed reset, silent Install, same-version Repair-equivalent
+Setup, healthy controller/database, credential-free LAN discovery, installed
+Windows controller/worker round trip (`queued → running → succeeded`, all 14
+checks true), and quiet Uninstall with data preservation. The VM was
+soft-stopped with `vmrun` and left powered off. The clone is an existing Windows
+11 validation image rather than a blank guest; the candidate is not
+Authenticode-signed, and this run did not exercise version-changing Upgrade or
+interrupted Rollback. See the detailed [`2026-10-02 VMware record`](vmware-current-candidate-lifecycle-20261002.md).
 
 This still does not close Issue #2's full
 Install → Repair → Upgrade → Rollback → Uninstall matrix: the version-changing
