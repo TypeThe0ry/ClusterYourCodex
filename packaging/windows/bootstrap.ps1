@@ -4536,64 +4536,291 @@ function Assert-CycTaskSnapshotOwnership {
     return $Snapshot
 }
 
+function Invoke-CycBoundedPowerShellJson {
+    <#
+    Task Scheduler cmdlets can block inside the RPC provider and cannot be
+    interrupted by a PowerShell timeout in the calling process. Run one
+    scheduler query in a child process bound to the exact Process handle and
+    terminate that handle on timeout. The child returns base64-encoded UTF-8
+    JSON so non-ASCII profile/account paths cannot be corrupted by the Windows
+    PowerShell console code page.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptText,
+        [ValidateRange(1, 120)][int]$TimeoutSeconds = 30
+    )
+    if ([string]::IsNullOrWhiteSpace($ScriptText)) {
+        throw 'Bounded PowerShell scheduler operation requires a script.'
+    }
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $powershell -PathType Leaf)) {
+        throw "Windows PowerShell host is missing: $powershell"
+    }
+    $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('cyc-scheduler-' + [Guid]::NewGuid().ToString('N'))
+    Assert-CycCreationPathNoReparse -Path $temporaryRoot
+    [void](New-Item -ItemType Directory -Path $temporaryRoot -Force)
+    $stdoutPath = Join-Path $temporaryRoot 'stdout.txt'
+    $stderrPath = Join-Path $temporaryRoot 'stderr.txt'
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ScriptText))
+    $schedulerProcess = $null
+    try {
+        $schedulerProcess = Start-Process `
+            -FilePath $powershell `
+            -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
+            -WorkingDirectory $temporaryRoot `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -PassThru `
+            -ErrorAction Stop
+        if (-not $schedulerProcess.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $schedulerProcess.Kill() } catch [System.InvalidOperationException] { }
+            $terminated = $false
+            try { $terminated = [bool]$schedulerProcess.WaitForExit(30000) } catch { }
+            if (-not $terminated) {
+                throw "Bounded Task Scheduler child did not terminate through its bound process handle (pid=$($schedulerProcess.Id))."
+            }
+            throw "Task Scheduler operation timed out after $TimeoutSeconds seconds (pid=$($schedulerProcess.Id))."
+        }
+        try { $schedulerProcess.Refresh() } catch { }
+        $exitCode = [int]$schedulerProcess.ExitCode
+        $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+            [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($stdoutPath)).Trim()
+        } else { '' }
+        $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+            [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($stderrPath)).Trim()
+        } else { '' }
+        if ([string]::IsNullOrWhiteSpace($stdout) -or $stdout.Length -gt 4MB) {
+            throw "Bounded Task Scheduler child returned no bounded result (exit=$exitCode, stderr=$stderr)."
+        }
+        try {
+            $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($stdout))
+            $result = ConvertFrom-Json -InputObject $json
+        } catch {
+            throw "Bounded Task Scheduler child returned invalid JSON (exit=$exitCode, stderr=$stderr)."
+        }
+        if ($exitCode -ne 0 -or [string]$result.status -cne 'passed') {
+            $detail = [string]$result.error
+            if ([string]::IsNullOrWhiteSpace($detail)) { $detail = $stderr }
+            throw "Bounded Task Scheduler operation failed (exit=$exitCode): $detail"
+        }
+        # Registration and other command-style scheduler operations return a
+        # successful envelope without a value member.  Do not dereference a
+        # missing property under the repository's strict-mode policy: a
+        # successful no-result operation is a valid bounded result.
+        $valueProperty = $result.PSObject.Properties['value']
+        if ($null -eq $valueProperty) { return $null }
+        return $valueProperty.Value
+    } finally {
+        if ($null -ne $schedulerProcess) { $schedulerProcess.Dispose() }
+        if (Test-Path -LiteralPath $temporaryRoot -PathType Container) {
+            Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Get-CycTaskSnapshotByName {
     param([Parameter(Mandatory = $true)][string]$Name)
-    $tasks = @(Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction SilentlyContinue)
-    if ($tasks.Count -gt 1) {
-        throw "Multiple root Scheduled Tasks found for $Name."
+    if ($Name -notin @($script:ControllerTaskName, $script:WorkerTaskName)) {
+        throw "Scheduled Task $Name is not a ClusterYourCodex-owned task name."
     }
-    $task = $tasks | Select-Object -First 1
-    if ($null -eq $task) { return $null }
-
-    $taskActionsProperty = $task.PSObject.Properties['Actions']
-    $taskActions = @(
-        if ($null -ne $taskActionsProperty -and $null -ne $taskActionsProperty.Value) {
-            $taskActionsProperty.Value | Select-Object -First 1
-        }
+    $scriptLines = @(
+        '$ErrorActionPreference = ''Stop'''
+        'function ConvertTo-CycChildSid([string]$Identity) {'
+        '    if ([string]::IsNullOrWhiteSpace($Identity)) { throw ''Scheduled Task identity is blank.'' }'
+        '    if ($Identity -match ''^S-\d-\d+(?:-\d+)+$'') { return $Identity }'
+        '    return ([System.Security.Principal.NTAccount]::new($Identity)).Translate([System.Security.Principal.SecurityIdentifier]).Value'
+        '}'
+        'try {'
+        '    $service = New-Object -ComObject Schedule.Service'
+        '    $service.Connect()'
+        '    $folder = $service.GetFolder(''\'')'
+        '    try {'
+        '        $task = $folder.GetTask(''__CYC_TASK_NAME__'')'
+        '    } catch {'
+        '        $hresult = [int]$_.Exception.HResult'
+        '        # 0x80070002 (ERROR_FILE_NOT_FOUND) and 0x8004130F (SCHED_E_TASK_NOT_FOUND) are confirmed absence only.'
+        '        if ($hresult -in @(-2147024894, -2147216625)) { $task = $null } else { throw }'
+        '    }'
+        '    if ($null -eq $task) {'
+        '        $value = [ordered]@{ exists = $false }'
+        '    } else {'
+        '        $definition = $task.Definition'
+        '        $actions = @($definition.Actions)'
+        '        if ($actions.Count -ne 1) { throw ''Scheduled Task has no single action.'' }'
+        '        $triggers = @($definition.Triggers)'
+        '        if ($triggers.Count -ne 1 -or [int]$triggers[0].Type -ne 9) { throw ''Scheduled Task must have exactly one logon trigger.'' }'
+        '        $triggerSids = @($triggers | ForEach-Object { if ($_.UserId) { ConvertTo-CycChildSid ([string]$_.UserId) } })'
+        '        if ($triggerSids.Count -ne 1) { throw ''Scheduled Task must have exactly one logon trigger identity.'' }'
+        '        $principalSid = ConvertTo-CycChildSid ([string]$definition.Principal.UserId)'
+        '        $value = [ordered]@{ exists = $true; name = ''__CYC_TASK_NAME__''; xml = [string]$task.Xml; taskPath = ''\''; principalSid = $principalSid; triggerSids = @($triggerSids); action = [ordered]@{ executable = [string]$actions[0].Path; arguments = [string]$actions[0].Arguments; workingDirectory = [string]$actions[0].WorkingDirectory }; wasRunning = ([int]$task.State -eq 4) }'
+        '    }'
+        '    $json = ConvertTo-Json -InputObject ([ordered]@{ status = ''passed''; value = $value }) -Depth 12 -Compress'
+        '    [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)'
+        '    [Console]::Write([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)))'
+        '} catch {'
+        '    $json = ConvertTo-Json -InputObject ([ordered]@{ status = ''failed''; error = [string]$_.Exception.Message }) -Depth 6 -Compress'
+        '    [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)'
+        '    [Console]::Write([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)))'
+        '    exit 1'
+        '}'
     )
-    if ($taskActions.Count -ne 1) { throw "Scheduled Task $Name has no single action to snapshot." }
-    $workingDirectoryProperty = $taskActions[0].PSObject.Properties['WorkingDirectory']
-
-    $taskTriggersProperty = $task.PSObject.Properties['Triggers']
-    $taskTriggers = @(
-        if ($null -ne $taskTriggersProperty -and $null -ne $taskTriggersProperty.Value) {
-            $taskTriggersProperty.Value
-        }
-    )
-    $triggerSids = @($taskTriggers | ForEach-Object {
-            $userProperty = $_.PSObject.Properties['UserId']
-            if ($null -ne $userProperty -and -not [string]::IsNullOrWhiteSpace([string]$userProperty.Value)) {
-                ConvertTo-CycTaskSnapshotSid ([string]$userProperty.Value)
-            }
-        })
-    if ($triggerSids.Count -ne 1) {
-        throw "Scheduled Task $Name must have exactly one logon trigger identity to snapshot."
-    }
-
-    $principalProperty = $task.PSObject.Properties['Principal']
-    $principal = if ($null -ne $principalProperty) { $principalProperty.Value } else { $null }
-    $principalUserProperty = if ($null -ne $principal) { $principal.PSObject.Properties['UserId'] } else { $null }
-    if ($null -eq $principalUserProperty -or
-        [string]::IsNullOrWhiteSpace([string]$principalUserProperty.Value)) {
-        throw "Scheduled Task $Name has no principal identity to snapshot."
-    }
-    $stateProperty = $task.PSObject.Properties['State']
-    $xml = Export-ScheduledTask -TaskName $Name -TaskPath '\'
+    $scriptText = ($scriptLines -join [Environment]::NewLine).Replace('__CYC_TASK_NAME__', $Name.Replace("'", "''"))
+    $value = Invoke-CycBoundedPowerShellJson -ScriptText $scriptText -TimeoutSeconds 30
+    if ($null -eq $value -or -not [bool]$value.exists) { return $null }
     return [PSCustomObject]@{
-        name = $Name
-        xml = $xml
-        taskPath = [string]$task.TaskPath
-        principalSid = ConvertTo-CycTaskSnapshotSid ([string]$principalUserProperty.Value)
-        triggerSids = $triggerSids
+        name = [string]$value.name
+        xml = [string]$value.xml
+        taskPath = [string]$value.taskPath
+        principalSid = [string]$value.principalSid
+        triggerSids = @($value.triggerSids | ForEach-Object { [string]$_ })
         action = [PSCustomObject]@{
-            executable = [string]$taskActions[0].Execute
-            arguments = [string]$taskActions[0].Arguments
-            workingDirectory = if ($null -ne $workingDirectoryProperty) {
-                [string]$workingDirectoryProperty.Value
-            } else { '' }
+            executable = [string]$value.action.executable
+            arguments = [string]$value.action.arguments
+            workingDirectory = [string]$value.action.workingDirectory
         }
-        wasRunning = ($null -ne $stateProperty -and [string]$stateProperty.Value -eq 'Running')
+        wasRunning = [bool]$value.wasRunning
     }
+}
+
+function Invoke-CycBoundedSchtasks {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('End', 'Delete', 'Run')][string]$Operation,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [switch]$IgnoreNonZero,
+        [ValidateRange(5, 120)][int]$TimeoutSeconds = 30
+    )
+    if ($Name -notin @($script:ControllerTaskName, $script:WorkerTaskName)) {
+        throw "Scheduled Task $Name is not a ClusterYourCodex-owned task name."
+    }
+    $schtasks = Join-Path $env:SystemRoot 'System32\schtasks.exe'
+    if (-not (Test-Path -LiteralPath $schtasks -PathType Leaf)) {
+        throw 'schtasks.exe is missing.'
+    }
+    $taskIdentifier = ('\' + $Name).Replace('"', '')
+    $arguments = switch ($Operation) {
+        'End' { '/End /TN "{0}"' -f $taskIdentifier }
+        'Delete' { '/Delete /TN "{0}" /F' -f $taskIdentifier }
+        'Run' { '/Run /TN "{0}"' -f $taskIdentifier }
+    }
+    $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('cyc-schtasks-' + [Guid]::NewGuid().ToString('N'))
+    Assert-CycCreationPathNoReparse -Path $temporaryRoot
+    [void](New-Item -ItemType Directory -Path $temporaryRoot -Force)
+    $schedulerProcess = $null
+    try {
+        # Start-Process can expose a null ExitCode on Windows when a native
+        # process is launched with redirected streams (notably on ARM64
+        # emulation). That would cast to zero and turn a failed scheduler
+        # operation into a false success. Use the .NET process handle so the
+        # actual native exit code is always read from the owning process.
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $schtasks
+        $startInfo.Arguments = $arguments
+        $startInfo.WorkingDirectory = $temporaryRoot
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $schedulerProcess = [System.Diagnostics.Process]::new()
+        $schedulerProcess.StartInfo = $startInfo
+        if (-not $schedulerProcess.Start()) {
+            throw "Unable to start schtasks.exe for /$Operation."
+        }
+        if (-not $schedulerProcess.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $schedulerProcess.Kill() } catch [System.InvalidOperationException] { }
+            $terminated = $false
+            try { $terminated = [bool]$schedulerProcess.WaitForExit(30000) } catch { }
+            if (-not $terminated) {
+                throw "schtasks /$Operation did not terminate through its bound process handle (pid=$($schedulerProcess.Id))."
+            }
+            throw "schtasks /$Operation timed out after $TimeoutSeconds seconds (task=$Name)."
+        }
+        $stdout = $schedulerProcess.StandardOutput.ReadToEnd().Trim()
+        $stderr = $schedulerProcess.StandardError.ReadToEnd().Trim()
+        $exitCode = [int]$schedulerProcess.ExitCode
+        if ($exitCode -ne 0 -and -not $IgnoreNonZero) {
+            throw "schtasks /$Operation failed for owned task '$Name' (exit=$exitCode, stdout=$stdout, stderr=$stderr)."
+        }
+        return [PSCustomObject]@{ operation = $Operation; taskName = $Name; exitCode = $exitCode }
+    } finally {
+        if ($null -ne $schedulerProcess) { $schedulerProcess.Dispose() }
+        if (Test-Path -LiteralPath $temporaryRoot -PathType Container) {
+            Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Invoke-CycBoundedTaskRegistration {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Action', 'Xml')][string]$Mode,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string]$Account,
+        [string]$ExpectedSid,
+        [ValidateSet('Interactive', 'S4U')][string]$LogonType = 'Interactive',
+        $Action,
+        [string]$Xml,
+        [ValidateRange(5, 120)][int]$TimeoutSeconds = 30
+    )
+    if ($Name -notin @($script:ControllerTaskName, $script:WorkerTaskName)) {
+        throw "Scheduled Task $Name is not a ClusterYourCodex-owned task name."
+    }
+    if ($Mode -eq 'Action' -and ($null -eq $Action -or [string]::IsNullOrWhiteSpace($Account) -or [string]::IsNullOrWhiteSpace($ExpectedSid))) {
+        throw 'Bounded task registration requires an action and account.'
+    }
+    if ($Mode -eq 'Xml' -and [string]::IsNullOrWhiteSpace($Xml)) {
+        throw 'Bounded XML task registration requires task XML.'
+    }
+    $encodeChildString = {
+        param([string]$Value)
+        return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Value))
+    }
+    $nameBase64 = & $encodeChildString $Name
+    $nameExpression = "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$nameBase64'))"
+    if ($Mode -eq 'Action') {
+        $executeExpression = "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$(& $encodeChildString ([string]$Action.executable))'))"
+        $argumentsExpression = "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$(& $encodeChildString ([string]$Action.arguments))'))"
+        $workingExpression = "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$(& $encodeChildString ([string]$Action.workingDirectory))'))"
+        $accountExpression = "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$(& $encodeChildString $Account)'))"
+        $sidExpression = "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$(& $encodeChildString $ExpectedSid)'))"
+        $logonExpression = "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$(& $encodeChildString $LogonType)'))"
+        $scriptLines = @(
+            '$ErrorActionPreference = ''Stop'''
+            ('$name = ' + $nameExpression)
+            ('$account = ' + $accountExpression)
+            ('$expectedSid = ' + $sidExpression)
+            ('$logonType = ' + $logonExpression)
+            ('$execute = ' + $executeExpression)
+            ('$arguments = ' + $argumentsExpression)
+            ('$workingDirectory = ' + $workingExpression)
+            'function ConvertTo-CycRegistrationSid([string]$Identity) { if ($Identity -match ''^S-\d-\d+(?:-\d+)+$'') { return $Identity }; return ([System.Security.Principal.NTAccount]::new($Identity)).Translate([System.Security.Principal.SecurityIdentifier]).Value }'
+            '$service = New-Object -ComObject Schedule.Service'
+            '$service.Connect()'
+            '$folder = $service.GetFolder(''\'')'
+            '$existing = $null'
+            'try { $existing = $folder.GetTask($name) } catch { $hresult = [int]$_.Exception.HResult; if ($hresult -notin @(-2147024894, -2147216625)) { throw } }'
+            'if ($null -ne $existing) { $existingDefinition = $existing.Definition; $existingActions = @($existingDefinition.Actions); $existingTriggers = @($existingDefinition.Triggers); if ($existingActions.Count -ne 1 -or $existingTriggers.Count -ne 1 -or [int]$existingTriggers[0].Type -ne 9 -or [string]$existingTriggers[0].UserId -eq '''' -or (ConvertTo-CycRegistrationSid ([string]$existingDefinition.Principal.UserId)) -cne $expectedSid -or (ConvertTo-CycRegistrationSid ([string]$existingTriggers[0].UserId)) -cne $expectedSid -or -not [string]::Equals([string]$existingActions[0].Path, $execute, [System.StringComparison]::OrdinalIgnoreCase) -or [string]$existingActions[0].Arguments -cne $arguments -or -not [string]::Equals([string]$existingActions[0].WorkingDirectory, $workingDirectory, [System.StringComparison]::OrdinalIgnoreCase)) { throw ''Existing same-name Scheduled Task is not owned by this installation.'' } }'
+            '$taskAction = New-ScheduledTaskAction -Execute $execute -Argument $arguments -WorkingDirectory $workingDirectory'
+            '$trigger = New-ScheduledTaskTrigger -AtLogOn -User $account'
+            '$principal = New-ScheduledTaskPrincipal -UserId $account -LogonType $logonType -RunLevel Limited'
+            '$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)'
+            'Register-ScheduledTask -TaskName $name -TaskPath ''\'' -Action $taskAction -Trigger $trigger -Principal $principal -Settings $settings -Description ''ClusterYourCodex per-user background component'' -Force | Out-Null'
+        )
+    } else {
+        $xmlBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Xml))
+        $scriptLines = @(
+            '$ErrorActionPreference = ''Stop'''
+            ('$name = ' + $nameExpression)
+            ('$xml = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(''' + $xmlBase64 + '''))')
+            'Register-ScheduledTask -TaskName $name -TaskPath ''\'' -Xml $xml | Out-Null'
+        )
+    }
+    $scriptLines += @(
+        '$json = ConvertTo-Json -InputObject ([ordered]@{ status = ''passed'' }) -Compress'
+        '[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)'
+        '[Console]::Write([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)))'
+    )
+    $scriptText = $scriptLines -join [Environment]::NewLine
+    [void](Invoke-CycBoundedPowerShellJson -ScriptText $scriptText -TimeoutSeconds $TimeoutSeconds)
 }
 
 function Assert-CycLiveTaskOwnership {
@@ -4671,15 +4898,13 @@ function Register-CycTask {
     # Re-check directly before the forceful replacement.  A task with the
     # product name but another owner/install root must never be overwritten.
     [void](Assert-CycLiveTaskOwnership -Name $Name -InstallRoot $ExpectedInstallRoot -ExpectedSid $ExpectedSid)
-    Register-ScheduledTask `
-        -TaskName $Name `
-        -TaskPath '\' `
-        -Action $taskAction `
-        -Trigger $trigger `
-        -Principal $principal `
-        -Settings $settings `
-        -Description 'ClusterYourCodex per-user background component' `
-        -Force | Out-Null
+    [void](Invoke-CycBoundedTaskRegistration `
+        -Mode Action `
+        -Name $Name `
+        -Account $identity `
+        -ExpectedSid $taskSid `
+        -LogonType $LogonType `
+        -Action $Action)
 }
 
 function Unregister-CycTask {
@@ -4703,8 +4928,11 @@ function Unregister-CycTask {
         -InstallRoot $ExpectedInstallRoot `
         -ExpectedSid $ExpectedSid
     if ($null -ne $snapshot) {
-        Stop-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $Name -TaskPath '\' -Confirm:$false
+        [void](Invoke-CycBoundedSchtasks -Operation End -Name $Name -IgnoreNonZero)
+        [void](Invoke-CycBoundedSchtasks -Operation Delete -Name $Name)
+        if ($null -ne (Get-CycTaskSnapshotByName -Name $Name)) {
+            throw "Owned Scheduled Task $Name remained after bounded removal."
+        }
     }
 }
 
@@ -4737,33 +4965,16 @@ function Get-CycTaskSnapshots {
 
 function Invoke-CycOwnedTaskEnd {
     param([Parameter(Mandatory = $true)][string]$Name)
-    $schtasks = Join-Path $env:SystemRoot 'System32\schtasks.exe'
-    if (-not (Test-Path -LiteralPath $schtasks -PathType Leaf)) { return }
-    $schedulerProcess = $null
     try {
         # /End is a scheduler-requested termination. It prevents the task's
         # RestartCount policy from treating our cleanup as an action failure;
         # killing the process first can otherwise launch a replacement while
         # the lifecycle is checking its ports.
-        $taskIdentifier = ('\' + $Name).Replace('"', '')
-        $arguments = '/End /TN "{0}"' -f $taskIdentifier
-        $schedulerProcess = Start-Process `
-            -FilePath $schtasks `
-            -ArgumentList $arguments `
-            -WindowStyle Hidden `
-            -PassThru `
-            -ErrorAction Stop
-        if (-not $schedulerProcess.WaitForExit(30000)) {
-            try { $schedulerProcess.Kill() } catch [System.InvalidOperationException] { }
-            try { [void]$schedulerProcess.WaitForExit(30000) } catch { }
-            throw "schtasks /End timed out for owned task '$Name'."
-        }
+        [void](Invoke-CycBoundedSchtasks -Operation End -Name $Name -IgnoreNonZero)
     } catch {
         # Stop-CycRuntime still performs exact executable-path termination and
         # the bounded listener preflight. A scheduler race is handled there;
         # this helper must not hide access-denied on the owned process itself.
-    } finally {
-        if ($null -ne $schedulerProcess) { $schedulerProcess.Dispose() }
     }
 }
 
@@ -4819,7 +5030,6 @@ function Stop-CycRuntime {
                 -ExpectedSid $ExpectedSid
             if ($null -ne $snapshot) {
                 [void]$ownedTaskNames.Add($name)
-                Stop-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction SilentlyContinue
                 Invoke-CycOwnedTaskEnd -Name $name
             }
         }
@@ -4838,7 +5048,6 @@ function Stop-CycRuntime {
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds(20)
     do {
         foreach ($name in @($ownedTaskNames)) {
-            Stop-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction SilentlyContinue
             Invoke-CycOwnedTaskEnd -Name $name
         }
         $ownedProcesses = @(Get-CycOwnedRuntimeProcesses -OwnedExecutables $ownedExecutables)
@@ -4968,11 +5177,60 @@ function Restore-CycTaskSnapshots {
             -Name ([string]$snapshot.name) `
             -InstallRoot $ExpectedInstallRoot `
             -ExpectedSid $ExpectedSid)
-        Register-ScheduledTask -TaskName $snapshot.name -TaskPath '\' -Xml $snapshot.xml | Out-Null
+        [void](Invoke-CycBoundedTaskRegistration `
+            -Mode Xml `
+            -Name ([string]$snapshot.name) `
+            -Xml ([string]$snapshot.xml))
         if ($snapshot.wasRunning) {
-            Start-ScheduledTask -TaskName $snapshot.name -TaskPath '\'
+            [void](Invoke-CycBoundedSchtasks -Operation Run -Name ([string]$snapshot.name))
         }
     }
+}
+
+function Get-CycTaskRuntimeStatus {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [ValidateRange(1, 120)][int]$TimeoutSeconds = 5
+    )
+    if ($Name -notin @($script:ControllerTaskName, $script:WorkerTaskName)) {
+        throw "Scheduled Task $Name is not a ClusterYourCodex-owned task name."
+    }
+    $scriptLines = @(
+        '$ErrorActionPreference = ''Stop'''
+        'try {'
+        '    $service = New-Object -ComObject Schedule.Service'
+        '    $service.Connect()'
+        '    $folder = $service.GetFolder(''\'')'
+        '    try {'
+        '        $task = $folder.GetTask(''__CYC_TASK_NAME__'')'
+        '    } catch {'
+        '        $hresult = [int]$_.Exception.HResult'
+        '        # 0x80070002 (ERROR_FILE_NOT_FOUND) and 0x8004130F (SCHED_E_TASK_NOT_FOUND) are confirmed absence only.'
+        '        if ($hresult -in @(-2147024894, -2147216625)) { $task = $null } else { throw }'
+        '    }'
+        '    if ($null -eq $task) {'
+        '        $value = [ordered]@{ exists = $false }'
+        '    } else {'
+        '        $definition = $task.Definition'
+        '        $actions = @($definition.Actions)'
+        '        if ($actions.Count -ne 1) { throw ''Scheduled Task has no single action.'' }'
+        '        $state = switch ([int]$task.State) { 1 { ''Disabled''; break } 2 { ''Queued''; break } 3 { ''Ready''; break } 4 { ''Running''; break } default { ''Unknown'' } }'
+        '        $lastTaskResult = [int64]$task.LastTaskResult'
+        '        if ($lastTaskResult -lt 0) { $lastTaskResult += 4294967296 }'
+        '        $value = [ordered]@{ exists = $true; state = $state; lastTaskResult = $lastTaskResult; lastRunTime = [string]$task.LastRunTime; action = [ordered]@{ executable = [string]$actions[0].Path; arguments = [string]$actions[0].Arguments; workingDirectory = [string]$actions[0].WorkingDirectory } }'
+        '    }'
+        '    $json = ConvertTo-Json -InputObject ([ordered]@{ status = ''passed''; value = $value }) -Depth 8 -Compress'
+        '    [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)'
+        '    [Console]::Write([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)))'
+        '} catch {'
+        '    $json = ConvertTo-Json -InputObject ([ordered]@{ status = ''failed''; error = [string]$_.Exception.Message }) -Depth 6 -Compress'
+        '    [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)'
+        '    [Console]::Write([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)))'
+        '    exit 1'
+        '}'
+    )
+    $scriptText = ($scriptLines -join [Environment]::NewLine).Replace('__CYC_TASK_NAME__', $Name.Replace("'", "''"))
+    return Invoke-CycBoundedPowerShellJson -ScriptText $scriptText -TimeoutSeconds $TimeoutSeconds
 }
 
 function Wait-CycTaskStable {
@@ -4990,48 +5248,43 @@ function Wait-CycTaskStable {
     $lastObservedProcess = $null
     do {
         $matchingActionProcess = $false
-        $task = Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction SilentlyContinue
-        if ($task) {
-            $lastObservedState = [string]$task.State
-            $actionsProperty = $task.PSObject.Properties['Actions']
-            if ($null -ne $actionsProperty -and $null -ne $actionsProperty.Value) {
-                $action = @($actionsProperty.Value | Select-Object -First 1)
-                if ($action.Count -eq 1) {
-                    $lastObservedAction = (([string]$action[0].Execute) + ' ' + ([string]$action[0].Arguments)).Trim()
-                    $executableName = Split-Path -Leaf ([string]$action[0].Execute)
-                    if (-not [string]::IsNullOrWhiteSpace($executableName)) {
-                        $executableName = [System.IO.Path]::GetFileNameWithoutExtension($executableName)
-                        foreach ($process in @(Get-Process -Name $executableName -ErrorAction SilentlyContinue)) {
-                            try {
-                                if ([string]::Equals([string]$process.Path, [string]$action[0].Execute, [StringComparison]::OrdinalIgnoreCase)) {
-                                    $matchingActionProcess = $true
-                                }
-                            } catch { }
+        $remainingSeconds = ($deadline - [DateTime]::UtcNow).TotalSeconds
+        if ($remainingSeconds -le 0) { break }
+        $probeTimeout = [Math]::Min(5, [Math]::Max(1, [int][Math]::Ceiling($remainingSeconds)))
+        try { $runtime = Get-CycTaskRuntimeStatus -Name $Name -TimeoutSeconds $probeTimeout } catch { $runtime = $null }
+        $task = if ($runtime -and [bool]$runtime.exists) {
+            $lastObservedState = [string]$runtime.state
+            $lastObservedResult = [long]$runtime.lastTaskResult
+            $lastObservedRunTime = [string]$runtime.lastRunTime
+            $action = $runtime.action
+            $lastObservedAction = (([string]$action.executable) + ' ' + ([string]$action.arguments)).Trim()
+            $executableName = Split-Path -Leaf ([string]$action.executable)
+            if (-not [string]::IsNullOrWhiteSpace($executableName)) {
+                $executableName = [System.IO.Path]::GetFileNameWithoutExtension($executableName)
+                foreach ($process in @(Get-Process -Name $executableName -ErrorAction SilentlyContinue)) {
+                    try {
+                        if ([string]::Equals([string]$process.Path, [string]$action.executable, [StringComparison]::OrdinalIgnoreCase)) {
+                            $matchingActionProcess = $true
                         }
-                        $lastObservedProcess = (@(Get-Process -Name $executableName -ErrorAction SilentlyContinue |
-                            Select-Object -First 5 |
-                            ForEach-Object { "#$($_.Id)" })) -join ','
-                        if ([string]::IsNullOrWhiteSpace($lastObservedProcess)) { $lastObservedProcess = 'absent' }
-                    }
+                    } catch { }
                 }
+                $lastObservedProcess = (@(Get-Process -Name $executableName -ErrorAction SilentlyContinue |
+                    Select-Object -First 5 |
+                    ForEach-Object { "#$($_.Id)" })) -join ','
+                if ([string]::IsNullOrWhiteSpace($lastObservedProcess)) { $lastObservedProcess = 'absent' }
             }
-            try {
-                $taskInfo = Get-ScheduledTaskInfo -TaskName $Name -TaskPath '\' -ErrorAction Stop
-                $lastObservedResult = [long]$taskInfo.LastTaskResult
-                $lastObservedRunTime = [string]$taskInfo.LastRunTime
-            } catch {
-                $lastObservedResult = 'unavailable'
-                $lastObservedRunTime = 'unavailable'
-            }
+            [PSCustomObject]@{ State = [string]$runtime.state }
         } else {
-            $lastObservedState = 'missing'
+            $lastObservedState = if ($null -eq $runtime) { 'unavailable' } else { 'missing' }
+            $lastObservedResult = if ($null -eq $runtime) { 'unavailable' } else { $null }
+            $lastObservedRunTime = if ($null -eq $runtime) { 'unavailable' } else { $null }
             $lastObservedProcess = 'unavailable'
+            $null
         }
         if ($task -and [string]$task.State -eq 'Running') {
             if (-not $runningSince) { $runningSince = [DateTime]::UtcNow }
             if (([DateTime]::UtcNow - $runningSince).TotalSeconds -ge $StableSeconds) {
-                $taskInfo = Get-ScheduledTaskInfo -TaskName $Name -TaskPath '\' -ErrorAction Stop
-                $lastResult = [long]$taskInfo.LastTaskResult
+                $lastResult = [long]$lastObservedResult
                 # SCHED_E_START_ATTEMPTED can describe a rejected duplicate
                 # start, not failure of the instance that is still running.
                 # Accept it only with the exact registered executable alive;
@@ -7078,13 +7331,13 @@ function Invoke-InstallOrRepairCore {
             -AgentsResult $agentsResult `
             -TlsIdentityResult $tlsIdentityResult
         if ($script:ProfileMatrixTaskGate -eq 'none') {
-            Start-ScheduledTask -TaskName $script:ControllerTaskName -TaskPath '\'
+            [void](Invoke-CycBoundedSchtasks -Operation Run -Name $script:ControllerTaskName)
             Wait-CycTaskStable -Name $script:ControllerTaskName -StableSeconds 2
             Wait-CycControllerReady
             Wait-CycManagedWorkerListenerReady -ManagedWorker $Plan.managedWorker
             Wait-CycTaskStable -Name $script:ControllerTaskName -StableSeconds 1
             if ($Plan.tasks[1].enabled) {
-                Start-ScheduledTask -TaskName $script:WorkerTaskName -TaskPath '\'
+                [void](Invoke-CycBoundedSchtasks -Operation Run -Name $script:WorkerTaskName)
                 Wait-CycTaskStable -Name $script:WorkerTaskName -StableSeconds 3
                 Test-CycWorkerStatus -Action $Plan.tasks[1].action -Config $Plan.workerConfig
                 Wait-CycTaskStable -Name $script:WorkerTaskName -StableSeconds 1
