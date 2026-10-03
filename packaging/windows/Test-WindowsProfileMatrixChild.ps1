@@ -200,6 +200,7 @@ $arguments = @(
     '-ScheduledTaskLogonType', 'Interactive'
 )
 if ($UseParentTaskHelper) {
+    $arguments += '-ProfileMatrixCaseRoot', $work
     $arguments += '-ProfileMatrixTaskHelperMode'
 }
 
