@@ -57,6 +57,16 @@ record is in [the VMware preview.106 upgrade record](vmware-preview106-upgrade-2
 sanitized JSON remains outside Git under
 `D:\ClusterYourCodex-validation\guest-exchange`.
 
+After that upgrade run, the same guest was uninstalled, verified with no
+install root or product tasks, and then installed again from the published
+preview.106 Setup. A deterministic `cyc.exe` byte mutation was repaired by a
+second Setup `/S` run: the Repair exit code was `0`, the exact original hash
+was restored, and controller health remained good. The installed controller
+and worker then passed the same 14-check live round trip, credential-free
+discovery passed, and quiet uninstall exited zero with the install root and
+product tasks absent afterward. See the [fresh VMware lifecycle record](vmware-preview106-fresh-lifecycle-20261003.md)
+for timestamps, hashes, and sanitized evidence paths.
+
 Independent evidence also covers Windows controller ↔ Linux worker and Linux
 controller ↔ Linux worker. macOS managed-runtime validation is intentionally
 deferred. These results prove usable preview paths, not every GA lifecycle gate.
