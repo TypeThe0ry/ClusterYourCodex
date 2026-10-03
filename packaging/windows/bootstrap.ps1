@@ -4700,19 +4700,26 @@ function Invoke-CycBoundedSchtasks {
     $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('cyc-schtasks-' + [Guid]::NewGuid().ToString('N'))
     Assert-CycCreationPathNoReparse -Path $temporaryRoot
     [void](New-Item -ItemType Directory -Path $temporaryRoot -Force)
-    $stdoutPath = Join-Path $temporaryRoot 'stdout.txt'
-    $stderrPath = Join-Path $temporaryRoot 'stderr.txt'
     $schedulerProcess = $null
     try {
-        $schedulerProcess = Start-Process `
-            -FilePath $schtasks `
-            -ArgumentList $arguments `
-            -WorkingDirectory $temporaryRoot `
-            -WindowStyle Hidden `
-            -RedirectStandardOutput $stdoutPath `
-            -RedirectStandardError $stderrPath `
-            -PassThru `
-            -ErrorAction Stop
+        # Start-Process can expose a null ExitCode on Windows when a native
+        # process is launched with redirected streams (notably on ARM64
+        # emulation). That would cast to zero and turn a failed scheduler
+        # operation into a false success. Use the .NET process handle so the
+        # actual native exit code is always read from the owning process.
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $schtasks
+        $startInfo.Arguments = $arguments
+        $startInfo.WorkingDirectory = $temporaryRoot
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $schedulerProcess = [System.Diagnostics.Process]::new()
+        $schedulerProcess.StartInfo = $startInfo
+        if (-not $schedulerProcess.Start()) {
+            throw "Unable to start schtasks.exe for /$Operation."
+        }
         if (-not $schedulerProcess.WaitForExit($TimeoutSeconds * 1000)) {
             try { $schedulerProcess.Kill() } catch [System.InvalidOperationException] { }
             $terminated = $false
@@ -4722,11 +4729,10 @@ function Invoke-CycBoundedSchtasks {
             }
             throw "schtasks /$Operation timed out after $TimeoutSeconds seconds (task=$Name)."
         }
-        try { $schedulerProcess.Refresh() } catch { }
+        $stdout = $schedulerProcess.StandardOutput.ReadToEnd().Trim()
+        $stderr = $schedulerProcess.StandardError.ReadToEnd().Trim()
         $exitCode = [int]$schedulerProcess.ExitCode
         if ($exitCode -ne 0 -and -not $IgnoreNonZero) {
-            $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($stdoutPath)).Trim() } else { '' }
-            $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($stderrPath)).Trim() } else { '' }
             throw "schtasks /$Operation failed for owned task '$Name' (exit=$exitCode, stdout=$stdout, stderr=$stderr)."
         }
         return [PSCustomObject]@{ operation = $Operation; taskName = $Name; exitCode = $exitCode }

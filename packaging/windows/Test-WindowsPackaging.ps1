@@ -4860,8 +4860,10 @@ exit 91
     Assert-True ($boundedNativeScheduler.Success -and
         $boundedNativeScheduler.Value -match "ValidateSet\('End', 'Delete', 'Run'\)" -and
         $boundedNativeScheduler.Value -match 'System32\\schtasks\.exe' -and
+        $boundedNativeScheduler.Value -match 'ProcessStartInfo' -and
         $boundedNativeScheduler.Value -match 'WaitForExit\(\$TimeoutSeconds \* 1000\)' -and
-        $boundedNativeScheduler.Value -match '\$schedulerProcess\.Kill\(\)') 'task end/delete/run operations use a bounded native schtasks adapter'
+        $boundedNativeScheduler.Value -match '\$schedulerProcess\.Kill\(\)' -and
+        $boundedNativeScheduler.Value -match '\$schedulerProcess\.ExitCode') 'task end/delete/run operations use a bounded native schtasks adapter with a real exit code'
     Assert-True ($bootstrapSource -match 'function Register-CycTask[\s\S]+Invoke-CycBoundedTaskRegistration[\s\S]+-Mode Action' -and
         $bootstrapSource -notmatch '(?m)^\s+Register-ScheduledTask\s') 'production task registration is delegated to the bounded child rather than an unbounded in-process cmdlet'
     $taskRegistrationFunction = [regex]::Match($bootstrapSource, 'function Invoke-CycBoundedTaskRegistration[\s\S]+?function Assert-CycLiveTaskOwnership')

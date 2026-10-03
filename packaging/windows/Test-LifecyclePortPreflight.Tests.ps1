@@ -96,7 +96,6 @@ Describe 'Owned runtime teardown' {
         Mock Assert-CycLiveTaskOwnership {
             [PSCustomObject]@{ name = $Name }
         }
-        Mock Stop-ScheduledTask { }
         Mock Invoke-CycOwnedTaskEnd { }
         Mock Resolve-NormalizedPath { param([string]$Path) return $Path }
         Mock Get-CimInstance {
@@ -123,6 +122,6 @@ Describe 'Owned runtime teardown' {
 
         $script:runtimeEnumeration | Should Be 3
         Assert-MockCalled Stop-Process -Times 2 -Exactly -Scope It
-        Assert-MockCalled Stop-ScheduledTask -Times 8 -Exactly -Scope It
+        Assert-MockCalled Invoke-CycOwnedTaskEnd -Times 8 -Exactly -Scope It
     }
 }
