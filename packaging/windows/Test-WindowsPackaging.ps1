@@ -729,6 +729,30 @@ try {
     $script:CycTaskProbeRegisteredAction = $null
     $script:CycTaskProbeRegisteredTrigger = $null
     $script:CycTaskProbeRegisteredPrincipal = $null
+    function Invoke-CycBoundedPowerShellJson {
+        param([string]$ScriptText, [int]$TimeoutSeconds)
+        if ($null -eq $script:CycTaskProbeTask) {
+            return [PSCustomObject]@{ exists = $false }
+        }
+        $task = $script:CycTaskProbeTask
+        return [PSCustomObject]@{
+            exists = $true
+            name = $script:ControllerTaskName
+            xml = '<Task />'
+            taskPath = [string]$task.TaskPath
+            principalSid = [string]$task.Principal.UserId
+            triggerSids = @([string]$task.Triggers[0].UserId)
+            action = [PSCustomObject]@{
+                executable = [string]$task.Actions[0].Execute
+                arguments = [string]$task.Actions[0].Arguments
+                workingDirectory = [string]$task.Actions[0].WorkingDirectory
+            }
+            state = [string]$task.State
+            lastTaskResult = [int64]0
+            lastRunTime = ''
+            wasRunning = ([string]$task.State -ceq 'Running')
+        }
+    }
     function Get-ScheduledTask {
         param([string]$TaskName, [string]$TaskPath, [string]$ErrorAction)
         return $script:CycTaskProbeTask
@@ -744,6 +768,22 @@ try {
     function Unregister-ScheduledTask {
         param([string]$TaskName, [string]$TaskPath, [switch]$Confirm)
         $script:CycTaskProbeUnregisterCount++
+    }
+    function Invoke-CycBoundedSchtasks {
+        param([string]$Operation, [string]$Name, [switch]$IgnoreNonZero, [int]$TimeoutSeconds)
+        if ($Operation -ceq 'End') { $script:CycTaskProbeStopCount++ }
+        if ($Operation -ceq 'Delete') {
+            $script:CycTaskProbeUnregisterCount++
+            $script:CycTaskProbeTask = $null
+        }
+        return [PSCustomObject]@{ operation = $Operation; taskName = $Name; exitCode = 0 }
+    }
+    function Invoke-CycBoundedTaskRegistration {
+        param([string]$Mode, [string]$Name, [string]$Account, [string]$ExpectedSid, [string]$LogonType, $Action, [string]$Xml, [int]$TimeoutSeconds)
+        $script:CycTaskProbeRegisterCount++
+        $script:CycTaskProbeRegisteredAction = $Action
+        $script:CycTaskProbeRegisteredTrigger = [PSCustomObject]@{ UserId = $Account }
+        $script:CycTaskProbeRegisteredPrincipal = [PSCustomObject]@{ UserId = $Account; LogonType = $LogonType }
     }
     function Register-ScheduledTask {
         param(
@@ -877,6 +917,9 @@ try {
                 -ExpectedSid $taskProbeSid) -and
             [string]$script:CycTaskProbeRegisteredPrincipal.LogonType -ceq 'Interactive') 'production task principal is canonical SID-bound Interactive identity'
     } finally {
+        Remove-Item Function:\Invoke-CycBoundedSchtasks -Force -ErrorAction SilentlyContinue
+        Remove-Item Function:\Invoke-CycBoundedTaskRegistration -Force -ErrorAction SilentlyContinue
+        Remove-Item Function:\Invoke-CycBoundedPowerShellJson -Force -ErrorAction SilentlyContinue
         Remove-Item Function:\Get-ScheduledTask -Force -ErrorAction SilentlyContinue
         Remove-Item Function:\Export-ScheduledTask -Force -ErrorAction SilentlyContinue
         Remove-Item Function:\Stop-ScheduledTask -Force -ErrorAction SilentlyContinue
@@ -918,7 +961,8 @@ try {
     Assert-True ($source -match 'Assert-SafePurgeTarget') 'recursive purge is guarded'
     Assert-True ($source -match 'Stop-CycRuntime') 'owned runtime is stopped before replacement'
     Assert-True ($source -match 'Get-Process -Id \$process\.Id -ErrorAction SilentlyContinue') 'runtime stop tolerates a process exiting between snapshot and stop'
-    Assert-True ($source -match 'function Invoke-CycOwnedTaskEnd[\s\S]+System32[\\/]schtasks\.exe[\s\S]+/End[\s\S]+RestartCount') 'runtime stop asks Task Scheduler to end owned tasks before killing their action process'
+    Assert-True ($source -match 'function Invoke-CycBoundedSchtasks[\s\S]+System32[\\/]schtasks\.exe[\s\S]+WaitForExit[\s\S]+Kill' -and
+        $source -match 'function Invoke-CycOwnedTaskEnd[\s\S]+Invoke-CycBoundedSchtasks[\s\S]+Operation End') 'runtime stop asks Task Scheduler to end owned tasks through an exact-handle bounded native adapter'
     Assert-True (($source -match 'taskIdentifier = ') -and ($source -match '/End /TN "\{0\}"') -and ($source -match 'WaitForExit\(30000\)')) 'runtime task end quotes task names and uses a bounded scheduler wait'
     Assert-True ($source -match 'function Get-CycOwnedRuntimeProcesses[\s\S]+Get-CimInstance -ClassName Win32_Process -OperationTimeoutSec 15[\s\S]+ExecutablePath') 'runtime ownership uses CIM executable paths when hosted by 32-bit PowerShell'
     Assert-True ($source -match 'function Stop-CycRuntime[\s\S]+ownedTaskNames[\s\S]+AddSeconds\(20\)[\s\S]+do \{[\s\S]+Invoke-CycOwnedTaskEnd[\s\S]+Get-CycOwnedRuntimeProcesses[\s\S]+\} while') 'runtime stop closes the bounded Scheduled Task restart race before probing ports'
@@ -1798,6 +1842,20 @@ exit 4
 
     $script:FakeTaskResult = 267009
     $script:FakeProcessPath = 'C:\fixture\cyc-controller.exe'
+    function Get-CycTaskRuntimeStatus {
+        param([string]$Name, [int]$TimeoutSeconds)
+        return [PSCustomObject]@{
+            exists = $true
+            state = 'Running'
+            lastTaskResult = [int64]$script:FakeTaskResult
+            lastRunTime = (Get-Date).ToString('o')
+            action = [PSCustomObject]@{
+                executable = 'C:\fixture\cyc-controller.exe'
+                arguments = ''
+                workingDirectory = 'C:\fixture'
+            }
+        }
+    }
     function Get-ScheduledTask { [PSCustomObject]@{ State = 'Running'; Actions = @([PSCustomObject]@{Execute='C:\fixture\cyc-controller.exe'; Arguments=''}) } }
     function Get-ScheduledTaskInfo { [PSCustomObject]@{ LastTaskResult = $script:FakeTaskResult; LastRunTime = Get-Date } }
     function Get-Process { [PSCustomObject]@{ Id=123; Path=$script:FakeProcessPath } }
@@ -1812,6 +1870,7 @@ exit 4
         try { Wait-CycTaskStable -Name 'fixture-task' -TimeoutSeconds 1 -StableSeconds 0 } catch { $taskFailureDetected = $true }
         Assert-True $taskFailureDetected 'non-success LastTaskResult fails task readiness'
     } finally {
+        Remove-Item Function:\Get-CycTaskRuntimeStatus -Force
         Remove-Item Function:\Get-ScheduledTask -Force
         Remove-Item Function:\Get-ScheduledTaskInfo -Force
         Remove-Item Function:\Get-Process -Force
@@ -4790,6 +4849,45 @@ exit 91
     Assert-True ($bootstrapSource -match 'parent-elevated-registration-v1[\s\S]+not-started') 'bootstrap has an explicit parent-elevated registration-only gate'
     Assert-True ($bootstrapSource -match 'ProfileMatrixTaskHelperMode[\s\S]+requires its explicit test switch') 'bootstrap requires an explicit helper-mode switch in addition to the IPC declaration'
     Assert-True ($bootstrapSource -match 'Invoke-CycProfileMatrixTaskGate[\s\S]+requestId') 'bootstrap binds gated task registration to a request/response exchange'
+    $boundedScheduler = [regex]::Match($bootstrapSource, 'function Invoke-CycBoundedPowerShellJson[\s\S]+?function Get-CycTaskSnapshotByName')
+    Assert-True ($boundedScheduler.Success -and
+        $boundedScheduler.Value -match 'Start-Process' -and
+        $boundedScheduler.Value -match 'WaitForExit\(\$TimeoutSeconds \* 1000\)' -and
+        $boundedScheduler.Value -match '\$schedulerProcess\.Kill\(\)' -and
+        $boundedScheduler.Value -match 'bound process handle' -and
+        $boundedScheduler.Value -match 'Base64String') 'production task queries run in a bounded child process with exact-handle timeout termination and an encoding-safe result channel'
+    $boundedNativeScheduler = [regex]::Match($bootstrapSource, 'function Invoke-CycBoundedSchtasks[\s\S]+?function Invoke-CycBoundedTaskRegistration')
+    Assert-True ($boundedNativeScheduler.Success -and
+        $boundedNativeScheduler.Value -match "ValidateSet\('End', 'Delete', 'Run'\)" -and
+        $boundedNativeScheduler.Value -match 'System32\\schtasks\.exe' -and
+        $boundedNativeScheduler.Value -match 'WaitForExit\(\$TimeoutSeconds \* 1000\)' -and
+        $boundedNativeScheduler.Value -match '\$schedulerProcess\.Kill\(\)') 'task end/delete/run operations use a bounded native schtasks adapter'
+    Assert-True ($bootstrapSource -match 'function Register-CycTask[\s\S]+Invoke-CycBoundedTaskRegistration[\s\S]+-Mode Action' -and
+        $bootstrapSource -notmatch '(?m)^\s+Register-ScheduledTask\s') 'production task registration is delegated to the bounded child rather than an unbounded in-process cmdlet'
+    $taskRegistrationFunction = [regex]::Match($bootstrapSource, 'function Invoke-CycBoundedTaskRegistration[\s\S]+?function Assert-CycLiveTaskOwnership')
+    Assert-True ($taskRegistrationFunction.Success -and
+        $taskRegistrationFunction.Value -match 'encodeChildString' -and
+        $taskRegistrationFunction.Value -match 'FromBase64String' -and
+        $taskRegistrationFunction.Value -match 'Existing same-name Scheduled Task is not owned') 'bounded registration transports Unicode/path arguments without PowerShell escape corruption and rechecks same-name ownership in the child'
+    $taskSnapshotFunction = [regex]::Match($bootstrapSource, 'function Get-CycTaskSnapshotByName[\s\S]+?function Assert-CycLiveTaskOwnership')
+    Assert-True ($taskSnapshotFunction.Success -and
+        $taskSnapshotFunction.Value -match 'Invoke-CycBoundedPowerShellJson' -and
+        $taskSnapshotFunction.Value -match 'hresult' -and
+        $taskSnapshotFunction.Value -match '0x8004130F' -and
+        $taskSnapshotFunction.Value -match '-2147024894' -and
+        $taskSnapshotFunction.Value -match 'Schedule\.Service' -and
+        $taskSnapshotFunction.Value -match '\$task\.Xml' -and
+        $taskSnapshotFunction.Value -match '\$definition\.Actions' -and
+        $taskSnapshotFunction.Value -match '\$definition\.Triggers') 'production task snapshots distinguish confirmed absence from scheduler errors while retaining XML/action identity data'
+    $taskRuntimeFunction = [regex]::Match($bootstrapSource, 'function Get-CycTaskRuntimeStatus[\s\S]+?function Wait-CycTaskStable')
+    Assert-True ($taskRuntimeFunction.Success -and
+        $taskRuntimeFunction.Value -match 'Invoke-CycBoundedPowerShellJson' -and
+        $taskRuntimeFunction.Value -match 'lastTaskResult' -and
+        $taskRuntimeFunction.Value -match 'lastRunTime') 'task readiness probes use the same bounded scheduler bridge and preserve runtime result diagnostics'
+    $waitTaskFunction = [regex]::Match($bootstrapSource, 'function Wait-CycTaskStable[\s\S]+?function Test-CycWorkerStatus')
+    Assert-True ($waitTaskFunction.Success -and
+        $waitTaskFunction.Value -match 'Get-CycTaskRuntimeStatus' -and
+        $waitTaskFunction.Value -notmatch 'Get-ScheduledTaskInfo|Get-ScheduledTask\s') 'task readiness does not issue unbounded scheduler cmdlets from the installer process'
     Assert-True ($bootstrapSource -match 'accountSid\s*=\s*\[string\]\$identity\.User\.Value') 'bootstrap carries the immutable profile-matrix account SID beside the display name'
     Assert-True ($bootstrapSource -match "ValidateSet\('Register', 'Unregister', 'Restore'\)") 'bootstrap task gate includes a dedicated restore operation'
     Assert-True ($bootstrapSource -match 'cyc\.dev/windows-profile-matrix-task-request/v2') 'bootstrap restore requests use the versioned structured task IPC contract'
@@ -4807,10 +4905,10 @@ exit 91
         $restoreTaskFunction.Value.Substring(0, $restoreTaskFunction.Value.IndexOf("if (`$script:ProfileMatrixTaskGate -ne 'none')", [StringComparison]::Ordinal))
     } else { '' }
     Assert-True ($restoreTaskFunction.Success -and
-        $restoreTaskFunction.Value -match 'Register-ScheduledTask[\s\S]+-Xml' -and
-        $restoreTaskFunction.Value -match 'Start-ScheduledTask' -and
-        $restoreGatePrefix -notmatch 'Register-ScheduledTask[\s\S]+-Xml' -and
-        $restoreGatePrefix -notmatch 'Start-ScheduledTask') 'bootstrap raw XML restore and task start remain production-only'
+        $restoreTaskFunction.Value -match 'Invoke-CycBoundedTaskRegistration[\s\S]+-Mode Xml' -and
+        $restoreTaskFunction.Value -match 'Invoke-CycBoundedSchtasks[\s\S]+-Operation Run' -and
+        $restoreGatePrefix -notmatch 'Invoke-CycBoundedTaskRegistration[\s\S]+-Mode Xml' -and
+        $restoreGatePrefix -notmatch 'Invoke-CycBoundedSchtasks[\s\S]+-Operation Run') 'bootstrap raw XML restore and task start remain production-only and bounded'
     $payloadEnumerator = [regex]::Match($bootstrapSource, 'function Get-PayloadFiles[\s\S]+?function Get-CycSha256Hex')
     Assert-True ($payloadEnumerator.Success -and $payloadEnumerator.Value -match 'Stack\[string\]' -and
         $payloadEnumerator.Value -match 'Get-ChildItem -LiteralPath \$current' -and
@@ -4853,7 +4951,7 @@ exit 91
         $atomicTargetHelper.Value -match 'ErrorCategory\]::ObjectNotFound' -and
         $atomicTargetHelper.Value -match 'Test-ReparsePoint\s+\$item' -and
         $atomicTargetHelper.Value -match '\$item\.PSIsContainer') 'atomic writers fail closed for valid and dangling reparse-point leaves'
-    Assert-True ($bootstrapSource -match 'if \(\$script:ProfileMatrixTaskGate -eq ''none''\)[\s\S]+Start-ScheduledTask') 'bootstrap keeps task start on the normal production path only'
+    Assert-True ($bootstrapSource -match 'if \(\$script:ProfileMatrixTaskGate -eq ''none''\)[\s\S]+Invoke-CycBoundedSchtasks[\s\S]+Operation Run') 'bootstrap keeps bounded task start on the normal production path only'
     Assert-True ($bootstrapSource -match 'enabled = \$true; logonType = \$script:ScheduledTaskLogonType') 'bootstrap binds enabled controller plan entries to the selected task principal'
 
     $nsis = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'ClusterYourCodex.nsi') -Raw
