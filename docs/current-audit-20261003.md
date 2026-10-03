@@ -4,7 +4,41 @@ This is the current release record for `TypeThe0ry/ClusterYourCodex`. The live
 GitHub repository, CI runs, and command-line VMware evidence are authoritative;
 older audit files are historical context only.
 
-## Current candidate and exact-commit evidence
+## Current public release and exact-commit evidence
+
+The latest public build is
+[`v0.1.0-preview.108`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.108),
+published at `2026-10-03T15:35:03Z` as a non-draft prerelease with 23 assets.
+The annotated tag dereferences to
+`022312e02439eea23ae1a7184f6bc08004fc7e42` (PR #193). That exact source passed
+main-push CI [37125532053](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/37125532053).
+
+Tagged release run
+[37127697694](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/37127697694)
+passed the identity gate, Linux/macOS/Windows portable builds, Worker Kit
+checks, Windows x64 self-contained build, post-archive fresh-deployment
+lifecycle, silent Setup lifecycle, release-index/provenance verification,
+and publication. The optional clean Windows 11 ARM64 x64-emulation job was
+still running at this audit point; its result is not claimed as a pass.
+
+All 23 assets were downloaded to
+`D:\ClusterYourCodex-validation\preview108-public-20261003`:
+
+- All 11 per-asset SHA-256 sidecars and 11 `SHA256SUMS` entries matched.
+- All 10 indexed artifacts matched their exact byte counts and hashes.
+- All 23 GitHub asset digests matched the downloaded bytes.
+- `gh attestation verify` verified the release provenance; all 10 subjects
+  matched the downloaded files and were bound to the exact tag, source
+  commit, and release workflow attempt 1.
+- Setup SHA-256:
+  `1ef7770358d60bd0c4f4d82ceb0526f1f609239f5862c4da041916c91245a87b`.
+- Release-index SHA-256:
+  `2a65f306fc3fe0083f87e9eb53709cd497c4b47288ef85cdb205e350c6fcd364`.
+
+This proves public prerelease asset integrity and source provenance, not
+Authenticode signing or completion of the remaining native GA gates.
+
+## Preparation history
 
 - PR #190 (`1db7b619bcf4f12bb9b40d0a334ba9edada759a3`) merged the bounded
   Windows Task Scheduler lifecycle fix.
@@ -20,10 +54,10 @@ older audit files are historical context only.
   `0.1.0-preview.108` release preparation. Its exact-SHA `main` CI run
   `37120683845` completed successfully, including Windows desktop/bridge,
   bounded Windows Rust, Worker Kits, cross-platform Rust, security checks, and
-  the Windows controller/worker live round-trip. Preview.108 is still not
-  tagged or published at this audit point.
-- The latest published public build remains
-  [`v0.1.0-preview.106`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.106).
+  the Windows controller/worker live round-trip.
+- PR #193 (`022312e02439eea23ae1a7184f6bc08004fc7e42`) refreshed the README
+  and release audit and added Changelog link verification to the ordinary CI
+  identity gate. It is the exact published preview.108 source.
 
 The command-line VMware candidate evidence for preview.107 is recorded in
 [the preview.107 candidate record](vmware-preview107-candidate-20261003.md).
@@ -101,6 +135,13 @@ blank Windows installation, it is not a GA lifecycle claim.
 Independent evidence also covers Windows controller ↔ Linux worker and Linux
 controller ↔ Linux worker. macOS managed-runtime validation is intentionally
 deferred. These results prove usable preview paths, not every GA lifecycle gate.
+
+A later CLI-only recheck of the D-drive GA-Rerun guest reached VMware Tools
+running state but did not complete application probes. Its VMware log records
+an idle guest ACPI S1 request followed by suspend and a clean VMX exit, not a
+CYC crash. The existing full clones share that sleep policy. A subsequent
+validation must disable AC sleep inside its disposable guest before long
+checks and must not relabel a `.vmss` resume as blank Windows acceptance.
 
 ## Remaining issue boundaries
 

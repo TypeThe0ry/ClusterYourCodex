@@ -13,7 +13,7 @@ hashes to the Codex session.
 
 ## Current public status
 
-The latest public developer build is **[v0.1.0-preview.106](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.106)**. The immutable stable baseline is **[v0.0.1](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)**. Work after preview.106 remains a prerelease candidate until the native acceptance gates are complete; no unreleased candidate should be treated as stable.
+The latest public developer build is **[v0.1.0-preview.108](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.108)**. It includes the bounded Windows Task Scheduler lifecycle fix, a self-contained Windows Setup, and verified release hashes and GitHub build provenance. It remains a prerelease while the native acceptance gates are incomplete. The immutable stable baseline is **[v0.0.1](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)**; it has not been replaced or modified.
 
 | Area | Status |
 | --- | --- |
@@ -28,7 +28,7 @@ the [current audit](docs/current-audit-20261003.md) and [project status](docs/pr
 
 ## Install the public Windows build
 
-1. Download [Windows Setup for preview.106](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.1.0-preview.106/ClusterYourCodex-Setup.exe) and its [SHA-256 sidecar](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.1.0-preview.106/ClusterYourCodex-Setup.exe.sha256).
+1. Download [Windows Setup for preview.108](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.1.0-preview.108/ClusterYourCodex-Setup.exe) and its [SHA-256 sidecar](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.1.0-preview.108/ClusterYourCodex-Setup.exe.sha256).
 2. Verify the download before running it:
 
    ~~~powershell

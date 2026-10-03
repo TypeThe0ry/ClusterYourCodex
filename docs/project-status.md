@@ -1,21 +1,36 @@
 # ClusterYourCodex project status
 
-## Current GitHub audit — 2026-10-03 (preview.108 candidate)
+## Current GitHub audit — 2026-10-03 (preview.108 published prerelease)
 
-The latest merged source is `478005eb074ad30bcf221e45b0ca1bf1a6bfd060`, the
-squash merge of PR #192. It prepares `0.1.0-preview.108` and corrects the
-Changelog comparison metadata that caused the immutable preview.107 release
-workflow to fail closed before publication. The exact main-push CI run
-`37120683845` completed successfully, including the Windows desktop/bridge,
-bounded Rust, Worker Kits, security, and live controller/worker checks.
-Preview.108 still needs its exact tag release workflow before it is public.
+The published preview.108 source is
+`022312e02439eea23ae1a7184f6bc08004fc7e42`, the squash merge of PR #193 and the
+peeled commit of the immutable preview.108 tag. PR #192 prepared the version
+and corrected the Changelog metadata that rejected preview.107. PR #193
+refreshed the README and audit and made the Changelog check part of ordinary
+CI. Exact main-push CI `37125532053` passed before the tag was pushed.
+
+[`v0.1.0-preview.108`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.108)
+was published at `2026-10-03T15:35:03Z` as a non-draft prerelease with 23
+assets. Tagged workflow `37127697694` passed Windows x64 self-contained,
+fresh-deployment and silent Setup lifecycle, portable platform builds,
+release indexing/provenance, and publication. The optional ARM64
+x64-emulation job was still running at this audit point and is not counted
+as accepted.
+
+The D-drive public asset download matched all 11 sidecars, all 11
+`SHA256SUMS` entries, all 10 indexed byte counts/hashes, and all 23 GitHub
+asset digests. GitHub provenance verification bound all 10 attested subjects
+to the exact tag/commit. Setup SHA-256 is
+`1ef7770358d60bd0c4f4d82ceb0526f1f609239f5862c4da041916c91245a87b`.
+Full commands, evidence boundaries, and the VM idle-sleep finding belong in
+[`docs/current-audit-20261003.md`](current-audit-20261003.md).
 
 PR #190 (`1db7b619bcf4f12bb9b40d0a334ba9edada759a3`) fixed bounded Windows Task
 Scheduler lifecycle operations. PR #191 (`29bbe9b301b1a85e30b3e7d79d9b843627466dbe`)
 prepared preview.107. The preview.107 tag remains immutable, but its release
 workflow `37117855967` rejected the missing Changelog compare link and created
-no public Release. The latest public developer build is therefore still
-[`v0.1.0-preview.106`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.106).
+no public Release. Preview.106 remains a historical published prerelease;
+preview.108 is now the latest public developer build.
 
 The D-drive command-line VMware candidate record for preview.107 is
 [`docs/vmware-preview107-candidate-20261003.md`](vmware-preview107-candidate-20261003.md).
@@ -29,7 +44,7 @@ Issues #2 and #3 remain open for their native acceptance boundaries. The stable
 `v0.0.1` tag remains immutable at
 `e4fbaef04b764268fa038311d85573b18b549f9f`.
 
-## Current GitHub audit — 2026-10-03 (preview.106 published prerelease)
+## Historical GitHub audit — 2026-10-03 (preview.106 published prerelease)
 
 The current `origin/main` source is `13c21b927bf885d1fc46614b7036f96ef0a0338c`,
 the squash merge of PR #187. Its preview source commit is
