@@ -148,6 +148,20 @@ function Get-ValidatedNodeExecutable {
 $bootstrap = Join-Path $PSScriptRoot 'bootstrap.ps1'
 . $bootstrap
 
+$freshDeploymentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-FreshDeployment.ps1') -Raw
+Assert-True ($freshDeploymentSource -match '\[string\]\$ProfileMatrixCaseRoot' -and
+    $freshDeploymentSource -match 'ProfileMatrixTaskHelperMode requires ProfileMatrixCaseRoot' -and
+    $freshDeploymentSource -match 'fresh deployment work root is a direct child of the profile matrix case root') `
+    'fresh deployment profile-matrix helper assertions bind evidence to the owned parent case root'
+Assert-True ($freshDeploymentSource -match 'Get-FreshTaskHelperRecordsFromValue' -and
+    $freshDeploymentSource -match 'generic[\s\S]*List projection' -and
+    $freshDeploymentSource -match '\$schemaProperty' -and
+    ([regex]::Match($freshDeploymentSource, 'function Get-FreshTaskHelperRecordsFromValue[\s\S]+?function Assert-FreshTaskHelperRecord').Value -match 'Get-FreshTaskHelperRecordsFromValue -Value \$valueProperty\.Value')) `
+    'fresh deployment profile-matrix helper evidence flattens legacy wrapper projections'
+$profileMatrixChildSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-WindowsProfileMatrixChild.ps1') -Raw
+Assert-True ($profileMatrixChildSource -match '\$arguments\s*\+=\s*''-ProfileMatrixCaseRoot'',\s*\$work') `
+    'profile matrix child forwards the parent-owned case root to fresh deployment'
+
 $nullAgentsTransactionNoOpsSucceeded = $true
 try {
     Complete-CycAgentsInstallTransaction -Transaction $null

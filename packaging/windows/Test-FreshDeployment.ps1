@@ -19,6 +19,11 @@ param(
 
     [switch]$ProfileMatrixTaskHelperMode,
 
+    # The profile-matrix parent owns the per-case helper evidence while this
+    # harness runs below <case>\fresh-deployment. Keep that boundary explicit
+    # instead of guessing from the child work root.
+    [string]$ProfileMatrixCaseRoot,
+
     # Every lifecycle child is a disposable acceptance process.  Keep the
     # parent bounded so a hung Windows PowerShell child cannot strand a
     # hosted runner (or skip the diagnostic upload and downstream gates).
@@ -508,12 +513,34 @@ function Get-FreshTaskHelperRecords {
     if ($null -eq $value) {
         return @()
     }
-    # The parent writes a JSON array, but accept a single record as well so
-    # this assertion remains compatible with an older helper snapshot.
-    if ($value -is [System.Array]) {
-        return @($value)
+    # Windows PowerShell can deserialize a prior JSON array through a generic
+    # List projection ({value: [...], Count: n}) when the file was written by
+    # a one-element pipeline. Flatten that compatibility shape before the
+    # helper assertions inspect versioned records.
+    return @(Get-FreshTaskHelperRecordsFromValue -Value $value)
+}
+
+function Get-FreshTaskHelperRecordsFromValue {
+    param([Parameter(Mandatory = $true)]$Value)
+
+    $entries = if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
+        $Value
+    } else {
+        @($Value)
     }
-    return @($value)
+    foreach ($entry in $entries) {
+        if ($null -eq $entry) { continue }
+        $valueProperty = $entry.PSObject.Properties['value']
+        $countProperty = $entry.PSObject.Properties['Count']
+        $schemaProperty = $entry.PSObject.Properties['schemaVersion']
+        if ($null -ne $valueProperty -and $null -ne $countProperty -and $null -eq $schemaProperty) {
+            foreach ($nested in @(Get-FreshTaskHelperRecordsFromValue -Value $valueProperty.Value)) {
+                $nested
+            }
+            continue
+        }
+        $entry
+    }
 }
 
 function Assert-FreshTaskHelperRecord {
@@ -663,6 +690,19 @@ function Wait-FreshFileUnlocked {
 
 $package = Resolve-FreshPath $PackageRoot
 $work = Resolve-FreshPath $WorkRoot
+$caseRoot = $work
+if ($ProfileMatrixTaskHelperMode) {
+    if ([string]::IsNullOrWhiteSpace($ProfileMatrixCaseRoot)) {
+        throw 'ProfileMatrixTaskHelperMode requires ProfileMatrixCaseRoot.'
+    }
+    $caseRoot = Resolve-FreshPath $ProfileMatrixCaseRoot
+    Assert-FreshTest (Test-Path -LiteralPath $caseRoot -PathType Container) 'profile matrix case root exists'
+    $caseRootItem = Get-Item -LiteralPath $caseRoot -Force -ErrorAction Stop
+    Assert-FreshTest (($caseRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) 'profile matrix case root is not a reparse point'
+    $workParent = Resolve-FreshPath (Split-Path -Parent $work)
+    Assert-FreshTest ([string]::Equals($workParent, $caseRoot, [System.StringComparison]::OrdinalIgnoreCase)) 'fresh deployment work root is a direct child of the profile matrix case root'
+    Assert-FreshTest ((Split-Path -Leaf $work) -ceq 'fresh-deployment') 'profile matrix fresh deployment work root has the expected leaf name'
+}
 $workExistedAtStart = Test-Path -LiteralPath $work
 $payload = Join-Path $package 'payload'
 $manifestPath = Join-Path $package 'preview-manifest.json'
