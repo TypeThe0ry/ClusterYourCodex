@@ -663,6 +663,11 @@ function Wait-FreshFileUnlocked {
 
 $package = Resolve-FreshPath $PackageRoot
 $work = Resolve-FreshPath $WorkRoot
+# Profile-matrix task-helper evidence is owned by the same per-case work root
+# passed to this harness. Keep an explicit alias for the helper assertions;
+# Windows PowerShell 5.1 runs with StrictMode and otherwise treats the
+# helper-only `$caseRoot` references below as an undefined variable.
+$caseRoot = $work
 $workExistedAtStart = Test-Path -LiteralPath $work
 $payload = Join-Path $package 'payload'
 $manifestPath = Join-Path $package 'preview-manifest.json'

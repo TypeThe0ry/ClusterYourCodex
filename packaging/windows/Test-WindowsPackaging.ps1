@@ -148,6 +148,10 @@ function Get-ValidatedNodeExecutable {
 $bootstrap = Join-Path $PSScriptRoot 'bootstrap.ps1'
 . $bootstrap
 
+$freshDeploymentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-FreshDeployment.ps1') -Raw
+Assert-True ($freshDeploymentSource -match '(?m)^\$caseRoot\s*=\s*\$work\s*$') `
+    'fresh deployment profile-matrix helper assertions bind caseRoot to the owned work root'
+
 $nullAgentsTransactionNoOpsSucceeded = $true
 try {
     Complete-CycAgentsInstallTransaction -Transaction $null
