@@ -80,6 +80,16 @@ upgraded from preview.105 to preview.106 with the Release Setup (exit 0), then
 re-ran the 14-check live round trip and discovery probe against controller
 version 0.1.0-preview.106. See the [VMware preview.106 upgrade record](docs/vmware-preview106-upgrade-20261003.md).
 
+The same guest was then left without an install root or product task, freshly
+installed from the published Setup, repaired after a deterministic `cyc.exe`
+byte mutation (exact hash restored, Repair exit `0`), exercised through the
+14-check round trip and credential-free discovery again, and quietly
+uninstalled with no product process/task left. See the [fresh VMware lifecycle
+record](docs/vmware-preview106-fresh-lifecycle-20261003.md). This is real VM
+evidence for Install → Repair → live round trip → Uninstall; it does not claim
+the still-missing interrupted rollback/downgrade, independent guest-worker,
+production signing/tray, or one-blank-VM combined matrix gates.
+
 The optional clean Windows 11 ARM64 x64-emulation acceptance is tracked by the
 same release run, but its fresh-deployment Repair child hit the 900-second
 bound and the job failed under `continue-on-error`; it is not a passing ARM64
@@ -384,6 +394,7 @@ Run the browser renderer with `pnpm dev`; it is not the installed native app. Fo
 - [Project status](docs/project-status.md)
 - [Cross-platform validation and LAN discovery](docs/cross-platform-validation-20260927.md)
 - [Current VMware candidate install probe](docs/vmware-current-candidate-install-20261001.md)
+- [VMware preview.106 fresh lifecycle](docs/vmware-preview106-fresh-lifecycle-20261003.md)
 
 Open acceptance work is tracked in [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
 and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). Hosted CI and
