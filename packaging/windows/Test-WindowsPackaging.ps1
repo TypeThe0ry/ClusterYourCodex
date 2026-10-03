@@ -934,6 +934,12 @@ try {
             CycTaskProbeRegisteredAction, CycTaskProbeRegisteredTrigger, CycTaskProbeRegisteredPrincipal `
             -Scope Script -ErrorAction SilentlyContinue
     }
+
+    # The task-probe fixture removes the bounded scheduler shims it owns.  The
+    # later uninstall/Codex fixtures exercise the real bounded preflight path,
+    # so restore the production bootstrap functions before continuing.
+    . $bootstrap
+
     Assert-True ($source -match 'AreAccessRulesProtected') 'ACL inheritance is verified'
     Assert-True ($source -match "S-1-5-32-544[\s\S]+ReadAndExecute") 'install ACL grants BUILTIN Administrators only the read/execute access needed by over-the-shoulder elevation'
     Assert-True ($source -match 'Set-PrivateDirectoryAcl -Path \$Plan\.installRoot -AllowAdministratorsReadAndExecute[\s\S]+Set-PrivateDirectoryAcl -Path \$Plan\.dataRoot') 'only the install tree, never private data/TLS state, receives the administrator read contract'
