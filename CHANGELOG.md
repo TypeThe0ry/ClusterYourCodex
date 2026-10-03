@@ -13,6 +13,25 @@
   repair marketplace is absent. Install and upgrade paths still fail closed on
   missing or tampered repair payloads.
 
+## [0.1.0-preview.109] - 2026-10-04
+
+### Fixed
+
+- Bind the Windows profile-matrix helper evidence to the parent-owned case root
+  instead of the disposable `fresh-deployment` work root. The child now passes
+  that root explicitly, the harness rejects ambiguous layouts, and legacy
+  Windows PowerShell `Value`/`Count` JSON projections are recursively flattened
+  before helper-record validation. This fixes the ARM64 profile-matrix failure
+  caused by an undefined `$caseRoot` and an evidence path mismatch.
+
+### Validation scope
+
+- PR #195 (`22a2f6fa993aa9e25e47a814395e485a3dba90d7`) passed the full CI,
+  Windows Setup acceptance, bounded Windows process checks, Desktop/Codex
+  bridge live round-trip, security scans, and native Worker Kit checks. The
+  exact tagged build remains a prerelease until the native Issue #2/#3 gates
+  are complete; stable `v0.0.1` is unchanged.
+
 ## [0.1.0-preview.108] - 2026-10-03
 
 ### Fixed
@@ -1842,7 +1861,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.108...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.109...HEAD
+[0.1.0-preview.109]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.108...v0.1.0-preview.109
 [0.1.0-preview.108]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.107...v0.1.0-preview.108
 [0.1.0-preview.107]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.106...v0.1.0-preview.107
 [0.1.0-preview.106]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.105...v0.1.0-preview.106

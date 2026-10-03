@@ -1,5 +1,28 @@
 # ClusterYourCodex project status
 
+## Current GitHub audit — 2026-10-04 (preview.109 candidate)
+
+PR #195 is merged at `22a2f6fa993aa9e25e47a814395e485a3dba90d7`. It fixes the
+Windows profile-matrix helper's case-root binding: the parent evidence root is
+passed explicitly, the disposable `fresh-deployment` path is required to be its
+direct child, and legacy Windows PowerShell `Value`/`Count` wrappers are
+flattened before record validation. The PR's exact CI run passed the Windows
+bounded process and Setup lifecycle jobs, the Desktop/Codex bridge live
+round-trip, security scans, and Linux/macOS Worker Kit checks.
+
+The next public candidate is `v0.1.0-preview.109`, and it must remain a
+prerelease. The D-drive VMware CLI run against the published preview.108 also
+passed Setup/Repair, controller health/database, scheduled-task readiness,
+credential-free discovery, and a same-host live job (`queued -> running ->
+succeeded`, 14/14 checks). Sanitized evidence is retained outside Git under
+`D:\\ClusterYourCodex-validation\\preview108-public-20261003\\`.
+
+Issues #2 and #3 remain open. Windows↔Windows, Windows↔Linux, Linux↔Linux,
+and LAN discovery evidence is recorded at its stated boundary; clean-VM
+Install → Repair → Upgrade → Rollback → Uninstall and native macOS runtime
+acceptance are not being claimed. Stable `v0.0.1` remains immutable at
+`e4fbaef04b764268fa038311d85573b18b549f9`.
+
 ## Current GitHub audit — 2026-10-03 (preview.108 published prerelease)
 
 The published preview.108 source is
