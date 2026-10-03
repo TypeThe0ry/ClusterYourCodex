@@ -9,17 +9,17 @@ ClusterYourCodex is a Codex-first controller and worker fleet for distributing b
 ![ClusterYourCodex execution flow](docs/assets/cluster-your-codex-flow.svg)
 
 > **Repository snapshot:** `main` contains the published `v0.0.1` stable line and
-> the `v0.1.0-preview.106` developer-preview candidate. Current fixes remain
-> prerelease candidates until the native acceptance evidence in Issues #2 and #3
-> is complete. The published `v0.0.1` tag and assets are immutable.
+> the published `v0.1.0-preview.106` developer preview. Preview builds remain
+> prerelease candidates while the native acceptance evidence in Issues #2 and #3
+> is completed. The published `v0.0.1` tag and assets are immutable.
 
 ## Start here
 
 | Goal | Action |
 | --- | --- |
 | Use the published baseline | Install [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1) |
-| Use the published public build | Install the [latest published preview](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.105) |
-| Track the current candidate | Inspect the [`v0.1.0-preview.106` tag](https://github.com/TypeThe0ry/ClusterYourCodex/tree/v0.1.0-preview.106); its Release assets are not published yet |
+| Use the published public build | Install the [latest published preview](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.106) |
+| Inspect source and provenance | Open the [`v0.1.0-preview.106` tag](https://github.com/TypeThe0ry/ClusterYourCodex/tree/v0.1.0-preview.106) or its [23-asset Release](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.106) |
 | Recover a broken native plugin | Run the [one-command repair](#codex-plugin-integrity) below |
 | Verify a checkout | Run the [native plugin checks](#native-plugin-checks) |
 
@@ -61,8 +61,15 @@ all product surfaces to `0.1.0-preview.106`. The exact PR-183 CI run
 `37057151914` and the preview.106 candidate CI run `37062423830` passed the
 Windows Setup lifecycle, bounded Windows Rust, desktop bridge, Linux/macOS
 Rust, Worker Kits, security, and live Windows controller/worker checks. The
-tagged release workflow repeats the exact-commit identity gate before building
-or publishing any asset.
+tagged release workflow `37067050549` then passed the exact-commit identity
+gate, built the packages, and published the prerelease at 2026-10-03
+00:06:21 UTC.
+
+The published Release contains 23 assets, including Setup.exe, Windows
+self-contained and portable archives, Linux/macOS packages, Worker Kits, the
+SBOM, provenance metadata, `release-index.json`, and SHA-256 files. A complete
+download to `D:\ClusterYourCodex-validation\preview106` matched all 11
+per-asset sidecars locally.
 
 The D-drive VMware Windows 11 guest also passed Setup, controller health
 (HTTP 200/database ok), credential-free LAN discovery, and a self-contained
