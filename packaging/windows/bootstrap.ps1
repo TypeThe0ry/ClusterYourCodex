@@ -4604,7 +4604,13 @@ function Invoke-CycBoundedPowerShellJson {
             if ([string]::IsNullOrWhiteSpace($detail)) { $detail = $stderr }
             throw "Bounded Task Scheduler operation failed (exit=$exitCode): $detail"
         }
-        return $result.value
+        # Registration and other command-style scheduler operations return a
+        # successful envelope without a value member.  Do not dereference a
+        # missing property under the repository's strict-mode policy: a
+        # successful no-result operation is a valid bounded result.
+        $valueProperty = $result.PSObject.Properties['value']
+        if ($null -eq $valueProperty) { return $null }
+        return $valueProperty.Value
     } finally {
         if ($null -ne $schedulerProcess) { $schedulerProcess.Dispose() }
         if (Test-Path -LiteralPath $temporaryRoot -PathType Container) {

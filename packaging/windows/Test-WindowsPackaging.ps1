@@ -4855,7 +4855,8 @@ exit 91
         $boundedScheduler.Value -match 'WaitForExit\(\$TimeoutSeconds \* 1000\)' -and
         $boundedScheduler.Value -match '\$schedulerProcess\.Kill\(\)' -and
         $boundedScheduler.Value -match 'bound process handle' -and
-        $boundedScheduler.Value -match 'Base64String') 'production task queries run in a bounded child process with exact-handle timeout termination and an encoding-safe result channel'
+        $boundedScheduler.Value -match 'Base64String' -and
+        $boundedScheduler.Value -match "PSObject\.Properties\['value'\]") 'production task queries run in a bounded child process with exact-handle timeout termination and an encoding-safe result channel'
     $boundedNativeScheduler = [regex]::Match($bootstrapSource, 'function Invoke-CycBoundedSchtasks[\s\S]+?function Invoke-CycBoundedTaskRegistration')
     Assert-True ($boundedNativeScheduler.Success -and
         $boundedNativeScheduler.Value -match "ValidateSet\('End', 'Delete', 'Run'\)" -and
