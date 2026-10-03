@@ -1,5 +1,34 @@
 # Current audit — 2026-10-04
 
+## Preview.109 published and VMware validation
+
+The exact tagged source commit is
+`9721c144fa19f95d6ece8c062740dee0f6eaf3db` (the PR #196 merge). Release
+workflow `37149273717` published
+[`v0.1.0-preview.109`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.109)
+at `2026-10-03T21:38:10Z` as a non-draft prerelease with 23 assets. The
+release-index, provenance, and publication jobs passed. A fresh D-drive
+download under
+`D:\\ClusterYourCodex-validation\\preview109-public-20261004\\` matched all
+11 per-asset `.sha256` sidecars and every entry in `SHA256SUMS`; no stable
+asset or tag was changed.
+
+The same public Setup was installed in the D-drive Windows 11 VMware guest
+through VIX CLI only. On a clean snapshot the installer returned exit code 0;
+the installed controller reported `0.1.0-preview.109`, health returned
+`status=ok`, `apiVersion=cyc.dev/v1`, and `database=ok`, and `cyc discover`
+found the guest controller with `credentialsTransmitted=false` and
+`pairingRequired=true`. The live same-host controller/worker fixture returned
+`queued -> running -> succeeded` with all 14 checks true and
+`jobRootDeleted=true`. Sanitized evidence is retained outside Git at
+`D:\\ClusterYourCodex-validation\\preview109-public-20261004\\guest\\`.
+
+The optional clean Windows 11 ARM64 x64-emulation job in the tagged workflow
+is still running at this audit point; its result is intentionally not counted
+until GitHub reports a terminal conclusion. The preview remains a prerelease.
+Issues #2 and #3 remain open, and stable `v0.0.1` remains immutable at
+`e4fbaef04b764268fa038311d85573b18b549f9`.
+
 ## Source and merge
 
 - PR #195, `fix(windows): bind profile helper evidence to case root`, merged

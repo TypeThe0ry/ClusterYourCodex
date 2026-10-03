@@ -1,6 +1,23 @@
 # ClusterYourCodex project status
 
-## Current GitHub audit — 2026-10-04 (preview.109 candidate)
+## Current GitHub audit — 2026-10-04 (preview.109 published prerelease)
+
+The exact source commit `9721c144fa19f95d6ece8c062740dee0f6eaf3db` is the PR
+#196 merge. Tagged workflow `37149273717` published
+[`v0.1.0-preview.109`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.109)
+at `2026-10-03T21:38:10Z` as a prerelease with 23 assets. The D-drive public
+download matched all 11 per-asset sidecars and `SHA256SUMS`; the immutable
+stable `v0.0.1` tag was not touched.
+
+The preview.109 Setup was then installed in the D-drive Windows 11 VMware
+guest using VIX CLI. A clean snapshot install returned 0, the controller
+reported preview.109 with healthy database/API, credential-free LAN discovery
+returned a pairing-required candidate, and the same-host live round-trip
+passed all 14 checks (`queued -> running -> succeeded`, job root deleted).
+Evidence remains outside Git under
+`D:\\ClusterYourCodex-validation\\preview109-public-20261004\\guest\\`.
+The optional ARM64 tagged job is still running and is not counted until its
+terminal result is known.
 
 PR #195 is merged at `22a2f6fa993aa9e25e47a814395e485a3dba90d7`. It fixes the
 Windows profile-matrix helper's case-root binding: the parent evidence root is
