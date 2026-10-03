@@ -2,14 +2,15 @@
 
 ## Current GitHub audit — 2026-10-03 (preview.106 published prerelease)
 
-The current `origin/main` source is `3402b5ba24229300ed51464638be0793b50225c0`,
-the squash merge of PR #185. Its preview source commit is
+The current `origin/main` source is `c54c719bf78a8690a310de6278a5bc0169633be2`,
+the squash merge of PR #186. Its preview source commit is
 `dcf4a6dbf7c3f1287e86da80397ac4d75f766f5c`, the squash merge of PR #184.
 PR #183 fixed the Windows profile-matrix
 Task-Scheduler deadlock by keeping disposable scheduler probes in the elevated
 parent helper, using bounded exact-process shutdown, and rejecting foreign
 same-name tasks before replacement. PR #184 synchronized all product surfaces
-to `0.1.0-preview.106`; PR #185 recorded the final audit and VMware evidence.
+to `0.1.0-preview.106`; PR #185 recorded the final audit and VMware evidence,
+and PR #186 recorded the published Release.
 The exact candidate and VMware evidence are recorded
 in [`docs/current-audit-20261003.md`](current-audit-20261003.md).
 
@@ -32,6 +33,13 @@ It contains 23 assets; the D-drive download under
 sidecars. It remains a preview while Issues #2 and #3 retain their
 native-environment gates.
 
+The optional clean Windows 11 ARM64 x64-emulation acceptance in the same
+release run is not a pass: job `111079962921` failed at the fresh-deployment
+Repair child after its 900-second bound (`bootstrap repair timed out`). The
+job is continue-on-error so the prerelease remains available; diagnostic
+artifact `11259418732` is retained for follow-up. This does not change the
+Issue #2 boundary or justify a GA claim.
+
 PR #180 fixes the release-only provenance handoff exposed by the failed
 preview.104 run: the self-contained Windows job now receives the exact source
 commit from the identity gate instead of relying on a job-local environment
@@ -47,6 +55,12 @@ includes GitHub artifact provenance, and marks macOS managed kits as
 runtime-gated.
 See [`docs/current-audit-20261003.md`](current-audit-20261003.md) for the
 full release and remaining Issue #2/#3 boundary.
+
+After publication, the D-drive VMware guest was upgraded from preview.105 to
+preview.106 with the released Setup, returned controller health `ok`, passed
+credential-free discovery with explicit pairing, and completed the 14-check
+Windows controller/worker round trip. See
+[`docs/vmware-preview106-upgrade-20261003.md`](vmware-preview106-upgrade-20261003.md).
 
 ## Follow-up audit — 2026-09-23 (PR #120)
 

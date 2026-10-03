@@ -75,10 +75,15 @@ The D-drive VMware Windows 11 guest also passed Setup, controller health
 (HTTP 200/database ok), credential-free LAN discovery, and a self-contained
 Windows controller/worker round trip with every check green. Independent
 Windows↔Linux and Linux↔Linux evidence is retained outside Git under the
-cross-platform validation directories.
+cross-platform validation directories. After publication, the same guest was
+upgraded from preview.105 to preview.106 with the Release Setup (exit 0), then
+re-ran the 14-check live round trip and discovery probe against controller
+version 0.1.0-preview.106. See the [VMware preview.106 upgrade record](docs/vmware-preview106-upgrade-20261003.md).
 
 The optional clean Windows 11 ARM64 x64-emulation acceptance is tracked by the
-same release run and is not substituted for a genuinely clean physical/VM
+same release run, but its fresh-deployment Repair child hit the 900-second
+bound and the job failed under `continue-on-error`; it is not a passing ARM64
+result. It is not substituted for a genuinely clean physical/VM
 controller-plus-guest-worker acceptance. Issue #2 therefore remains open for
 the version-changing Upgrade, interrupted Rollback, blank-guest lifecycle,
 and remaining GA signing/tray requirements. Native macOS managed-runtime
