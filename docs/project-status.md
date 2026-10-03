@@ -1,5 +1,34 @@
 # ClusterYourCodex project status
 
+## Current GitHub audit — 2026-10-03 (preview.108 candidate)
+
+The latest merged source is `478005eb074ad30bcf221e45b0ca1bf1a6bfd060`, the
+squash merge of PR #192. It prepares `0.1.0-preview.108` and corrects the
+Changelog comparison metadata that caused the immutable preview.107 release
+workflow to fail closed before publication. The exact main-push CI run
+`37120683845` completed successfully, including the Windows desktop/bridge,
+bounded Rust, Worker Kits, security, and live controller/worker checks.
+Preview.108 still needs its exact tag release workflow before it is public.
+
+PR #190 (`1db7b619bcf4f12bb9b40d0a334ba9edada759a3`) fixed bounded Windows Task
+Scheduler lifecycle operations. PR #191 (`29bbe9b301b1a85e30b3e7d79d9b843627466dbe`)
+prepared preview.107. The preview.107 tag remains immutable, but its release
+workflow `37117855967` rejected the missing Changelog compare link and created
+no public Release. The latest public developer build is therefore still
+[`v0.1.0-preview.106`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.106).
+
+The D-drive command-line VMware candidate record for preview.107 is
+[`docs/vmware-preview107-candidate-20261003.md`](vmware-preview107-candidate-20261003.md).
+It proves candidate Install, deterministic Repair hash restoration, same-host
+Windows round-trip, credential-free discovery, and quiet Uninstall, but it is
+not a blank Windows VM, not a tagged/public preview.107 asset, and not a GA
+claim. Windows↔Linux and Linux↔Linux validation remains recorded separately;
+native macOS runtime validation is deferred by request.
+
+Issues #2 and #3 remain open for their native acceptance boundaries. The stable
+`v0.0.1` tag remains immutable at
+`e4fbaef04b764268fa038311d85573b18b549f9f`.
+
 ## Current GitHub audit — 2026-10-03 (preview.106 published prerelease)
 
 The current `origin/main` source is `13c21b927bf885d1fc46614b7036f96ef0a0338c`,

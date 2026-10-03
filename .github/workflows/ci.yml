@@ -29,6 +29,9 @@ jobs:
       - name: Verify VERSION and every published product surface
         shell: pwsh
         run: ./scripts/Test-VersionConsistency.ps1
+      - name: Verify changelog version and comparison links
+        shell: pwsh
+        run: ./scripts/Test-ChangelogConsistency.ps1
       - name: Install the pinned Pester 3.4 test runner
         shell: powershell
         run: |

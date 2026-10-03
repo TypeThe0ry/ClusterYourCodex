@@ -2,372 +2,162 @@
 
 > **Give Codex more computers.**
 
-ClusterYourCodex is a Codex-first controller and worker fleet for distributing builds, tests, batch jobs, containers, and GPU work across computers you own. The Controller chooses a compatible worker from current telemetry and reservations, then returns verified logs and artifact hashes to the Codex session.
+ClusterYourCodex is a Codex-first controller and worker fleet for computers you
+own. It places build, test, batch, container, and GPU work on a compatible
+worker, then returns native exit status, logs, cleanup state, and artifact
+hashes to the Codex session.
 
 [![Stable release](https://img.shields.io/github/v/release/TypeThe0ry/ClusterYourCodex?label=stable&sort=semver)](https://github.com/TypeThe0ry/ClusterYourCodex/releases) [![Latest prerelease](https://img.shields.io/github/v/release/TypeThe0ry/ClusterYourCodex?include_prereleases&label=latest%20preview&sort=semver)](https://github.com/TypeThe0ry/ClusterYourCodex/releases) [![CI](https://github.com/TypeThe0ry/ClusterYourCodex/actions/workflows/ci.yml/badge.svg)](https://github.com/TypeThe0ry/ClusterYourCodex/actions) [![License](https://img.shields.io/github/license/TypeThe0ry/ClusterYourCodex)](LICENSE)
 
 ![ClusterYourCodex execution flow](docs/assets/cluster-your-codex-flow.svg)
 
-> **Repository snapshot:** `main` contains the published `v0.0.1` stable line and
-> the published `v0.1.0-preview.106` developer preview. Preview builds remain
-> prerelease candidates while the native acceptance evidence in Issues #2 and #3
-> is completed. The published `v0.0.1` tag and assets are immutable.
+## Current public status
 
-## Start here
+The latest public developer build is **[v0.1.0-preview.106](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.106)**. The immutable stable baseline is **[v0.0.1](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)**. Work after preview.106 remains a prerelease candidate until the native acceptance gates are complete; no unreleased candidate should be treated as stable.
 
-| Goal | Action |
+| Area | Status |
 | --- | --- |
-| Use the published baseline | Install [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1) |
-| Use the published public build | Install the [latest published preview](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.106) |
-| Inspect source and provenance | Open the [`v0.1.0-preview.106` tag](https://github.com/TypeThe0ry/ClusterYourCodex/tree/v0.1.0-preview.106) or its [23-asset Release](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.106) |
-| Recover a broken native plugin | Run the [one-command repair](#codex-plugin-integrity) below |
-| Verify a checkout | Run the [native plugin checks](#native-plugin-checks) |
+| Windows x64 desktop/controller | Public preview; install, repair, plugin registration, health, and controller/worker checks are available. |
+| Linux x64 worker | Public Worker Kit and Windows → Linux validation path. |
+| macOS x64 / arm64 worker packages | Worker Kits build and verify; native managed-runtime acceptance is deferred in [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). |
+| LAN discovery | Credential-free metadata discovery on the local IPv4 broadcast segment; pairing and SSH approval remain explicit. |
+| Stable GA | Not yet declared. [Issue #2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) track the remaining native gates. |
 
-## Status at a glance
+For the authoritative commit, workflow runs, VM evidence, and open gates, see
+the [current audit](docs/current-audit-20261003.md) and [project status](docs/project-status.md).
 
-### Clean Windows VM: first application launch
+## Install the public Windows build
 
-![ClusterYourCodex running in a clean Windows VM, with the first-run Windows firewall prompt](docs/assets/windows-vm-first-launch.png)
+1. Download [Windows Setup for preview.106](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.1.0-preview.106/ClusterYourCodex-Setup.exe) and its [SHA-256 sidecar](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.1.0-preview.106/ClusterYourCodex-Setup.exe.sha256).
+2. Verify the download before running it:
 
-On 2026-09-23, a local diagnostic installer containing the `v0.0.1` binaries
-and a bootstrap path-length fix installed successfully in the clean VM
-(exit 0). The desktop rendered its Chinese empty-fleet home screen, and the
-controller health endpoint returned HTTP 200 with a healthy database. The
-screenshot includes the first-run Windows firewall prompt; it does not prove
-remote worker connectivity. This diagnostic package is not the published
-installer or a current-source release candidate. See the
-[installation evidence and remaining checks](docs/windows-vm-install-20260923.md).
-
-![Validation status](docs/assets/validation-status.svg)
-
-### What the test effect means
-
-The green cards above are backed by repeatable checks, not a decorative claim:
-
-- **Native plugin:** the integrity contract, bundled runtime, MCP protocol probe, and 48-test MCP suite pass on the Windows controller host. See the [cache verification record](docs/native-plugin-cache-verification-20260919.md).
-- **Hosted CI:** the current candidate exercises Rust on Windows/Linux/macOS, native Linux/macOS Worker Kits, dependency/security checks, and the Windows controller/bridge path. See [GitHub Actions](https://github.com/TypeThe0ry/ClusterYourCodex/actions) for the run history.
-- **Acceptance status:** the current source has an independent VMware Windows-controller → Windows-host-worker live job, a VMware Windows-controller → independent Linux-worker live job, and an independent Linux-controller → Linux-worker live job. LAN discovery is credential-free and paired enrollment remains explicit. The Windows VM uses a guest-only TPM-check exception and modified no-prompt media, so it does not prove Windows 11 hardware compliance. Native macOS managed-runtime validation is intentionally deferred; [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) remains open.
-- **LAN discovery boundary:** automatic discovery is an IPv4 broadcast on the local layer-2 segment; it does not enumerate routed subnets. The Windows candidate now provisions UDP `47830` beside the worker TCP rule in one transactional firewall lifecycle, while legacy v1 transactions remain recoverable. A clean current-source VM install/repair/rollback/uninstall matrix is still an open Issue #2 gate, so manual host entry remains the fallback if a pre-dual-rule installation or a strict network policy blocks discovery.
-
-This distinction keeps the README useful: a passing package test proves the package contract, while a clean-VM or live-worker claim requires the corresponding runtime evidence.
-
-### Recorded candidate test results
-
-#### Current preview audit — 2026-10-03
-
-PR #183 fixed the Windows profile-matrix scheduler deadlock by keeping
-Task-Scheduler authority in the elevated parent helper; PR #184 synchronized
-all product surfaces to `0.1.0-preview.106`. The exact PR-183 CI run
-`37057151914` and the preview.106 candidate CI run `37062423830` passed the
-Windows Setup lifecycle, bounded Windows Rust, desktop bridge, Linux/macOS
-Rust, Worker Kits, security, and live Windows controller/worker checks. The
-tagged release workflow `37067050549` then passed the exact-commit identity
-gate, built the packages, and published the prerelease at 2026-10-03
-00:06:21 UTC.
-
-The published Release contains 23 assets, including Setup.exe, Windows
-self-contained and portable archives, Linux/macOS packages, Worker Kits, the
-SBOM, provenance metadata, `release-index.json`, and SHA-256 files. A complete
-download to `D:\ClusterYourCodex-validation\preview106` matched all 11
-per-asset sidecars locally.
-
-The D-drive VMware Windows 11 guest also passed Setup, controller health
-(HTTP 200/database ok), credential-free LAN discovery, and a self-contained
-Windows controller/worker round trip with every check green. Independent
-Windows↔Linux and Linux↔Linux evidence is retained outside Git under the
-cross-platform validation directories. After publication, the same guest was
-upgraded from preview.105 to preview.106 with the Release Setup (exit 0), then
-re-ran the 14-check live round trip and discovery probe against controller
-version 0.1.0-preview.106. See the [VMware preview.106 upgrade record](docs/vmware-preview106-upgrade-20261003.md).
-
-The same guest was then left without an install root or product task, freshly
-installed from the published Setup, repaired after a deterministic `cyc.exe`
-byte mutation (exact hash restored, Repair exit `0`), exercised through the
-14-check round trip and credential-free discovery again, and quietly
-uninstalled with no product process/task left. See the [fresh VMware lifecycle
-record](docs/vmware-preview106-fresh-lifecycle-20261003.md). This is real VM
-evidence for Install → Repair → live round trip → Uninstall; it does not claim
-the still-missing interrupted rollback/downgrade, independent guest-worker,
-production signing/tray, or one-blank-VM combined matrix gates.
-
-The optional clean Windows 11 ARM64 x64-emulation acceptance is tracked by the
-same release run, but its fresh-deployment Repair child hit the 900-second
-bound and the job failed under `continue-on-error`; it is not a passing ARM64
-result. It is not substituted for a genuinely clean physical/VM
-controller-plus-guest-worker acceptance. Issue #2 therefore remains open for
-the version-changing Upgrade, interrupted Rollback, blank-guest lifecycle,
-and remaining GA signing/tray requirements. Native macOS managed-runtime
-validation remains deferred under Issue #3. See the [2026-10-03 audit record](docs/current-audit-20261003.md).
-
-#### Current repository audit — 2026-10-01
-
-The current `main` includes PR #157's transactional LAN discovery firewall
-path, PR #158's native PowerShell runtime-ownership repair, PR #159's audit
-documentation, PR #160's final-main reference correction, and PR #163's
-inherited-ACL regression coverage plus a usable worker-address probe. PR #169
-then corrected the VMware acceptance record and documented the installed
-scheduled-task worker round trip. Resolve the exact live `origin/main` ref with
-the reproduction commands in the [current audit record](docs/current-audit-20261001.md)
-instead of copying a hash into this document. The candidate CI matrix and
-Windows Setup acceptance both passed (runs
-[36749204624](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/36749204624)
-and [36749204684](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/36749204684)).
-The latest PR #169 candidate matrix also passed, including the Windows
-controller/worker live round trip and packaged acceptance (run
-[36844909414](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/36844909414)).
-The detailed record is in the [2026-10-01 audit](docs/current-audit-20261001.md),
-the [2026-09-30 audit](docs/current-audit-20260930.md), the [VMware installed
-round-trip record](docs/vmware-installed-task-roundtrip-20261001.md), and the
-[runtime repair note](docs/windows-runtime-repair-20261001.md).
-
-The D-drive VMware evidence uses reset full clones of the existing Windows
-validation image, not a blank Windows installation. The first Setup attempt on
-the latest clone failed closed because another lifecycle operation still held
-the installer mutex; after that process ended, the `install2` retry and a
-post-logon Setup run exited `0`, reached a complete diagnostic, returned
-controller health HTTP 200/database `ok`, and answered a credential-free LAN
-discovery probe. The installed scheduled-task controller/worker harness then
-passed all 15 checks (`queued → running → succeeded`), and the same-version
-Setup rerun followed the idempotent Repair-equivalent path. Uninstall removed
-the product-owned install state while preserving user data. Issue #2 remains
-open only for the version-changing Upgrade, interrupted Rollback, genuinely
-blank-guest lifecycle, and any remaining GA signing/tray requirements.
-The [`vmrun`-only recheck](docs/vmware-cli-recheck-20261001.md) records the
-separate headless-session boundary and the fail-closed ACL proof; no product
-guard was bypassed and no credentials were retained in Git.
-
-The latest command-line-only candidate probe on 2026-10-02 repeated the
-disposable full-clone flow with a real Setup Install, same-version
-Repair-equivalent rerun, credential-free discovery, installed Windows
-controller/worker job, and quiet Uninstall. Its sanitized evidence is in the
-[`2026-10-02 VMware lifecycle record`](docs/vmware-current-candidate-lifecycle-20261002.md).
-The record explicitly keeps blank-guest, Authenticode, N-1 → N Upgrade, and
-interrupted Rollback gates open.
-
-The same day also completed a real disposable SSH Add Computer run from the
-current controller source to a Linux x86_64 Worker Kit. Host-key approval,
-remote inventory, signed kit staging, enrollment, worker TLS heartbeat, a
-controller-to-worker job with verified logs/artifact, and multi-step removal
-all passed. The run exposed and fixed two source defects that package-only
-checks missed: the full-run log marker was not emitted by platform-specific
-scripts, and the Linux systemd unit used an invalid quoted
-`WorkingDirectory=`. See the [2026-10-02 live cross-platform audit](docs/current-audit-20261002.md).
-This strengthens the Windows → Linux boundary; it does not close the clean
-Windows VM gates in Issue #2 or the native macOS gates in Issue #3.
-
-#### Historical repository audit — 2026-09-23
-
-The authoritative source is the live `origin/main` ref; resolve its current
-commit with the audit commands below. The audit record tracks the merged
-documentation corrections after PR #122 fixed Windows staging failures caused
-by long temporary paths. Its completed
-candidate checks passed the Windows Setup acceptance run
-[`35805960001`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35805960001)
-and the platform/security checks in
-[`35805960000`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35805960000).
-The later PR #131 candidate run
-[`35870549904`](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/35870549904)
-also completed successfully and was merged as
-`83de510bca30cf6116a20ced105b86ec3e2e9ba5`. PR #133 then recorded a
-CLI-created VMware guest, and PR #135 recorded the separate blank-disk media
-boundary; both documentation PRs passed the full candidate matrix. Resolve the
-live `origin/main` ref with the audit command below instead of relying on a
-copied commit hash; PR #137's merge commit is recorded in the audit document.
-An in-progress check is not counted as a completed pass.
-
-There are currently no open pull requests. Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
-and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) remain open
-because their final runtime gates are still specific and independently
-unproven: a current-source clean Windows 11 lifecycle for #2, and a native
-macOS LaunchAgent plus managed controller/worker round trip for #3. Hosted CI
-and package probes are recorded as evidence, but are not substituted for those
-runtime gates. See the [current live audit record](docs/current-audit-20261001.md),
-the [2026-09-30 audit](docs/current-audit-20260930.md)
-and the historical [2026-09-23 audit](docs/current-audit-20260923.md).
-
-The stable `v0.0.1` tag and assets remain unchanged at
-`e4fbaef04b764268fa038311d85573b18b549f9f`. The table below summarizes the
-current evidence and is not an automatically refreshed dashboard.
-
-| Test layer | Current result | What was observed |
-| --- | --- | --- |
-| Rust controller/workspace | PASS | Windows, Ubuntu, and macOS jobs completed successfully |
-| Native Worker Kits | PASS | Linux x64 plus macOS x64/arm64 package checks completed |
-| Security and dependency gates | PASS | CodeQL, RustSec, Cargo deny, and pnpm audit completed |
-| Windows controller/bridge job | PASS | Candidate CI completed the Windows controller/worker live round trip |
-| D-drive VMware acceptance | PARTIAL | Reset full-clone Setup retry, same-version Repair-equivalent rerun, Uninstall, LAN discovery, and installed scheduled-task worker job (15/15) pass. Version-changing Upgrade, interrupted Rollback, blank-guest lifecycle, and remaining GA signing/tray gates are still open. See the [current audit](docs/current-audit-20261001.md), [installed round-trip record](docs/vmware-installed-task-roundtrip-20261001.md), and [cross-platform validation](docs/cross-platform-validation-20260927.md). |
-
-The diagrams summarize the evidence categories; they are not application screenshots or an automatically refreshed test dashboard. Runtime acceptance remains open until the corresponding evidence is recorded.
-
-| Area | State | Evidence |
-| --- | --- | --- |
-| Native Codex plugin | Ready | Registration, bundled runtime integrity, and MCP 8-tool smoke pass on Windows |
-| Windows controller/worker | Preview-ready | Hosted CI controller/worker round-trip is green; clean-VM GA evidence remains open |
-| Linux worker kit | Preview-ready | Native Linux kit build and contract verification pass |
-| macOS worker kits | Package-ready | Intel and Apple Silicon kits build and verify; PR #131's containment tests pass in hosted CI, while live managed execution on a customer Mac remains gated |
-| Stable release | `v0.0.1` unchanged | New work stays prerelease until the real GA gates in Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) are evidenced |
-
-### Choose the right channel
-
-| You need | Use | What it means |
-| --- | --- | --- |
-| A published baseline | [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1) | Immutable stable assets; no native-plugin recovery fixes |
-| A published preview | [v0.1.0-preview.105](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.105) | Latest public developer preview; stable GA gates remain open |
-| A release candidate | [`v0.1.0-preview.106`](https://github.com/TypeThe0ry/ClusterYourCodex/tree/v0.1.0-preview.106) | Tagged candidate; assets wait for exact push CI and the fail-closed release workflow |
-| Source development | `main` or a feature branch | Run the checks below before packaging; do not call a preview stable |
-
-For installation fixes and their verification, see the
-[native plugin recovery record](docs/native-plugin-recovery-20260918.md).
-For current acceptance gaps, see [project status](docs/project-status.md).
-
-## What you get
-
-- **One Windows-first desktop flow:** add a computer, connect Codex, run a check.
-- **Fast LAN onboarding:** Add Computer can scan the local IPv4 segment and
-  prefill a discovered controller; host-key approval, SSH credentials, worker
-  installation, and pairing remain explicit. The live SSH onboarding harness
-  is documented in [`docs/provisioning-ssh-e2e-20261001.md`](docs/provisioning-ssh-e2e-20261001.md),
-  with a [脱敏配置骨架](docs/provisioning-ssh-e2e.example.json) for a
-  disposable acceptance run.
-- **Typed scheduling:** requirements are filtered against capabilities; current load and reservations decide the best eligible worker.
-- **Evidence by default:** every run records placement, native exit status, logs, cleanup state, and artifact SHA-256 values.
-- **Portable workers:** Linux and macOS Worker Kits share the same protocol; managed runtime support remains platform-gated.
-- **Credential boundaries:** passwords, keys, and bearer tokens stay behind native vault/config references and never enter JobSpec payloads or Codex calls. Windows can remember passwords in Credential Manager; controllers without a persistent native vault use an explicit session-only path instead of failing after SSH authentication.
-
-## The shortest useful mental model
-
-```text
-Codex session
-    -> native ClusterYourCodex plugin + MCP bridge
-    -> local Controller (typed requirements, reservations, receipts)
-    -> Windows / Linux / macOS Worker
-    -> exit status + logs + SHA-256 artifact evidence
-```
-
-The Controller owns placement. The model supplies requirements and consumes
-verified results; it does not pick a worker from a stale snapshot or receive
-worker credentials.
-
-## Current release
-
-**Stable: [v0.0.1](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)**
-
-Download [Windows Setup](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.0.1/ClusterYourCodex-Setup.exe) and its [SHA-256 sidecar](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.0.1/ClusterYourCodex-Setup.exe.sha256). The release includes the Windows desktop/controller, Codex plugin, self-contained ZIP, Linux/macOS Worker Kits, SBOM, checksums, and provenance.
-
-Windows binaries are currently code-unsigned; verify the sidecar before running Setup. The supported execution boundary is trusted, single-user workloads. Hostile-workload isolation is outside the current product scope; see the decision in [Issue #5](https://github.com/TypeThe0ry/ClusterYourCodex/issues/5). Closing that proposal does not enable the isolated tier.
-
-### Codex plugin integrity
-
-The current Windows installer and integration-preview pipeline ship the native
-`cluster-your-codex@clusteryourcodex` plugin with its private Node runtime. The
-installer validates the manifest, MCP bridge, runtime, marketplace binding, and
-file hashes before registering the plugin. The recovery fixes are in the
-repository, not the published `v0.0.1` or `v0.1.0-preview.102` assets. As of
-2026-09-19, installing the latest published preview is not a verified remedy
-for this error. Use the source-checkout repair below until an installer built
-from the corrected source is published; do not copy a plugin directory from a
-different build.
-
-For a source-checkout recovery, use an up-to-date checkout with the documented
-development dependencies installed and run from its root. This path requires
-build tools; it is not the dependency-free Setup experience. Use the native
-Codex CLI registration path. Keep
-the generated marketplace under a persistent Codex-owned directory; a temporary
-marketplace can be deleted by cleanup jobs and make an otherwise healthy plugin
-look missing on the next launch:
-
-```powershell
-$marketplace = Join-Path $env:USERPROFILE '.codex/marketplaces/clusteryourcodex'
-powershell -ExecutionPolicy Bypass -File scripts/Install-NativeCodexPlugin.ps1 `
-  -MarketplaceRoot $marketplace
-```
-
-If that directory was left empty or partial by an interrupted install, the
-installer automatically moves it to a timestamped recoverable backup,
-rebuilds the native payload, and runs the integrity and MCP probes. Pass
-`-Repair` when you also want to force-rebuild an otherwise complete directory
-(for example after an interrupted upgrade):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/Install-NativeCodexPlugin.ps1 `
-  -MarketplaceRoot $marketplace -Repair
-```
-
-The recovery path uses the bundled MCP runtime and does not install or depend
-on legacy `clustor`, `cluster-orchestrator`, or `orchestrator` skills. Each install
-also removes exact-name legacy skill directories from the Codex home into a
-timestamped recoverable backup before registering the native plugin. See the recorded verification in
-[`docs/native-plugin-recovery-20260918.md`](docs/native-plugin-recovery-20260918.md).
-
-### Native plugin checks
-
-From a repository checkout, these commands verify both the contract and the
-exact cached payload used by Codex:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/Test-NativeCodexPluginContract.ps1
-powershell -ExecutionPolicy Bypass -File scripts/Test-NativeCodexPlugin.ps1 `
-  -PluginRoot "$env:USERPROFILE/.codex/plugins/cache/clusteryourcodex/cluster-your-codex/0.0.1"
-pnpm --filter @clusteryourcodex/codex-mcp test -- --run
-```
-
-The current recovery record is [`docs/native-plugin-cache-verification-20260919.md`](docs/native-plugin-cache-verification-20260919.md); it records the
-6-file cache check, the MCP `2025-06-18` / 8-tool probe, and the 48-test MCP
-suite. A failed cache check should be repaired, not bypassed.
-
-## Platform status
-
-| Platform | Current delivery |
-| --- | --- |
-| Windows x64 | Desktop, Controller and Worker; full clean-VM Repair/rollback acceptance remains tracked in [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2). The running-Controller repair race from #68 is fixed and closed. |
-| Linux x64 | Worker packages; see the [Linux setup guide](docs/add-linux-computer.md). |
-| macOS x64 / arm64 | Worker Kit packages; live managed execution acceptance is still open in [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). |
-
-## Fast start on Windows
-
-1. Download Setup and the `.sha256` sidecar.
-2. Verify the installer:
-
-   ```powershell
+   ~~~powershell
    $setup = Resolve-Path .\ClusterYourCodex-Setup.exe
    $actual = (Get-FileHash -Algorithm SHA256 $setup).Hash.ToLowerInvariant()
    $expected = ((Get-Content "$setup.sha256" -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
    if ($actual -cne $expected) { throw 'SHA-256 mismatch' }
-   ```
+   ~~~
 
-3. Run Setup. It installs per-user files under `%LOCALAPPDATA%\Programs\ClusterYourCodex`, registers the Codex plugin, and opens the desktop.
-4. In **Add Computer**, choose **Scan local network** to find running CYC controllers, or enter the worker host manually. Selecting a candidate only pre-fills the SSH host; verify the host-key fingerprint, then run install, pair, start, and probe.
-5. Open **Advanced verification** and run **Full Run Check**. Then ask Codex to run a real build or test.
+3. Run Setup. Per-user files are installed under
+   %LOCALAPPDATA%\Programs\ClusterYourCodex; the desktop and native Codex
+   plugin are registered together.
+4. Open **Add Computer**. Use **Scan local network** to prefill a running CYC
+   controller, or enter a worker host manually. Confirm the SSH host-key
+   fingerprint, then install, pair, start, and probe the worker.
+5. Run **Advanced verification → Full Run Check**, then ask Codex to execute a
+   real build or test.
 
-To find controllers already running on the same private LAN, use **Scan local
-network** in Add Computer or run `cyc discover --pretty`. Both paths send a
-credential-free UDP probe and return only metadata candidates; neither pairs
-automatically or transmits an SSH password. Verify the SSH host key, then use
-the normal Add Computer flow for install, pairing, and the first probe. The
-protocol and current validation boundaries are recorded in
-[`docs/cross-platform-validation-20260927.md`](docs/cross-platform-validation-20260927.md).
+The installer is currently code-unsigned. Keep the sidecar beside Setup and
+verify it before launch. The supported execution boundary is a trusted,
+single-user workload; hostile multi-tenant isolation is outside this release.
 
-## How it works
+## What the UI does
 
-```text
-Codex Desktop / CLI
-        |
-Codex plugin + MCP bridge
-        |
-Controller <---- Windows desktop
-        |
-typed requirements -> scheduler -> reservation
-        |
-Windows / Linux / macOS workers
-        |
-verified logs + artifacts
-```
+The desktop keeps the main path short:
 
-The repository is organized around `cyc-controller` (local API, persistence, scheduling, and run lifecycle), `cyc-worker` (inventory, pairing, execution), `cyc-cli` (diagnostics), `cyc-protocol` (portable contracts), `cyc-scheduler` (explainable placement), `apps/desktop`, and `plugins/cluster-your-codex`.
+- **Add Computer** discovers or registers a worker, checks reachability, and
+  guides SSH installation and explicit pairing.
+- **Run Check** reports health, plugin state, worker capabilities, and a real
+  controller-to-worker probe.
+- The activity view shows placement, queue/running/succeeded state, logs,
+  cleanup, and artifact verification for each run.
 
-## Development
+![First launch in a clean Windows VM](docs/assets/windows-vm-first-launch.png)
 
-```powershell
+The screenshot shows the first-run Windows firewall prompt and the empty-fleet
+home screen. It demonstrates the desktop rendering and first launch only; it is
+not proof of remote-worker connectivity. The validation diagram below is a
+summary of recorded checks, not a live dashboard.
+
+![Validation status summary](docs/assets/validation-status.svg)
+
+## LAN discovery and credentials
+
+**Scan local network** sends a credential-free UDP discovery probe on the local
+IPv4 layer-2 segment (UDP 47830). It returns metadata such as address, role,
+version, and pairing readiness. It does not enumerate routed subnets, transmit
+an SSH password, or pair a machine automatically.
+
+Host-key approval, SSH credentials, worker installation, and pairing are still
+explicit steps. Passwords, private keys, and bearer tokens stay behind native
+vault/config references and never enter JobSpec, MCP payloads, logs, or Codex
+messages. Windows may remember a password in Credential Manager; other
+controllers use an explicit session-only path when no persistent native vault
+is available.
+
+See the [cross-platform validation and discovery record](docs/cross-platform-validation-20260927.md)
+and the [SSH onboarding harness](docs/provisioning-ssh-e2e-20261001.md).
+
+## Native Codex plugin recovery
+
+If Codex reports **“The installed Codex payload or its build catalog failed
+integrity verification”** or **“built-in Codex plugin payload is missing or
+incomplete”**, repair the native payload from a source checkout. This is a
+build-tool path, not a dependency-free Setup shortcut:
+
+~~~powershell
+$marketplace = Join-Path $env:USERPROFILE '.codex/marketplaces/clusteryourcodex'
+powershell -ExecutionPolicy Bypass -File scripts/Install-NativeCodexPlugin.ps1 -MarketplaceRoot $marketplace -Repair
+~~~
+
+The script backs up an interrupted or partial marketplace, rebuilds the
+payload, verifies the manifest and hashes, probes the bundled MCP runtime, and
+registers the native plugin. It removes exact-name legacy clustor,
+cluster-orchestrator, and orchestrator skill directories into a recoverable
+timestamped backup; it does not rely on those skills.
+
+Verify the contract and cached payload with:
+
+~~~powershell
+powershell -ExecutionPolicy Bypass -File scripts/Test-NativeCodexPluginContract.ps1
+powershell -ExecutionPolicy Bypass -File scripts/Test-NativeCodexPlugin.ps1 -PluginRoot "$env:USERPROFILE/.codex/plugins/cache/clusteryourcodex/cluster-your-codex/0.0.1"
+pnpm --filter @clusteryourcodex/codex-mcp test -- --run
+~~~
+
+The [plugin recovery record](docs/native-plugin-recovery-20260918.md) and
+[cache verification record](docs/native-plugin-cache-verification-20260919.md)
+contain the detailed probes and expected boundaries. A failed integrity check
+should be repaired, not bypassed.
+
+## How work is placed
+
+~~~text
+Codex session
+    -> native ClusterYourCodex plugin + MCP bridge
+    -> local Controller (requirements, telemetry, reservations)
+    -> Windows / Linux / macOS Worker
+    -> exit status + logs + SHA-256 artifact evidence
+~~~
+
+The Controller chooses a compatible worker from current capabilities, load, and
+reservations. The model supplies requirements and consumes verified results; it
+does not choose a worker from a stale snapshot and never receives worker
+credentials.
+
+The repository is organized around cyc-controller (API, persistence,
+scheduling, and lifecycle), cyc-worker (inventory, pairing, execution),
+cyc-cli (diagnostics), cyc-protocol (portable contracts), cyc-scheduler
+(explainable placement), apps/desktop, and the native
+plugins/cluster-your-codex package.
+
+## Validation boundaries
+
+Hosted CI covers Rust on Windows/Linux/macOS, Worker Kit packaging, security
+checks, the desktop bridge, and Windows controller/worker fixtures. D-drive
+VMware evidence covers Windows Setup, health, repair, uninstall, discovery, and
+same-host live round trips. Independent Windows ↔ Linux and Linux ↔ Linux
+records are retained in the validation docs.
+
+These checks do not yet close every GA gate. The current Windows gap is a
+single clean-guest current-source matrix covering Install → Repair → versioned
+Upgrade → interrupted Rollback → Uninstall, plus an independent guest worker
+and remaining production signing/tray requirements. The macOS gap is native
+LaunchAgent lifecycle, live controller/worker execution, and detached-process
+cleanup. The detailed evidence and exact status belong in [Issue #2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2), [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3), and the [current audit](docs/current-audit-20261003.md).
+
+## Develop
+
+~~~powershell
 git clone https://github.com/TypeThe0ry/ClusterYourCodex.git
 cd ClusterYourCodex
 pnpm install --frozen-lockfile
@@ -376,35 +166,31 @@ cargo test --workspace
 pnpm -r lint
 pnpm -r test
 pnpm -r build
-```
+~~~
 
-Run the browser renderer with `pnpm dev`; it is not the installed native app. For the native desktop use `pnpm --filter @clusteryourcodex/desktop tauri:dev` (Rust and the Tauri Windows build prerequisites are required). Packaging and acceptance details live in [docs/packaging.md](docs/packaging.md).
+Use pnpm dev for the browser renderer. For the native desktop, use
+pnpm --filter @clusteryourcodex/desktop tauri:dev with Rust and the Tauri
+Windows prerequisites installed. Packaging, acceptance, and release rules are
+in [docs/packaging.md](docs/packaging.md) and [docs/release-process.md](docs/release-process.md).
 
-## Documentation
+## Documentation map
 
 - [Windows getting started](docs/getting-started-windows.md)
 - [Add a Windows computer](docs/add-windows-computer.md)
-- [Linux worker](docs/add-linux-computer.md)
+- [Add a Linux computer](docs/add-linux-computer.md)
 - [Codex integration](docs/codex-integration.md)
 - [Upgrade, repair, rollback, uninstall](docs/upgrade-rollback.md)
 - [Compatibility and security boundary](docs/compatibility.md)
 - [Troubleshooting](docs/troubleshooting.md)
-- [Release process](docs/release-process.md)
-- [Changelog](CHANGELOG.md)
-- [Project status](docs/project-status.md)
 - [Cross-platform validation and LAN discovery](docs/cross-platform-validation-20260927.md)
-- [Current VMware candidate install probe](docs/vmware-current-candidate-install-20261001.md)
-- [VMware preview.106 fresh lifecycle](docs/vmware-preview106-fresh-lifecycle-20261003.md)
+- [Current audit](docs/current-audit-20261003.md)
+- [Project status](docs/project-status.md)
+- [Changelog](CHANGELOG.md)
+- [Contributing](CONTRIBUTING.md)
 
-Open acceptance work is tracked in [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2)
-and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). Hosted CI and
-portable archives do not substitute for the native Windows/macOS runtime gates
-called out in those issues.
+## Product boundary and license
 
-## Project boundary
-
-ClusterYourCodex distributes executable work that Codex initiates. It is not a remote desktop, generic cluster administrator, or multi-tenant hostile-code sandbox. See [ADR 0001](docs/adr/0001-product-boundary.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## License
-
-See [LICENSE](LICENSE).
+ClusterYourCodex distributes executable work initiated by Codex. It is not a
+remote desktop, generic cluster administrator, or hostile-code sandbox. See
+[ADR 0001](docs/adr/0001-product-boundary.md) for the product boundary and
+[LICENSE](LICENSE) for licensing terms.
