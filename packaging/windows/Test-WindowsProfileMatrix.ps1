@@ -1288,7 +1288,23 @@ function Invoke-ProfileMatrixTaskHelperRequest {
             }
         }
     }
-    if (-not (Test-Path -LiteralPath $RequestPath -PathType Leaf)) { return $false }
+    if (-not (Test-Path -LiteralPath $RequestPath -PathType Container) -or
+        -not (Test-Path -LiteralPath $ResponsePath -PathType Container)) { return $false }
+    $requestFiles = @(
+        Get-ChildItem -LiteralPath $RequestPath -Filter 'request-*.json' -File -Force -ErrorAction Stop |
+            Where-Object { ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0 } |
+            Sort-Object LastWriteTimeUtc, Name
+    )
+    if ($requestFiles.Count -eq 0) { return $false }
+    $requestFile = $requestFiles[0]
+    $requestFilePath = [string]$requestFile.FullName
+    $requestFileName = [string]$requestFile.Name
+    $requestFileId = if ($requestFileName -match '^request-([0-9a-f]{32})\.json$') { $Matches[1] } else { $null }
+    if ([string]::IsNullOrWhiteSpace($requestFileId)) {
+        Remove-Item -LiteralPath $requestFilePath -Force -ErrorAction Stop
+        throw "profile-matrix task helper rejected malformed request filename: $requestFileName"
+    }
+    $responseFilePath = Join-Path $ResponsePath ("response-$requestFileId.json")
     $request = $null
     $status = 'failed'
     $errorMessage = $null
@@ -1300,9 +1316,10 @@ function Invoke-ProfileMatrixTaskHelperRequest {
     $requestAccountSidValue = $null
     $accountBinding = 'unresolved'
     try {
-        $request = Read-ProfileMatrixUtf8Json -Path $RequestPath
+        $request = Read-ProfileMatrixUtf8Json -Path $requestFilePath
         if ([string]$request.schemaVersion -cne 'cyc.dev/windows-profile-matrix-task-request/v2' -or
             [string]$request.requestId -notmatch '^[0-9a-f]{32}$' -or
+            [string]$request.requestId -cne $requestFileId -or
             [string]$request.sid -cne $Sid -or
             [string]$request.logonType -cne 'Interactive' -or
             [string]$request.taskName -notin @('ClusterYourCodex Controller', 'ClusterYourCodex Worker')) {
@@ -1460,7 +1477,10 @@ function Invoke-ProfileMatrixTaskHelperRequest {
     } catch {
         $errorMessage = [string]$_.Exception.Message
     }
-    $requestId = if ($null -ne $request) { [string]$request.requestId } else { [Guid]::NewGuid().ToString('N') }
+    # Keep malformed-request failures correlated to the filename-derived
+    # request id so the child receives a deterministic rejected response
+    # instead of waiting for the outer child timeout.
+    $requestId = if ($null -ne $request) { [string]$request.requestId } else { $requestFileId }
     $record = [ordered]@{
         schemaVersion = 'cyc.dev/windows-profile-matrix-task-helper/v1'
         requestId = $requestId
@@ -1505,12 +1525,12 @@ function Invoke-ProfileMatrixTaskHelperRequest {
         # Consume the request before publishing the response. The child may
         # observe the response and immediately publish its next request; an
         # unconditional finally-time delete would then remove that new request.
-        Remove-Item -LiteralPath $RequestPath -Force -ErrorAction Stop
+        Remove-Item -LiteralPath $requestFilePath -Force -ErrorAction Stop
         $requestRemoved = $true
-        Write-ProfileMatrixAtomicJson -Path $ResponsePath -Value $record
+        Write-ProfileMatrixAtomicJson -Path $responseFilePath -Value $record
     } finally {
         if (-not $requestRemoved) {
-            Remove-Item -LiteralPath $RequestPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $requestFilePath -Force -ErrorAction SilentlyContinue
         }
     }
     return $true
@@ -1794,9 +1814,11 @@ try {
             # InteractiveToken boundary. Keep registration in the elevated
             # controller, but only for the exact request emitted by the child
             # and only while that child is alive.
-            $taskRequestPath = Join-Path $caseRoot 'task-registration-request.json'
-            $taskResponsePath = Join-Path $caseRoot 'task-registration-response.json'
+            $taskRequestPath = Join-Path $caseRoot 'task-registration-requests'
+            $taskResponsePath = Join-Path $caseRoot 'task-registration-responses'
             $taskHelperEvidencePath = Join-Path $caseRoot 'task-helper-evidence.json'
+            [void](New-Item -ItemType Directory -Path $taskRequestPath -Force)
+            [void](New-Item -ItemType Directory -Path $taskResponsePath -Force)
             $deadline = [DateTimeOffset]::UtcNow.AddSeconds($ChildTimeoutSeconds)
             $timedOut = $false
             while (-not $process.HasExited) {
@@ -1844,7 +1866,12 @@ try {
                         -EvidencePath $taskHelperEvidencePath `
                         -Sid $sid `
                         -UserName $userName
-                    if (-not $handled -and -not (Test-Path -LiteralPath $taskRequestPath -PathType Leaf)) { break }
+                    $remainingRequests = @(
+                        if (Test-Path -LiteralPath $taskRequestPath -PathType Container) {
+                            Get-ChildItem -LiteralPath $taskRequestPath -Filter 'request-*.json' -File -Force -ErrorAction SilentlyContinue
+                        }
+                    )
+                    if (-not $handled -and $remainingRequests.Count -eq 0) { break }
                     Start-Sleep -Milliseconds 100
                 }
             }

@@ -4868,7 +4868,9 @@ exit 91
     Assert-True ($bootstrapSource -match 'taskRuntime\s*=\s*\[ordered\]@') 'bootstrap records task runtime gating separately from the production logon type'
     Assert-True ($bootstrapSource -match 'parent-elevated-registration-v1[\s\S]+not-started') 'bootstrap has an explicit parent-elevated registration-only gate'
     Assert-True ($bootstrapSource -match 'ProfileMatrixTaskHelperMode[\s\S]+requires its explicit test switch') 'bootstrap requires an explicit helper-mode switch in addition to the IPC declaration'
-    Assert-True ($bootstrapSource -match 'Invoke-CycProfileMatrixTaskGate[\s\S]+requestId') 'bootstrap binds gated task registration to a request/response exchange'
+    Assert-True ($bootstrapSource -match 'Invoke-CycProfileMatrixTaskGate[\s\S]+requestId' -and
+        $bootstrapSource -match 'request-\$requestId\.json' -and
+        $bootstrapSource -match 'response-\$requestId\.json') 'bootstrap binds each gated task operation to a unique request/response file pair'
     $boundedScheduler = [regex]::Match($bootstrapSource, 'function Invoke-CycBoundedPowerShellJson[\s\S]+?function Get-CycTaskSnapshotByName')
     Assert-True ($boundedScheduler.Success -and
         $boundedScheduler.Value -match 'Start-Process' -and
@@ -5343,7 +5345,10 @@ exit 0
     Assert-True ($profileMatrixSource -match '(?i)GLOBALROOT[\\/]|\\bDevice[\\/]|Volume\\{|UNC[\\/]') 'profile matrix rejects device, volume, GLOBALROOT, and UNC reparse targets'
     Assert-True ($profileMatrixSource -match 'tagMatches\.Count -ne 1[\s\S]+uniqueTargets\.Count -ne 1') 'profile matrix rejects ambiguous or malformed native reparse metadata'
     Assert-True ($profileMatrixSource -match 'invalidTargetProjection[\s\S]+return \$false') 'profile matrix rejects malformed link projections instead of ignoring them'
-    Assert-True ($profileMatrixSource -match 'IPC path escaped its case root' -and $profileMatrixSource -match 'IPC path is a reparse point') 'profile matrix confines elevated-helper IPC to the case root without following links'
+    Assert-True ($profileMatrixSource -match 'IPC path escaped its case root' -and
+        $profileMatrixSource -match 'IPC path is a reparse point' -and
+        $profileMatrixSource -match "request-\*\.json" -and
+        $profileMatrixSource -match 'response-\$requestFileId\.json') 'profile matrix confines queued elevated-helper IPC to the case root without following links'
     Assert-True ($profileMatrixSource -match 'cyc\.dev/windows-profile-matrix-task-request/v2' -and
         $profileMatrixSource -match 'cyc\.dev/windows-profile-matrix-task-snapshot/v1' -and
         $profileMatrixSource -match "operation -notin @\('Register', 'Unregister', 'Restore'\)") 'profile matrix parent helper validates the structured restore operation contract'
