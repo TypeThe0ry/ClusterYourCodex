@@ -13,6 +13,28 @@
   repair marketplace is absent. Install and upgrade paths still fail closed on
   missing or tampered repair payloads.
 
+## [0.1.0-preview.107] - 2026-10-03
+
+### Fixed
+
+- Route Windows Task Scheduler snapshot, registration, start, stop, and delete
+  operations through bounded child/native-process adapters with exact process
+  handle cleanup and fail-closed ownership checks. This prevents slow or stuck
+  Scheduler RPCs from hanging Repair/Uninstall and preserves the canonical
+  account SID, task path, action, trigger, and executable invariants.
+- Preserve native `schtasks.exe` exit codes when stdout/stderr are redirected,
+  so a failed task start cannot be misreported as success.
+- Keep the Windows packaging fixture isolated after scheduler probes so later
+  uninstall and Codex-cleanup assertions exercise the production helpers.
+
+### Validation scope
+
+- PR #190 passed the complete CI, Windows Setup acceptance, bounded Windows
+  Rust, desktop bridge, security, Worker Kit, and live Windows
+  controller/worker checks (`37103138642`, Setup acceptance `37103138270`).
+  Stable `v0.0.1` remains unchanged. Clean-VM GA and native macOS runtime
+  gates remain explicitly tracked by Issues #2 and #3.
+
 ## [0.1.0-preview.106] - 2026-10-03
 
 ### Fixed
