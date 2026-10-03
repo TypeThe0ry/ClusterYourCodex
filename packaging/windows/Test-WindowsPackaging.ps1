@@ -5310,10 +5310,14 @@ exit 0
         $profileMatrixSource -match 'WaitForExit\(\$TimeoutSeconds \* 1000\)' -and
         $profileMatrixSource -match 'bare PID can refer to a replacement process' -and
         $profileMatrixSource -notmatch 'Unregister-ScheduledTask') 'profile matrix removes tasks through a bounded native scheduler command instead of an unbounded PowerShell unregister call'
-    Assert-True ($profileMatrixSource -match 'function Get-ProfileMatrixRootTaskStrict' -and
-        $profileMatrixSource -match "Get-ScheduledTask -TaskName '\*' -TaskPath '\\' -ErrorAction Stop" -and
-        $profileMatrixSource -match 'empty, successfully queried result' -and
-        $profileMatrixSource -match 'Get-ProfileMatrixRootTaskStrict -TaskName') 'profile matrix distinguishes confirmed task absence from scheduler query failure'
+    Assert-True ($profileMatrixSource -match 'function Invoke-ProfileMatrixBoundedTaskQuery' -and
+        $profileMatrixSource -match 'Get-ScheduledTask -TaskName \$env:CYC_PROFILE_MATRIX_TASK_NAME' -and
+        $profileMatrixSource -match 'WaitForExit\(\$TimeoutSeconds \* 1000\)' -and
+        $profileMatrixSource -match 'query timed out after \$TimeoutSeconds seconds' -and
+        $profileMatrixSource -match '\$hresult -eq -2147024894' -and
+        $profileMatrixSource -match '\$hresult -eq -2147216625' -and
+        $profileMatrixSource -match 'function Get-ProfileMatrixRootTaskStrict' -and
+        $profileMatrixSource -match 'Get-ProfileMatrixRootTaskStrict -TaskName') 'profile matrix bounds Task Scheduler queries and distinguishes confirmed task absence from provider failure'
     Assert-True ($profileMatrixSource -match 'function Get-ProfileMatrixTaskHelperHistoryRecords' -and
         $profileMatrixSource -match 'historyArray' -and
         $profileMatrixSource -match 'Value \(,\$historyArray\)') 'profile matrix helper evidence is flattened and always serialized as a JSON array'
@@ -5348,7 +5352,10 @@ exit 0
     Assert-True ($profileMatrixSource -match 'IPC path escaped its case root' -and
         $profileMatrixSource -match 'IPC path is a reparse point' -and
         $profileMatrixSource -match "request-\*\.json" -and
-        $profileMatrixSource -match 'response-\$requestFileId\.json') 'profile matrix confines queued elevated-helper IPC to the case root without following links'
+        $profileMatrixSource -match 'response-\$requestFileId\.json' -and
+        $profileMatrixSource -match 'ProcessingPath' -and
+        $profileMatrixSource -match '\[System\.IO\.File\]::Move\(\$requestFilePath' -and
+        $profileMatrixSource -match 'response is durably published') 'profile matrix confines queued elevated-helper IPC to the case root without following links and recovers claimed requests'
     Assert-True ($profileMatrixSource -match 'cyc\.dev/windows-profile-matrix-task-request/v2' -and
         $profileMatrixSource -match 'cyc\.dev/windows-profile-matrix-task-snapshot/v1' -and
         $profileMatrixSource -match "operation -notin @\('Register', 'Unregister', 'Restore'\)") 'profile matrix parent helper validates the structured restore operation contract'
@@ -5419,6 +5426,10 @@ exit 0
     Assert-True ($profileMatrixChildSource -match 'ProfileMatrixTaskHelperMode') 'profile matrix child forwards the explicit helper-mode switch'
     Assert-True ($profileMatrixChildSource -match 'parent-elevated-registration-only') 'profile matrix child records the gated registration-only runtime semantics'
     Assert-True ($profileMatrixChildSource -match 'task-helper-evidence\.json') 'profile matrix child preserves helper request/response evidence'
+    Assert-True ($freshDeploymentSource -match 'function Write-FreshPhaseTrace' -and
+        $freshDeploymentSource -match 'phase-trace\.jsonl' -and
+        $freshDeploymentSource -match "Event 'start'" -and
+        $freshDeploymentSource -match "Event 'end'") 'fresh deployment diagnostics retain per-phase timestamps'
 
     $profileWorkflowNeedle = 'Test-WindowsProfileMatrix\.ps1'
     Assert-True ($releaseWorkflow -match $profileWorkflowNeedle) 'release workflow invokes the Windows profile/path matrix'

@@ -25,9 +25,10 @@ found the guest controller with `credentialsTransmitted=false` and
 
 The optional clean Windows 11 ARM64 x64-emulation job reached a terminal
 non-blocking failure in its profile matrix: the `standard-ascii` child timed
-out after 900 seconds during the second uninstall task-gate operation. Fresh
-deployment and silent Setup passed; this is retained as a real lifecycle
-defect, not counted as a pass. Diagnostics are retained outside Git under
+out after 900 seconds while the lifecycle was still in its second
+task-gate/repair-uninstall boundary. Fresh deployment and silent Setup passed;
+this is retained as an unresolved lifecycle boundary, not counted as a pass.
+Diagnostics are retained outside Git under
 `D:\\ClusterYourCodex-validation\\preview109-arm64-diagnostics-20261004\\`.
 The preview remains a prerelease.
 Issues #2 and #3 remain open, and stable `v0.0.1` remains immutable at
@@ -56,15 +57,20 @@ legacy Windows PowerShell `Value`/`Count` JSON projection before validating
 helper records. The source contract also protects the regression with a static
 PowerShell test.
 
-The tagged preview.109 ARM64 run then exposed a second boundary: the
-disposable child could complete Worker task removal but lose the following
-Controller request when the single fixed request/response filenames were
-reused under slow x64 emulation. The follow-up fix changes this test-only IPC
-to a case-root-confined directory queue with one immutable
+The tagged preview.109 ARM64 run then exposed a second boundary, but did not
+prove a single root cause. Durable helper evidence contains the install pair
+at `22:37:58Z`/`22:38:00Z` and the repair pair at
+`22:47:13Z`/`22:47:14Z`; the approximately 553-second gap occurs before the
+repair Controller registration, and no normal Uninstall helper pair was
+recorded. That is consistent with a slow repair preflight or Task Scheduler
+query as well as an IPC problem. The follow-up fix therefore hardens this
+test-only IPC to a case-root-confined directory queue with one immutable
 `request-<requestId>.json` / `response-<requestId>.json` pair per operation,
-while keeping the existing SID, task-path, action, and bounded scheduler
-checks. A new prerelease candidate is required before claiming this boundary
-is repaired.
+atomically claims requests into `processing/`, and retains them until the
+response is committed. It is defensive recovery, not proof that the original
+timeout was caused by file reuse. A new prerelease candidate with phase
+timestamps and a successful ARM64 matrix is required before claiming this
+boundary is repaired.
 
 ## D-drive VMware CLI evidence
 

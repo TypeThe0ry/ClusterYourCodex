@@ -18,8 +18,8 @@ Evidence remains outside Git under
 `D:\\ClusterYourCodex-validation\\preview109-public-20261004\\guest\\`.
 The optional ARM64 tagged job reached a terminal non-blocking failure in the
 profile matrix: the `standard-ascii` child timed out after 900 seconds during
-the second uninstall task-gate operation. Fresh deployment and silent Setup
-passed; diagnostics are retained outside Git under
+the later repair/uninstall task-gate boundary. Fresh deployment and silent
+Setup passed; diagnostics are retained outside Git under
 `D:\\ClusterYourCodex-validation\\preview109-arm64-diagnostics-20261004\\`.
 
 PR #195 is merged at `22a2f6fa993aa9e25e47a814395e485a3dba90d7`. It fixes the
@@ -43,12 +43,16 @@ Install → Repair → Upgrade → Rollback → Uninstall and native macOS runti
 acceptance are not being claimed. Stable `v0.0.1` remains immutable at
 `e4fbaef04b764268fa038311d85573b18b549f9`.
 
-The follow-up source fix replaces the profile-matrix helper's reused
-single-slot request/response files with a case-root-confined directory queue:
-each task-gate operation gets a unique request/response filename pair. The
-existing SID, task-action, and bounded scheduler checks remain fail-closed.
-This fix must be published and revalidated before the ARM64 profile matrix can
-be called repaired.
+The follow-up source fix hardens the profile-matrix helper's reused
+single-slot request/response files into a case-root-confined directory queue:
+each task-gate operation gets a unique request/response filename pair,
+requests are atomically claimed into `processing/`, and a claimed request is
+retained until its response is committed. The existing SID, task-action, and
+bounded scheduler checks remain fail-closed. The preview.109 evidence did not
+prove that file reuse caused the timeout: its largest timing gap occurs before
+the repair Controller request, so a slow repair preflight or scheduler query
+remains possible. This fix must be published and revalidated with phase
+timestamps before the ARM64 profile matrix can be called repaired.
 
 ## Current GitHub audit — 2026-10-03 (preview.108 published prerelease)
 

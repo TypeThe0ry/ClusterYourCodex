@@ -1124,7 +1124,7 @@ function Invoke-ProfileMatrixBoundedTaskEnd {
             # re-enumerates and requires a stable absence window; only a still
             # running instance turns a benign scheduler race into a failure.
             Start-Sleep -Milliseconds 100
-            $task = Get-ProfileMatrixRootTaskStrict -TaskName $TaskName
+            $task = Get-ProfileMatrixRootTaskStrict -TaskName $TaskName -CaseRoot $resolvedCaseRoot
             $taskState = if ($null -ne $task) { [string]$task.State } else { 'Absent' }
             if ($taskState -eq 'Running') {
                 $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
@@ -1144,27 +1144,102 @@ function Invoke-ProfileMatrixBoundedTaskEnd {
     }
 }
 
-function Get-ProfileMatrixRootTaskStrict {
+function Invoke-ProfileMatrixBoundedTaskQuery {
     param(
-        [Parameter(Mandatory = $true)][ValidateSet('ClusterYourCodex Controller', 'ClusterYourCodex Worker')][string]$TaskName
+        [Parameter(Mandatory = $true)][ValidateSet('ClusterYourCodex Controller', 'ClusterYourCodex Worker')][string]$TaskName,
+        [ValidateRange(5, 120)][int]$TimeoutSeconds = 30,
+        [string]$CaseRoot = ([System.IO.Path]::GetTempPath())
     )
 
-    # Enumerate the root task folder with terminating errors, then distinguish
-    # an empty, successfully queried result from a scheduler/CIM/permission
-    # failure. A target-specific query with SilentlyContinue makes both states
-    # look like `$null` and can turn failed cleanup into a false success.
-    $matches = @(
-        Get-ScheduledTask -TaskName '*' -TaskPath '\' -ErrorAction Stop |
-            Where-Object {
-                [string]$_.TaskName -ceq $TaskName -and
-                [string]$_.TaskPath -ceq '\'
-            }
-    )
-    if ($matches.Count -gt 1) {
-        throw "profile-matrix task query returned duplicate root tasks for $TaskName."
+    # Task Scheduler's PowerShell provider has no reliable timeout on the
+    # ARM64/x64-emulation runner. Run the narrow query in a child process and
+    # bind timeout termination to that exact process handle. The child emits a
+    # small JSON projection, not a live COM object, preserving only the fields
+    # required by ownership validation and runtime cleanup.
+    $resolvedRoot = Resolve-ProfileMatrixPath $CaseRoot
+    if (-not (Test-Path -LiteralPath $resolvedRoot -PathType Container)) {
+        $resolvedRoot = Resolve-ProfileMatrixPath ([System.IO.Path]::GetTempPath())
     }
-    if ($matches.Count -eq 0) { return $null }
-    return $matches[0]
+    $suffix = [Guid]::NewGuid().ToString('N')
+    $outputPath = Join-Path $resolvedRoot ("task-query-$suffix.json")
+    $errorPath = Join-Path $resolvedRoot ("task-query-$suffix.stderr.log")
+    $stdoutPath = Join-Path $resolvedRoot ("task-query-$suffix.stdout.log")
+    $queryScript = @'
+$ErrorActionPreference = 'Stop'
+try {
+    $task = Get-ScheduledTask -TaskName $env:CYC_PROFILE_MATRIX_TASK_NAME -TaskPath '\' -ErrorAction Stop
+    if ($null -eq $task) { exit 3 }
+    $projection = [ordered]@{
+        TaskName = [string]$task.TaskName
+        TaskPath = [string]$task.TaskPath
+        State = [string]$task.State
+        Principal = [ordered]@{ UserId = [string]$task.Principal.UserId; LogonType = [string]$task.Principal.LogonType }
+        Triggers = @($task.Triggers | ForEach-Object { [ordered]@{ UserId = [string]$_.UserId } })
+        Actions = @($task.Actions | ForEach-Object { [ordered]@{ Execute = [string]$_.Execute; Arguments = [string]$_.Arguments; WorkingDirectory = [string]$_.WorkingDirectory } })
+    }
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($env:CYC_PROFILE_MATRIX_TASK_OUTPUT, ($projection | ConvertTo-Json -Depth 8), $encoding)
+    exit 0
+} catch {
+    $hresult = $_.Exception.HResult
+    if ($hresult -eq -2147024894 -or $hresult -eq -2147216625) { exit 3 }
+    [Console]::Error.WriteLine([string]$_.Exception.Message)
+    exit 1
+}
+'@
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($queryScript))
+    $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $previousName = [Environment]::GetEnvironmentVariable('CYC_PROFILE_MATRIX_TASK_NAME', 'Process')
+    $previousOutput = [Environment]::GetEnvironmentVariable('CYC_PROFILE_MATRIX_TASK_OUTPUT', 'Process')
+    $queryProcess = $null
+    try {
+        [Environment]::SetEnvironmentVariable('CYC_PROFILE_MATRIX_TASK_NAME', $TaskName, 'Process')
+        [Environment]::SetEnvironmentVariable('CYC_PROFILE_MATRIX_TASK_OUTPUT', $outputPath, 'Process')
+        $queryProcess = Start-Process -FilePath $windowsPowerShell `
+            -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
+            -WorkingDirectory $resolvedRoot -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $errorPath -PassThru
+        if (-not $queryProcess.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $queryProcess.Kill() } catch [System.InvalidOperationException] { }
+            $terminated = $false
+            try { $terminated = [bool]$queryProcess.WaitForExit(30000) } catch { }
+            if (-not $terminated) {
+                throw "profile-matrix task query did not terminate through its bound process handle (pid=$($queryProcess.Id))."
+            }
+            throw "profile-matrix task query timed out after $TimeoutSeconds seconds (task=$TaskName)."
+        }
+        try { $queryProcess.Refresh() } catch { }
+        $exitCode = [int]$queryProcess.ExitCode
+        if ($exitCode -eq 3) { return $null }
+        if ($exitCode -ne 0) {
+            $stderr = if (Test-Path -LiteralPath $errorPath -PathType Leaf) { [System.IO.File]::ReadAllText($errorPath) } else { '' }
+            throw "profile-matrix task query failed for $TaskName with exit $exitCode. stderr=$stderr"
+        }
+        if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
+            throw "profile-matrix task query produced no projection for $TaskName."
+        }
+        return Read-ProfileMatrixUtf8Json -Path $outputPath
+    } finally {
+        if ($null -ne $queryProcess) { $queryProcess.Dispose() }
+        [Environment]::SetEnvironmentVariable('CYC_PROFILE_MATRIX_TASK_NAME', $previousName, 'Process')
+        [Environment]::SetEnvironmentVariable('CYC_PROFILE_MATRIX_TASK_OUTPUT', $previousOutput, 'Process')
+        Remove-Item -LiteralPath $outputPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $errorPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-ProfileMatrixRootTaskStrict {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('ClusterYourCodex Controller', 'ClusterYourCodex Worker')][string]$TaskName,
+        [string]$CaseRoot = ([System.IO.Path]::GetTempPath())
+    )
+
+    # A confirmed missing-task HRESULT is the only absence result. All other
+    # scheduler/provider failures remain hard errors instead of becoming a
+    # false cleanup success.
+    return Invoke-ProfileMatrixBoundedTaskQuery -TaskName $TaskName -CaseRoot $CaseRoot
 }
 
 function Invoke-ProfileMatrixBoundedTaskRemoval {
@@ -1219,7 +1294,7 @@ function Invoke-ProfileMatrixBoundedTaskRemoval {
             # A concurrent cleanup can win the race after ownership was
             # validated. Treat that narrow case as already absent; a task that
             # remains present is still a hard failure with captured diagnostics.
-            $remaining = Get-ProfileMatrixRootTaskStrict -TaskName $TaskName
+            $remaining = Get-ProfileMatrixRootTaskStrict -TaskName $TaskName -CaseRoot $resolvedCaseRoot
             if ($null -ne $remaining) {
                 $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
                 $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
@@ -1271,12 +1346,13 @@ function Invoke-ProfileMatrixTaskHelperRequest {
         [Parameter(Mandatory = $true)][string]$CaseRoot,
         [Parameter(Mandatory = $true)][string]$RequestPath,
         [Parameter(Mandatory = $true)][string]$ResponsePath,
+        [Parameter(Mandatory = $true)][string]$ProcessingPath,
         [Parameter(Mandatory = $true)][string]$EvidencePath,
         [Parameter(Mandatory = $true)][string]$Sid,
         [Parameter(Mandatory = $true)][string]$UserName
     )
     $resolvedCaseRoot = Resolve-ProfileMatrixPath $CaseRoot
-    foreach ($ipcPath in @($RequestPath, $ResponsePath, $EvidencePath)) {
+    foreach ($ipcPath in @($RequestPath, $ResponsePath, $ProcessingPath, $EvidencePath)) {
         $resolvedIpcPath = Resolve-ProfileMatrixPath $ipcPath
         if (-not $resolvedIpcPath.StartsWith($resolvedCaseRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
             throw "profile-matrix task helper IPC path escaped its case root: $resolvedIpcPath"
@@ -1289,20 +1365,47 @@ function Invoke-ProfileMatrixTaskHelperRequest {
         }
     }
     if (-not (Test-Path -LiteralPath $RequestPath -PathType Container) -or
-        -not (Test-Path -LiteralPath $ResponsePath -PathType Container)) { return $false }
-    $requestFiles = @(
+        -not (Test-Path -LiteralPath $ResponsePath -PathType Container) -or
+        -not (Test-Path -LiteralPath $ProcessingPath -PathType Container)) { return $false }
+    $pendingFiles = @(
         Get-ChildItem -LiteralPath $RequestPath -Filter 'request-*.json' -File -Force -ErrorAction Stop |
             Where-Object { ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0 } |
             Sort-Object LastWriteTimeUtc, Name
     )
-    if ($requestFiles.Count -eq 0) { return $false }
-    $requestFile = $requestFiles[0]
+    $processingFiles = @(
+        Get-ChildItem -LiteralPath $ProcessingPath -Filter 'request-*.json' -File -Force -ErrorAction Stop |
+            Where-Object { ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0 } |
+            Sort-Object LastWriteTimeUtc, Name
+    )
+    $requestFile = if ($processingFiles.Count -gt 0) { $processingFiles[0] } elseif ($pendingFiles.Count -gt 0) { $pendingFiles[0] } else { $null }
+    if ($null -eq $requestFile) { return $false }
     $requestFilePath = [string]$requestFile.FullName
+    $requestWasProcessing = [string]::Equals(
+        (Resolve-ProfileMatrixPath (Split-Path -Parent $requestFilePath)),
+        (Resolve-ProfileMatrixPath $ProcessingPath),
+        [System.StringComparison]::OrdinalIgnoreCase)
     $requestFileName = [string]$requestFile.Name
     $requestFileId = if ($requestFileName -match '^request-([0-9a-f]{32})\.json$') { $Matches[1] } else { $null }
     if ([string]::IsNullOrWhiteSpace($requestFileId)) {
         Remove-Item -LiteralPath $requestFilePath -Force -ErrorAction Stop
         throw "profile-matrix task helper rejected malformed request filename: $requestFileName"
+    }
+    # Claim a pending request by an atomic same-volume rename before reading
+    # it. A crashed helper leaves the request in processing/ for deterministic
+    # recovery on the next poll instead of silently losing it between read,
+    # response publication, and cleanup.
+    if ([string]::Equals((Resolve-ProfileMatrixPath (Split-Path -Parent $requestFilePath)), (Resolve-ProfileMatrixPath $RequestPath), [System.StringComparison]::OrdinalIgnoreCase)) {
+        $claimedPath = Join-Path $ProcessingPath $requestFileName
+        if (Test-Path -LiteralPath $claimedPath) {
+            $claimedItem = Get-Item -LiteralPath $claimedPath -Force -ErrorAction Stop
+            if (($claimedItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "profile-matrix task helper processing path is a reparse point: $claimedPath"
+            }
+            Remove-Item -LiteralPath $requestFilePath -Force -ErrorAction Stop
+        } else {
+            [System.IO.File]::Move($requestFilePath, $claimedPath)
+        }
+        $requestFilePath = $claimedPath
     }
     $responseFilePath = Join-Path $ResponsePath ("response-$requestFileId.json")
     if (Test-Path -LiteralPath $responseFilePath) {
@@ -1310,6 +1413,13 @@ function Invoke-ProfileMatrixTaskHelperRequest {
         if (($responseItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "profile-matrix task helper response path is a reparse point: $responseFilePath"
         }
+    }
+    if ($requestWasProcessing -and (Test-Path -LiteralPath $responseFilePath -PathType Leaf)) {
+        # A prior helper invocation committed the response but crashed before
+        # deleting its claimed request. Reconcile that durable state without
+        # executing the task operation a second time.
+        Remove-Item -LiteralPath $requestFilePath -Force -ErrorAction Stop
+        return $false
     }
     $request = $null
     $status = 'failed'
@@ -1385,7 +1495,7 @@ function Invoke-ProfileMatrixTaskHelperRequest {
         }
         if ($operation -eq 'Register') {
             $action = Assert-ProfileMatrixTaskAction -Request $request -Sid $Sid -UserName $UserName
-            $existingTask = Get-ProfileMatrixRootTaskStrict -TaskName ([string]$request.taskName)
+            $existingTask = Get-ProfileMatrixRootTaskStrict -TaskName ([string]$request.taskName) -CaseRoot $resolvedCaseRoot
             if ($null -ne $existingTask) {
                 # Preserve the production fail-closed boundary before -Force:
                 # a foreign same-name task must never be overwritten merely
@@ -1426,14 +1536,14 @@ function Invoke-ProfileMatrixTaskHelperRequest {
                 throw "profile-matrix task helper observed unexpected task logon type $observedLogonType."
             }
         } elseif ($operation -eq 'Unregister') {
-            $task = Get-ProfileMatrixRootTaskStrict -TaskName ([string]$request.taskName)
+            $task = Get-ProfileMatrixRootTaskStrict -TaskName ([string]$request.taskName) -CaseRoot $resolvedCaseRoot
             if ($null -ne $task) {
                 $ownership = Assert-ProfileMatrixTaskOwnership -Task $task -Sid $Sid
                 [void](Stop-ProfileMatrixOwnedTaskRuntime -Ownership $ownership -CaseRoot $resolvedCaseRoot -TaskName ([string]$request.taskName))
                 [void](Invoke-ProfileMatrixBoundedTaskRemoval -CaseRoot $resolvedCaseRoot -TaskName ([string]$request.taskName))
                 [void](Stop-ProfileMatrixOwnedTaskRuntime -Ownership $ownership -CaseRoot $resolvedCaseRoot -TaskName ([string]$request.taskName))
             }
-            if ($null -ne (Get-ProfileMatrixRootTaskStrict -TaskName ([string]$request.taskName))) {
+            if ($null -ne (Get-ProfileMatrixRootTaskStrict -TaskName ([string]$request.taskName) -CaseRoot $resolvedCaseRoot)) {
                 throw "profile-matrix task helper could not remove $([string]$request.taskName)."
             }
         } else {
@@ -1528,15 +1638,17 @@ function Invoke-ProfileMatrixTaskHelperRequest {
         $historyArray = [object[]]::new($history.Count)
         $history.CopyTo($historyArray)
         Write-ProfileMatrixAtomicJson -Path $EvidencePath -Value (,$historyArray)
-        # Consume the request before publishing the response. The child may
-        # observe the response and immediately publish its next request; an
-        # unconditional finally-time delete would then remove that new request.
+        Write-ProfileMatrixAtomicJson -Path $responseFilePath -Value $record
+        # Keep the claimed request until the response is durably published.
+        # This makes a helper crash/restart recoverable and prevents an
+        # at-most-once request from disappearing without a response.
         Remove-Item -LiteralPath $requestFilePath -Force -ErrorAction Stop
         $requestRemoved = $true
-        Write-ProfileMatrixAtomicJson -Path $responseFilePath -Value $record
     } finally {
         if (-not $requestRemoved) {
-            Remove-Item -LiteralPath $requestFilePath -Force -ErrorAction SilentlyContinue
+            # Leave processing requests in place for the next bounded poll.
+            # Pending malformed files are removed above so they cannot poison
+            # the queue forever.
         }
     }
     return $true
@@ -1549,13 +1661,13 @@ function Remove-ProfileMatrixTaskHelperTasks {
     )
     $profilePath = Get-ProfileMatrixProfilePathForSid -Sid $Sid
     foreach ($taskName in @('ClusterYourCodex Controller', 'ClusterYourCodex Worker')) {
-        $task = Get-ProfileMatrixRootTaskStrict -TaskName $taskName
+        $task = Get-ProfileMatrixRootTaskStrict -TaskName $taskName -CaseRoot $CaseRoot
         if ($null -eq $task) { continue }
         $ownership = Assert-ProfileMatrixTaskOwnership -Task $task -Sid $Sid
         [void](Stop-ProfileMatrixOwnedTaskRuntime -Ownership $ownership -CaseRoot $CaseRoot -TaskName $taskName)
         [void](Invoke-ProfileMatrixBoundedTaskRemoval -CaseRoot $CaseRoot -TaskName $taskName)
         [void](Stop-ProfileMatrixOwnedTaskRuntime -Ownership $ownership -CaseRoot $CaseRoot -TaskName $taskName)
-        if ($null -ne (Get-ProfileMatrixRootTaskStrict -TaskName $taskName)) {
+        if ($null -ne (Get-ProfileMatrixRootTaskStrict -TaskName $taskName -CaseRoot $CaseRoot)) {
             throw "profile-matrix task helper could not remove owned task $taskName."
         }
     }
@@ -1822,9 +1934,11 @@ try {
             # and only while that child is alive.
             $taskRequestPath = Join-Path $caseRoot 'task-registration-requests'
             $taskResponsePath = Join-Path $caseRoot 'task-registration-responses'
+            $taskProcessingPath = Join-Path $taskRequestPath 'processing'
             $taskHelperEvidencePath = Join-Path $caseRoot 'task-helper-evidence.json'
             [void](New-Item -ItemType Directory -Path $taskRequestPath -Force)
             [void](New-Item -ItemType Directory -Path $taskResponsePath -Force)
+            [void](New-Item -ItemType Directory -Path $taskProcessingPath -Force)
             $deadline = [DateTimeOffset]::UtcNow.AddSeconds($ChildTimeoutSeconds)
             $timedOut = $false
             while (-not $process.HasExited) {
@@ -1833,6 +1947,7 @@ try {
                         -CaseRoot $caseRoot `
                         -RequestPath $taskRequestPath `
                         -ResponsePath $taskResponsePath `
+                        -ProcessingPath $taskProcessingPath `
                         -EvidencePath $taskHelperEvidencePath `
                         -Sid $sid `
                         -UserName $userName)
@@ -1869,6 +1984,7 @@ try {
                         -CaseRoot $caseRoot `
                         -RequestPath $taskRequestPath `
                         -ResponsePath $taskResponsePath `
+                        -ProcessingPath $taskProcessingPath `
                         -EvidencePath $taskHelperEvidencePath `
                         -Sid $sid `
                         -UserName $userName
@@ -1877,7 +1993,12 @@ try {
                             Get-ChildItem -LiteralPath $taskRequestPath -Filter 'request-*.json' -File -Force -ErrorAction SilentlyContinue
                         }
                     )
-                    if (-not $handled -and $remainingRequests.Count -eq 0) { break }
+                    $remainingProcessing = @(
+                        if (Test-Path -LiteralPath $taskProcessingPath -PathType Container) {
+                            Get-ChildItem -LiteralPath $taskProcessingPath -Filter 'request-*.json' -File -Force -ErrorAction SilentlyContinue
+                        }
+                    )
+                    if (-not $handled -and $remainingRequests.Count -eq 0 -and $remainingProcessing.Count -eq 0) { break }
                     Start-Sleep -Milliseconds 100
                 }
             }
