@@ -36,18 +36,26 @@ older audit files are historical context only.
   `release-index.json`, portable/self-contained archives, Worker Kits, and the
   SBOM metadata. The tag dereferences to
   `dcf4a6dbf7c3f1287e86da80397ac4d75f766f5c`.
+- The optional clean Windows 11 ARM64 x64-emulation job
+  `111079962921` completed with `failure` after the fresh-deployment Repair
+  child hit its 900-second bound (`bootstrap repair timed out after 900
+  seconds`). The job is `continue-on-error`, so this did not turn the release
+  run or published assets into a false failure; it also does not count as ARM64
+  acceptance. Its diagnostic artifact is `11259418732`.
 
 ## Command-line VMware and cross-platform evidence
 
 The D-drive Windows 11 VMware guest (build 26200, launched and exercised with
-`vmrun`/VIX only) started from a clean product state. Preview.105 Setup exited
-zero, the controller health endpoint returned HTTP 200 with `database: ok`,
-ports 47831/47832 listened, and LAN discovery returned
-`credentialsTransmitted: false` with explicit pairing required. The installed
-controller/worker harness then passed the complete queued → running →
-succeeded round trip, artifact/log verification, cleanup, process cleanup, and
-secret scan. Sanitized checks are retained outside Git at
-`D:\ClusterYourCodex-validation\guest-exchange\vm-roundtrip-checks-20261003.json`.
+`vmrun`/VIX only) started with preview.105 installed. The published preview.106
+Setup then exited zero, the install manifest changed to preview.106, and the
+controller health endpoint returned HTTP 200 with `database: ok`. The upgraded
+controller/worker harness passed all 14 checks across the complete queued →
+running → succeeded round trip, artifact/log verification, cleanup, process
+cleanup, and secret scan. A post-upgrade credential-free discovery probe
+returned version preview.106 with explicit pairing required. The full
+record is in [the VMware preview.106 upgrade record](vmware-preview106-upgrade-20261003.md);
+sanitized JSON remains outside Git under
+`D:\ClusterYourCodex-validation\guest-exchange`.
 
 Independent evidence also covers Windows controller ↔ Linux worker and Linux
 controller ↔ Linux worker. macOS managed-runtime validation is intentionally
