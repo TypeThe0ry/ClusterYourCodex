@@ -13,6 +13,22 @@
   repair marketplace is absent. Install and upgrade paths still fail closed on
   missing or tampered repair payloads.
 
+## [0.1.0-preview.108] - 2026-10-03
+
+### Fixed
+
+- Correct the changelog comparison links and release metadata after the
+  immutable `v0.1.0-preview.107` tag was rejected by the release identity gate.
+  Preview.107 remains unchanged; this candidate is the next prerelease source
+  and is intended to exercise the complete tagged-release workflow again.
+
+### Validation scope
+
+- The source commit is validated by the exact-main CI run after the scheduler
+  lifecycle fix. The release workflow must independently pass its identity,
+  packaging, sidecar, and prerelease publication gates before this candidate is
+  announced.
+
 ## [0.1.0-preview.107] - 2026-10-03
 
 ### Fixed
@@ -1826,7 +1842,9 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.106...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.108...HEAD
+[0.1.0-preview.108]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.107...v0.1.0-preview.108
+[0.1.0-preview.107]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.106...v0.1.0-preview.107
 [0.1.0-preview.106]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.105...v0.1.0-preview.106
 [0.1.0-preview.105]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.104...v0.1.0-preview.105
 [0.1.0-preview.104]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.103...v0.1.0-preview.104
