@@ -193,11 +193,20 @@ if (-not [string]::IsNullOrWhiteSpace($profileMatrixGate)) {
     foreach ($gatePath in @($gateEvidencePath, $gateRequestPath, $gateResponsePath)) {
         if ([string]::IsNullOrWhiteSpace($gatePath) -or
             -not [System.IO.Path]::IsPathRooted($gatePath)) {
-            throw 'Profile-matrix task gate requires absolute evidence, request, and response paths.'
+            throw 'Profile-matrix task gate requires absolute evidence, request, and response directory paths.'
         }
     }
     if (-not (Test-Path -LiteralPath $gateEvidencePath -PathType Leaf)) {
         throw 'Profile-matrix task gate evidence declaration is missing.'
+    }
+    foreach ($gateDirectory in @($gateRequestPath, $gateResponsePath)) {
+        if (-not (Test-Path -LiteralPath $gateDirectory -PathType Container)) {
+            throw "Profile-matrix task gate IPC directory is missing: $gateDirectory"
+        }
+        $directoryItem = Get-Item -LiteralPath $gateDirectory -Force -ErrorAction Stop
+        if (($directoryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Profile-matrix task gate IPC directory is a reparse point: $gateDirectory"
+        }
     }
     try {
         $gateDeclaration = Read-CycUtf8Json -Path $gateEvidencePath
@@ -4359,18 +4368,26 @@ function Invoke-CycProfileMatrixTaskGate {
         } else { $null }
         requestedAtUtc = [DateTime]::UtcNow.ToString('o')
     }
-    # Write-DurableAtomicJson is intentionally used for the request so the
-    # elevated controller never parses a partially-written command.
+    # Use one immutable request/response pair per operation. Reusing one
+    # filename created a single-slot protocol: on Windows ARM64/x64
+    # emulation, the parent could still be releasing the previous request or
+    # response handle while the child immediately published the next one.
+    # Unique files make the hand-off queue-safe without weakening the parent
+    # helper's SID, operation, and task-action validation.
+    $requestDirectory = Resolve-NormalizedPath $script:ProfileMatrixTaskRequestPath
+    $responseDirectory = Resolve-NormalizedPath $script:ProfileMatrixTaskResponsePath
+    $requestPath = Join-Path $requestDirectory ("request-$requestId.json")
+    $responsePath = Join-Path $responseDirectory ("response-$requestId.json")
     Write-DurableAtomicJson `
-        -Path $script:ProfileMatrixTaskRequestPath `
+        -Path $requestPath `
         -Value $request `
         -Depth 8
 
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds(60)
     do {
-        if (Test-Path -LiteralPath $script:ProfileMatrixTaskResponsePath -PathType Leaf) {
+        if (Test-Path -LiteralPath $responsePath -PathType Leaf) {
             try {
-                $response = Read-CycUtf8Json -Path $script:ProfileMatrixTaskResponsePath
+                $response = Read-CycUtf8Json -Path $responsePath
             } catch {
                 $response = $null
             }
@@ -4413,7 +4430,7 @@ function Invoke-CycProfileMatrixTaskGate {
         }
         Start-Sleep -Milliseconds 100
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
-    throw "Profile-matrix parent task helper timed out for $Operation $Name. request=$($script:ProfileMatrixTaskRequestPath) response=$($script:ProfileMatrixTaskResponsePath)"
+    throw "Profile-matrix parent task helper timed out for $Operation $Name. request=$requestPath response=$responsePath"
 }
 
 function ConvertTo-CycTaskSnapshotSid {

@@ -185,8 +185,8 @@ $freshWork = Join-Path $work 'fresh-deployment'
 $stdoutPath = Join-Path $logRoot 'fresh-deployment.stdout.log'
 $stderrPath = Join-Path $logRoot 'fresh-deployment.stderr.log'
 $taskGateEvidencePath = Join-Path $work 'task-gate.json'
-$taskRequestPath = Join-Path $work 'task-registration-request.json'
-$taskResponsePath = Join-Path $work 'task-registration-response.json'
+$taskRequestPath = Join-Path $work 'task-registration-requests'
+$taskResponsePath = Join-Path $work 'task-registration-responses'
 $taskHelperEvidencePath = Join-Path $work 'task-helper-evidence.json'
 $arguments = @(
     '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
@@ -211,12 +211,17 @@ $oldTaskRequest = [string]$env:CYC_PROFILE_MATRIX_TASK_REQUEST
 $oldTaskResponse = [string]$env:CYC_PROFILE_MATRIX_TASK_RESPONSE
 try {
     if ($UseParentTaskHelper) {
+        [void](New-Item -ItemType Directory -Path $taskRequestPath -Force)
+        [void](New-Item -ItemType Directory -Path $taskResponsePath -Force)
         $gate = [ordered]@{
             schemaVersion = 'cyc.dev/windows-profile-matrix-task-gate/v1'
             mode = 'parent-elevated-registration-only'
             caseName = $CaseName
             sid = [string]$identity.User.Value
             requestedTaskLogonType = 'Interactive'
+            # The gate uses per-request files in these directories. A unique
+            # pair avoids the single-slot request/response race that can
+            # strand the next lifecycle operation on slow ARM64 emulation.
             requestPath = $taskRequestPath
             responsePath = $taskResponsePath
             createdAtUtc = [DateTime]::UtcNow.ToString('o')
