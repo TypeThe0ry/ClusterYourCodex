@@ -1305,6 +1305,12 @@ function Invoke-ProfileMatrixTaskHelperRequest {
         throw "profile-matrix task helper rejected malformed request filename: $requestFileName"
     }
     $responseFilePath = Join-Path $ResponsePath ("response-$requestFileId.json")
+    if (Test-Path -LiteralPath $responseFilePath) {
+        $responseItem = Get-Item -LiteralPath $responseFilePath -Force -ErrorAction Stop
+        if (($responseItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "profile-matrix task helper response path is a reparse point: $responseFilePath"
+        }
+    }
     $request = $null
     $status = 'failed'
     $errorMessage = $null
