@@ -19,14 +19,23 @@ older audit files are historical context only.
   and packaged Setup checks
   [37062423747](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/37062423747)
   passed.
-- The preview.106 tag is present, but the first release attempt ([workflow
-  37067050549](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/37067050549))
-  stopped before asset publication because the exact merge commit had no
-  successful `main` push CI yet. This was the intended fail-closed identity
-  gate, not an installer or build failure. The exact push CI for that commit is
-  still running as this record is prepared; after it succeeds, rerun the full
-  release workflow so all skipped artifact jobs execute. Until then there is
-  no preview.106 GitHub Release or downloadable asset.
+- PR #185 (`3402b5ba24229300ed51464638be0793b50225c0`) recorded the final
+  preview.106 audit baseline and the VMware evidence on `origin/main`.
+- The first attempt of tagged workflow
+  [37067050549](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/37067050549)
+  stopped at the exact-commit identity gate because the matching `main` push CI
+  had not completed. After that push run succeeded, the full tagged workflow
+  was rerun. Its Windows x64 self-contained job passed Setup, fresh deployment,
+  silent Setup lifecycle, and asset staging; the release-index/provenance job
+  and the publish job also passed.
+- GitHub now publishes
+  [`v0.1.0-preview.106`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.106)
+  as a non-draft prerelease at `2026-10-03T00:06:21Z`. The Release contains 23
+  assets. All 11 downloaded per-asset SHA-256 sidecars matched their payloads
+  in `D:\ClusterYourCodex-validation\preview106`, including Setup.exe,
+  `release-index.json`, portable/self-contained archives, Worker Kits, and the
+  SBOM metadata. The tag dereferences to
+  `dcf4a6dbf7c3f1287e86da80397ac4d75f766f5c`.
 
 ## Command-line VMware and cross-platform evidence
 

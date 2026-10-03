@@ -1,16 +1,19 @@
 # ClusterYourCodex project status
 
-## Current GitHub audit — 2026-10-03 (preview.106 candidate)
+## Current GitHub audit — 2026-10-03 (preview.106 published prerelease)
 
-The current `origin/main` source is `dcf4a6dbf7c3f1287e86da80397ac4d75f766f5c`,
-the squash merge of PR #184. PR #183 fixed the Windows profile-matrix
+The current `origin/main` source is `3402b5ba24229300ed51464638be0793b50225c0`,
+the squash merge of PR #185. Its preview source commit is
+`dcf4a6dbf7c3f1287e86da80397ac4d75f766f5c`, the squash merge of PR #184.
+PR #183 fixed the Windows profile-matrix
 Task-Scheduler deadlock by keeping disposable scheduler probes in the elevated
 parent helper, using bounded exact-process shutdown, and rejecting foreign
 same-name tasks before replacement. PR #184 synchronized all product surfaces
-to `0.1.0-preview.106`. The exact candidate and VMware evidence are recorded
+to `0.1.0-preview.106`; PR #185 recorded the final audit and VMware evidence.
+The exact candidate and VMware evidence are recorded
 in [`docs/current-audit-20261003.md`](current-audit-20261003.md).
 
-At the PR #180 merge point there were no other open pull requests. Issues #2 and #3 remain open because
+At the PR #185 merge point there were no other open pull requests. Issues #2 and #3 remain open because
 their remaining requirements are real native-environment gates, not replaced by
 hosted CI or package checks: Issue #2 still needs a genuinely clean Windows 11
 Install → Repair → N-1→N Upgrade → interrupted Rollback → Uninstall run plus
@@ -21,13 +24,12 @@ recorded as passed where their stated evidence boundary is satisfied.
 
 The stable `v0.0.1` tag remains immutable at
 `e4fbaef04b764268fa038311d85573b18b549f9f`. The current public build is the
-published developer prerelease `v0.1.0-preview.105`, produced by release run
-`37023139818` after exact push CI run `37023051938` completed successfully.
-The `v0.1.0-preview.106` annotated tag points at the current candidate, but
-its first release run `37067050549` correctly stopped before assets because
-the exact merge commit did not yet have successful push CI. The candidate
-remains prerelease-only; rerun the full release workflow after push CI
-succeeds. It remains a preview while Issues #2 and #3 retain their
+published developer prerelease
+[`v0.1.0-preview.106`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.106),
+published by tagged release run `37067050549` at `2026-10-03T00:06:21Z`.
+It contains 23 assets; the D-drive download under
+`D:\ClusterYourCodex-validation\preview106` matched all 11 per-asset SHA-256
+sidecars. It remains a preview while Issues #2 and #3 retain their
 native-environment gates.
 
 PR #180 fixes the release-only provenance handoff exposed by the failed
@@ -36,12 +38,13 @@ commit from the identity gate instead of relying on a job-local environment
 variable. Preview.104 remains immutable and is not presented as a published
 release.
 
-The published preview.105 assets and their sidecars were downloaded to the
+The published preview.106 assets and their sidecars were downloaded to the
 D-drive validation workspace and verified locally: Setup.exe, the Windows
-self-contained ZIP, and `release-index.json` all matched their SHA-256
-sidecars. The release index binds the prerelease to source commit
-`c152f701432ce07a91f292e2ac325236883b60c5`, includes the CycloneDX SBOM and
-GitHub artifact provenance, and marks macOS managed kits as runtime-gated.
+self-contained and portable archives, Worker Kits, SBOM metadata, and
+`release-index.json` all matched their SHA-256 sidecars. The release index
+binds the prerelease to source commit `dcf4a6dbf7c3f1287e86da80397ac4d75f766f5c`,
+includes GitHub artifact provenance, and marks macOS managed kits as
+runtime-gated.
 See [`docs/current-audit-20261003.md`](current-audit-20261003.md) for the
 full release and remaining Issue #2/#3 boundary.
 
