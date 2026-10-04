@@ -1,5 +1,20 @@
 # Current audit — 2026-10-04
 
+## Preview.111 candidate after PR #199
+
+PR #199 is merged into `origin/main` at
+`bc683ec31cfe086006f051f71bba8a488ce731a7`. It replaces the incorrect
+`Get-ScheduledTask` absence assumption with a bounded `Schedule.Service` COM
+projection, preserving strict UTF-8 task identity/action evidence and
+fail-closed unknown errors. The exact-source CI run passed all required checks;
+the next candidate is `v0.1.0-preview.111`.
+
+The immutable `v0.1.0-preview.110` tag is not a published release: its first
+tagged workflow correctly stopped because the exact main-push CI was still in
+progress. It is retained as a failed candidate and will not be moved or
+republished. Issues #2 and #3 remain open, and stable `v0.0.1` remains
+immutable at `e4fbaef04b764268fa038311d85573b18b549f9`.
+
 ## Preview.110 candidate after PR #197
 
 PR #197 is merged into `origin/main` at
