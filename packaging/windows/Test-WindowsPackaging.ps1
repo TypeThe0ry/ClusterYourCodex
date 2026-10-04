@@ -4868,7 +4868,9 @@ exit 91
     Assert-True ($bootstrapSource -match 'taskRuntime\s*=\s*\[ordered\]@') 'bootstrap records task runtime gating separately from the production logon type'
     Assert-True ($bootstrapSource -match 'parent-elevated-registration-v1[\s\S]+not-started') 'bootstrap has an explicit parent-elevated registration-only gate'
     Assert-True ($bootstrapSource -match 'ProfileMatrixTaskHelperMode[\s\S]+requires its explicit test switch') 'bootstrap requires an explicit helper-mode switch in addition to the IPC declaration'
-    Assert-True ($bootstrapSource -match 'Invoke-CycProfileMatrixTaskGate[\s\S]+requestId') 'bootstrap binds gated task registration to a request/response exchange'
+    Assert-True ($bootstrapSource -match 'Invoke-CycProfileMatrixTaskGate[\s\S]+requestId' -and
+        $bootstrapSource -match 'request-\$requestId\.json' -and
+        $bootstrapSource -match 'response-\$requestId\.json') 'bootstrap binds each gated task operation to a unique request/response file pair'
     $boundedScheduler = [regex]::Match($bootstrapSource, 'function Invoke-CycBoundedPowerShellJson[\s\S]+?function Get-CycTaskSnapshotByName')
     Assert-True ($boundedScheduler.Success -and
         $boundedScheduler.Value -match 'Start-Process' -and
@@ -5308,10 +5310,14 @@ exit 0
         $profileMatrixSource -match 'WaitForExit\(\$TimeoutSeconds \* 1000\)' -and
         $profileMatrixSource -match 'bare PID can refer to a replacement process' -and
         $profileMatrixSource -notmatch 'Unregister-ScheduledTask') 'profile matrix removes tasks through a bounded native scheduler command instead of an unbounded PowerShell unregister call'
-    Assert-True ($profileMatrixSource -match 'function Get-ProfileMatrixRootTaskStrict' -and
-        $profileMatrixSource -match "Get-ScheduledTask -TaskName '\*' -TaskPath '\\' -ErrorAction Stop" -and
-        $profileMatrixSource -match 'empty, successfully queried result' -and
-        $profileMatrixSource -match 'Get-ProfileMatrixRootTaskStrict -TaskName') 'profile matrix distinguishes confirmed task absence from scheduler query failure'
+    Assert-True ($profileMatrixSource -match 'function Invoke-ProfileMatrixBoundedTaskQuery' -and
+        $profileMatrixSource -match 'Get-ScheduledTask -TaskName \$env:CYC_PROFILE_MATRIX_TASK_NAME' -and
+        $profileMatrixSource -match 'WaitForExit\(\$TimeoutSeconds \* 1000\)' -and
+        $profileMatrixSource -match 'query timed out after \$TimeoutSeconds seconds' -and
+        $profileMatrixSource -match '\$hresult -eq -2147024894' -and
+        $profileMatrixSource -match '\$hresult -eq -2147216625' -and
+        $profileMatrixSource -match 'function Get-ProfileMatrixRootTaskStrict' -and
+        $profileMatrixSource -match 'Get-ProfileMatrixRootTaskStrict -TaskName') 'profile matrix bounds Task Scheduler queries and distinguishes confirmed task absence from provider failure'
     Assert-True ($profileMatrixSource -match 'function Get-ProfileMatrixTaskHelperHistoryRecords' -and
         $profileMatrixSource -match 'historyArray' -and
         $profileMatrixSource -match 'Value \(,\$historyArray\)') 'profile matrix helper evidence is flattened and always serialized as a JSON array'
@@ -5343,7 +5349,13 @@ exit 0
     Assert-True ($profileMatrixSource -match '(?i)GLOBALROOT[\\/]|\\bDevice[\\/]|Volume\\{|UNC[\\/]') 'profile matrix rejects device, volume, GLOBALROOT, and UNC reparse targets'
     Assert-True ($profileMatrixSource -match 'tagMatches\.Count -ne 1[\s\S]+uniqueTargets\.Count -ne 1') 'profile matrix rejects ambiguous or malformed native reparse metadata'
     Assert-True ($profileMatrixSource -match 'invalidTargetProjection[\s\S]+return \$false') 'profile matrix rejects malformed link projections instead of ignoring them'
-    Assert-True ($profileMatrixSource -match 'IPC path escaped its case root' -and $profileMatrixSource -match 'IPC path is a reparse point') 'profile matrix confines elevated-helper IPC to the case root without following links'
+    Assert-True ($profileMatrixSource -match 'IPC path escaped its case root' -and
+        $profileMatrixSource -match 'IPC path is a reparse point' -and
+        $profileMatrixSource -match "request-\*\.json" -and
+        $profileMatrixSource -match 'response-\$requestFileId\.json' -and
+        $profileMatrixSource -match 'ProcessingPath' -and
+        $profileMatrixSource -match '\[System\.IO\.File\]::Move\(\$requestFilePath' -and
+        $profileMatrixSource -match 'response is durably published') 'profile matrix confines queued elevated-helper IPC to the case root without following links and recovers claimed requests'
     Assert-True ($profileMatrixSource -match 'cyc\.dev/windows-profile-matrix-task-request/v2' -and
         $profileMatrixSource -match 'cyc\.dev/windows-profile-matrix-task-snapshot/v1' -and
         $profileMatrixSource -match "operation -notin @\('Register', 'Unregister', 'Restore'\)") 'profile matrix parent helper validates the structured restore operation contract'
@@ -5414,6 +5426,10 @@ exit 0
     Assert-True ($profileMatrixChildSource -match 'ProfileMatrixTaskHelperMode') 'profile matrix child forwards the explicit helper-mode switch'
     Assert-True ($profileMatrixChildSource -match 'parent-elevated-registration-only') 'profile matrix child records the gated registration-only runtime semantics'
     Assert-True ($profileMatrixChildSource -match 'task-helper-evidence\.json') 'profile matrix child preserves helper request/response evidence'
+    Assert-True ($freshDeploymentSource -match 'function Write-FreshPhaseTrace' -and
+        $freshDeploymentSource -match 'phase-trace\.jsonl' -and
+        $freshDeploymentSource -match "Event 'start'" -and
+        $freshDeploymentSource -match "Event 'end'") 'fresh deployment diagnostics retain per-phase timestamps'
 
     $profileWorkflowNeedle = 'Test-WindowsProfileMatrix\.ps1'
     Assert-True ($releaseWorkflow -match $profileWorkflowNeedle) 'release workflow invokes the Windows profile/path matrix'

@@ -688,6 +688,27 @@ function Wait-FreshFileUnlocked {
     throw "fresh deployment file remained locked before repair mutation: $Path; lastError=$lastError"
 }
 
+function Write-FreshPhaseTrace {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Phase,
+        [Parameter(Mandatory = $true)][ValidateSet('start', 'end', 'failure')][string]$Event,
+        [string]$Detail
+    )
+    $record = [ordered]@{
+        schemaVersion = 'cyc.dev/fresh-deployment-phase/v1'
+        phase = $Phase
+        event = $Event
+        detail = $Detail
+        timestampUtc = [DateTime]::UtcNow.ToString('o')
+    }
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::AppendAllText(
+        $Path,
+        ((($record | ConvertTo-Json -Compress -Depth 4) + [Environment]::NewLine)),
+        $encoding)
+}
+
 $package = Resolve-FreshPath $PackageRoot
 $work = Resolve-FreshPath $WorkRoot
 $caseRoot = $work
@@ -708,6 +729,7 @@ $payload = Join-Path $package 'payload'
 $manifestPath = Join-Path $package 'preview-manifest.json'
 $bootstrap = Join-Path $package 'payload\installer\bootstrap.ps1'
 $logRoot = Join-Path $work 'logs'
+$phaseTracePath = Join-Path $logRoot 'phase-trace.jsonl'
 $suffix = [Guid]::NewGuid().ToString('N')
 $isolatedRoot = Resolve-FreshPath (Join-Path $env:LOCALAPPDATA "ClusterYourCodex-fresh-$suffix")
 $installRoot = Resolve-FreshPath (Join-Path $isolatedRoot 'program')
@@ -727,6 +749,8 @@ if (-not $KeepWorkRoot) {
     Assert-FreshTest ((Split-Path -Leaf $work) -cmatch '^clusteryourcodex-fresh-[0-9a-f]{32}$') 'auto-cleaned work root uses the harness-owned GUID name'
 }
 [void](New-Item -ItemType Directory -Path $logRoot -Force)
+$currentPhase = 'initialization'
+Write-FreshPhaseTrace -Path $phaseTracePath -Phase $currentPhase -Event 'start' -Detail 'fresh deployment harness initialized'
 
 $common = @(
     '-Action', 'Install',
@@ -775,7 +799,10 @@ try {
     Assert-FreshTest ($productTasksBefore.Count -eq 0) 'fresh deployment runner starts without pre-existing product tasks'
     Assert-FreshTest (-not $preInstallState.lifecycleOwned) 'isolated lifecycle state did not exist before install'
 
+    $currentPhase = 'plan'
+    Write-FreshPhaseTrace -Path $phaseTracePath -Phase $currentPhase -Event 'start' -Detail 'plan-only lifecycle'
     $plan = Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments ($common + @('-PlanOnly')) -LogRoot $logRoot -Label 'plan' -TimeoutSeconds $LifecycleTimeoutSeconds
+    Write-FreshPhaseTrace -Path $phaseTracePath -Phase $currentPhase -Event 'end' -Detail "exitCode=$($plan.exitCode)"
     Assert-FreshTest ($plan.exitCode -eq 0) 'manifest-bound install plan succeeds'
     $previewManifest = Read-FreshUtf8Json -Path $manifestPath
     Assert-FreshTest ([string]$previewManifest.schemaVersion -eq 'cyc.dev/windows-preview/v1') 'preview manifest schema is recognized'
@@ -791,7 +818,10 @@ try {
     # Mark cleanup ownership before crossing that process boundary.
     $installAttempted = $true
     $installed = $true
+    $currentPhase = 'install'
+    Write-FreshPhaseTrace -Path $phaseTracePath -Phase $currentPhase -Event 'start' -Detail 'install lifecycle'
     [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $common -LogRoot $logRoot -Label 'install' -TimeoutSeconds $LifecycleTimeoutSeconds)
+    Write-FreshPhaseTrace -Path $phaseTracePath -Phase $currentPhase -Event 'end' -Detail 'install lifecycle completed'
     foreach ($relative in @('ClusterYourCodex.exe', 'cyc-controller.exe', 'cyc-worker.exe', 'cyc.exe', 'installer/bootstrap.ps1')) {
         [void](Assert-InstalledFile -Root $installRoot -RelativePath $relative)
     }
@@ -872,7 +902,10 @@ try {
 
     $repairArguments = @($common)
     $repairArguments[1] = 'Repair'
+    $currentPhase = 'repair'
+    Write-FreshPhaseTrace -Path $phaseTracePath -Phase $currentPhase -Event 'start' -Detail 'repair lifecycle'
     [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $repairArguments -LogRoot $logRoot -Label 'repair' -TimeoutSeconds $LifecycleTimeoutSeconds)
+    Write-FreshPhaseTrace -Path $phaseTracePath -Phase $currentPhase -Event 'end' -Detail 'repair lifecycle completed'
     $repairedManifest = Read-FreshUtf8Json -Path $installedManifestPath
     Assert-FreshTest ([string]$repairedManifest.schemaVersion -eq 'cyc.dev/windows-install-manifest/v1') 'repair keeps a valid manifest'
     if ($ProfileMatrixTaskHelperMode) {
@@ -916,7 +949,10 @@ try {
         $uninstallArguments += '-ProfileMatrixTaskHelperMode'
     }
     $uninstallAttempted = $true
+    $currentPhase = 'uninstall'
+    Write-FreshPhaseTrace -Path $phaseTracePath -Phase $currentPhase -Event 'start' -Detail 'uninstall lifecycle'
     [void](Invoke-FreshPowerShell -Bootstrap $bootstrap -Arguments $uninstallArguments -LogRoot $logRoot -Label 'uninstall' -TimeoutSeconds $LifecycleTimeoutSeconds)
+    Write-FreshPhaseTrace -Path $phaseTracePath -Phase $currentPhase -Event 'end' -Detail 'uninstall lifecycle completed'
     # A successful child exit is not the lifecycle proof. Keep cleanup armed
     # until the task, manifest, and install-root postconditions all pass.
     $uninstallPostcondition = @{
@@ -958,8 +994,12 @@ try {
         taskLogonType = $observedTaskLogonType
         steps = @('plan', 'install', 'controller-version', 'worker-probe', 'cli-help', 'repair-corrupted-cli', 'uninstall')
         logs = $logRoot
+        phaseTrace = $phaseTracePath
     } | ConvertTo-Json -Depth 6
 } finally {
+    if ($currentPhase -ne 'initialization' -and -not $bodySucceeded) {
+        try { Write-FreshPhaseTrace -Path $phaseTracePath -Phase $currentPhase -Event 'failure' -Detail 'fresh deployment harness failed before phase completion' } catch { }
+    }
     $postTestCleanupFailures = New-Object System.Collections.Generic.List[string]
     if ($isolatedRootPrepared -and $installed -and -not $uninstalled) {
         $cleanupState = $null

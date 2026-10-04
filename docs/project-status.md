@@ -1,6 +1,26 @@
 # ClusterYourCodex project status
 
-## Current GitHub audit — 2026-10-04 (preview.109 candidate)
+## Current GitHub audit — 2026-10-04 (preview.109 published prerelease)
+
+The exact source commit `9721c144fa19f95d6ece8c062740dee0f6eaf3db` is the PR
+#196 merge. Tagged workflow `37149273717` published
+[`v0.1.0-preview.109`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.109)
+at `2026-10-03T21:38:10Z` as a prerelease with 23 assets. The D-drive public
+download matched all 11 per-asset sidecars and `SHA256SUMS`; the immutable
+stable `v0.0.1` tag was not touched.
+
+The preview.109 Setup was then installed in the D-drive Windows 11 VMware
+guest using VIX CLI. A clean snapshot install returned 0, the controller
+reported preview.109 with healthy database/API, credential-free LAN discovery
+returned a pairing-required candidate, and the same-host live round-trip
+passed all 14 checks (`queued -> running -> succeeded`, job root deleted).
+Evidence remains outside Git under
+`D:\\ClusterYourCodex-validation\\preview109-public-20261004\\guest\\`.
+The optional ARM64 tagged job reached a terminal non-blocking failure in the
+profile matrix: the `standard-ascii` child timed out after 900 seconds during
+the later repair/uninstall task-gate boundary. Fresh deployment and silent
+Setup passed; diagnostics are retained outside Git under
+`D:\\ClusterYourCodex-validation\\preview109-arm64-diagnostics-20261004\\`.
 
 PR #195 is merged at `22a2f6fa993aa9e25e47a814395e485a3dba90d7`. It fixes the
 Windows profile-matrix helper's case-root binding: the parent evidence root is
@@ -10,7 +30,7 @@ flattened before record validation. The PR's exact CI run passed the Windows
 bounded process and Setup lifecycle jobs, the Desktop/Codex bridge live
 round-trip, security scans, and Linux/macOS Worker Kit checks.
 
-The next public candidate is `v0.1.0-preview.109`, and it must remain a
+The current public candidate is `v0.1.0-preview.109`, and it remains a
 prerelease. The D-drive VMware CLI run against the published preview.108 also
 passed Setup/Repair, controller health/database, scheduled-task readiness,
 credential-free discovery, and a same-host live job (`queued -> running ->
@@ -22,6 +42,17 @@ and LAN discovery evidence is recorded at its stated boundary; clean-VM
 Install → Repair → Upgrade → Rollback → Uninstall and native macOS runtime
 acceptance are not being claimed. Stable `v0.0.1` remains immutable at
 `e4fbaef04b764268fa038311d85573b18b549f9`.
+
+The follow-up source fix hardens the profile-matrix helper's reused
+single-slot request/response files into a case-root-confined directory queue:
+each task-gate operation gets a unique request/response filename pair,
+requests are atomically claimed into `processing/`, and a claimed request is
+retained until its response is committed. The existing SID, task-action, and
+bounded scheduler checks remain fail-closed. The preview.109 evidence did not
+prove that file reuse caused the timeout: its largest timing gap occurs before
+the repair Controller request, so a slow repair preflight or scheduler query
+remains possible. This fix must be published and revalidated with phase
+timestamps before the ARM64 profile matrix can be called repaired.
 
 ## Current GitHub audit — 2026-10-03 (preview.108 published prerelease)
 
