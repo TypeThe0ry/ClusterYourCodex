@@ -21,11 +21,11 @@ The latest public developer build is **[v0.1.0-preview.111](https://github.com/T
 | Linux x64 worker | Public Worker Kit and Windows → Linux validation path. |
 | macOS x64 / arm64 worker packages | Worker Kits build and verify; native managed-runtime acceptance is deferred in [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). |
 | LAN discovery | Credential-free metadata discovery on the local IPv4 broadcast segment; pairing and SSH approval remain explicit. |
-| Live three-machine deployment | Preview.111 is running on this Windows controller, the NUC Linux worker, and the Helio Windows worker; see the [deployment record](docs/live-deployment-preview111-20261004.md). |
+| Live deployment | Preview.111 is verified on this Windows controller and the NUC Linux worker. Helio has a historical successful run, but its current worker heartbeat is stale; see the [deployment record](docs/live-deployment-preview111-20261004.md) and [current audit](docs/current-audit-20261005.md). |
 | Stable GA | Not yet declared. [Issue #2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) track the remaining native gates. |
 
 For the authoritative commit, workflow runs, VM evidence, and open gates, see
-the [current audit](docs/current-audit-20261004.md), the [preview.111 VMware record](docs/vmware-preview111-20261004.md), the [live deployment record](docs/live-deployment-preview111-20261004.md), and [project status](docs/project-status.md).
+the [current audit](docs/current-audit-20261005.md), the [preview.111 VMware record](docs/vmware-preview111-20261004.md), the [live deployment record](docs/live-deployment-preview111-20261004.md), and [project status](docs/project-status.md).
 
 ## Install the public Windows build
 

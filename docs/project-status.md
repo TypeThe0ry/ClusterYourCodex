@@ -1,5 +1,45 @@
 # ClusterYourCodex project status
 
+## Current GitHub audit — 2026-10-05 (preview.111; post-PR #206)
+
+The authoritative `origin/main` commit is
+`a5f38d9f51107ea3e31d910ec3c32238053f7e14`, the merge of PR #206. The latest
+public developer build is
+[`v0.1.0-preview.111`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.111),
+published as a non-draft prerelease. The immutable stable
+[`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)
+still resolves to `e4fbaef04b764268fa038311d85573b18b549f9` locally and
+remotely; no stable tag or asset was changed.
+
+PR #206 clarifies the renderer boundary: the browser preview can read health
+and fleet telemetry through the loopback development proxy, while plugin
+installation/repair, SSH credential storage, provisioning, and full proof
+remain native-desktop-only operations. The browser now labels this state as
+**Browser preview** and disables actions that cannot succeed without the
+Tauri bridge.
+
+The current Windows installation of preview.111 has a healthy Controller and
+database, a valid native plugin/MCP probe, and a fresh same-host Windows
+controller/worker round trip with 14/14 checks passing. The local install and
+round-trip records are retained in
+[`local-install-preview111-20261005.md`](local-install-preview111-20261005.md)
+and [`local-windows-roundtrip-20261005.md`](local-windows-roundtrip-20261005.md).
+The NUC Linux worker also completed a preview.111 proof job with exit code 0.
+
+At the latest fleet observation, the NUC is online and schedulable. The Helio
+Windows host is reachable at the network layer but its worker heartbeat is
+stale and its worker/controller ports are closed; no new Helio deployment is
+claimed from that observation. Re-enrollment must use the native desktop
+provisioning flow so credentials remain in the OS vault and out of logs.
+
+Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and
+[#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) remain open. The
+remaining gates are the clean current-source Windows version-changing
+`Install → Repair → Upgrade → Rollback → Uninstall` matrix plus production
+Authenticode/final packaged acceptance, and native macOS LaunchAgent/live
+managed-runtime acceptance. Hosted CI, a provisioned VM, or a browser preview
+is not being promoted to those stronger claims.
+
 ## Current GitHub audit — 2026-10-04 (preview.109 published prerelease)
 
 The exact source commit `9721c144fa19f95d6ece8c062740dee0f6eaf3db` is the PR
