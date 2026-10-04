@@ -167,6 +167,8 @@ const fullRunLayerKeys: Record<FullRunLayerId, TranslationKey> = {
 
 const controllerErrorKeys: Readonly<Record<string, TranslationKey>> = {
   transport_unavailable: "error.controllerTransport",
+  controller_auth_unavailable: "error.controllerAuth",
+  controller_unavailable: "error.controllerUnavailable",
   invalid_response: "error.controllerInvalidResponse",
   no_eligible_node: "error.noEligibleNode",
   invalid_job: "error.invalidJob",
@@ -179,9 +181,11 @@ const integrationErrorKeys: Readonly<Record<string, TranslationKey>> = {
   invalid_native_response: "error.integrationInvalidResponse",
   codex_not_found: "error.codexNotFound",
   codex_cli_broken: "error.codexCliBroken",
+  integration_data_unavailable: "error.integrationDataUnavailable",
   integration_payload_unavailable: "error.integrationPayloadUnavailable",
   marketplace_install_failed: "error.marketplaceInstallFailed",
   plugin_install_failed: "error.pluginInstallFailed",
+  agents_integration_failed: "error.agentsIntegrationFailed",
   integration_state_unavailable: "error.integrationStateUnavailable",
   repair_required: "error.repairRequired",
   integration_self_test_failed: "error.integrationSelfTestFailed",
@@ -520,6 +524,7 @@ function IntegrationPage({
   const [status, setStatus] = useState<IntegrationStatus>();
   const [statusFresh, setStatusFresh] = useState(false);
   const [statusChecking, setStatusChecking] = useState(true);
+  const [statusErrorCode, setStatusErrorCode] = useState<string>();
   const [autoPollStatus, setAutoPollStatus] = useState(false);
   const [operation, setOperation] = useState<"install" | "check" | "full_check">();
   const [error, setError] = useState<string>();
@@ -537,6 +542,7 @@ function IntegrationPage({
     setStatusFresh(false);
     if (!desktopBridgeAvailable) {
       setStatus(undefined);
+      setStatusErrorCode(undefined);
       setError(undefined);
       setStatusChecking(false);
       return;
@@ -546,12 +552,14 @@ function IntegrationPage({
       if (sequence !== statusSequence.current) return;
       setStatus(next);
       setStatusFresh(true);
+      setStatusErrorCode(undefined);
       setAutoPollStatus(["restart_required", "installed", "stale"].includes(next.state));
       setError(undefined);
     } catch (caught) {
       if (sequence !== statusSequence.current) return;
       setStatus(undefined);
       setStatusFresh(false);
+      setStatusErrorCode(errorCode(caught));
       setError(localizedUiError(caught, t, "error.integrationOperationFailed"));
     } finally {
       if (sequence === statusSequence.current) setStatusChecking(false);
@@ -574,6 +582,7 @@ function IntegrationPage({
   }, []);
 
   const busy = operation !== undefined;
+  const nativeStatusUnavailable = desktopBridgeAvailable && statusErrorCode !== undefined;
   useEffect(() => {
     if (busy || statusChecking || !autoPollStatus) return undefined;
     const timer = window.setTimeout(() => void refreshStatus(), 3_000);
@@ -724,8 +733,8 @@ function IntegrationPage({
         <header className="panel-header"><div><h3>{t("integration.checklistTitle")}</h3><p>{t("integration.checklistDescription")}</p></div></header>
         {!desktopBridgeAvailable ? <div className="integration-result is-stale" role="status"><strong>{t("integration.browserPreview")}</strong><span>{t("integration.browserPreviewDescription")}</span></div> : null}
         <div className={`setup-step ${online ? "done" : "current"}`}><span>{online ? <Icon name="check" /> : "1"}</span><div><strong>{t("integration.stepController")}</strong><p>{online ? t("integration.controllerReady") : t("integration.controllerStart")}</p></div></div>
-        <div className={`setup-step ${pluginInstalled ? "done" : "current"}`}><span>{pluginInstalled ? <Icon name="check" /> : "2"}</span><div><strong>{t("integration.stepPlugin")}</strong><p>{t("integration.pluginDescriptionShort")}</p></div><button className="button button-secondary" disabled={busy || statusChecking || !desktopBridgeAvailable || status?.state === "not_found"} onClick={() => void install()}>{operation === "install" ? t("integration.working") : installLabel}</button></div>
-        <div className={`setup-step ${pluginConnected ? "done" : pluginInstalled ? "current" : ""}`}><span>{pluginConnected ? <Icon name="check" /> : "3"}</span><div><strong>{t("integration.stepCheck")}</strong><p>{t("integration.pluginCheckDescription")}</p></div><button className="text-button small" disabled={busy || statusChecking || !desktopBridgeAvailable || !online || !pluginInstalled} onClick={() => void runPluginCheck()}>{operation === "check" ? t("integration.checking") : t("integration.stepCheck")} <Icon name="arrow" size={14} /></button></div>
+        <div className={`setup-step ${pluginInstalled ? "done" : "current"}`}><span>{pluginInstalled ? <Icon name="check" /> : "2"}</span><div><strong>{t("integration.stepPlugin")}</strong><p>{t("integration.pluginDescriptionShort")}</p></div><button className="button button-secondary" disabled={busy || statusChecking || nativeStatusUnavailable || !desktopBridgeAvailable || status?.state === "not_found"} onClick={() => void install()}>{operation === "install" ? t("integration.working") : installLabel}</button></div>
+        <div className={`setup-step ${pluginConnected ? "done" : pluginInstalled ? "current" : ""}`}><span>{pluginConnected ? <Icon name="check" /> : "3"}</span><div><strong>{t("integration.stepCheck")}</strong><p>{t("integration.pluginCheckDescription")}</p></div><button className="text-button small" disabled={busy || statusChecking || nativeStatusUnavailable || !desktopBridgeAvailable || !online || !pluginInstalled} onClick={() => void runPluginCheck()}>{operation === "check" ? t("integration.checking") : t("integration.stepCheck")} <Icon name="arrow" size={14} /></button></div>
         {error ? <div className="integration-result is-error" role="alert"><strong>{t("integration.operationFailed")}</strong><span>{error}</span><button className="text-button small" disabled={busy || statusChecking} onClick={() => void refreshStatus()}>{t("integration.refreshStatus")}</button></div> : null}
         {result && resultSteps ? (
           <div className={`integration-result ${actionPassed ? "is-success" : "is-error"}`} aria-live="polite">
@@ -773,7 +782,7 @@ function IntegrationPage({
             <span>{fullRunResult.cleanup ? t("integration.cleanupEvidence", { status: fullRunResult.cleanup.status, root: fullRunResult.cleanup.relativeRoot, version: fullRunResult.cleanup.terminalStateVersion, reason: fullRunResult.cleanup.releaseReason, time: new Date(fullRunResult.cleanup.reservationReleasedAt).toLocaleString() }) : t("integration.noCleanupEvidence")}</span>
           </div>
         ) : null}
-        <button className="button button-secondary" disabled={busy || statusChecking || !desktopBridgeAvailable || !online || !pluginConnected} onClick={() => void runFullCheck()}>{operation === "full_check" ? t("integration.fullRunRunningProof") : staleReason ? t("integration.fullRunAgain") : t("integration.fullRunTitle")}</button>
+        <button className="button button-secondary" disabled={busy || statusChecking || nativeStatusUnavailable || !desktopBridgeAvailable || !online || !pluginConnected} onClick={() => void runFullCheck()}>{operation === "full_check" ? t("integration.fullRunRunningProof") : staleReason ? t("integration.fullRunAgain") : t("integration.fullRunTitle")}</button>
       </section>
       </details>
     </div>

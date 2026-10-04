@@ -778,9 +778,11 @@ function publicError(error: unknown): IntegrationApiError {
   const messages: Record<string, string> = {
     codex_not_found: "Codex Desktop or the Codex CLI was not found",
     codex_cli_broken: "The detected Codex CLI could not complete the request",
+    integration_data_unavailable: "Desktop integration data is unavailable; run Setup Repair or restart ClusterYourCodex",
     integration_payload_unavailable: "The native Codex plugin is unavailable; bundled repair files are missing or incomplete",
     marketplace_install_failed: "The local ClusterYourCodex marketplace could not be registered",
     plugin_install_failed: "The ClusterYourCodex plugin could not be installed",
+    agents_integration_failed: "Global AGENTS.md integration could not be completed; run Setup Repair",
     integration_state_unavailable: "Integration health state could not be saved",
     repair_required: "Codex integration rollback was incomplete. Run Setup Repair before retrying",
     integration_self_test_failed: "The plugin connection check could not be completed",

@@ -138,7 +138,7 @@ export class ControllerClient {
         throw error;
       }
       if (error instanceof ControllerTransportError) {
-        throw new ControllerApiError(error.message, { code: "transport_unavailable" });
+        throw new ControllerApiError(error.message, { code: error.code ?? "transport_unavailable" });
       }
       throw new ControllerApiError("Could not reach the local ClusterYourCodex controller");
     } finally {

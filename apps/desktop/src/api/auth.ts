@@ -67,10 +67,24 @@ declare global {
   }
 }
 
+const publicNativeBridgeErrorCodes = new Set([
+  "controller_auth_unavailable",
+  "controller_unavailable",
+]);
+
+function nativeBridgeErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && publicNativeBridgeErrorCodes.has(code) ? code : undefined;
+}
+
 export class ControllerTransportError extends Error {
-  constructor(message: string) {
+  readonly code?: string;
+
+  constructor(message: string, code?: string) {
     super(message);
     this.name = "ControllerTransportError";
+    this.code = code;
   }
 }
 
@@ -113,6 +127,13 @@ export class DesktopHostControllerTransport implements ControllerTransport {
       );
     } catch (error) {
       if (error instanceof ControllerTransportError) throw error;
+      const code = nativeBridgeErrorCode(error);
+      if (code === "controller_auth_unavailable") {
+        throw new ControllerTransportError("Controller authentication is unavailable", code);
+      }
+      if (code === "controller_unavailable") {
+        throw new ControllerTransportError("The local ClusterYourCodex controller is unavailable", code);
+      }
       throw new ControllerTransportError("Desktop controller proxy request failed");
     }
   }

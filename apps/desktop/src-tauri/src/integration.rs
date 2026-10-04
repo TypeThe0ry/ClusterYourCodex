@@ -1266,9 +1266,10 @@ fn load_verified_install(
 ) -> Result<VerifiedInstall, IntegrationError> {
     let executable =
         std::env::current_exe().map_err(|_| IntegrationError::AgentsIntegrationFailed)?;
-    // The desktop launcher is installed beside the data root, while the
-    // verified payload lives under the manifest's installRoot (the Programs
-    // directory).  Do not assume current_exe().parent() is the payload root.
+    // Older Windows installs kept a launcher beside the data root, while the
+    // current installer starts the verified desktop payload from installRoot
+    // (the Programs directory).  Accept both layouts during the transition;
+    // the manifest and catalog checks below still bind every payload file.
     let launcher_root = executable
         .parent()
         .ok_or(IntegrationError::AgentsIntegrationFailed)?
@@ -1277,9 +1278,6 @@ fn load_verified_install(
         return Err(IntegrationError::AgentsIntegrationFailed);
     }
     let data_root = inner.data_root.clone();
-    if !same_path(&launcher_root, &data_root) {
-        return Err(IntegrationError::AgentsIntegrationFailed);
-    }
     if !is_real_directory_without_reparse(&data_root) {
         return Err(IntegrationError::AgentsIntegrationFailed);
     }
@@ -1306,7 +1304,14 @@ fn load_verified_install(
     if !is_real_directory_without_reparse(&install_root) {
         return Err(IntegrationError::AgentsIntegrationFailed);
     }
+    if !launcher_root_is_allowed(&launcher_root, &data_root, &install_root) {
+        return Err(IntegrationError::AgentsIntegrationFailed);
+    }
     validate_install_manifest(&manifest_bytes, &install_root, &data_root)
+}
+
+fn launcher_root_is_allowed(launcher_root: &Path, data_root: &Path, install_root: &Path) -> bool {
+    same_path(launcher_root, data_root) || same_path(launcher_root, install_root)
 }
 
 fn install_manifest_size_is_supported(length: u64) -> bool {
@@ -3991,6 +3996,19 @@ mod tests {
         assert!(!install_manifest_size_is_supported(
             MAX_INSTALL_MANIFEST + 1
         ));
+    }
+
+    #[test]
+    fn launcher_root_accepts_current_and_legacy_windows_layouts_only() {
+        let root = fixture_root("launcher-layout");
+        let data = root.join("data");
+        let install = root.join("install");
+        let foreign = root.join("foreign");
+        std::fs::create_dir_all(&foreign).unwrap();
+        assert!(launcher_root_is_allowed(&data, &data, &install));
+        assert!(launcher_root_is_allowed(&install, &data, &install));
+        assert!(!launcher_root_is_allowed(&foreign, &data, &install));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

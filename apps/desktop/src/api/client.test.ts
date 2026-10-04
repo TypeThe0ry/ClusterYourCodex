@@ -448,6 +448,24 @@ describe("ControllerClient", () => {
     });
   });
 
+  it.each([
+    ["controller_auth_unavailable", "Controller authentication is unavailable"],
+    ["controller_unavailable", "The local ClusterYourCodex controller is unavailable"],
+  ])("preserves the safe native bridge error code: %s", async (code, message) => {
+    const controllerRequest = vi.fn(async () => Promise.reject({ code }));
+    vi.stubGlobal("window", { __CLUSTER_YOUR_CODEX__: { controllerRequest } });
+    try {
+      const error = await new ControllerClient({ transport: new DesktopHostControllerTransport() })
+        .health()
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ControllerApiError);
+      expect(error).toMatchObject({ code, message });
+      expect(JSON.stringify(error)).not.toContain("authorization");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("keeps the Vite development token server-side", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } }),
