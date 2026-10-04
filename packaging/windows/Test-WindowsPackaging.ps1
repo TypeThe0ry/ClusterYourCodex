@@ -5311,7 +5311,12 @@ exit 0
         $profileMatrixSource -match 'bare PID can refer to a replacement process' -and
         $profileMatrixSource -notmatch 'Unregister-ScheduledTask') 'profile matrix removes tasks through a bounded native scheduler command instead of an unbounded PowerShell unregister call'
     Assert-True ($profileMatrixSource -match 'function Invoke-ProfileMatrixBoundedTaskQuery' -and
-        $profileMatrixSource -match 'Get-ScheduledTask -TaskName \$env:CYC_PROFILE_MATRIX_TASK_NAME' -and
+        $profileMatrixSource -match "New-Object -ComObject 'Schedule\.Service'" -and
+        $profileMatrixSource -match '\$service\.GetFolder\(''\\''\)' -and
+        $profileMatrixSource -match '\$folder\.GetTask\(\$env:CYC_PROFILE_MATRIX_TASK_NAME\)' -and
+        $profileMatrixSource -match '\$definition\.Principal\.UserId' -and
+        $profileMatrixSource -match '\$definition\.Triggers\.Item\(\$index\)' -and
+        $profileMatrixSource -match '\$definition\.Actions\.Item\(\$index\)' -and
         $profileMatrixSource -match 'WaitForExit\(\$TimeoutSeconds \* 1000\)' -and
         $profileMatrixSource -match 'query timed out after \$TimeoutSeconds seconds' -and
         $profileMatrixSource -match '\$hresult -eq -2147024894' -and

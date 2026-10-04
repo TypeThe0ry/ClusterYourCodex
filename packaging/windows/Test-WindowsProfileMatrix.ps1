@@ -1164,25 +1164,57 @@ function Invoke-ProfileMatrixBoundedTaskQuery {
     $outputPath = Join-Path $resolvedRoot ("task-query-$suffix.json")
     $errorPath = Join-Path $resolvedRoot ("task-query-$suffix.stderr.log")
     $stdoutPath = Join-Path $resolvedRoot ("task-query-$suffix.stdout.log")
-    $queryScript = @'
+$queryScript = @'
 $ErrorActionPreference = 'Stop'
 try {
-    $task = Get-ScheduledTask -TaskName $env:CYC_PROFILE_MATRIX_TASK_NAME -TaskPath '\' -ErrorAction Stop
+    # The ScheduledTasks CIM provider can return a query-not-found exception
+    # for an absent task and can block inside a provider call. Use the native
+    # Task Scheduler COM API in this already-bounded child instead. COM gives
+    # us the same identity/action projection without depending on a localized
+    # PowerShell cmdlet or console code page.
+    $service = New-Object -ComObject 'Schedule.Service'
+    $service.Connect()
+    $folder = $service.GetFolder('\')
+    try {
+        $task = $folder.GetTask($env:CYC_PROFILE_MATRIX_TASK_NAME)
+    } catch {
+        $hresult = $_.Exception.HResult
+        if ($hresult -eq -2147024894 -or $hresult -eq -2147216625) { exit 3 }
+        throw
+    }
     if ($null -eq $task) { exit 3 }
+    $definition = $task.Definition
+    $stateNames = @{ 0 = 'Unknown'; 1 = 'Disabled'; 2 = 'Queued'; 3 = 'Ready'; 4 = 'Running' }
+    $triggerProjection = New-Object System.Collections.Generic.List[object]
+    for ($index = 1; $index -le [int]$definition.Triggers.Count; $index++) {
+        $trigger = $definition.Triggers.Item($index)
+        [void]$triggerProjection.Add([ordered]@{ UserId = [string]$trigger.UserId })
+    }
+    $actionProjection = New-Object System.Collections.Generic.List[object]
+    for ($index = 1; $index -le [int]$definition.Actions.Count; $index++) {
+        $action = $definition.Actions.Item($index)
+        [void]$actionProjection.Add([ordered]@{
+            Execute = [string]$action.Path
+            Arguments = [string]$action.Arguments
+            WorkingDirectory = [string]$action.WorkingDirectory
+        })
+    }
+    $stateValue = [int]$task.State
     $projection = [ordered]@{
-        TaskName = [string]$task.TaskName
-        TaskPath = [string]$task.TaskPath
-        State = [string]$task.State
-        Principal = [ordered]@{ UserId = [string]$task.Principal.UserId; LogonType = [string]$task.Principal.LogonType }
-        Triggers = @($task.Triggers | ForEach-Object { [ordered]@{ UserId = [string]$_.UserId } })
-        Actions = @($task.Actions | ForEach-Object { [ordered]@{ Execute = [string]$_.Execute; Arguments = [string]$_.Arguments; WorkingDirectory = [string]$_.WorkingDirectory } })
+        TaskName = [string]$task.Name
+        TaskPath = [string]$task.Path
+        State = if ($stateNames.ContainsKey($stateValue)) { $stateNames[$stateValue] } else { "Unknown($stateValue)" }
+        Principal = [ordered]@{
+            UserId = [string]$definition.Principal.UserId
+            LogonType = [string]$definition.Principal.LogonType
+        }
+        Triggers = $triggerProjection.ToArray()
+        Actions = $actionProjection.ToArray()
     }
     $encoding = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($env:CYC_PROFILE_MATRIX_TASK_OUTPUT, ($projection | ConvertTo-Json -Depth 8), $encoding)
     exit 0
 } catch {
-    $hresult = $_.Exception.HResult
-    if ($hresult -eq -2147024894 -or $hresult -eq -2147216625) { exit 3 }
     [Console]::Error.WriteLine([string]$_.Exception.Message)
     exit 1
 }
