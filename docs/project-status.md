@@ -1,10 +1,10 @@
 # ClusterYourCodex project status
 
-## Current GitHub audit — 2026-10-05 (preview.111; post-PR #209)
+## Current GitHub audit — 2026-10-05 (preview.111; post-PR #210)
 
-The authoritative `origin/main` commit is
-`fab89f6ea1429cb8fe72d2494a6688153ef68f1e`, the merge of PR #209 after PR
-#208. The latest
+The audited source baseline before the final docs merge is
+`fab89f6ea1429cb8fe72d2494a6688153ef68f1e` (PR #209); PR #210 is the final
+identity-correction docs merge. The latest
 public developer build is
 [`v0.1.0-preview.111`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.111),
 published as a non-draft prerelease. The immutable stable
