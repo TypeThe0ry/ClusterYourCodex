@@ -13,7 +13,7 @@ hashes to the Codex session.
 
 ## Current public status
 
-The latest public developer build is **[v0.1.0-preview.111](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.111)**. It carries the Windows profile-matrix queue/recovery hardening, a bounded native Task Scheduler COM query, phase-timestamp diagnostics, and a passing clean Windows 11 ARM64 x64-emulation acceptance job. Preview.110 remains an immutable, unpublished candidate because its fail-closed tagged workflow ran before exact-source CI completed. Preview.111 remains a prerelease while the native acceptance gates are incomplete. The immutable stable baseline is **[v0.0.1](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)**; it has not been replaced or modified.
+The latest public developer build is **[v0.1.0-preview.111](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.111)**. It carries the Windows profile-matrix queue/recovery hardening, a bounded native Task Scheduler COM query, phase-timestamp diagnostics, and a passing clean Windows 11 ARM64 x64-emulation acceptance job. Preview.110 remains an immutable, unpublished candidate because its fail-closed tagged workflow ran before exact-source CI completed. PR #208 is merged in `main` with actionable native integration diagnostics and shortcut refresh for future installers; preview.111 predates that merge and remains unchanged. Preview.111 remains a prerelease while the native acceptance gates are incomplete. The immutable stable baseline is **[v0.0.1](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)**; it has not been replaced or modified.
 
 | Area | Status |
 | --- | --- |

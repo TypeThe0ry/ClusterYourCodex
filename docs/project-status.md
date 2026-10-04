@@ -1,9 +1,9 @@
 # ClusterYourCodex project status
 
-## Current GitHub audit — 2026-10-05 (preview.111; post-PR #206)
+## Current GitHub audit — 2026-10-05 (preview.111; post-PR #208)
 
 The authoritative `origin/main` commit is
-`a5f38d9f51107ea3e31d910ec3c32238053f7e14`, the merge of PR #206. The latest
+`1f7f8335c7f6567c0013a633ad43fe7a1272f4bf`, the merge of PR #208. The latest
 public developer build is
 [`v0.1.0-preview.111`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.111),
 published as a non-draft prerelease. The immutable stable
@@ -39,6 +39,12 @@ remaining gates are the clean current-source Windows version-changing
 Authenticode/final packaged acceptance, and native macOS LaunchAgent/live
 managed-runtime acceptance. Hosted CI, a provisioned VM, or a browser preview
 is not being promoted to those stronger claims.
+
+PR #208 additionally maps native integration failures to actionable localized
+diagnostics, preserves safe controller transport codes, disables native
+actions while status is unavailable, and refreshes Windows shortcuts to the
+verified install root. The published preview.111 predates this merge; a later
+preview is required before users receive those source fixes.
 
 ## Current GitHub audit — 2026-10-04 (preview.109 published prerelease)
 

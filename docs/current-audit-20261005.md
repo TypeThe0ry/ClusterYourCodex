@@ -1,11 +1,11 @@
 # Current audit — 2026-10-05
 
-This audit records the repository and local runtime state after PR #206. It is
+This audit records the repository and local runtime state after PR #208. It is
 an evidence ledger, not a release declaration.
 
 ## Source and release identity
 
-- `origin/main`: `a5f38d9f51107ea3e31d910ec3c32238053f7e14`
+- `origin/main`: `1f7f8335c7f6567c0013a633ad43fe7a1272f4bf`
 - Latest public developer build: [`v0.1.0-preview.111`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.111), non-draft prerelease
 - Stable tag: `v0.0.1` → `e4fbaef04b764268fa038311d85573b18b549f9`
 - Open pull requests: none
@@ -13,6 +13,18 @@ an evidence ledger, not a release declaration.
 
 The stable tag was compared locally and against the remote ref during this
 audit. It remains immutable.
+
+PR #208 (`1f7f8335c7f6567c0013a633ad43fe7a1272f4bf`) is now merged. It makes
+native integration failures actionable in the desktop renderer, preserves the
+safe controller-auth/unavailable error codes across the native bridge, and
+disables native actions while the controller status is unavailable. The
+Windows installer now refreshes Start Menu and desktop shortcuts to the
+verified current install root, and native verification accepts only the
+current or explicitly supported legacy launcher layouts.
+
+The published `v0.1.0-preview.111` installer predates PR #208 and remains
+unchanged. The source fix will first appear in a subsequent preview build; no
+claim is made that an already-installed preview.111 binary contains it.
 
 ## Browser renderer boundary
 
