@@ -289,6 +289,12 @@ cyc_check_cleanup:
 
 cyc_install_complete:
   DetailPrint "ClusterYourCodex installation completed."
+  ; Always refresh shortcuts to the catalog-bound executable in the current
+  ; install root. Older previews pointed at a data-root copy, which could
+  ; leave the UI running a stale payload after an upgrade or repair.
+  CreateDirectory "$SMPROGRAMS"
+  CreateShortCut "$SMPROGRAMS\ClusterYourCodex.lnk" "$INSTDIR\ClusterYourCodex.exe" "" "$INSTDIR\ClusterYourCodex.exe" 0 SW_SHOWNORMAL "" "Launch ClusterYourCodex"
+  CreateShortCut "$DESKTOP\ClusterYourCodex.lnk" "$INSTDIR\ClusterYourCodex.exe" "" "$INSTDIR\ClusterYourCodex.exe" 0 SW_SHOWNORMAL "" "Launch ClusterYourCodex"
   IfSilent silent_complete
   Exec '"$WINDIR\explorer.exe" "$INSTDIR\ClusterYourCodex.exe"'
 silent_complete:
