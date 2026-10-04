@@ -1,5 +1,39 @@
 # Current audit — 2026-10-04
 
+## Preview.111 published and VMware VIX acceptance
+
+PR #200 is merged into `origin/main` at
+`833d10f59c0ea5196ae9746b1c7d61f12389e802`. Exact main-push CI
+[37172854585](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/37172854585)
+and tagged release workflow
+[37174731863](https://github.com/TypeThe0ry/ClusterYourCodex/actions/runs/37174731863)
+passed. The public
+[v0.1.0-preview.111](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.111)
+is a non-draft prerelease; preview.110 remains an immutable unpublished
+candidate after its fail-closed identity gate stopped before exact-source CI
+completed.
+
+The public assets were downloaded outside the checkout to
+`D:\ClusterYourCodex-validation\preview111-public-20261004` and verified:
+11/11 `SHA256SUMS` entries and 11/11 per-asset `.sha256` sidecars matched.
+The tagged workflow's clean Windows 11 ARM64 x64-emulation acceptance also
+passed.
+
+The D-drive VMware guest was reverted to `pre-upgrade-20261002` and tested by
+VIX/`vmrun` CLI only. Preview.111 Setup returned exit code `0`; the installed
+manifest/controller and health API reported preview.111, `status=ok`, and
+`database=ok`; the Controller task was Running; and `cyc discover` returned a
+candidate with `credentialsTransmitted=false` and `pairingRequired=true`. The
+installed same-host controller/worker fixture returned
+`queued -> running -> verifying -> succeeded`, all 14 checks passed, and the
+job root was deleted. Full sanitized paths and the exact evidence boundary are
+in [the preview.111 VMware record](vmware-preview111-20261004.md).
+
+This closes the preview.111 runnable Windows evidence loop, but not the full GA
+matrix or production-signing gates. Issues #2 and #3 remain open, and stable
+`v0.0.1` remains immutable at
+`e4fbaef04b764268fa038311d85573b18b549f9f`.
+
 ## Preview.111 candidate after PR #199
 
 PR #199 is merged into `origin/main` at
