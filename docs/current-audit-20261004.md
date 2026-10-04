@@ -1,5 +1,15 @@
 # Current audit — 2026-10-04
 
+## Preview.111 live deployment
+
+The public preview was deployed and exercised on the current Windows
+controller, the NUC Linux worker, and the Helio Windows worker. Both remote
+workers reported `0.1.0-preview.111` and `online`; a Linux proof job and a
+Windows proof job each returned exit code `0` with verified artifacts. The
+sanitized node, job, and artifact evidence is recorded in the [live deployment
+record](live-deployment-preview111-20261004.md). This is usable preview
+evidence, not a declaration that the remaining native GA gates are closed.
+
 ## Preview.111 published and VMware VIX acceptance
 
 PR #200 is merged into `origin/main` at
