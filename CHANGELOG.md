@@ -13,6 +13,28 @@
   repair marketplace is absent. Install and upgrade paths still fail closed on
   missing or tampered repair payloads.
 
+## [0.1.0-preview.110] - 2026-10-04
+
+### Fixed
+
+- Harden the Windows profile-matrix elevated task helper with unique queued
+  request/response files, atomic `processing/` claims, response-before-delete
+  recovery, and a bounded Task Scheduler query child. Unknown scheduler
+  failures remain fail-closed; only explicit missing-task results are treated
+  as absence.
+- Record Fresh Deployment plan/install/repair/uninstall phase timestamps so
+  slow disposable Windows lifecycle runs retain enough evidence to separate
+  preflight, scheduler, and IPC delays.
+
+### Validation scope
+
+- PR #197 (`c9984dd509de2dd254fd4452a4e2731583caccaa`) passed the complete
+  required CI and security checks, including Windows Setup lifecycle, bounded
+  Windows process checks, Desktop/Codex bridge live round-trip, MSRV, CodeQL,
+  RustSec, Cargo deny, pnpm audit, and Linux/macOS Worker Kits. This build is a
+  prerelease; stable `v0.0.1` remains immutable. The ARM64 profile matrix and
+  native macOS gates still require direct candidate validation.
+
 ## [0.1.0-preview.109] - 2026-10-04
 
 ### Fixed
@@ -1861,7 +1883,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.109...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.110...HEAD
+[0.1.0-preview.110]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.109...v0.1.0-preview.110
 [0.1.0-preview.109]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.108...v0.1.0-preview.109
 [0.1.0-preview.108]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.107...v0.1.0-preview.108
 [0.1.0-preview.107]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.106...v0.1.0-preview.107
