@@ -1,11 +1,11 @@
 # Current audit — 2026-10-05
 
-This audit records the repository and local runtime state after PR #209. It is
+This audit records the repository and local runtime state after PR #210. It is
 an evidence ledger, not a release declaration.
 
 ## Source and release identity
 
-- `origin/main`: `fab89f6ea1429cb8fe72d2494a6688153ef68f1e`
+- Audited source baseline before the final docs merge: `fab89f6ea1429cb8fe72d2494a6688153ef68f1e`
 - Latest public developer build: [`v0.1.0-preview.111`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.111), non-draft prerelease
 - Stable tag: `v0.0.1` → `e4fbaef04b764268fa038311d85573b18b549f9`
 - Open pull requests: none
@@ -14,9 +14,8 @@ an evidence ledger, not a release declaration.
 The stable tag was compared locally and against the remote ref during this
 audit. It remains immutable.
 
-PR #208 (`1f7f8335c7f6567c0013a633ad43fe7a1272f4bf`) and the follow-up docs
-PR #209 (`fab89f6ea1429cb8fe72d2494a6688153ef68f1e`) are now merged. PR #208
-makes
+PR #208 (`1f7f8335c7f6567c0013a633ad43fe7a1272f4bf`), docs PR #209, and the
+final identity-correction docs PR #210 are now merged. PR #208 makes
 native integration failures actionable in the desktop renderer, preserves the
 safe controller-auth/unavailable error codes across the native bridge, and
 disables native actions while the controller status is unavailable. The
