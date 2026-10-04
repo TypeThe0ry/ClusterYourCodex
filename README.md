@@ -175,6 +175,13 @@ pnpm --filter @clusteryourcodex/desktop tauri:dev with Rust and the Tauri
 Windows prerequisites installed. Packaging, acceptance, and release rules are
 in [docs/packaging.md](docs/packaging.md) and [docs/release-process.md](docs/release-process.md).
 
+The browser renderer can read controller health and fleet data through its
+loopback development proxy, but it does not receive the native Tauri bridge.
+Plugin install/repair, SSH provisioning, and full-run checks are therefore
+disabled in the browser preview and clearly marked as desktop-only. Use the
+native command above (or the packaged app) for those actions; this keeps
+credentials and host-side operations out of browser JavaScript.
+
 ## Documentation map
 
 - [Windows getting started](docs/getting-started-windows.md)

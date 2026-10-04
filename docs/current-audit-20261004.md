@@ -1,5 +1,16 @@
 # Current audit — 2026-10-04
 
+## Browser renderer boundary — 2026-10-05
+
+The browser renderer remains intentionally read-only for host integration. Its
+loopback development proxy can show controller health and fleet telemetry, but
+the Tauri bridge is the only surface allowed to install/repair the Codex
+plugin, store SSH credentials, run provisioning, or execute the full proof.
+The renderer now identifies this as **Browser preview** and disables those
+desktop-only actions when the native bridge is absent, instead of showing a
+generic integration failure after a click. The native desktop app remains the
+required surface for setup and full validation.
+
 ## Follow-up Windows live round trip — 2026-10-05
 
 After the public preview.111 install, the current Windows checkout ran a fresh
