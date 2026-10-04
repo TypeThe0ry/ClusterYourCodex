@@ -378,6 +378,21 @@ describe("IntegrationClient", () => {
     expect(String(error)).not.toContain("must-not-leak");
   });
 
+  it.each([
+    ["integration_data_unavailable", "Desktop integration data is unavailable; run Setup Repair or restart ClusterYourCodex"],
+    ["agents_integration_failed", "Global AGENTS.md integration could not be completed; run Setup Repair"],
+  ])("maps native %s failures to actionable public messages", async (code, message) => {
+    vi.stubGlobal("window", {
+      __CLUSTER_YOUR_CODEX__: {
+        integrationStatus: vi.fn(async () => {
+          throw { code };
+        }),
+      },
+    });
+    const error = await new IntegrationClient().status().catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code, message });
+  });
+
   it("turns rollback failures into an explicit repair action without exposing diagnostics", async () => {
     vi.stubGlobal("window", {
       __CLUSTER_YOUR_CODEX__: {
