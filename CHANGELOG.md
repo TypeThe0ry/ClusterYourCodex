@@ -13,6 +13,31 @@
   repair marketplace is absent. Install and upgrade paths still fail closed on
   missing or tampered repair payloads.
 
+## [0.1.0-preview.111] - 2026-10-04
+
+### Fixed
+
+- Use the native `Schedule.Service` COM API inside the bounded Windows
+  profile-matrix query child. Missing tasks now map to absence using the
+  documented scheduler/file-not-found results, while unknown provider or COM
+  failures remain hard errors. Task identity, Unicode trigger/action fields,
+  and state are projected as strict UTF-8 JSON for the existing ownership
+  checks.
+
+### Validation scope
+
+- PR #199 (`bc683ec31cfe086006f051f71bba8a488ce731a7`) passed all required CI
+  and security checks, including the Windows Setup lifecycle, bounded Windows
+  process tests, Desktop/Codex bridge live round-trip, MSRV, CodeQL, RustSec,
+  Cargo deny, pnpm audit, and Linux/macOS Worker Kits. This build remains a
+  prerelease; stable `v0.0.1` is immutable. The ARM64 matrix and native macOS
+  gates still require direct candidate validation.
+
+The immutable `v0.1.0-preview.110` tag was intentionally not republished:
+its first tagged workflow ran before the exact main-push CI had completed and
+the fail-closed release identity gate rejected it. Preview.111 is the next
+candidate after the corrected COM query merged and its exact-source CI passed.
+
 ## [0.1.0-preview.110] - 2026-10-04
 
 ### Fixed
@@ -1883,7 +1908,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.110...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.111...HEAD
+[0.1.0-preview.111]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.110...v0.1.0-preview.111
 [0.1.0-preview.110]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.109...v0.1.0-preview.110
 [0.1.0-preview.109]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.108...v0.1.0-preview.109
 [0.1.0-preview.108]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.107...v0.1.0-preview.108
