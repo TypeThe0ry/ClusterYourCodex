@@ -13,7 +13,7 @@ hashes to the Codex session.
 
 ## Current public status
 
-The next public developer build is **v0.1.0-preview.111** (release publication follows its PR and tagged workflow). It carries the Windows profile-matrix queue/recovery hardening, a bounded native Task Scheduler COM query, and phase-timestamp diagnostics. Preview.110 remains an immutable, unpublished candidate because its fail-closed tagged workflow ran before exact-source CI completed. Preview.111 remains a prerelease while the native acceptance gates are incomplete. The immutable stable baseline is **[v0.0.1](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)**; it has not been replaced or modified.
+The latest public developer build is **[v0.1.0-preview.111](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.111)**. It carries the Windows profile-matrix queue/recovery hardening, a bounded native Task Scheduler COM query, phase-timestamp diagnostics, and a passing clean Windows 11 ARM64 x64-emulation acceptance job. Preview.110 remains an immutable, unpublished candidate because its fail-closed tagged workflow ran before exact-source CI completed. Preview.111 remains a prerelease while the native acceptance gates are incomplete. The immutable stable baseline is **[v0.0.1](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)**; it has not been replaced or modified.
 
 | Area | Status |
 | --- | --- |
@@ -24,7 +24,7 @@ The next public developer build is **v0.1.0-preview.111** (release publication f
 | Stable GA | Not yet declared. [Issue #2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) track the remaining native gates. |
 
 For the authoritative commit, workflow runs, VM evidence, and open gates, see
-the [current audit](docs/current-audit-20261004.md) and [project status](docs/project-status.md).
+the [current audit](docs/current-audit-20261004.md), the [preview.111 VMware record](docs/vmware-preview111-20261004.md), and [project status](docs/project-status.md).
 
 ## Install the public Windows build
 
