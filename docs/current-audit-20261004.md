@@ -1,5 +1,20 @@
 # Current audit — 2026-10-04
 
+## Follow-up local install — 2026-10-05
+
+The current Windows controller was upgraded from the older installed payload
+to the public `v0.1.0-preview.111` Setup payload. The retry committed a fresh
+manifest, activated the installer-managed native plugin, preserved the user's
+global `AGENTS.md` content while restoring exactly one managed block, and
+passed the controller health, native-plugin contract, and native-plugin
+integrity/MCP probes. Fresh post-install jobs then succeeded on the Helio
+Windows worker and NUC Linux worker with exit code `0`. The complete local
+install and job evidence is in [the local install record](local-install-preview111-20261005.md).
+
+This is usable preview evidence. It does not close the clean-guest lifecycle,
+production-signing, or deferred macOS gates below, so `v0.1.0-preview.111`
+remains a prerelease and stable `v0.0.1` remains immutable.
+
 ## Preview.111 live deployment
 
 The public preview was deployed and exercised on the current Windows
