@@ -1,5 +1,19 @@
 # Current audit — 2026-10-04
 
+## Follow-up Windows live round trip — 2026-10-05
+
+After the public preview.111 install, the current Windows checkout ran a fresh
+self-contained controller/worker round trip. The harness returned
+`windows controller/worker live round-trip passed`, observed
+`queued -> running -> succeeded`, and reported all fourteen checks true,
+including artifact verification, process cleanup, and secret scanning. The
+sanitized record and artifact digest are in
+[local-windows-roundtrip-20261005.md](local-windows-roundtrip-20261005.md).
+
+This strengthens the live Windows gate but does not replace clean-guest
+version-changing lifecycle evidence or production Authenticode/tray acceptance;
+Issue #2 remains open and preview.111 remains a prerelease.
+
 ## Follow-up local install — 2026-10-05
 
 The current Windows controller was upgraded from the older installed payload

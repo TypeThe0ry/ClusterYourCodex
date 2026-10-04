@@ -187,6 +187,7 @@ in [docs/packaging.md](docs/packaging.md) and [docs/release-process.md](docs/rel
 - [Cross-platform validation and LAN discovery](docs/cross-platform-validation-20260927.md)
 - [Current audit](docs/current-audit-20261004.md)
 - [Live preview.111 deployment](docs/live-deployment-preview111-20261004.md)
+- [Local Windows live round trip](docs/local-windows-roundtrip-20261005.md)
 - [Project status](docs/project-status.md)
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
