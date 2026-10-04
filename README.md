@@ -21,10 +21,11 @@ The latest public developer build is **[v0.1.0-preview.111](https://github.com/T
 | Linux x64 worker | Public Worker Kit and Windows → Linux validation path. |
 | macOS x64 / arm64 worker packages | Worker Kits build and verify; native managed-runtime acceptance is deferred in [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). |
 | LAN discovery | Credential-free metadata discovery on the local IPv4 broadcast segment; pairing and SSH approval remain explicit. |
+| Live three-machine deployment | Preview.111 is running on this Windows controller, the NUC Linux worker, and the Helio Windows worker; see the [deployment record](docs/live-deployment-preview111-20261004.md). |
 | Stable GA | Not yet declared. [Issue #2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) track the remaining native gates. |
 
 For the authoritative commit, workflow runs, VM evidence, and open gates, see
-the [current audit](docs/current-audit-20261004.md), the [preview.111 VMware record](docs/vmware-preview111-20261004.md), and [project status](docs/project-status.md).
+the [current audit](docs/current-audit-20261004.md), the [preview.111 VMware record](docs/vmware-preview111-20261004.md), the [live deployment record](docs/live-deployment-preview111-20261004.md), and [project status](docs/project-status.md).
 
 ## Install the public Windows build
 
@@ -153,7 +154,7 @@ single clean-guest current-source matrix covering Install → Repair → version
 Upgrade → interrupted Rollback → Uninstall, plus an independent guest worker
 and remaining production signing/tray requirements. The macOS gap is native
 LaunchAgent lifecycle, live controller/worker execution, and detached-process
-cleanup. The detailed evidence and exact status belong in [Issue #2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2), [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3), and the [current audit](docs/current-audit-20261003.md).
+cleanup. The detailed evidence and exact status belong in [Issue #2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2), [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3), and the [current audit](docs/current-audit-20261004.md).
 
 ## Develop
 
@@ -183,7 +184,8 @@ in [docs/packaging.md](docs/packaging.md) and [docs/release-process.md](docs/rel
 - [Compatibility and security boundary](docs/compatibility.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Cross-platform validation and LAN discovery](docs/cross-platform-validation-20260927.md)
-- [Current audit](docs/current-audit-20261003.md)
+- [Current audit](docs/current-audit-20261004.md)
+- [Live preview.111 deployment](docs/live-deployment-preview111-20261004.md)
 - [Project status](docs/project-status.md)
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
