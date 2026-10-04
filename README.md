@@ -111,7 +111,8 @@ Verify the contract and cached payload with:
 
 ~~~powershell
 powershell -ExecutionPolicy Bypass -File scripts/Test-NativeCodexPluginContract.ps1
-powershell -ExecutionPolicy Bypass -File scripts/Test-NativeCodexPlugin.ps1 -PluginRoot "$env:USERPROFILE/.codex/plugins/cache/clusteryourcodex/cluster-your-codex/0.0.1"
+$pluginRoot = Join-Path $env:LOCALAPPDATA 'Programs/ClusterYourCodex/integrations/codex-marketplace/plugins/cluster-your-codex'
+powershell -ExecutionPolicy Bypass -File scripts/Test-NativeCodexPlugin.ps1 -PluginRoot $pluginRoot
 pnpm --filter @clusteryourcodex/codex-mcp test -- --run
 ~~~
 
