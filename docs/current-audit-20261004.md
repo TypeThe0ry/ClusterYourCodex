@@ -1,5 +1,16 @@
 # Current audit — 2026-10-04
 
+## Preview.110 candidate after PR #197
+
+PR #197 is merged into `origin/main` at
+`c9984dd509de2dd254fd4452a4e2731583caccaa`. The next candidate is
+`v0.1.0-preview.110`, with the Windows profile-matrix queue/recovery hardening,
+bounded Task Scheduler query child, and Fresh Deployment phase-trace evidence.
+It must remain a prerelease until a tagged candidate proves the ARM64 matrix;
+the preview.109 failure did not establish a single IPC root cause. Issues #2
+and #3 remain open. Stable `v0.0.1` remains immutable at
+`e4fbaef04b764268fa038311d85573b18b549f9`.
+
 ## Preview.109 published and VMware validation
 
 The exact tagged source commit is

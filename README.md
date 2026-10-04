@@ -13,7 +13,7 @@ hashes to the Codex session.
 
 ## Current public status
 
-The latest public developer build is **[v0.1.0-preview.109](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.109)**. It includes the Windows profile-matrix evidence-root fix, a self-contained Windows Setup, and verified release hashes and GitHub build provenance. It remains a prerelease while the native acceptance gates are incomplete. The immutable stable baseline is **[v0.0.1](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)**; it has not been replaced or modified.
+The next public developer build is **v0.1.0-preview.110** (release publication follows its PR and tagged workflow). It carries the Windows profile-matrix queue/recovery hardening, bounded Task Scheduler queries, and phase-timestamp diagnostics on top of the verified preview.109 baseline. It remains a prerelease while the native acceptance gates are incomplete. The immutable stable baseline is **[v0.0.1](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)**; it has not been replaced or modified.
 
 | Area | Status |
 | --- | --- |
@@ -28,7 +28,7 @@ the [current audit](docs/current-audit-20261004.md) and [project status](docs/pr
 
 ## Install the public Windows build
 
-1. Download [Windows Setup for preview.109](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.1.0-preview.109/ClusterYourCodex-Setup.exe) and its [SHA-256 sidecar](https://github.com/TypeThe0ry/ClusterYourCodex/releases/download/v0.1.0-preview.109/ClusterYourCodex-Setup.exe.sha256).
+1. Download Windows Setup for the latest published preview from the [releases page](https://github.com/TypeThe0ry/ClusterYourCodex/releases) and its matching `.sha256` sidecar.
 2. Verify the download before running it:
 
    ~~~powershell
