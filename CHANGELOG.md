@@ -9,7 +9,7 @@
   fail-closed until a real macOS host proves the full LaunchAgent lifecycle.
 
 - Refreshed the public README, current audit, and project status to identify
-  preview.112 as the latest published build and to separate supported
+  preview.113 as the final public candidate and to separate supported
   Windows/Linux runtime evidence from historical preview records.
 
 - Added an idempotent native-install cleanup step that moves exact-name legacy
@@ -22,6 +22,26 @@
   `cluster-your-codex@clusteryourcodex` MCP plugin when the optional bundled
   repair marketplace is absent. Install and upgrade paths still fail closed on
   missing or tampered repair payloads.
+
+## [0.1.0-preview.113] - 2026-10-05
+
+### Fixed
+
+- Reconcile a stale Windows `AGENTS.md` install receipt when the user restores
+  or edits the file outside the installer. Repair preserves the current
+  user-owned bytes, records the exact before-image, and keeps unrelated marker
+  or drifted states fail-closed.
+- Retain exact macOS descendant process identities across reparenting while
+  rejecting PID reuse. Managed macOS activation remains fail-closed until a
+  native host proves the full lifecycle.
+
+### Validation scope
+
+- The final candidate carries the complete required CI/security/packaging
+  matrix through PR #220, including Windows install/repair acceptance and
+  Windows/Linux runtime evidence. It remains a prerelease; stable `v0.0.1`
+  is immutable. Clean-guest GA lifecycle, Authenticode/tray signing, and
+  native macOS runtime gates remain explicitly documented boundaries.
 
 ## [0.1.0-preview.112] - 2026-10-04
 
@@ -1935,7 +1955,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.112...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.113...HEAD
+[0.1.0-preview.113]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.112...v0.1.0-preview.113
 [0.1.0-preview.112]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.111...v0.1.0-preview.112
 [0.1.0-preview.111]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.110...v0.1.0-preview.111
 [0.1.0-preview.110]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.109...v0.1.0-preview.110

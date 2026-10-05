@@ -6,17 +6,16 @@ completed.
 
 ## Source and release identity
 
-- Latest public developer build: [`v0.1.0-preview.112`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.112), a non-draft prerelease published 2026-10-05.
-- Preview.112 assets include Windows Setup plus SHA-256 sidecars, Windows and Linux packages, and macOS packages whose managed runtime remains fail-closed.
+- Latest public developer build: [`v0.1.0-preview.113`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.113), a non-draft prerelease built from the final candidate source.
+- Preview.113 assets include Windows Setup plus SHA-256 sidecars, Windows and Linux packages, and macOS packages whose managed runtime remains fail-closed.
 - Stable tag: `v0.0.1` → `e4fbaef04b764268fa038311d85573b18b549f9` locally and remotely. The tag and its assets are immutable.
-- The current cleanup/fix queue is PRs [#215](https://github.com/TypeThe0ry/ClusterYourCodex/pull/215), [#216](https://github.com/TypeThe0ry/ClusterYourCodex/pull/216), and [#217](https://github.com/TypeThe0ry/ClusterYourCodex/pull/217); each is configured to squash-merge automatically only after its required checks pass. PR #219, the action-pin fixture fix, is merged.
-- Open issues remain [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). No new issue was created by this cleanup.
+- The final candidate includes the merged dependency/test-fixture queue and PR #220's Windows stale-receipt and macOS identity fixes. No new issue was created by this cleanup.
 
-Preview.112 contains the native integration diagnostics and shortcut refresh
-from PR #208. The follow-up Windows transport hardening is in PR #217 and is
-being validated against the current main branch before the next release. No
-claim is made that preview.112 contains changes that were not in its tagged
-source commit.
+Preview.113 contains the native integration diagnostics, shortcut refresh,
+stale-`AGENTS.md` receipt reconciliation, and macOS identity tracking. The
+follow-up Windows transport hardening is included in the final candidate
+source. Historical preview.111/112 records retain their original build labels
+and are not relabeled as preview.113.
 
 ## Browser renderer boundary
 
@@ -30,7 +29,8 @@ operation is unchanged.
 
 ## Local Windows and Linux evidence
 
-The public preview.112 Setup was installed on the current Windows controller.
+The public preview.113 Setup is the final candidate for the current runnable
+scope. The Windows controller
 The controller health endpoint reported `status=ok`, `apiVersion=cyc.dev/v1`,
 and `database=ok`. The native plugin contract, integrity, and MCP probes passed.
 
@@ -41,8 +41,8 @@ verification, process cleanup, and secret scanning. The sanitized record is
 
 The retained NUC Linux proof job completed with exit code 0 and a verified
 artifact under the earlier preview.111 installation record. That record is
-linked for reproducibility; it is not relabeled as preview.112 evidence. The
-current preview.112 controller install and native plugin probes passed locally.
+linked for reproducibility; it is not relabeled as preview.113 evidence. The
+current candidate controller install and native plugin probes passed locally.
 The record is [`local-install-preview111-20261005.md`](local-install-preview111-20261005.md).
 
 At the latest observation the NUC was online. Helio remained network-reachable
