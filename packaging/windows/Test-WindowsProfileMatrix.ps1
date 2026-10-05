@@ -1118,7 +1118,13 @@ function Invoke-ProfileMatrixBoundedTaskEnd {
             throw "profile-matrix task end timed out after $TimeoutSeconds seconds (task=$TaskName)."
         }
         try { $schedulerProcess.Refresh() } catch { }
-        $exitCode = [int]$schedulerProcess.ExitCode
+        $rawExitCode = $schedulerProcess.ExitCode
+        if ($null -eq $rawExitCode) {
+            $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
+            $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
+            throw "profile-matrix task end exit code was unavailable for $TaskName. stdout=$stdout stderr=$stderr"
+        }
+        $exitCode = [int]$rawExitCode
         if ($exitCode -ne 0) {
             # The action can exit between enumeration and /End. The caller
             # re-enumerates and requires a stable absence window; only a still
@@ -1202,7 +1208,12 @@ try {
     $stateValue = [int]$task.State
     $projection = [ordered]@{
         TaskName = [string]$task.Name
-        TaskPath = [string]$task.Path
+        # Task.Path is the fully-qualified COM path (for example
+        # ``\ClusterYourCodex Controller``), while the PowerShell
+        # ScheduledTasks projection used by the ownership checks exposes the
+        # containing folder as TaskPath (``\``). Preserve the latter contract
+        # so a successful bounded query cannot be rejected as a foreign task.
+        TaskPath = [string]$folder.Path
         State = if ($stateNames.ContainsKey($stateValue)) { $stateNames[$stateValue] } else { "Unknown($stateValue)" }
         Principal = [ordered]@{
             UserId = [string]$definition.Principal.UserId
@@ -1212,7 +1223,14 @@ try {
         Actions = $actionProjection.ToArray()
     }
     $encoding = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($env:CYC_PROFILE_MATRIX_TASK_OUTPUT, ($projection | ConvertTo-Json -Depth 8), $encoding)
+    $projectionJson = $projection | ConvertTo-Json -Depth 8
+    [System.IO.File]::WriteAllText($env:CYC_PROFILE_MATRIX_TASK_OUTPUT, $projectionJson, $encoding)
+    # Keep a transport-independent copy on stdout. On native ARM64 Windows
+    # running the x64-emulated Windows PowerShell host, the child can exit
+    # successfully while an inherited ProgramData output path is briefly
+    # unavailable to the parent. Base64 keeps this fallback ASCII-only and
+    # avoids console-code-page corruption for non-ASCII profile cases.
+    [Console]::Write([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($projectionJson)))
     exit 0
 } catch {
     [Console]::Error.WriteLine([string]$_.Exception.Message)
@@ -1242,16 +1260,36 @@ try {
             throw "profile-matrix task query timed out after $TimeoutSeconds seconds (task=$TaskName)."
         }
         try { $queryProcess.Refresh() } catch { }
-        $exitCode = [int]$queryProcess.ExitCode
+        $rawExitCode = $queryProcess.ExitCode
+        if ($null -eq $rawExitCode) {
+            $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { [System.IO.File]::ReadAllText($stdoutPath, [System.Text.Encoding]::ASCII) } else { '' }
+            $stderr = if (Test-Path -LiteralPath $errorPath -PathType Leaf) { [System.IO.File]::ReadAllText($errorPath) } else { '' }
+            throw "profile-matrix task query exit code was unavailable for $TaskName. stdout=$stdout stderr=$stderr"
+        }
+        $exitCode = [int]$rawExitCode
         if ($exitCode -eq 3) { return $null }
         if ($exitCode -ne 0) {
             $stderr = if (Test-Path -LiteralPath $errorPath -PathType Leaf) { [System.IO.File]::ReadAllText($errorPath) } else { '' }
             throw "profile-matrix task query failed for $TaskName with exit $exitCode. stderr=$stderr"
         }
-        if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
-            throw "profile-matrix task query produced no projection for $TaskName."
+        if (Test-Path -LiteralPath $outputPath -PathType Leaf) {
+            return Read-ProfileMatrixUtf8Json -Path $outputPath
         }
-        return Read-ProfileMatrixUtf8Json -Path $outputPath
+        $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+            [System.IO.File]::ReadAllText($stdoutPath, [System.Text.Encoding]::ASCII).Trim()
+        } else { '' }
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+            try {
+                $json = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($stdout))
+                return ConvertFrom-Json -InputObject $json
+            } catch {
+                throw "profile-matrix task query emitted an invalid stdout projection for $TaskName. stderr=$(if (Test-Path -LiteralPath $errorPath -PathType Leaf) { [System.IO.File]::ReadAllText($errorPath) } else { '' })"
+            }
+        }
+        $stderr = if (Test-Path -LiteralPath $errorPath -PathType Leaf) {
+            [System.IO.File]::ReadAllText($errorPath)
+        } else { '' }
+        throw "profile-matrix task query produced no projection for $TaskName. stderr=$stderr"
     } finally {
         if ($null -ne $queryProcess) { $queryProcess.Dispose() }
         [Environment]::SetEnvironmentVariable('CYC_PROFILE_MATRIX_TASK_NAME', $previousName, 'Process')
@@ -1321,7 +1359,13 @@ function Invoke-ProfileMatrixBoundedTaskRemoval {
             throw "profile-matrix task removal timed out after $TimeoutSeconds seconds (task=$TaskName)."
         }
         try { $schedulerProcess.Refresh() } catch { }
-        $exitCode = [int]$schedulerProcess.ExitCode
+        $rawExitCode = $schedulerProcess.ExitCode
+        if ($null -eq $rawExitCode) {
+            $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
+            $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
+            throw "profile-matrix task removal exit code was unavailable for $TaskName. stdout=$stdout stderr=$stderr"
+        }
+        $exitCode = [int]$rawExitCode
         if ($exitCode -ne 0) {
             # A concurrent cleanup can win the race after ownership was
             # validated. Treat that narrow case as already absent; a task that

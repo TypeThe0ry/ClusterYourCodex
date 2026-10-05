@@ -399,7 +399,13 @@ function Invoke-FreshPowerShell {
         }
         $process.WaitForExit()
         try { $process.Refresh() } catch { }
-        $exitCode = [int]$process.ExitCode
+        $rawExitCode = $process.ExitCode
+        if ($null -eq $rawExitCode) {
+            $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
+            $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
+            throw "bootstrap $Label exit code was unavailable. stdout=$stdout stderr=$stderr"
+        }
+        $exitCode = [int]$rawExitCode
         if ($exitCode -ne 0) {
             $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
             $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
