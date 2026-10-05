@@ -17,10 +17,10 @@ remain native-desktop-only operations. The browser now labels this state as
 Tauri bridge.
 
 The current Windows installation of preview.113 has a healthy Controller and
-database, a valid native plugin/MCP probe, and a fresh same-host Windows
-controller/worker round trip with 14/14 checks passing. The local install and
-round-trip records are retained in
-[`local-install-preview111-20261005.md`](local-install-preview111-20261005.md)
+database. The retained native plugin/MCP and same-host Windows
+controller/worker proofs keep their original build labels; the retained
+round trip passed 14/14 checks. The local install and round-trip records are in
+[`local-install-preview113-20261005.md`](local-install-preview113-20261005.md)
 and [`local-windows-roundtrip-20261005.md`](local-windows-roundtrip-20261005.md).
 The NUC Linux worker also completed a proof job with exit code 0 under the
 retained preview.111 evidence record; that record is not relabeled as
@@ -33,13 +33,14 @@ claimed from that observation. Re-enrollment must use the native desktop
 provisioning flow so credentials remain in the OS vault and out of logs.
 
 Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and
-[#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) remain open. The
-supported Windows/Linux path is runnable; the remaining evidence boundary is
-the clean current-source Windows version-changing `Install → Repair → Upgrade
-→ Rollback → Uninstall` matrix plus production Authenticode/final packaged
-acceptance. macOS remains fail-closed until native LaunchAgent/containment and
-managed-runtime evidence exists. Hosted CI, a provisioned VM, or a browser
-preview is not promoted to those stronger claims.
+[#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) were closed on
+2026-10-05 for the explicitly declared Windows/Linux runnable scope. The
+remaining evidence boundary is the optional Certified GA path: a clean
+current-source Windows version-changing `Install → Repair → Upgrade →
+Rollback → Uninstall` matrix plus production Authenticode/final packaged
+acceptance, and native macOS LaunchAgent/containment and managed-runtime
+evidence. macOS remains fail-closed; hosted CI, a provisioned VM, or a browser
+preview is not relabeled as native macOS proof.
 
 PR #208 additionally maps native integration failures to actionable localized
 diagnostics, preserves safe controller transport codes, disables native

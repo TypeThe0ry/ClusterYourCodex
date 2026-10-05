@@ -19,7 +19,7 @@ The latest public developer build is **[v0.1.0-preview.113](https://github.com/T
 | --- | --- |
 | Windows x64 desktop/controller | Public preview; install, repair, plugin registration, health, and controller/worker checks are available. |
 | Linux x64 worker | Public Worker Kit and Windows → Linux validation path. |
-| macOS x64 / arm64 worker packages | Worker Kits build and verify; native managed-runtime acceptance is deferred in [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). |
+| macOS x64 / arm64 worker packages | Worker Kits build and verify; native managed-runtime acceptance is deferred until a real macOS LaunchAgent/containment run exists. |
 | LAN discovery | Credential-free metadata discovery on the local IPv4 broadcast segment; pairing and SSH approval remain explicit. |
 | Live deployment | Preview.113 is the final public candidate for the current runnable scope. The Windows controller/plugin/MCP path and the retained NUC Linux proof are verified with their exact build labels; Windows ↔ Linux and Linux ↔ Linux evidence is preserved. Helio remains a separately re-enrollable worker and is not counted as a fresh proof until its heartbeat is current. |
 | Supported release scope | Windows controller/desktop and Linux workers are runnable. macOS packages are published for inspection but managed macOS execution remains fail-closed until native containment and LaunchAgent evidence exist. |
@@ -156,10 +156,10 @@ The remaining non-blocking release evidence is a clean guest matrix covering
 Install → Repair → versioned Upgrade → interrupted Rollback → Uninstall, plus
 production Authenticode/tray signing. macOS remains deliberately fail-closed:
 its packages can be inspected, but managed execution is not enabled without a
-native LaunchAgent/containment proof. The exact evidence and boundaries belong
-in [Issue #2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2),
-[Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3), and the
-[current audit](docs/current-audit-20261005.md).
+native LaunchAgent/containment proof. Issues #2 and #3 are closed for the
+declared Windows/Linux runnable scope. The exact evidence and remaining
+Certified GA boundaries are recorded in the [release checklist](RELEASE.md)
+and [current audit](docs/current-audit-20261005.md).
 
 ## Develop
 
