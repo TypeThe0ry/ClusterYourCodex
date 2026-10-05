@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Fixed macOS managed-process tracking so descendants observed before a
+  reparenting/new-session transition remain addressable by their exact
+  `(pid, lstart)` identity; a reused PID is still rejected. Added a regression
+  test for reparenting and PID reuse. The native macOS runtime gate remains
+  fail-closed until a real macOS host proves the full LaunchAgent lifecycle.
+
+- Refreshed the public README, current audit, and project status to identify
+  preview.112 as the latest published build and to separate supported
+  Windows/Linux runtime evidence from historical preview records.
+
 - Added an idempotent native-install cleanup step that moves exact-name legacy
   `clustor`, `cluster-orchestrator`, and `orchestrator` skill directories out of
   the active Codex home into a timestamped backup before registering the native
