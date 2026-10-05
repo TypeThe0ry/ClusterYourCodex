@@ -48,6 +48,15 @@ linked for reproducibility; it is not relabeled as preview.113 evidence. The
 current candidate controller install and native plugin probes passed locally.
 The record is [`local-install-preview111-20261005.md`](local-install-preview111-20261005.md).
 
+After the final candidate CI completed, the installed preview.113 Controller
+also dispatched a fresh Windows-controller → Linux-Worker job from main
+commit `85b43ae9733235baf4966d3ace953f5ced99e8fd`. The controller created
+plan `8f8964b4-e6b3-4af0-9c4b-b5d1c7a0882c`, selected the online `nuc` node
+from current telemetry, rejected stale/offline Helio, and the run
+`29057f17-6195-4785-9542-6c14cd9fd2bb` finished with native exit code `0` and
+artifact `874c5420-d6cf-4021-8b1f-044a460bb078`. This is current installed
+runtime evidence; it does not relabel the older retained preview.111 records.
+
 At the latest observation the NUC was online. Helio remained network-reachable
 but its worker heartbeat was stale and ports 47831/47832 were not accepting
 connections; no new Helio runtime success is claimed from that observation.
