@@ -209,6 +209,10 @@ function Assert-CycReleaseWorkflowIdentity {
     if (-not $workflow.Contains($strictStableTagGate)) {
         throw 'Release workflow source-tag validation is not aligned with the strict prerelease/stable channel contract.'
     }
+    if (-not $workflow.Contains('if [[ "$CYC_SOURCE_TAG" != *-* ]]; then') -or
+        $workflow -notmatch "stable tags must be published only by the protected ga\.yml workflow") {
+        throw 'The ordinary release publisher must reject stable tags and defer them to the protected GA workflow.'
+    }
 
     $releaseJob = [System.Text.RegularExpressions.Regex]::Match(
         $workflow,
