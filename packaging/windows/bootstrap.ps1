@@ -1150,8 +1150,17 @@ function Get-CycAgentsInstallMutation {
     if ($markerState.present -and -not $oldInstalled) {
         throw 'Global AGENTS.md already contains an unowned ClusterYourCodex marker pair.'
     }
+    # A previous installer can have committed its manifest after the managed
+    # block was removed outside the installer (for example, when a user
+    # restored AGENTS.md from a backup).  Treat that state as a stale receipt,
+    # not as a fatal repair error: the current file is the authoritative user
+    # document, and the transaction below snapshots it before appending a new
+    # owned block.  This preserves every byte currently present and gives the
+    # next manifest an accurate before-image for uninstall/rollback.
+    $reconciledStaleManifest = $false
     if (-not $markerState.present -and $oldInstalled) {
-        throw 'The recorded ClusterYourCodex block is missing from global AGENTS.md.'
+        $reconciledStaleManifest = $true
+        $oldInstalled = $false
     }
 
     $previousFileSha256 = if ($document.existed) { Get-CycSha256Hex -Bytes $document.bytes } else { $null }
@@ -1243,6 +1252,7 @@ function Get-CycAgentsInstallMutation {
         pluginActivationVerified = [bool]($PluginReceipt -and
             (Get-CycObjectProperty -Object $PluginReceipt -Name 'pluginVerified' -Default $false))
         pluginActivationMethod = if ($PluginReceipt) { 'codex-plugin-list-json' } else { 'direct-test-harness' }
+        reconciledStaleManifest = [bool]$reconciledStaleManifest
         operation = $operation
         changed = [bool]$changed
         installedAtUtc = [DateTime]::UtcNow.ToString('o')
