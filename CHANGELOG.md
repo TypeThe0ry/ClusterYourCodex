@@ -13,6 +13,23 @@
   repair marketplace is absent. Install and upgrade paths still fail closed on
   missing or tampered repair payloads.
 
+## [0.1.0-preview.112] - 2026-10-04
+
+### Fixed
+
+- Deliver the native integration error mapping and Windows shortcut refresh from
+  PR #208 in the next installable prerelease. Desktop now reports actionable
+  controller/plugin states instead of the generic integration failure, and the
+  installer refreshes shortcuts to the verified Programs payload.
+
+### Validation scope
+
+- PR #211 passed the complete required CI and security checks, including the
+  Windows desktop host and controller/worker live round-trip, bounded Windows
+  process tests, MSRV, CodeQL, RustSec, Cargo deny, pnpm audit, and Linux/macOS
+  Worker Kits. This build remains a prerelease; stable `v0.0.1` is immutable.
+  Native macOS and clean-VM GA gates remain documented in Issues #2 and #3.
+
 ## [0.1.0-preview.111] - 2026-10-04
 
 ### Fixed
@@ -1908,7 +1925,8 @@ are versioned independently from the product.
   firewall, and additive `AGENTS.md` lifecycle.
 - Windows and Linux signed Worker Kits and fresh-deployment smoke coverage.
 
-[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.111...HEAD
+[Unreleased]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.112...HEAD
+[0.1.0-preview.112]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.111...v0.1.0-preview.112
 [0.1.0-preview.111]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.110...v0.1.0-preview.111
 [0.1.0-preview.110]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.109...v0.1.0-preview.110
 [0.1.0-preview.109]: https://github.com/TypeThe0ry/ClusterYourCodex/compare/v0.1.0-preview.108...v0.1.0-preview.109
