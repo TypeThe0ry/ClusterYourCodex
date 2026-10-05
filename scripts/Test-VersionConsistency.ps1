@@ -497,8 +497,18 @@ if (-not $SkipNegativeTests) {
             -Force
 
         $workflowText = [System.IO.File]::ReadAllText($fixtureWorkflowPath)
+        # Dependabot may refresh the checkout action pin independently of this
+        # fixture. Locate the current immutable pin instead of coupling the
+        # negative test to one historical SHA.
+        $checkoutPin = [System.Text.RegularExpressions.Regex]::Match(
+            $workflowText,
+            'actions/checkout@[0-9a-f]{40}'
+        )
+        if (-not $checkoutPin.Success) {
+            throw 'Negative GitHub Action pin fixture could not find a checkout pin.'
+        }
         $workflowUnpinned = $workflowText.Replace(
-            'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
+            $checkoutPin.Value,
             'actions/checkout@v4'
         )
         if ($workflowUnpinned -ceq $workflowText) {
