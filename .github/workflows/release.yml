@@ -40,6 +40,10 @@ jobs:
             echo 'source_tag must be a strict stable or preview.N/alpha.N/beta.N/rc.N tag' >&2
             exit 1
           fi
+          if [[ "$CYC_SOURCE_TAG" != *-* ]]; then
+            echo 'stable tags must be published only by the protected ga.yml workflow' >&2
+            exit 1
+          fi
           # actions/checkout first fetches the annotated tag, then force-updates
           # refs/tags/<tag> to the checked-out commit for detached HEAD. Verify
           # the immutable remote tag through a separate local namespace instead
