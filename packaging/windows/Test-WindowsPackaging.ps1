@@ -5044,6 +5044,8 @@ exit 91
         $freshDeploymentSource -match 'function Invoke-FreshPowerShell' -and
         $freshDeploymentSource -match 'WaitForExit\(100\)' -and
         $freshDeploymentSource -match 'taskkill\.exe' -and
+        $freshDeploymentSource -match '\$rawExitCode = \$process\.ExitCode' -and
+        $freshDeploymentSource -match 'bootstrap \$Label exit code was unavailable' -and
         $freshDeploymentSource -match 'timed out after \$TimeoutSeconds') 'fresh deployment lifecycle children have bounded process-tree termination'
     Assert-True ($freshDeploymentSource -match 'LifecycleTimeoutSeconds' -and
         ([regex]::Matches($freshDeploymentSource, 'TimeoutSeconds \$LifecycleTimeoutSeconds')).Count -ge 5) 'fresh deployment applies the bounded lifecycle timeout to plan/install/repair/uninstall/cleanup'
@@ -5324,6 +5326,11 @@ exit 0
         $profileMatrixSource -match 'TaskPath = \[string\]\$folder\.Path' -and
         $profileMatrixSource -match 'ToBase64String\(\[Text\.Encoding\]::UTF8\.GetBytes\(\$projectionJson\)\)' -and
         $profileMatrixSource -match 'emitted an invalid stdout projection' -and
+        $profileMatrixSource -match '\$rawExitCode = \$queryProcess\.ExitCode' -and
+        $profileMatrixSource -match 'task query exit code was unavailable' -and
+        ([regex]::Matches($profileMatrixSource, '\$rawExitCode = \$schedulerProcess\.ExitCode')).Count -ge 2 -and
+        $profileMatrixSource -match 'task end exit code was unavailable' -and
+        $profileMatrixSource -match 'task removal exit code was unavailable' -and
         $profileMatrixSource -match 'function Get-ProfileMatrixRootTaskStrict' -and
         $profileMatrixSource -match 'Get-ProfileMatrixRootTaskStrict -TaskName') 'profile matrix bounds Task Scheduler queries and distinguishes confirmed task absence from provider failure'
     Assert-True ($profileMatrixSource -match 'function Get-ProfileMatrixTaskHelperHistoryRecords' -and

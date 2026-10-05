@@ -1118,7 +1118,13 @@ function Invoke-ProfileMatrixBoundedTaskEnd {
             throw "profile-matrix task end timed out after $TimeoutSeconds seconds (task=$TaskName)."
         }
         try { $schedulerProcess.Refresh() } catch { }
-        $exitCode = [int]$schedulerProcess.ExitCode
+        $rawExitCode = $schedulerProcess.ExitCode
+        if ($null -eq $rawExitCode) {
+            $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
+            $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
+            throw "profile-matrix task end exit code was unavailable for $TaskName. stdout=$stdout stderr=$stderr"
+        }
+        $exitCode = [int]$rawExitCode
         if ($exitCode -ne 0) {
             # The action can exit between enumeration and /End. The caller
             # re-enumerates and requires a stable absence window; only a still
@@ -1254,7 +1260,13 @@ try {
             throw "profile-matrix task query timed out after $TimeoutSeconds seconds (task=$TaskName)."
         }
         try { $queryProcess.Refresh() } catch { }
-        $exitCode = [int]$queryProcess.ExitCode
+        $rawExitCode = $queryProcess.ExitCode
+        if ($null -eq $rawExitCode) {
+            $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { [System.IO.File]::ReadAllText($stdoutPath, [System.Text.Encoding]::ASCII) } else { '' }
+            $stderr = if (Test-Path -LiteralPath $errorPath -PathType Leaf) { [System.IO.File]::ReadAllText($errorPath) } else { '' }
+            throw "profile-matrix task query exit code was unavailable for $TaskName. stdout=$stdout stderr=$stderr"
+        }
+        $exitCode = [int]$rawExitCode
         if ($exitCode -eq 3) { return $null }
         if ($exitCode -ne 0) {
             $stderr = if (Test-Path -LiteralPath $errorPath -PathType Leaf) { [System.IO.File]::ReadAllText($errorPath) } else { '' }
@@ -1347,7 +1359,13 @@ function Invoke-ProfileMatrixBoundedTaskRemoval {
             throw "profile-matrix task removal timed out after $TimeoutSeconds seconds (task=$TaskName)."
         }
         try { $schedulerProcess.Refresh() } catch { }
-        $exitCode = [int]$schedulerProcess.ExitCode
+        $rawExitCode = $schedulerProcess.ExitCode
+        if ($null -eq $rawExitCode) {
+            $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
+            $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
+            throw "profile-matrix task removal exit code was unavailable for $TaskName. stdout=$stdout stderr=$stderr"
+        }
+        $exitCode = [int]$rawExitCode
         if ($exitCode -ne 0) {
             # A concurrent cleanup can win the race after ownership was
             # validated. Treat that narrow case as already absent; a task that
