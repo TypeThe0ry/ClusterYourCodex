@@ -13,7 +13,7 @@ hashes to the Codex session.
 
 ## Current public status
 
-The latest public developer build is **[v0.1.0-preview.112](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.112)**. It includes the native integration diagnostics and Windows shortcut refresh from PR #208, the profile-matrix transport hardening from PR #217, and the dependency/test-fixture updates merged after preview.111. Preview.112 is a prerelease and the immutable stable baseline is **[v0.0.1](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)**; the stable tag and its assets have not been replaced or modified.
+The latest public developer build is **[v0.1.0-preview.113](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.113)**. It carries the Windows stale-`AGENTS.md` receipt recovery fix, macOS descendant-identity tracking, the native integration diagnostics, Windows shortcut refresh, profile-matrix transport hardening, and the dependency/test-fixture updates merged after preview.111. Preview.113 is a prerelease and the immutable stable baseline is **[v0.0.1](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)**; the stable tag and its assets have not been replaced or modified.
 
 | Area | Status |
 | --- | --- |
@@ -21,11 +21,11 @@ The latest public developer build is **[v0.1.0-preview.112](https://github.com/T
 | Linux x64 worker | Public Worker Kit and Windows → Linux validation path. |
 | macOS x64 / arm64 worker packages | Worker Kits build and verify; native managed-runtime acceptance is deferred in [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). |
 | LAN discovery | Credential-free metadata discovery on the local IPv4 broadcast segment; pairing and SSH approval remain explicit. |
-| Live deployment | Preview.112 is installed and verified on the Windows controller. The retained NUC Linux worker proof is recorded under the earlier preview.111 installation; Windows ↔ Linux and Linux ↔ Linux evidence is preserved with its exact build labels. Helio remains a separately re-enrollable worker and is not counted as a fresh proof until its heartbeat is current. |
+| Live deployment | Preview.113 is the final public candidate for the current runnable scope. The Windows controller/plugin/MCP path and the retained NUC Linux proof are verified with their exact build labels; Windows ↔ Linux and Linux ↔ Linux evidence is preserved. Helio remains a separately re-enrollable worker and is not counted as a fresh proof until its heartbeat is current. |
 | Supported release scope | Windows controller/desktop and Linux workers are runnable. macOS packages are published for inspection but managed macOS execution remains fail-closed until native containment and LaunchAgent evidence exist. |
 
 For the authoritative commit, workflow runs, VM evidence, and open gates, see
-the [current audit](docs/current-audit-20261005.md), the [VMware record](docs/vmware-preview111-20261004.md), the [live deployment record](docs/live-deployment-preview111-20261004.md), and [project status](docs/project-status.md). The records identify the exact build they exercised; they are not silently relabeled as preview.112 evidence.
+the [current audit](docs/current-audit-20261005.md), the [VMware record](docs/vmware-preview111-20261004.md), the [live deployment record](docs/live-deployment-preview111-20261004.md), and [project status](docs/project-status.md). The records identify the exact build they exercised; historical preview.111 evidence is not silently relabeled as preview.113 evidence.
 
 ## Install the public Windows build
 

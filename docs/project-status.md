@@ -1,9 +1,9 @@
 # ClusterYourCodex project status
 
-## Current GitHub audit — 2026-10-05 (preview.112)
+## Current GitHub audit — 2026-10-05 (preview.113)
 
 The latest public developer build is
-[`v0.1.0-preview.112`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.112),
+[`v0.1.0-preview.113`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.113),
 published as a non-draft prerelease. The immutable stable
 [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)
 still resolves to `e4fbaef04b764268fa038311d85573b18b549f9` locally and
@@ -16,7 +16,7 @@ remain native-desktop-only operations. The browser now labels this state as
 **Browser preview** and disables actions that cannot succeed without the
 Tauri bridge.
 
-The current Windows installation of preview.112 has a healthy Controller and
+The current Windows installation of preview.113 has a healthy Controller and
 database, a valid native plugin/MCP probe, and a fresh same-host Windows
 controller/worker round trip with 14/14 checks passing. The local install and
 round-trip records are retained in
@@ -24,7 +24,7 @@ round-trip records are retained in
 and [`local-windows-roundtrip-20261005.md`](local-windows-roundtrip-20261005.md).
 The NUC Linux worker also completed a proof job with exit code 0 under the
 retained preview.111 evidence record; that record is not relabeled as
-preview.112.
+preview.113.
 
 At the latest fleet observation, the NUC is online and schedulable. The Helio
 Windows host is reachable at the network layer but its worker heartbeat is
@@ -44,7 +44,7 @@ preview is not promoted to those stronger claims.
 PR #208 additionally maps native integration failures to actionable localized
 diagnostics, preserves safe controller transport codes, disables native
 actions while status is unavailable, and refreshes Windows shortcuts to the
-verified install root. Those source fixes are included in preview.112.
+verified install root. Those source fixes are included in preview.113.
 
 ## Current GitHub audit — 2026-10-04 (preview.109 published prerelease)
 
