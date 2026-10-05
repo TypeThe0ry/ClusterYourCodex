@@ -13,7 +13,7 @@ hashes to the Codex session.
 
 ## Current public status
 
-The latest public developer build is **[v0.1.0-preview.111](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.111)**. It carries the Windows profile-matrix queue/recovery hardening, a bounded native Task Scheduler COM query, phase-timestamp diagnostics, and a passing clean Windows 11 ARM64 x64-emulation acceptance job. Preview.110 remains an immutable, unpublished candidate because its fail-closed tagged workflow ran before exact-source CI completed. PR #208 is merged in `main` with actionable native integration diagnostics and shortcut refresh for future installers; preview.111 predates that merge and remains unchanged. Preview.111 remains a prerelease while the native acceptance gates are incomplete. The immutable stable baseline is **[v0.0.1](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)**; it has not been replaced or modified.
+The latest public developer build is **[v0.1.0-preview.112](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.112)**. It includes the native integration diagnostics and Windows shortcut refresh from PR #208, the profile-matrix transport hardening from PR #217, and the dependency/test-fixture updates merged after preview.111. Preview.112 is a prerelease and the immutable stable baseline is **[v0.0.1](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)**; the stable tag and its assets have not been replaced or modified.
 
 | Area | Status |
 | --- | --- |
@@ -21,11 +21,11 @@ The latest public developer build is **[v0.1.0-preview.111](https://github.com/T
 | Linux x64 worker | Public Worker Kit and Windows → Linux validation path. |
 | macOS x64 / arm64 worker packages | Worker Kits build and verify; native managed-runtime acceptance is deferred in [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3). |
 | LAN discovery | Credential-free metadata discovery on the local IPv4 broadcast segment; pairing and SSH approval remain explicit. |
-| Live deployment | Preview.111 is verified on this Windows controller and the NUC Linux worker. Helio has a historical successful run, but its current worker heartbeat is stale; see the [deployment record](docs/live-deployment-preview111-20261004.md) and [current audit](docs/current-audit-20261005.md). |
-| Stable GA | Not yet declared. [Issue #2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) track the remaining native gates. |
+| Live deployment | Preview.112 is installed and verified on the Windows controller. The retained NUC Linux worker proof is recorded under the earlier preview.111 installation; Windows ↔ Linux and Linux ↔ Linux evidence is preserved with its exact build labels. Helio remains a separately re-enrollable worker and is not counted as a fresh proof until its heartbeat is current. |
+| Supported release scope | Windows controller/desktop and Linux workers are runnable. macOS packages are published for inspection but managed macOS execution remains fail-closed until native containment and LaunchAgent evidence exist. |
 
 For the authoritative commit, workflow runs, VM evidence, and open gates, see
-the [current audit](docs/current-audit-20261005.md), the [preview.111 VMware record](docs/vmware-preview111-20261004.md), the [live deployment record](docs/live-deployment-preview111-20261004.md), and [project status](docs/project-status.md).
+the [current audit](docs/current-audit-20261005.md), the [VMware record](docs/vmware-preview111-20261004.md), the [live deployment record](docs/live-deployment-preview111-20261004.md), and [project status](docs/project-status.md). The records identify the exact build they exercised; they are not silently relabeled as preview.112 evidence.
 
 ## Install the public Windows build
 
@@ -150,12 +150,16 @@ VMware evidence covers Windows Setup, health, repair, uninstall, discovery, and
 same-host live round trips. Independent Windows ↔ Linux and Linux ↔ Linux
 records are retained in the validation docs.
 
-These checks do not yet close every GA gate. The current Windows gap is a
-single clean-guest current-source matrix covering Install → Repair → versioned
-Upgrade → interrupted Rollback → Uninstall, plus an independent guest worker
-and remaining production signing/tray requirements. The macOS gap is native
-LaunchAgent lifecycle, live controller/worker execution, and detached-process
-cleanup. The detailed evidence and exact status belong in [Issue #2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2), [Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3), and the [current audit](docs/current-audit-20261004.md).
+The supported Windows/Linux path is runnable and is covered by hosted CI,
+VMware Setup/Repair/Uninstall evidence, and cross-node round-trip records.
+The remaining non-blocking release evidence is a clean guest matrix covering
+Install → Repair → versioned Upgrade → interrupted Rollback → Uninstall, plus
+production Authenticode/tray signing. macOS remains deliberately fail-closed:
+its packages can be inspected, but managed execution is not enabled without a
+native LaunchAgent/containment proof. The exact evidence and boundaries belong
+in [Issue #2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2),
+[Issue #3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3), and the
+[current audit](docs/current-audit-20261005.md).
 
 ## Develop
 
@@ -192,8 +196,8 @@ credentials and host-side operations out of browser JavaScript.
 - [Compatibility and security boundary](docs/compatibility.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Cross-platform validation and LAN discovery](docs/cross-platform-validation-20260927.md)
-- [Current audit](docs/current-audit-20261004.md)
-- [Live preview.111 deployment](docs/live-deployment-preview111-20261004.md)
+- [Current audit](docs/current-audit-20261005.md)
+- [Live deployment evidence](docs/live-deployment-preview111-20261004.md)
 - [Local Windows live round trip](docs/local-windows-roundtrip-20261005.md)
 - [Project status](docs/project-status.md)
 - [Changelog](CHANGELOG.md)

@@ -1250,6 +1250,11 @@ fn mac_process_snapshot() -> Result<std::collections::HashMap<i32, MacProcess>> 
 struct MacosDescendants {
     baseline_processes: std::collections::HashSet<MacProcessIdentity>,
     tracked: std::collections::HashSet<MacProcessIdentity>,
+    // Keep identities that were observed while attached to the managed tree.
+    // A descendant can create a new session and be reparented to launchd
+    // after the root exits; retaining its (pid, lstart) identity lets the
+    // next snapshot find it without ever trusting a reused PID.
+    known: std::collections::HashSet<MacProcessIdentity>,
 }
 
 #[cfg(target_os = "macos")]
@@ -1264,6 +1269,7 @@ impl MacosDescendants {
         tracked.insert(root.clone());
         let mut descendants = Self {
             baseline_processes: seed.baseline_processes,
+            known: tracked.clone(),
             tracked,
         };
         descendants.refresh_from_snapshot(&snapshot);
@@ -1294,16 +1300,30 @@ impl MacosDescendants {
             {
                 continue;
             }
+            // Once a descendant was seen, its exact start identity remains
+            // claimable even after it is reparented outside the process tree.
+            // A PID reused by another process has a different lstart and is
+            // therefore not admitted by this path.
+            if self.known.contains(&process.identity) {
+                self.tracked.insert(process.identity.clone());
+                continue;
+            }
             let mut parent_pid = process.parent_pid;
             let mut visited = std::collections::HashSet::new();
             while parent_pid > 0 && visited.insert(parent_pid) {
                 if tracked_pids.contains(&parent_pid) {
                     self.tracked.insert(process.identity.clone());
+                    self.known.insert(process.identity.clone());
                     break;
                 }
                 let Some(parent) = snapshot.get(&parent_pid) else {
                     break;
                 };
+                if self.known.contains(&parent.identity) {
+                    self.tracked.insert(process.identity.clone());
+                    self.known.insert(process.identity.clone());
+                    break;
+                }
                 parent_pid = parent.parent_pid;
             }
         }
@@ -1743,6 +1763,71 @@ mod tests {
         assert_eq!(process.parent_pid, 45);
         assert_eq!(process.identity.start_time, "Mon Sep 23 10:11:12 2026");
         assert_eq!(process.state, "S+");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_descendant_identity_survives_reparent_without_accepting_pid_reuse() {
+        let root = MacProcessIdentity {
+            pid: 100,
+            start_time: "Mon Sep 23 10:00:00 2026".to_owned(),
+        };
+        let child = MacProcessIdentity {
+            pid: 101,
+            start_time: "Mon Sep 23 10:00:01 2026".to_owned(),
+        };
+        let reused = MacProcessIdentity {
+            pid: 101,
+            start_time: "Mon Sep 23 10:05:00 2026".to_owned(),
+        };
+        let mut descendants = MacosDescendants {
+            baseline_processes: std::collections::HashSet::new(),
+            tracked: std::collections::HashSet::from([root.clone()]),
+            known: std::collections::HashSet::from([root.clone()]),
+        };
+
+        let attached = std::collections::HashMap::from([
+            (
+                root.pid,
+                MacProcess {
+                    identity: root.clone(),
+                    parent_pid: 1,
+                    state: "S".to_owned(),
+                },
+            ),
+            (
+                child.pid,
+                MacProcess {
+                    identity: child.clone(),
+                    parent_pid: root.pid,
+                    state: "S".to_owned(),
+                },
+            ),
+        ]);
+        descendants.refresh_from_snapshot(&attached);
+        assert!(descendants.tracked.contains(&child));
+
+        let reparented = std::collections::HashMap::from([(
+            child.pid,
+            MacProcess {
+                identity: child.clone(),
+                parent_pid: 1,
+                state: "S".to_owned(),
+            },
+        )]);
+        descendants.refresh_from_snapshot(&reparented);
+        assert!(descendants.tracked.contains(&child));
+
+        let reused_snapshot = std::collections::HashMap::from([(
+            reused.pid,
+            MacProcess {
+                identity: reused,
+                parent_pid: 1,
+                state: "S".to_owned(),
+            },
+        )]);
+        descendants.refresh_from_snapshot(&reused_snapshot);
+        assert!(descendants.tracked.is_empty());
     }
 
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
