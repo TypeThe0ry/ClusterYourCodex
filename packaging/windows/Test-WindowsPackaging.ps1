@@ -1310,7 +1310,10 @@ try {
 
     $largeRemoval = Get-CycAgentsRemovalPlan -Record $agentsUpdated
     Remove-CycAgentsManagedBlock -RemovalPlan $largeRemoval
-    Assert-BytesEqual $largeOriginalBytes ([System.IO.File]::ReadAllBytes($agentsPath)) 'uninstall restores large CRLF/no-final-newline AGENTS.md byte-for-byte'
+    # The stale-receipt repair deliberately treats the current document as
+    # authoritative.  Uninstall must therefore restore that exact
+    # user-restored before-image, including its CRLF/no-final-newline bytes.
+    Assert-BytesEqual $staleBeforeRepair ([System.IO.File]::ReadAllBytes($agentsPath)) 'uninstall restores the stale-receipt AGENTS.md before-image byte-for-byte'
 
     # UTF-8 BOM is retained through install, repair-compatible parsing, and
     # exact uninstall restoration.
