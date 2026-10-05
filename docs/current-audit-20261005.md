@@ -30,13 +30,16 @@ operation is unchanged.
 ## Local Windows and Linux evidence
 
 The public preview.113 Setup is the final candidate for the current runnable
-scope. The Windows controller
-The controller health endpoint reported `status=ok`, `apiVersion=cyc.dev/v1`,
-and `database=ok`. The native plugin contract, integrity, and MCP probes passed.
+scope. The local Windows controller health endpoint reported `status=ok`,
+`apiVersion=cyc.dev/v1`, and `database=ok`. The retained native plugin contract,
+integrity, and MCP probes passed at the builds identified by their records.
+The committed public Setup install is
+recorded in [`local-install-preview113-20261005.md`](local-install-preview113-20261005.md).
 
-The fresh same-host Windows controller/worker run reached
+The retained same-host Windows controller/worker run reached
 `queued → running → succeeded`; all 14 checks passed, including artifact
-verification, process cleanup, and secret scanning. The sanitized record is
+verification, process cleanup, and secret scanning at source `60bb863` after
+the preview.111 install. It is not relabeled as preview.113 evidence. The record is
 [`local-windows-roundtrip-20261005.md`](local-windows-roundtrip-20261005.md).
 
 The retained NUC Linux proof job completed with exit code 0 and a verified
@@ -51,21 +54,18 @@ connections; no new Helio runtime success is claimed from that observation.
 The safe recovery path is native desktop re-enrollment, not plaintext secrets
 in a shell command or repository artifact.
 
-## Remaining release gates
+## Scope and remaining release gates
 
-Issue #2's remaining evidence boundary is a clean current-source Windows 11
-VM run of `Install → Repair → Upgrade → Rollback → Uninstall`, plus production
-Authenticode/tray acceptance. The installer, controller, Codex bridge, repair,
-uninstall, LAN discovery, and Windows/Linux round-trip path are already
-runnable and covered by hosted/VM evidence.
+Issues #2 and #3 were closed on 2026-10-05 for the explicitly declared
+Windows/Linux runnable scope. The installer, controller, Codex bridge, repair,
+uninstall, LAN discovery, and Windows/Linux round-trip path are runnable and
+covered by the published preview and retained evidence.
 
-Issue #3's Linux worker path and package contracts are covered. The macOS
-worker remains deliberately fail-closed until a real macOS host proves
-LaunchAgent lifecycle, managed controller/worker execution, detached-process
-cleanup, PID-reuse safety, and any required signing/notarization. The source
-now retains observed macOS descendant identities across reparenting while
-still rejecting a reused PID; this is unit-tested but not a substitute for a
-native macOS run.
-
-Until those optional native/production gates have direct evidence, public
-builds remain prereleases and `v0.0.1` remains untouched.
+Certified GA remains a separate, stricter release channel. It still requires a
+clean current-source Windows 11 version-changing matrix, production
+Authenticode/tray acceptance, and a real macOS LaunchAgent/managed-runtime
+run. The macOS worker therefore remains deliberately fail-closed; its
+descendant identity and PID-reuse protections are unit-tested, but are not
+presented as native macOS acceptance. Until those optional production gates
+have direct evidence, `v0.1.0-preview.113` is the final runnable public build
+and `v0.0.1` remains untouched.

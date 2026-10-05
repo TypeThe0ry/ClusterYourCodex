@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Reconciled current public issue status with the closed Windows/Linux scope
+  and recorded the public preview.113 local Setup commit, executable versions,
+  and healthy Controller/database without relabeling historical live jobs.
+
 - Fixed macOS managed-process tracking so descendants observed before a
   reparenting/new-session transition remain addressable by their exact
   `(pid, lstart)` identity; a reused PID is still rejected. Added a regression
