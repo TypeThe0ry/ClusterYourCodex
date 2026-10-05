@@ -281,10 +281,10 @@ function Assert-CycReleaseWorkflowIdentity {
     # the source of truth and must still use an immutable 40-hex commit pin.
     $provenancePin = [System.Text.RegularExpressions.Regex]::Match(
         $workflow,
-        '(?m)^\s*uses:\s*actions/attest-build-provenance@(?<sha>[0-9a-f]{40})\s+#\s*v3\.2\.0\s*$'
+        '(?m)^\s*uses:\s*actions/attest-build-provenance@(?<sha>[0-9a-f]{40})\s+#\s*v(?:3\.2\.0|4\.2\.2)\s*$'
     )
     if (-not $provenancePin.Success) {
-        throw 'Release workflow must pin actions/attest-build-provenance v3.2.0 to an immutable commit SHA.'
+        throw 'Release workflow must pin an approved actions/attest-build-provenance v3.2.0 or v4.2.2 revision to an immutable commit SHA.'
     }
 
     foreach ($requiredReleaseContract in @(
