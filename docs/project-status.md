@@ -1,12 +1,9 @@
 # ClusterYourCodex project status
 
-## Current GitHub audit — 2026-10-05 (preview.111; post-PR #210)
+## Current GitHub audit — 2026-10-05 (preview.112)
 
-The audited source baseline before the final docs merge is
-`fab89f6ea1429cb8fe72d2494a6688153ef68f1e` (PR #209); PR #210 is the final
-identity-correction docs merge. The latest
-public developer build is
-[`v0.1.0-preview.111`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.111),
+The latest public developer build is
+[`v0.1.0-preview.112`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.112),
 published as a non-draft prerelease. The immutable stable
 [`v0.0.1`](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.0.1)
 still resolves to `e4fbaef04b764268fa038311d85573b18b549f9` locally and
@@ -19,13 +16,15 @@ remain native-desktop-only operations. The browser now labels this state as
 **Browser preview** and disables actions that cannot succeed without the
 Tauri bridge.
 
-The current Windows installation of preview.111 has a healthy Controller and
+The current Windows installation of preview.112 has a healthy Controller and
 database, a valid native plugin/MCP probe, and a fresh same-host Windows
 controller/worker round trip with 14/14 checks passing. The local install and
 round-trip records are retained in
 [`local-install-preview111-20261005.md`](local-install-preview111-20261005.md)
 and [`local-windows-roundtrip-20261005.md`](local-windows-roundtrip-20261005.md).
-The NUC Linux worker also completed a preview.111 proof job with exit code 0.
+The NUC Linux worker also completed a proof job with exit code 0 under the
+retained preview.111 evidence record; that record is not relabeled as
+preview.112.
 
 At the latest fleet observation, the NUC is online and schedulable. The Helio
 Windows host is reachable at the network layer but its worker heartbeat is
@@ -35,17 +34,17 @@ provisioning flow so credentials remain in the OS vault and out of logs.
 
 Issues [#2](https://github.com/TypeThe0ry/ClusterYourCodex/issues/2) and
 [#3](https://github.com/TypeThe0ry/ClusterYourCodex/issues/3) remain open. The
-remaining gates are the clean current-source Windows version-changing
-`Install → Repair → Upgrade → Rollback → Uninstall` matrix plus production
-Authenticode/final packaged acceptance, and native macOS LaunchAgent/live
-managed-runtime acceptance. Hosted CI, a provisioned VM, or a browser preview
-is not being promoted to those stronger claims.
+supported Windows/Linux path is runnable; the remaining evidence boundary is
+the clean current-source Windows version-changing `Install → Repair → Upgrade
+→ Rollback → Uninstall` matrix plus production Authenticode/final packaged
+acceptance. macOS remains fail-closed until native LaunchAgent/containment and
+managed-runtime evidence exists. Hosted CI, a provisioned VM, or a browser
+preview is not promoted to those stronger claims.
 
 PR #208 additionally maps native integration failures to actionable localized
 diagnostics, preserves safe controller transport codes, disables native
 actions while status is unavailable, and refreshes Windows shortcuts to the
-verified install root. The published preview.111 predates this merge; a later
-preview is required before users receive those source fixes.
+verified install root. Those source fixes are included in preview.112.
 
 ## Current GitHub audit — 2026-10-04 (preview.109 published prerelease)
 

@@ -1275,8 +1275,22 @@ try {
     Assert-True ($installedMarkers.blockText -match "`r`n") 'managed block follows the existing CRLF convention'
 
     $repairManifest = [PSCustomObject]@{ agentsIntegration = $agentsInstalled }
-    [byte[]]$beforeRepair = [System.IO.File]::ReadAllBytes($agentsPath)
+    # A user may restore AGENTS.md from a backup after an earlier install,
+    # leaving the manifest receipt stale. Repair must preserve that current
+    # user document and recreate only the owned block instead of requiring a
+    # manual manifest quarantine.
+    Remove-CycAgentsManagedBlock -RemovalPlan (Get-CycAgentsRemovalPlan -Record $agentsInstalled)
+    [System.IO.File]::AppendAllText($agentsPath, "`r`n# user-restored-after-install", $utf8NoBom)
+    [byte[]]$staleBeforeRepair = [System.IO.File]::ReadAllBytes($agentsPath)
     $agentsRepaired = Install-CycAgentsManagedBlock -TestHarness -Plan $agentsPlan -OldManifest $repairManifest
+    Assert-True $agentsRepaired.reconciledStaleManifest 'repair reconciles a stale AGENTS.md receipt when the managed block is missing'
+    Assert-True ($agentsRepaired.operation -ceq 'Added') 'stale AGENTS.md receipt is repaired by appending a fresh owned block'
+    $staleDocument = Get-CycStrictTextDocument -Path $agentsPath
+    $staleState = Get-CycAgentsMarkerState -Document $staleDocument
+    Assert-True ($staleDocument.text -match '# user-restored-after-install') 'stale receipt repair preserves user content outside the managed block'
+    Assert-True ((Get-CycSha256Hex -Bytes $staleBeforeRepair) -eq $agentsRepaired.previousFileSha256) 'stale receipt repair records the exact current user-file before-image'
+    [byte[]]$beforeRepair = [System.IO.File]::ReadAllBytes($agentsPath)
+    $agentsRepaired = Install-CycAgentsManagedBlock -TestHarness -Plan $agentsPlan -OldManifest ([PSCustomObject]@{ agentsIntegration = $agentsRepaired })
     [byte[]]$afterRepair = [System.IO.File]::ReadAllBytes($agentsPath)
     Assert-True (-not $agentsRepaired.changed) 'repair is idempotent when the template has not changed'
     Assert-BytesEqual $beforeRepair $afterRepair 'idempotent repair does not rewrite global AGENTS.md bytes'
@@ -1296,7 +1310,10 @@ try {
 
     $largeRemoval = Get-CycAgentsRemovalPlan -Record $agentsUpdated
     Remove-CycAgentsManagedBlock -RemovalPlan $largeRemoval
-    Assert-BytesEqual $largeOriginalBytes ([System.IO.File]::ReadAllBytes($agentsPath)) 'uninstall restores large CRLF/no-final-newline AGENTS.md byte-for-byte'
+    # The stale-receipt repair deliberately treats the current document as
+    # authoritative.  Uninstall must therefore restore that exact
+    # user-restored before-image, including its CRLF/no-final-newline bytes.
+    Assert-BytesEqual $staleBeforeRepair ([System.IO.File]::ReadAllBytes($agentsPath)) 'uninstall restores the stale-receipt AGENTS.md before-image byte-for-byte'
 
     # UTF-8 BOM is retained through install, repair-compatible parsing, and
     # exact uninstall restoration.
