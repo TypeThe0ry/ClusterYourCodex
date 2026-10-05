@@ -5321,6 +5321,9 @@ exit 0
         $profileMatrixSource -match 'query timed out after \$TimeoutSeconds seconds' -and
         $profileMatrixSource -match '\$hresult -eq -2147024894' -and
         $profileMatrixSource -match '\$hresult -eq -2147216625' -and
+        $profileMatrixSource -match 'TaskPath = \[string\]\$folder\.Path' -and
+        $profileMatrixSource -match 'ToBase64String\(\[Text\.Encoding\]::UTF8\.GetBytes\(\$projectionJson\)\)' -and
+        $profileMatrixSource -match 'emitted an invalid stdout projection' -and
         $profileMatrixSource -match 'function Get-ProfileMatrixRootTaskStrict' -and
         $profileMatrixSource -match 'Get-ProfileMatrixRootTaskStrict -TaskName') 'profile matrix bounds Task Scheduler queries and distinguishes confirmed task absence from provider failure'
     Assert-True ($profileMatrixSource -match 'function Get-ProfileMatrixTaskHelperHistoryRecords' -and
