@@ -22,9 +22,11 @@ controller/worker proofs keep their original build labels; the retained
 round trip passed 14/14 checks. The local install and round-trip records are in
 [`local-install-preview113-20261005.md`](local-install-preview113-20261005.md)
 and [`local-windows-roundtrip-20261005.md`](local-windows-roundtrip-20261005.md).
-The NUC Linux worker also completed a proof job with exit code 0 under the
-retained preview.111 evidence record; that record is not relabeled as
-preview.113.
+The NUC Linux worker also completed a fresh preview.113 Controller → Linux
+Worker job from main commit `85b43ae` with exit code 0 (run
+`29057f17-6195-4785-9542-6c14cd9fd2bb`, artifact
+`874c5420-d6cf-4021-8b1f-044a460bb078`). The older retained preview.111 record
+remains linked for reproducibility and is not relabeled as preview.113.
 
 At the latest fleet observation, the NUC is online and schedulable. The Helio
 Windows host is reachable at the network layer but its worker heartbeat is

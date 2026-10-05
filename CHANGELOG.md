@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added a fresh preview.113 Controller → Linux Worker live round-trip record
+  from main commit `85b43ae`, including scheduler selection, native exit code,
+  and artifact identifiers; historical preview records retain their original
+  build labels.
+
 - Reconciled current public issue status with the closed Windows/Linux scope
   and recorded the public preview.113 local Setup commit, executable versions,
   and healthy Controller/database without relabeling historical live jobs.
