@@ -1,6 +1,7 @@
 # ClusterYourCodex
 
 > **Give Codex more computers.**
+> **This project is partially or entirely created by AI.**
 
 ClusterYourCodex is a Codex-first controller and worker fleet for computers you
 own. It places build, test, batch, container, and GPU work on a compatible
