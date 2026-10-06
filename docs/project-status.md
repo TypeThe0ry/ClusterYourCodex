@@ -1,5 +1,19 @@
 # ClusterYourCodex project status
 
+## Current GitHub audit — 2026-10-06 (v0.1.0 unsigned public release)
+
+The existing `v0.1.0-preview.113` payload is now the latest public GitHub
+Release as **[ClusterYourCodex v0.1.0 (unsigned public release)](https://github.com/TypeThe0ry/ClusterYourCodex/releases/tag/v0.1.0-preview.113)**.
+The release is published and non-draft with 23 unchanged assets. The payload
+tag and embedded product version remain `v0.1.0-preview.113` so all checksums,
+manifests, and runtime receipts stay bound to the build that was tested.
+
+This is a deliberate unsigned release. It is usable for the declared
+Windows/Linux scope, but it does not claim Authenticode, Developer ID,
+notarization, or signed stable-GA provenance. Verify the Setup SHA-256 sidecar
+before launch. The immutable historical `v0.0.1` tag and assets remain
+unchanged, and there are no open Issues or Pull Requests.
+
 ## Current GitHub audit — 2026-10-05 (preview.113)
 
 The latest public developer build is
