@@ -308,7 +308,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows controller/worker round trip failed with exit code $LASTEXITCODE." }
       - name: Upload Windows controller/worker round-trip evidence
         if: runner.os == 'Windows' && always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ClusterYourCodex-windows-controller-worker-roundtrip-${{ matrix.label }}
           path: |
@@ -596,14 +596,14 @@ jobs:
           if (-not [string]::IsNullOrWhiteSpace([string]$env:CYC_WORKER_KIT_SIGNING_KEY_PATH)) {
             [IO.File]::Delete([string]$env:CYC_WORKER_KIT_SIGNING_KEY_PATH)
           }
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ClusterYourCodex-${{ matrix.label }}-preview
           path: release-assets/*
           if-no-files-found: error
       - name: Upload managed worker kit for controller aggregation
         if: matrix.include_worker == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ClusterYourCodex-worker-kit-${{ matrix.label }}
           path: release-stage/*/worker-kit/*
@@ -699,7 +699,7 @@ jobs:
           if (-not [string]::IsNullOrWhiteSpace([string]$env:CYC_WORKER_KIT_SIGNING_KEY_PATH)) {
             [IO.File]::Delete([string]$env:CYC_WORKER_KIT_SIGNING_KEY_PATH)
           }
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ClusterYourCodex-worker-kit-linux-arm64
           path: worker-kit-artifact/*
@@ -721,7 +721,7 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 11.0.8
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.19.0
           cache: pnpm
@@ -940,7 +940,7 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
           "$hash  $(Split-Path $archive -Leaf)" |
             Set-Content -NoNewline -Encoding ascii "$archive.sha256"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ClusterYourCodex-integration-preview
           path: release-assets/*
@@ -959,7 +959,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download cross-platform managed worker kits
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: ClusterYourCodex-worker-kit-*
           path: ${{ runner.temp }}\cyc-downloaded-worker-kits
@@ -1024,7 +1024,7 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 11.0.8
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.19.0
           cache: pnpm
@@ -1424,7 +1424,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'fresh deployment lifecycle smoke failed' }
       - name: Upload fresh deployment diagnostics
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ClusterYourCodex-windows-fresh-deployment-diagnostics
           path: ${{ runner.temp }}\ClusterYourCodex-fresh-deployment-smoke\**
@@ -1456,12 +1456,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'silent Setup lifecycle smoke failed' }
       - name: Upload silent Setup diagnostics
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ClusterYourCodex-windows-setup-silent-diagnostics
           path: ${{ runner.temp }}\ClusterYourCodex-setup-silent-smoke\**
           if-no-files-found: warn
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ClusterYourCodex-windows-x64-self-contained-preview
           path: release-assets/*
@@ -1486,7 +1486,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download the Windows x64 self-contained preview
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ClusterYourCodex-windows-x64-self-contained-preview
           path: ${{ runner.temp }}\cyc-windows11-acceptance-artifact
@@ -1638,7 +1638,7 @@ jobs:
           if ($matrixExitCode -ne 0) { throw "Windows profile/path matrix failed with exit code $matrixExitCode." }
       - name: Upload Windows 11 ARM64 compatibility diagnostics
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ClusterYourCodex-windows11-arm64-compatibility-diagnostics
           path: ${{ runner.temp }}\cyc-windows11-acceptance-diagnostics\**
@@ -1657,7 +1657,7 @@ jobs:
       CYC_PRODUCT_VERSION: ${{ needs.release-identity.outputs.product_version }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: downloaded-artifacts
       - name: Verify sidecars and assemble indexed release assets
@@ -1946,7 +1946,7 @@ jobs:
           $combined = @($index.artifacts | Sort-Object name | ForEach-Object { "$($_.sha256)  $($_.name)" })
           $combined += "$indexHash  release-index.json"
           $combined | Set-Content -LiteralPath (Join-Path $PWD 'release-assets/SHA256SUMS') -Encoding ASCII
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ClusterYourCodex-release-index-preview
           path: release-assets/*
@@ -1965,7 +1965,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ClusterYourCodex-release-index-preview
           path: release-assets
